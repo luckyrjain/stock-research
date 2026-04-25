@@ -1,0 +1,123 @@
+'use client';
+
+import { useState, useRef, useCallback } from 'react';
+import type { TaskName, TaskStatus, Phase, SSEMessage, Report } from '@/types';
+import TickerSearch     from '@/components/ticker-search';
+import ProgressTracker  from '@/components/progress-tracker';
+import ResultsDashboard from '@/components/results-dashboard';
+
+const ALL_TASKS: TaskName[] = ['stock_info', 'research', 'news', 'shareholding', 'mf_holdings'];
+
+function initStatus(): Record<TaskName, TaskStatus> {
+  return Object.fromEntries(ALL_TASKS.map(t => [t, 'idle'])) as Record<TaskName, TaskStatus>;
+}
+
+export default function HomePage() {
+  const [phase, setPhase]           = useState<Phase>('idle');
+  const [taskStatus, setTaskStatus] = useState<Record<TaskName, TaskStatus>>(initStatus());
+  const [report, setReport]         = useState<Report | null>(null);
+  const [error, setError]           = useState<string | null>(null);
+  const esRef     = useRef<EventSource | null>(null);
+  const doneRef   = useRef(false);
+
+  const handleAnalyse = useCallback((symbol: string) => {
+    // Close any previous stream
+    esRef.current?.close();
+
+    setPhase('fetching');
+    setTaskStatus(initStatus());
+    setReport(null);
+    setError(null);
+    doneRef.current = false;
+
+    const es = new EventSource(`/api/analyse/${symbol}`);
+    esRef.current = es;
+
+    es.onmessage = (e) => {
+      let msg: SSEMessage;
+      try { msg = JSON.parse(e.data); } catch { return; }
+
+      switch (msg.event) {
+        case 'start': {
+          const next = initStatus();
+          // cached tasks stay marked cached; everything else (stale + fresh) is running
+          ALL_TASKS.forEach(t => {
+            next[t] = msg.cached.includes(t) ? 'cached' : 'running';
+          });
+          setTaskStatus(next);
+          break;
+        }
+        case 'task_done': {
+          setTaskStatus(prev => ({
+            ...prev,
+            [msg.task as TaskName]: msg.ok ? 'ok' : 'fail',
+          }));
+          break;
+        }
+        case 'analysing': {
+          setPhase('analysing');
+          break;
+        }
+        case 'done': {
+          doneRef.current = true;
+          setReport(msg.report);
+          setPhase('done');
+          es.close();
+          break;
+        }
+        case 'error': {
+          setError(msg.message);
+          setPhase('error');
+          es.close();
+          break;
+        }
+      }
+    };
+
+    es.onerror = () => {
+      if (!doneRef.current) {
+        setError('Connection to server lost. Please try again.');
+        setPhase('error');
+      }
+      es.close();
+    };
+  }, []);
+
+  const isRunning = phase === 'fetching' || phase === 'analysing';
+
+  return (
+    <main className="min-h-screen bg-bg text-tx">
+      <div className="max-w-3xl mx-auto px-4 py-16">
+
+        {/* Logo / heading */}
+        <div className="mb-14 text-center">
+          <h1 className="text-4xl font-black tracking-tight text-tx mb-2">
+            Stock<span className="text-accent">Research</span> AI
+          </h1>
+          <p className="text-muted text-sm">AI-powered equity research for Indian markets</p>
+        </div>
+
+        {/* Search */}
+        <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} />
+
+        {/* Progress */}
+        {(phase === 'fetching' || phase === 'analysing') && (
+          <ProgressTracker taskStatus={taskStatus} phase={phase} />
+        )}
+
+        {/* Error */}
+        {phase === 'error' && error && (
+          <div className="mb-8 px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm">
+            {error}
+          </div>
+        )}
+
+        {/* Results */}
+        {phase === 'done' && report && (
+          <ResultsDashboard report={report} />
+        )}
+
+      </div>
+    </main>
+  );
+}

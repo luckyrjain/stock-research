@@ -1,0 +1,27 @@
+{
+  "stock_info": {
+    "description": "Fetch current market data for NSE stock: {symbol}. Call the 'Get NSE Stock Quote' tool with symbol='{symbol}'. Output ONLY the raw JSON string returned by the tool. Do not add any explanation, commentary, or markdown formatting.",
+    "expected_output": "JSON with: symbol, company_name, current_price, change_pct, market_cap_cr, pe_ratio, eps, 52w_high, 52w_low, sector, industry, about, and prices_by_exchange when both NSE and BSE quotes are available.",
+    "max_retries": 3
+  },
+  "research": {
+    "description": "Get financial ratios and fundamentals for NSE stock: {symbol}. Call the 'Get Screener.in Fundamentals' tool with symbol='{symbol}'. Output ONLY the raw JSON string returned by the tool. Do not add any explanation, commentary, or markdown formatting.",
+    "expected_output": "JSON with: symbol, ratios (dict of metric name to value), about (description).",
+    "max_retries": 3
+  },
+  "news": {
+    "description": "Find the latest news for: {symbol} NSE India stock latest news. Call the 'Get Latest Stock News' tool with query='{symbol} NSE India stock latest news'. Output ONLY the raw JSON string returned by the tool. Do not add any explanation, commentary, or markdown formatting.",
+    "expected_output": "JSON with 'articles' list; each item: title, description, source, published_at, url.",
+    "max_retries": 3
+  },
+  "shareholding": {
+    "description": "Get shareholding pattern for NSE stock: {symbol}. Call the 'Get Shareholding Pattern and Mutual Fund Holdings' tool with symbol='{symbol}'. Output ONLY the raw JSON string returned by the tool. Do not add any explanation, commentary, or markdown formatting.",
+    "expected_output": "JSON with: symbol, shareholding_pattern (Promoters, FIIs, DIIs, Government, Public %).",
+    "max_retries": 3
+  },
+  "mf_holdings": {
+    "description": "Get mutual fund holdings for NSE stock: {symbol}. Call the 'Get NSE Mutual Fund Holdings' tool with symbol='{symbol}'. Output ONLY the raw JSON string returned by the tool. Do not add any explanation, commentary, or markdown formatting.",
+    "expected_output": "JSON with: symbol, as_of_date, mutual_funds (list of fund + holding_pct).",
+    "max_retries": 3
+  }
+}
