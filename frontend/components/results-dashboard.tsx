@@ -1,13 +1,16 @@
 import type { Report, StockInfo } from '@/types';
 
-interface Props { report: Report }
+interface Props {
+  report: Report;
+  onHardRefresh?: () => void;
+}
 
 type FactorValue = string | number | null | undefined;
 type FactorShape = string | Record<string, FactorValue>;
 
 function fmt(n: number | null | undefined, decimals = 2) {
   if (n == null) return '—';
-  return n.toLocaleString('en-IN', { maximumFractionDigits: decimals });
+  return n.toLocaleString('en-IN', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
 function fmtCr(n: number | null | undefined) {
@@ -18,9 +21,9 @@ function fmtCr(n: number | null | undefined) {
 }
 
 const REC_CONFIG = {
-  BUY:  { bg: 'bg-buy/10',  border: 'border-buy/30',  text: 'text-buy',  badge: 'bg-buy  text-white' },
-  SELL: { bg: 'bg-sell/10', border: 'border-sell/30', text: 'text-sell', badge: 'bg-sell text-white' },
-  HOLD: { bg: 'bg-hold/10', border: 'border-hold/30', text: 'text-hold', badge: 'bg-hold text-white' },
+  BUY:  { bg: 'bg-buy/10',  border: 'border-buy/30',  text: 'text-buy',  badge: 'bg-buy  text-white', strip: 'bg-buy'  },
+  SELL: { bg: 'bg-sell/10', border: 'border-sell/30', text: 'text-sell', badge: 'bg-sell text-white', strip: 'bg-sell' },
+  HOLD: { bg: 'bg-hold/10', border: 'border-hold/30', text: 'text-hold', badge: 'bg-hold text-white', strip: 'bg-hold' },
 };
 
 const CONF_COLOR: Record<string, string> = {
@@ -79,43 +82,111 @@ function formatFactor(factor: FactorShape) {
   return parts.join(' • ') || '—';
 }
 
+function formatAge(dateStr: string): string {
+  const today     = new Date().toISOString().slice(0, 10);
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  if (dateStr === today)     return 'Updated today';
+  if (dateStr === yesterday) return 'Updated yesterday';
+  return `Updated ${new Date(dateStr).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`;
+}
+
 function formatNewsHighlights(highlights: Report['analysis']['news_highlights']) {
   if (Array.isArray(highlights)) return highlights.join(' • ');
   return highlights ?? '';
 }
 
-function ExchangeQuoteCard({
-  exchange,
-  price,
-  changePct,
-  active = false,
+function ExchangeTable({
+  quotes,
+  primaryExchange,
 }: {
-  exchange: string;
-  price: number | null | undefined;
-  changePct: number | null | undefined;
-  active?: boolean;
+  quotes: Array<[string, Partial<StockInfo>]>;
+  primaryExchange: string;
 }) {
-  const change = changePct ?? 0;
-  const changeCls = change > 0 ? 'text-buy' : change < 0 ? 'text-sell' : 'text-muted';
-  const changeStr = `${change > 0 ? '+' : ''}${fmt(change)}%`;
+  if (quotes.length === 1) {
+    const [exchange, q] = quotes[0];
+    const change    = q?.change_pct ?? 0;
+    const changeCls = change > 0 ? 'text-buy' : change < 0 ? 'text-sell' : 'text-muted';
+    return (
+      <div className="text-right shrink-0">
+        <p className="text-2xl font-bold font-mono text-tx">
+          {q?.current_price != null ? `₹${fmt(q.current_price)}` : '—'}
+        </p>
+        <p className={`text-sm font-mono ${changeCls}`}>
+          {`${change > 0 ? '+' : ''}${fmt(change)}%`}
+        </p>
+        <p className="text-[11px] text-muted mt-0.5">{exchange}</p>
+      </div>
+    );
+  }
 
   return (
-    <div className={`min-w-[132px] rounded-xl border p-3 ${active ? 'border-accent/40 bg-accent/5' : 'border-border bg-card'}`}>
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] font-mono font-semibold text-muted">{exchange}</span>
-        {active && (
-          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-accent">Primary</span>
-        )}
-      </div>
-      <p className="mt-2 text-xl font-bold font-mono text-tx">
-        {price != null ? `₹${fmt(price)}` : '—'}
-      </p>
-      <p className={`text-sm font-mono ${changeCls}`}>{changeStr}</p>
+    <div className="rounded-xl border border-border bg-card overflow-hidden text-sm min-w-[260px] shrink-0">
+      {quotes.map(([exchange, q]) => {
+        const change    = q?.change_pct ?? 0;
+        const changeCls = change > 0 ? 'text-buy' : change < 0 ? 'text-sell' : 'text-muted';
+        const isPrimary = exchange === primaryExchange;
+        return (
+          <div
+            key={exchange}
+            className={`flex items-center justify-between px-4 py-2.5 border-b border-border last:border-0 ${
+              isPrimary ? 'bg-accent/5' : ''
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-[11px] font-semibold text-muted">{exchange}</span>
+              {isPrimary && (
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-accent">Primary</span>
+              )}
+            </div>
+            <div className="text-right">
+              <span className="font-mono font-bold text-tx">
+                {q?.current_price != null ? `₹${fmt(q.current_price)}` : '—'}
+              </span>
+              <span className={`ml-3 font-mono text-xs ${changeCls}`}>
+                {`${change > 0 ? '+' : ''}${fmt(change)}%`}
+              </span>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-export default function ResultsDashboard({ report }: Props) {
+function RangeBar({ low, current, high }: { low: number; current: number; high: number }) {
+  const pct = high === low ? 50 : Math.max(0, Math.min(100, ((current - low) / (high - low)) * 100));
+  return (
+    <div className="mt-3">
+      <div className="relative h-1.5 rounded-full bg-border">
+        <div className="absolute inset-0 rounded-full bg-gradient-to-r from-sell/25 via-hold/25 to-buy/25" />
+        <div
+          className="absolute top-1/2 w-2 h-2 rounded-full bg-tx border border-bg"
+          style={{ left: `${pct}%`, transform: 'translate(-50%, -50%)' }}
+        />
+      </div>
+      <div className="flex justify-between text-[10px] text-muted/60 mt-1">
+        <span>₹{fmt(low, 0)}</span>
+        <span>52W Range</span>
+        <span>₹{fmt(high, 0)}</span>
+      </div>
+    </div>
+  );
+}
+
+function fmtRatio(raw: string): string {
+  const s = String(raw).trim();
+  if (/[a-zA-Z%]/.test(s)) return s;
+  const n = parseFloat(s.replace(/,/g, ''));
+  if (!isNaN(n) && isFinite(n)) return fmt(n, s.includes('.') ? 2 : 0);
+  return s;
+}
+
+function summaryBullets(text: string): string[] {
+  const sentences = text.match(/[^.!?]+[.!?]+/g) ?? [];
+  return sentences.map(s => s.trim()).filter(s => s.length > 5);
+}
+
+export default function ResultsDashboard({ report, onHardRefresh }: Props) {
   const { analysis: a, stock_info: s, research: r, news, holdings: h } = report;
 
   const rec = (a?.recommendation ?? 'HOLD') as 'BUY' | 'SELL' | 'HOLD';
@@ -127,116 +198,160 @@ export default function ResultsDashboard({ report }: Props) {
   const primaryExchange = s?.primary_exchange ?? s?.exchange ?? 'NSE';
 
   return (
-    <div className="animate-fade-up space-y-6">
+    <div className="animate-fade-up space-y-5">
 
-      {/* Header — company + price */}
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h2 className="text-2xl font-bold text-tx">{s?.company_name ?? report.symbol}</h2>
-          <div className="flex items-center gap-2 mt-1">
-            <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded bg-accent/10 text-accent border border-accent/20">
-              {exchangeQuotes.length > 1 ? 'NSE + BSE' : (s?.exchange ?? 'NSE')}
-            </span>
-            {s?.sector && (
-              <span className="text-xs text-muted">{s.sector}</span>
-            )}
-          </div>
-        </div>
-        <div className="flex flex-wrap justify-end gap-3">
-          {exchangeQuotes.map(([exchange, quote]) => (
-            <ExchangeQuoteCard
-              key={exchange}
-              exchange={exchange}
-              price={quote?.current_price}
-              changePct={quote?.change_pct}
-              active={exchange === primaryExchange}
-            />
-          ))}
-        </div>
-      </div>
+      {/* ── 1. Hero strip: identity · verdict · price ── */}
+      <div className={`rounded-xl border overflow-hidden ${cfg.border} ${cfg.bg}`}>
+        <div className={`h-0.5 ${cfg.strip}`} />
+        <div className="px-6 py-5 flex flex-wrap items-center justify-between gap-6">
 
-      {/* Recommendation card */}
-      <div className={`rounded-xl border p-5 ${cfg.bg} ${cfg.border}`}>
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="flex-1 min-w-0">
-            <p className="text-[11px] font-semibold text-muted tracking-[1px] uppercase mb-2">AI Recommendation</p>
-            <p className="text-sm text-tx leading-relaxed">{a?.summary ?? 'Analysis pending.'}</p>
-          </div>
-          <div className="flex flex-col items-end gap-2 shrink-0">
-            <span className={`text-2xl font-black px-5 py-2 rounded-lg ${cfg.badge}`}>{rec}</span>
-            {a?.confidence && (
-              <span className={`text-xs font-semibold ${CONF_COLOR[a.confidence]}`}>
-                {a.confidence} confidence
+          {/* Identity */}
+          <div className="min-w-0">
+            <div className="flex items-baseline gap-2.5 flex-wrap">
+              <h2 className="text-xl font-bold text-tx">{s?.company_name ?? report.symbol}</h2>
+              {s?.company_name && (
+                <span className="font-mono text-sm font-semibold text-muted">{report.symbol}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+              <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded bg-accent/10 text-accent border border-accent/20">
+                {exchangeQuotes.length > 1 ? 'NSE + BSE' : (s?.exchange ?? 'NSE')}
               </span>
+              {s?.industry && <span className="text-xs text-muted">{s.industry}</span>}
+              {s?.sector && s.sector !== s.industry && (
+                <span className="text-xs text-muted/50">· {s.sector}</span>
+              )}
+              {report.generated_at && (
+                <span className="text-xs text-muted/60">· {formatAge(report.generated_at)}</span>
+              )}
+            </div>
+          </div>
+
+          {/* Verdict */}
+          <div className="flex flex-col items-center gap-2 shrink-0">
+            <span className={`text-3xl font-black px-8 py-2.5 rounded-xl ${cfg.badge}`}>{rec}</span>
+            <div className="flex items-center gap-3">
+              {a?.confidence && (
+                <span className={`text-[11px] font-semibold tracking-widest uppercase ${CONF_COLOR[a.confidence]}`}>
+                  {a.confidence} confidence
+                </span>
+              )}
+              {onHardRefresh && (
+                <button
+                  onClick={onHardRefresh}
+                  className="flex items-center gap-1 text-[11px] font-medium text-muted
+                    hover:text-tx transition-colors duration-150"
+                >
+                  <span>↺</span><span>Refresh</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Price */}
+          <ExchangeTable quotes={exchangeQuotes} primaryExchange={primaryExchange} />
+        </div>
+      </div>
+
+      {/* ── 2. Main grid: thesis (60%) + metrics (40%) ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
+
+        {/* Investment Thesis — summary + bull/bear as one card */}
+        <div className="lg:col-span-3">
+          <Card title="Investment Thesis" className="h-full">
+            {(() => {
+              const text    = a?.summary ?? '';
+              const bullets = summaryBullets(text);
+              return bullets.length > 1 ? (
+                <ul className="space-y-2 mb-5">
+                  {bullets.map((b, i) => (
+                    <li key={i} className="flex gap-2 text-sm text-tx leading-relaxed">
+                      <span className={`${cfg.text} shrink-0 mt-px`}>›</span>
+                      <span>{b}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-tx leading-relaxed mb-5">{text || 'Analysis pending.'}</p>
+              );
+            })()}
+
+            <div className="grid grid-cols-2 gap-5 pt-4 border-t border-border">
+              <div>
+                <p className="text-[11px] font-semibold text-buy tracking-[1px] uppercase mb-3">Bull Case</p>
+                <ul className="space-y-2">
+                  {(a?.bull_factors ?? []).map((f, i) => (
+                    <li key={i} className="flex gap-2 text-sm text-tx">
+                      <span className="text-buy mt-0.5 shrink-0">▲</span>
+                      <span>{formatFactor(f)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold text-sell tracking-[1px] uppercase mb-3">Bear Case</p>
+                <ul className="space-y-2">
+                  {(a?.bear_factors ?? []).map((f, i) => (
+                    <li key={i} className="flex gap-2 text-sm text-tx">
+                      <span className="text-sell mt-0.5 shrink-0">▼</span>
+                      <span>{formatFactor(f)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </Card>
+        </div>
+
+        {/* Key Metrics sidebar */}
+        <div className="lg:col-span-2 space-y-4">
+          <Card title="Key Metrics">
+            <div className="grid grid-cols-3 gap-2 mb-4">
+              {[
+                { label: 'P/E', value: s?.pe_ratio      != null ? fmt(s.pe_ratio, 1)      : '—' },
+                { label: 'P/B', value: s?.price_to_book != null ? fmt(s.price_to_book, 1) : '—' },
+                { label: 'EPS', value: s?.eps            != null ? `₹${fmt(s.eps, 0)}`    : '—' },
+              ].map(({ label, value }) => (
+                <div key={label} className="bg-card-hi rounded-lg p-2.5 text-center">
+                  <p className="text-xs text-muted uppercase tracking-wide mb-1">{label}</p>
+                  <p className="font-mono font-bold text-lg text-tx leading-tight">{value}</p>
+                </div>
+              ))}
+            </div>
+            <MetricRow label="Market Cap" value={fmtCr(s?.market_cap_cr)} />
+            <MetricRow label="Book Value" value={s?.book_value != null ? `₹${fmt(s.book_value)}` : '—'} />
+            {s?.beta != null && <MetricRow label="Beta" value={fmt(s.beta, 2)} />}
+            {s?.dividend_yield_pct != null && (
+              <MetricRow label="Div Yield" value={`${fmt(s.dividend_yield_pct, 2)}%`} />
             )}
-          </div>
-        </div>
-      </div>
+            <MetricRow label="52W High" value={s?.['52w_high'] != null ? `₹${fmt(s['52w_high'])}` : '—'} />
+            <MetricRow label="52W Low"  value={s?.['52w_low']  != null ? `₹${fmt(s['52w_low'])}`  : '—'} />
+            {s?.['52w_low'] != null && s?.['52w_high'] != null && s?.current_price != null && (
+              <RangeBar low={s['52w_low']!} current={s.current_price} high={s['52w_high']!} />
+            )}
+          </Card>
 
-      {/* Market metrics + Valuation */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card title="Market Metrics">
-          {exchangeQuotes.length > 1 && (
-            <MetricRow label="Primary Exchange" value={primaryExchange} />
+          {r?.ratios && Object.keys(r.ratios).length > 0 && (
+            <Card title="Fundamentals">
+              {Object.entries(r.ratios).map(([k, v]) => (
+                <MetricRow key={k} label={k} value={fmtRatio(String(v))} />
+              ))}
+            </Card>
           )}
-          <MetricRow label="Market Cap"   value={fmtCr(s?.market_cap_cr)} />
-          <MetricRow label="P/E Ratio"    value={s?.pe_ratio != null ? fmt(s.pe_ratio) : '—'} />
-          <MetricRow label="EPS"          value={s?.eps != null ? `₹${fmt(s.eps)}` : '—'} />
-          <MetricRow label="Book Value"   value={s?.book_value != null ? `₹${fmt(s.book_value)}` : '—'} />
-          <MetricRow label="52W High"     value={s?.['52w_high'] != null ? `₹${fmt(s['52w_high'])}` : '—'} />
-          <MetricRow label="52W Low"      value={s?.['52w_low']  != null ? `₹${fmt(s['52w_low'])}` : '—'} />
-        </Card>
 
-        <div className="flex flex-col gap-4">
-          <Card title="Valuation">
-            <p className={`text-sm font-semibold mb-1 ${
-              a?.valuation?.verdict === 'Undervalued' ? 'text-buy' :
-              a?.valuation?.verdict === 'Overvalued'  ? 'text-sell' : 'text-hold'
-            }`}>{a?.valuation?.verdict ?? '—'}</p>
-            <p className="text-sm text-muted leading-relaxed">{a?.valuation?.comment ?? '—'}</p>
-          </Card>
-          <Card title="Business Quality">
-            <p className="text-sm text-tx leading-relaxed">{a?.business_quality ?? '—'}</p>
-          </Card>
+          {a?.valuation && (
+            <Card title="Valuation">
+              <p className={`text-sm font-semibold mb-1 ${
+                a.valuation.verdict === 'Undervalued' ? 'text-buy' :
+                a.valuation.verdict === 'Overvalued'  ? 'text-sell' : 'text-hold'
+              }`}>{a.valuation.verdict}</p>
+              <p className="text-sm text-muted leading-relaxed">{a.valuation.comment}</p>
+            </Card>
+          )}
         </div>
       </div>
 
-      {/* Fundamentals ratios */}
-      {r?.ratios && Object.keys(r.ratios).length > 0 && (
-        <Card title="Key Ratios">
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6">
-            {Object.entries(r.ratios).map(([k, v]) => (
-              <MetricRow key={k} label={k} value={String(v)} />
-            ))}
-          </div>
-        </Card>
-      )}
-
-      {/* Bull / Bear */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card title="Bull Case">
-          <ul className="space-y-2">
-            {(a?.bull_factors ?? []).map((f, i) => (
-              <li key={i} className="flex gap-2 text-sm text-tx">
-                <span className="text-buy mt-0.5 shrink-0">▲</span>
-                <span>{formatFactor(f)}</span>
-              </li>
-            ))}
-          </ul>
-        </Card>
-        <Card title="Bear Case">
-          <ul className="space-y-2">
-            {(a?.bear_factors ?? []).map((f, i) => (
-              <li key={i} className="flex gap-2 text-sm text-tx">
-                <span className="text-sell mt-0.5 shrink-0">▼</span>
-                <span>{formatFactor(f)}</span>
-              </li>
-            ))}
-          </ul>
-        </Card>
-      </div>
-
-      {/* Key Risks */}
+      {/* ── 3. Key Risks ── */}
       {(a?.key_risks ?? []).length > 0 && (
         <Card title="Key Risks">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -250,7 +365,33 @@ export default function ResultsDashboard({ report }: Props) {
         </Card>
       )}
 
-      {/* Institutional + Shareholding */}
+      {/* ── 4. Narrative row: context cards ── */}
+      {(() => {
+        const narrativeCards = [
+          a?.business_quality && (
+            <Card key="bq" title="Business Quality">
+              <p className="text-sm text-tx leading-relaxed">{a.business_quality}</p>
+            </Card>
+          ),
+          <Card key="it" title="Institutional Trend">
+            <p className="text-sm text-tx leading-relaxed">{a?.institutional_trend ?? '—'}</p>
+          </Card>,
+          a?.news_sentiment && (
+            <Card key="ns" title="News Sentiment">
+              <p className={`text-sm font-semibold mb-1 ${SENT_COLOR[a.news_sentiment]}`}>
+                {a.news_sentiment}
+              </p>
+              <p className="text-sm text-muted leading-relaxed">{formatNewsHighlights(a?.news_highlights)}</p>
+            </Card>
+          ),
+        ].filter(Boolean);
+        const colCls = narrativeCards.length === 3 ? 'sm:grid-cols-3' : narrativeCards.length === 2 ? 'sm:grid-cols-2' : '';
+        return (
+          <div className={`grid grid-cols-1 ${colCls} gap-4`}>{narrativeCards}</div>
+        );
+      })()}
+
+      {/* ── 5. Data tables ── */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {h?.shareholding_pattern && Object.keys(h.shareholding_pattern).length > 0 && (
           <Card title="Shareholding Pattern">
@@ -261,70 +402,46 @@ export default function ResultsDashboard({ report }: Props) {
                   <span className="font-mono font-semibold text-tx">{fmt(v, 1)}%</span>
                 </div>
                 <div className="h-1.5 rounded-full bg-border overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-accent"
-                    style={{ width: `${Math.min(v, 100)}%` }}
-                  />
+                  <div className="h-full rounded-full bg-accent" style={{ width: `${Math.min(v, 100)}%` }} />
                 </div>
               </div>
             ))}
           </Card>
         )}
 
-        <div className="flex flex-col gap-4">
-          <Card title="Institutional Trend">
-            <p className="text-sm text-tx leading-relaxed">{a?.institutional_trend ?? '—'}</p>
+        {h?.mutual_funds && h.mutual_funds.length > 0 && (
+          <Card title="Mutual Fund Holdings">
+            <div className="divide-y divide-border">
+              {h.mutual_funds.slice(0, 8).map((mf, i) => (
+                <div key={i} className="flex items-center justify-between py-2">
+                  <span className="text-sm text-tx">{mf.fund}</span>
+                  <span className="text-sm font-mono font-semibold text-accent">{fmt(mf.holding_pct, 2)}%</span>
+                </div>
+              ))}
+            </div>
           </Card>
-          {a?.news_sentiment && (
-            <Card title="News Sentiment">
-              <p className={`text-sm font-semibold mb-1 ${SENT_COLOR[a.news_sentiment]}`}>
-                {a.news_sentiment}
-              </p>
-              <p className="text-sm text-muted leading-relaxed">{formatNewsHighlights(a?.news_highlights)}</p>
-            </Card>
-          )}
-        </div>
+        )}
       </div>
 
-      {/* MF Holdings */}
-      {h?.mutual_funds && h.mutual_funds.length > 0 && (
-        <Card title="Mutual Fund Holdings">
-          <div className="divide-y divide-border">
-            {h.mutual_funds.slice(0, 8).map((mf, i) => (
-              <div key={i} className="flex items-center justify-between py-2">
-                <span className="text-sm text-tx">{mf.fund}</span>
-                <span className="text-sm font-mono font-semibold text-accent">{fmt(mf.holding_pct, 2)}%</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-      )}
-
-      {/* News headlines */}
+      {/* ── 6. News ── */}
       {news && news.length > 0 && (
         <Card title="Recent News">
-          <div className="space-y-3">
+          <div className="divide-y divide-border">
             {news.slice(0, 5).map((n, i) => (
-              <a
-                key={i}
-                href={n.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex flex-col gap-0.5 group"
+              <a key={i} href={n.url} target="_blank" rel="noopener noreferrer"
+                className="flex flex-col gap-1 py-3 first:pt-0 last:pb-0 group"
               >
                 <span className="text-sm text-tx group-hover:text-accent transition-colors leading-snug">
                   {n.title}
                 </span>
-                <span className="text-[11px] text-muted">
-                  {n.source} · {n.published_at}
-                </span>
+                <span className="text-[11px] text-muted">{n.source} · {n.published_at} ↗</span>
               </a>
             ))}
           </div>
         </Card>
       )}
 
-      {/* About */}
+      {/* ── 7. About ── */}
       {r?.about && (
         <Card title="About">
           <p className="text-sm text-muted leading-relaxed">{r.about}</p>

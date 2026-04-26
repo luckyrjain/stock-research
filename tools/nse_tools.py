@@ -55,7 +55,9 @@ def _build_quote_payload(sym: str, exchange: str, info: dict) -> dict:
         "price_to_book": info.get("priceToBook"),
         "52w_high": info.get("fiftyTwoWeekHigh"),
         "52w_low": info.get("fiftyTwoWeekLow"),
-        "dividend_yield_pct": round(info.get("dividendYield", 0) * 100, 2) if info.get("dividendYield") else 0,
+        # yfinance should return dividendYield as a decimal (0.25 = 25%).
+        # Some tickers return it already in percentage form (e.g. 258.65); treat those as bad data.
+        "dividend_yield_pct": round((info.get("dividendYield") or 0) * 100, 2) if 0 < (info.get("dividendYield") or 0) <= 1 else 0,
         "beta": info.get("beta"),
         "sector": info.get("sector"),
         "industry": info.get("industry"),

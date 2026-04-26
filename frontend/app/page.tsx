@@ -13,24 +13,26 @@ function initStatus(): Record<TaskName, TaskStatus> {
 }
 
 export default function HomePage() {
-  const [phase, setPhase]           = useState<Phase>('idle');
-  const [taskStatus, setTaskStatus] = useState<Record<TaskName, TaskStatus>>(initStatus());
-  const [report, setReport]         = useState<Report | null>(null);
-  const [error, setError]           = useState<string | null>(null);
-  const esRef     = useRef<EventSource | null>(null);
-  const doneRef   = useRef(false);
+  const [phase, setPhase]               = useState<Phase>('idle');
+  const [taskStatus, setTaskStatus]     = useState<Record<TaskName, TaskStatus>>(initStatus());
+  const [report, setReport]             = useState<Report | null>(null);
+  const [error, setError]               = useState<string | null>(null);
+  const [currentSymbol, setCurrentSymbol] = useState<string | null>(null);
+  const esRef   = useRef<EventSource | null>(null);
+  const doneRef = useRef(false);
 
-  const handleAnalyse = useCallback((symbol: string) => {
+  const handleAnalyse = useCallback((symbol: string, force = false) => {
     // Close any previous stream
     esRef.current?.close();
 
+    setCurrentSymbol(symbol);
     setPhase('fetching');
     setTaskStatus(initStatus());
     setReport(null);
     setError(null);
     doneRef.current = false;
 
-    const es = new EventSource(`/api/analyse/${symbol}`);
+    const es = new EventSource(`/api/analyse/${symbol}?force=${force}`);
     esRef.current = es;
 
     es.onmessage = (e) => {
@@ -83,38 +85,61 @@ export default function HomePage() {
     };
   }, []);
 
+  const handleHardRefresh = useCallback(() => {
+    if (currentSymbol) handleAnalyse(currentSymbol, true);
+  }, [currentSymbol, handleAnalyse]);
+
   const isRunning = phase === 'fetching' || phase === 'analysing';
+  const isIdle    = phase === 'idle';
 
   return (
     <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-3xl mx-auto px-4 py-16">
+      <div className={`max-w-5xl mx-auto px-4 ${isIdle ? 'py-16' : 'pt-8 pb-16'}`}>
 
-        {/* Logo / heading */}
-        <div className="mb-14 text-center">
-          <h1 className="text-4xl font-black tracking-tight text-tx mb-2">
-            Stock<span className="text-accent">Research</span> AI
-          </h1>
-          <p className="text-muted text-sm">AI-powered equity research for Indian markets</p>
-        </div>
-
-        {/* Search */}
-        <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} />
-
-        {/* Progress */}
-        {(phase === 'fetching' || phase === 'analysing') && (
-          <ProgressTracker taskStatus={taskStatus} phase={phase} />
-        )}
-
-        {/* Error */}
-        {phase === 'error' && error && (
-          <div className="mb-8 px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm">
-            {error}
+        {isIdle ? (
+          <div className="max-w-2xl mx-auto">
+            <div className="mb-12 text-center">
+              <h1 className="text-4xl font-black tracking-tight text-tx mb-2">
+                Stock<span className="text-accent">Research</span> AI
+              </h1>
+              <p className="text-muted text-sm">AI-powered equity research for Indian markets</p>
+            </div>
+            <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} />
           </div>
-        )}
+        ) : (
+          <>
+            <div className="flex items-center gap-3 mb-5 pb-4 border-b border-border">
+              <span className="text-base font-black tracking-tight text-tx">
+                Stock<span className="text-accent">Research</span> AI
+              </span>
+            </div>
 
-        {/* Results */}
-        {phase === 'done' && report && (
-          <ResultsDashboard report={report} />
+            <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} compact />
+
+            {(phase === 'fetching' || phase === 'analysing') && (
+              <ProgressTracker taskStatus={taskStatus} phase={phase} />
+            )}
+
+            {phase === 'error' && error && (
+              <div className="mb-8 px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm flex items-start justify-between gap-4">
+                <span>{error}</span>
+                {currentSymbol && (
+                  <button
+                    onClick={() => handleAnalyse(currentSymbol)}
+                    className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
+                      border border-sell/40 text-sell hover:bg-sell/10
+                      transition-colors duration-150"
+                  >
+                    Try Again
+                  </button>
+                )}
+              </div>
+            )}
+
+            {phase === 'done' && report && (
+              <ResultsDashboard report={report} onHardRefresh={handleHardRefresh} />
+            )}
+          </>
         )}
 
       </div>

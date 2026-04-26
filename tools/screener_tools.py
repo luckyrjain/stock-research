@@ -14,8 +14,30 @@ _HEADERS = {
 }
 
 
+def _resolve_screener_slug(symbol: str) -> str:
+    """Return the Screener slug for a symbol, falling back to search if direct URL 404s."""
+    upper = symbol.upper()
+    resp = requests.get(f"https://www.screener.in/company/{upper}/", headers=_HEADERS, timeout=10)
+    if resp.status_code == 200:
+        return upper
+    # 404 or redirect — search for the slug
+    search = requests.get(
+        "https://www.screener.in/api/company/search/",
+        params={"q": upper},
+        headers={"User-Agent": _HEADERS["User-Agent"]},
+        timeout=6,
+    )
+    results = search.json() if search.ok else []
+    if results:
+        slug = (results[0].get("url") or "").strip("/").split("/")[-1]
+        if slug:
+            return slug
+    return upper  # best effort
+
+
 def _fetch_soup(symbol: str) -> BeautifulSoup:
-    url = f"https://www.screener.in/company/{symbol.upper()}/"
+    slug = _resolve_screener_slug(symbol)
+    url = f"https://www.screener.in/company/{slug}/"
     resp = requests.get(url, headers=_HEADERS, timeout=20)
     resp.raise_for_status()
     return BeautifulSoup(resp.text, "lxml")

@@ -19,6 +19,7 @@ const config: Config = {
         accent:     '#6c71f0',
       },
       fontFamily: {
+        sans: ['var(--font-sans)', 'system-ui', 'sans-serif'],
         mono: ['var(--font-mono)', 'monospace'],
       },
       animation: {

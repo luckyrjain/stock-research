@@ -325,103 +325,69 @@ def _safe_analysis_fallback(symbol: str, reason: str) -> dict:
     }
 
 
+def _is_rate_limit(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "rate_limit" in msg or "ratelimit" in msg or "rate limit" in msg
+
+
+def _rate_limit_wait_secs(exc: Exception) -> float:
+    m = re.search(r"try again in (\d+\.?\d*)s", str(exc), re.IGNORECASE)
+    return float(m.group(1)) + 2.0 if m else 40.0
+
+
+def _call_direct_llm(analyst_llm, prompt: str):
+    if hasattr(analyst_llm, "call"):
+        return analyst_llm.call(prompt)
+    if hasattr(analyst_llm, "invoke"):
+        return analyst_llm.invoke(prompt)
+    if callable(analyst_llm):
+        return analyst_llm(prompt)
+    return None
+
+
 def run_analysis_with_fallback(symbol: str, all_data: dict[str, dict], run_id: str | None = None) -> dict:
-    """Run analyst via CrewAI first, then fall back to a direct LLM call if guardrails fail."""
-    try:
-        started_at = time.perf_counter()
-        log_event(LOGGER, "analyst_crewai_started", run_id=run_id, symbol=symbol)
-        crew = build_crew(symbol, active_tasks=set(), cached_data=all_data, run_analysis=True)
-        result = crew.kickoff()
-        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
-        outputs = getattr(result, "tasks_output", [])
-        if outputs:
-            text = outputs[0].raw if hasattr(outputs[0], "raw") else str(outputs[0])
-            parsed = parse_json_object(text)
-            ok, validated = _validate_analysis_payload(parsed, all_data)
-            if ok:
-                log_event(LOGGER, "analyst_crewai_succeeded", run_id=run_id, symbol=symbol, latency_ms=elapsed_ms)
-                return parsed
-            crew_error = str(validated)
-            log_event(
-                LOGGER,
-                "analyst_crewai_failed",
-                level="warning",
-                run_id=run_id,
-                symbol=symbol,
-                latency_ms=elapsed_ms,
-                error=crew_error,
-                failure_stage="guardrail",
-            )
-        else:
-            crew_error = "CrewAI analyst returned no task outputs."
-            log_event(
-                LOGGER,
-                "analyst_crewai_failed",
-                level="warning",
-                run_id=run_id,
-                symbol=symbol,
-                latency_ms=elapsed_ms,
-                error=crew_error,
-                failure_stage="empty_output",
-            )
-    except Exception as exc:
-        crew_error = str(exc)
-        log_event(
-            LOGGER,
-            "analyst_crewai_failed",
-            level="warning",
-            run_id=run_id,
-            symbol=symbol,
-            error=crew_error,
-            failure_stage="exception",
-        )
+    """Run analyst via direct LLM call. Retries once after waiting if rate-limited."""
+    analyst_llm = _resolve_llm(analyst=True)
+    prompt = build_analysis_prompt(symbol, all_data)
 
-    try:
-        analyst_llm = _resolve_llm(analyst=True)
-        prompt = build_analysis_prompt(symbol, all_data)
+    for attempt in range(2):
+        try:
+            started_at = time.perf_counter()
+            log_event(LOGGER, "analyst_llm_started", run_id=run_id, symbol=symbol, attempt=attempt + 1)
+            raw_response = _call_direct_llm(analyst_llm, prompt)
 
-        raw_response = None
-        started_at = time.perf_counter()
-        log_event(LOGGER, "analyst_direct_llm_started", run_id=run_id, symbol=symbol)
-        if hasattr(analyst_llm, "call"):
-            raw_response = analyst_llm.call(prompt)
-        elif hasattr(analyst_llm, "invoke"):
-            raw_response = analyst_llm.invoke(prompt)
-        elif callable(analyst_llm):
-            raw_response = analyst_llm(prompt)
-
-        if raw_response is not None:
             elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
-            text = raw_response.raw if hasattr(raw_response, "raw") else str(raw_response)
+            text = raw_response.raw if hasattr(raw_response, "raw") else str(raw_response or "")
             parsed = parse_json_object(text)
             ok, validated = _validate_analysis_payload(parsed, all_data)
             if ok:
-                log_event(LOGGER, "analyst_direct_llm_succeeded", run_id=run_id, symbol=symbol, latency_ms=elapsed_ms)
+                log_event(LOGGER, "analyst_llm_succeeded", run_id=run_id, symbol=symbol, latency_ms=elapsed_ms)
                 return parsed
+
             log_event(
-                LOGGER,
-                "analyst_direct_llm_failed",
-                level="warning",
-                run_id=run_id,
-                symbol=symbol,
-                latency_ms=elapsed_ms,
-                error=str(validated),
-                failure_stage="guardrail",
+                LOGGER, "analyst_llm_failed", level="warning",
+                run_id=run_id, symbol=symbol, latency_ms=elapsed_ms,
+                error=str(validated), failure_stage="guardrail",
             )
             return _safe_analysis_fallback(symbol, str(validated))
-    except Exception as exc:
-        log_event(
-            LOGGER,
-            "analyst_direct_llm_failed",
-            level="error",
-            run_id=run_id,
-            symbol=symbol,
-            error=str(exc),
-            failure_stage="exception",
-        )
-        return _safe_analysis_fallback(symbol, f"{crew_error}; direct fallback failed: {exc}")
 
-    return _safe_analysis_fallback(symbol, crew_error)
+        except Exception as exc:
+            if _is_rate_limit(exc) and attempt == 0:
+                wait = _rate_limit_wait_secs(exc)
+                log_event(
+                    LOGGER, "analyst_rate_limited", level="warning",
+                    run_id=run_id, symbol=symbol, wait_seconds=wait, error=str(exc),
+                )
+                time.sleep(wait)
+                continue
+
+            log_event(
+                LOGGER, "analyst_llm_failed", level="error",
+                run_id=run_id, symbol=symbol, error=str(exc), failure_stage="exception",
+            )
+            return _safe_analysis_fallback(symbol, str(exc))
+
+    return _safe_analysis_fallback(symbol, "analyst failed after rate-limit retry")
 
 
 # ── Main builder ──────────────────────────────────────────────────────────────

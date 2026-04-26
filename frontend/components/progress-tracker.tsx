@@ -51,8 +51,8 @@ export default function ProgressTracker({ taskStatus, phase }: Props) {
           ? 'bg-accent/10 border-accent text-accent'
           : 'bg-card border-border text-muted'
       }`}>
-        <span className={phase === 'analysing' ? 'inline-block animate-spin-slow' : ''}>
-          {phase === 'analysing' ? '⟳' : '🤖'}
+        <span className={phase === 'analysing' ? 'inline-block animate-spin-slow' : 'opacity-40'}>
+          ⟳
         </span>
         <span>
           {phase === 'analysing' ? 'AI analysis in progress…' : 'Waiting for data…'}

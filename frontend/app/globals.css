@@ -12,6 +12,13 @@ body {
   background: #08090d;
   color: #e4e8f4;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: #6c71f040;
+  color: #e4e8f4;
 }
 
 /* Scrollbar */

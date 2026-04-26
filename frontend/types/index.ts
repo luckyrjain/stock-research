@@ -3,8 +3,9 @@ export interface ValidationResult {
   valid: boolean;
   symbol: string;
   company: string;
+  exchange?: string;
   suspended?: boolean;
-  suggestions: { symbol: string; company: string }[];
+  suggestions: { symbol: string; company: string; exchange?: string }[];
 }
 
 export interface StockInfo {

@@ -26,7 +26,7 @@ def _fetch_task(task_name: str, symbol: str, run_id: str, max_attempts: int = 3)
     dispatch = {
         "stock_info":   lambda: get_stock_quote.run(symbol),
         "research":     lambda: get_fundamentals.run(symbol),
-        "news":         lambda: get_latest_news.run(f"{symbol} NSE India stock latest news"),
+        "news":         lambda: get_latest_news.run(f"{symbol} India stock latest news"),
         "shareholding": lambda: get_holdings.run(symbol),
         "mf_holdings":  lambda: get_mf_holdings.run(symbol),
     }

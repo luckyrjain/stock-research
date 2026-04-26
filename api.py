@@ -1,7 +1,9 @@
 import asyncio
 import json
 import os
+import time
 import uuid
+import re
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -19,8 +21,156 @@ _NSE_HEADERS = {
     "Accept": "application/json",
 }
 
+# ── ISIN cache (NSE equity master list, refreshed hourly) ─────────────────────
+_ISIN_CACHE: tuple[float, dict[str, dict]] | None = None
+_ISIN_CACHE_TTL = 3600
+
+
+def _is_isin(s: str) -> bool:
+    return bool(re.match(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$", s))
+
+
+def _load_isin_map() -> dict[str, dict]:
+    """Download and parse NSE's equity master CSV into an ISIN → {symbol, company} map."""
+    global _ISIN_CACHE
+    now = time.monotonic()
+    if _ISIN_CACHE and now - _ISIN_CACHE[0] < _ISIN_CACHE_TTL:
+        return _ISIN_CACHE[1]
+    import requests
+    try:
+        r = requests.get(
+            "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        mapping: dict[str, dict] = {}
+        for line in r.text.splitlines()[1:]:
+            parts = line.split(",")
+            if len(parts) >= 7:
+                symbol = parts[0].strip()
+                company = parts[1].strip()
+                isin = parts[6].strip()
+                if isin and symbol:
+                    mapping[isin] = {"symbol": symbol, "company": company}
+        _ISIN_CACHE = (now, mapping)
+        return mapping
+    except Exception:
+        return _ISIN_CACHE[1] if _ISIN_CACHE else {}
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _normalize(text: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (text or "").upper())
+
+
+def _is_name_match(query: str, company: str) -> bool:
+    q = _normalize(query)
+    c = _normalize(company)
+    return q in c or c.startswith(q)
+
+
+def _quote_meta_sync(symbol: str) -> dict:
+    import requests
+    try:
+        s = requests.Session()
+        s.get("https://www.nseindia.com", headers=_NSE_HEADERS, timeout=6)
+        r = s.get(
+            f"https://www.nseindia.com/api/quote-equity?symbol={symbol}",
+            headers=_NSE_HEADERS,
+            timeout=6,
+        )
+        info = r.json().get("info", {})
+        return {
+            "company": (info.get("companyName") or "").strip(),
+            "isin": (info.get("isin") or "").strip(),
+        }
+    except Exception:
+        return {"company": "", "isin": ""}
+
+def _screener_search_sync(query: str) -> list[dict]:
+    import requests
+    try:
+        r = requests.get(
+            "https://www.screener.in/api/company/search/",
+            params={"q": query},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=6,
+        )
+        return r.json() or []
+    except Exception:
+        return []
+
+
+def _screener_company_page_sync(slug: str) -> dict:
+    import requests
+    import re
+
+    try:
+        url = f"https://www.screener.in/company/{slug}/"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
+        html = r.text
+
+        def extract(pattern):
+            m = re.search(pattern, html)
+            return m.group(1).strip() if m else ""
+
+        return {
+            "company": extract(r"<h1[^>]*>(.*?)</h1>"),
+            "isin": extract(r"isin[/\"].*?([A-Z]{2}[A-Z0-9]{10})"),
+            "nse": extract(r"nseindia\.com/get-quotes/equity\?symbol=([A-Z0-9&%-]+)"),
+            "bse": extract(r"bseindia\.com/stock-share-price/[^/]+/([A-Z0-9&%-]+)/\d+/"),
+        }
+
+    except Exception:
+        return {}
+
+def _bse_search_by_isin(isin: str) -> dict:
+    import requests
+    try:
+        r = requests.get(
+            "https://api.bseindia.com/BseIndiaAPI/api/GetDataByISIN/w",
+            params={"isin": isin},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=6,
+        )
+        data = r.json()
+        return {
+            "symbol": data.get("ShortName") or data.get("scripShortName") or str(data.get("ScripCode") or ""),
+            "company": data.get("CompanyName") or "",
+            "exchange": "BSE",
+        }
+    except Exception:
+        return {}
+
+
+def _bse_autocomplete_sync(query: str) -> list[dict]:
+    """Search for BSE-listed stocks via Screener.in (BSE API returns HTML, not JSON)."""
+    import requests
+    try:
+        r = requests.get(
+            "https://www.screener.in/api/company/search/",
+            params={"q": query},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=6,
+        )
+        results = r.json() or []
+        output = []
+        for item in results[:8]:
+            # Derive symbol from Screener URL slug (e.g. /company/505685/ → 505685)
+            slug = (item.get("url") or "").strip("/").split("/")[-1]
+            if not slug:
+                continue
+            output.append({
+                "symbol": slug,
+                "company": item.get("name", ""),
+                "exchange": "BSE",
+                "activeSeries": True,
+            })
+        return output
+    except Exception:
+        return []
+
 
 def _autocomplete_sync(query: str) -> list[dict]:
     import requests
@@ -90,38 +240,130 @@ async def index():
 async def health():
     return {"status": "ok"}
 
-
 @app.get("/api/validate/{symbol}")
-async def validate_symbol(symbol: str):
+async def validate_symbol(symbol: str, exchange: str = ""):
     sym = symbol.upper().strip()
     loop = asyncio.get_running_loop()
-    results = await loop.run_in_executor(None, _autocomplete_sync, sym)
 
-    exact = next((r for r in results if r.get("symbol", "").upper() == sym), None)
-    others = [r for r in results if r.get("symbol", "").upper() != sym and r.get("activeSeries")]
+    # ── BSE-FORCED PATH (user selected a BSE suggestion) ─────
+    # sym may be a Screener slug (e.g. "505685" or "TAPARIA-TOOLS") — resolve it
+    # to the actual NSE/BSE ticker via the Screener company page.
+    if exchange.upper() == "BSE":
+        details = await loop.run_in_executor(None, _screener_company_page_sync, sym)
+        if details and (details.get("nse") or details.get("bse")):
+            proper_sym = details.get("nse") or details.get("bse") or sym
+            proper_exchange = "NSE" if details.get("nse") else "BSE"
+            return {
+                "found": True,
+                "valid": True,
+                "symbol": proper_sym,
+                "company": details.get("company", ""),
+                "exchange": proper_exchange,
+                "isin": details.get("isin"),
+                "suspended": False,
+                "suggestions": [],
+            }
+        return {"found": False, "valid": False, "symbol": sym, "company": "", "suggestions": []}
 
-    if exact:
-        active = bool(exact.get("activeSeries"))
-        company = _company_name_from_result(exact)
-        if not company:
-            company = await loop.run_in_executor(None, _quote_company_name_sync, sym)
-        return {
+    # ── STEP 1: NSE autocomplete + BSE autocomplete in parallel ──
+    nse_results, bse_results = await asyncio.gather(
+        loop.run_in_executor(None, _autocomplete_sync, sym),
+        loop.run_in_executor(None, _bse_autocomplete_sync, sym),
+    )
+
+    exact_nse = next(
+        (r for r in nse_results if r.get("symbol", "").upper() == sym),
+        None
+    )
+
+    # ── CASE 1: NSE FOUND ────────────────────────────────────
+    if exact_nse:
+        meta = await loop.run_in_executor(None, _quote_meta_sync, sym)
+
+        company = meta.get("company") or _company_name_from_result(exact_nse)
+        isin = meta.get("isin")
+        active = bool(exact_nse.get("activeSeries"))
+
+        result = {
             "found": True,
             "valid": active,
-            "symbol": exact["symbol"],
+            "symbol": exact_nse["symbol"],
             "company": company,
+            "exchange": "NSE",
+            "isin": isin,
             "suspended": not active,
-            "suggestions": [{"symbol": r["symbol"], "company": _company_name_from_result(r)} for r in others[:5]],
         }
 
-    return {
-        "found": False,
-        "valid": False,
-        "symbol": sym,
-        "company": "",
-        "suggestions": [{"symbol": r["symbol"], "company": _company_name_from_result(r)} for r in others[:5]],
-    }
+        if isin:
+            bse_data = await loop.run_in_executor(None, _bse_search_by_isin, isin)
+            if bse_data.get("symbol"):
+                result["bse_symbol"] = bse_data["symbol"]
 
+        # NSE alternatives first, then BSE-only alternatives
+        nse_symbols = {r.get("symbol", "").upper() for r in nse_results}
+        nse_others = [
+            {"symbol": r.get("symbol"), "company": _company_name_from_result(r), "exchange": "NSE"}
+            for r in nse_results if r.get("symbol", "").upper() != sym
+        ]
+        bse_others = [
+            {"symbol": r["symbol"], "company": r.get("company", ""), "exchange": "BSE"}
+            for r in bse_results
+            if r.get("symbol", "").upper() not in nse_symbols
+        ]
+        result["suggestions"] = (nse_others + bse_others)[:6]
+        return result
+
+    # ── CASE 2: NSE FAILED → BSE ─────────────────────────────
+    if bse_results:
+        match = next(
+            (r for r in bse_results if _is_name_match(sym, r.get("company", ""))),
+            bse_results[0],
+        )
+        # Resolve Screener slug (e.g. "505685") to proper ticker (e.g. "TAPARIA")
+        slug = match["symbol"]
+        details = await loop.run_in_executor(None, _screener_company_page_sync, slug)
+        proper_sym = (details.get("nse") or details.get("bse") or slug) if details else slug
+        proper_exchange = "NSE" if (details or {}).get("nse") else "BSE"
+        company = (details or {}).get("company") or match.get("company", "")
+
+        others = [
+            {"symbol": r["symbol"], "company": r.get("company", ""), "exchange": "BSE"}
+            for r in bse_results if r.get("symbol", "").upper() != slug.upper()
+        ]
+        return {
+            "found": True,
+            "valid": True,
+            "symbol": proper_sym,
+            "company": company,
+            "exchange": proper_exchange,
+            "isin": (details or {}).get("isin") or None,
+            "suspended": False,
+            "suggestions": others[:5],
+        }
+
+    # ── CASE 3: SCREENER FALLBACK ─────────────────────────────
+    search_results = await loop.run_in_executor(None, _screener_search_sync, sym)
+
+    if search_results:
+        best = search_results[0]
+        slug = best.get("url", "").strip("/").split("/")[-1]
+        details = await loop.run_in_executor(None, _screener_company_page_sync, slug)
+
+        if details:
+            return {
+                "found": True,
+                "valid": True,
+                "symbol": details.get("nse") or details.get("bse") or sym,
+                "company": details.get("company"),
+                "exchange": "NSE" if details.get("nse") else "BSE",
+                "isin": details.get("isin"),
+                "bse_symbol": details.get("bse"),
+                "suspended": False,
+                "suggestions": [],
+            }
+
+    # ── FINAL: NOTHING WORKED ─────────────────────────────────
+    return {"found": False, "valid": False, "symbol": sym, "company": "", "suggestions": []}
 
 @app.get("/api/analyse/{symbol}")
 async def analyse(symbol: str, force: bool = False):

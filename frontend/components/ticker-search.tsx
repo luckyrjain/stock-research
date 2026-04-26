@@ -6,20 +6,22 @@ import type { ValidationResult } from '@/types';
 interface Props {
   onAnalyse: (symbol: string) => void;
   disabled: boolean;
+  compact?: boolean;
 }
 
-export default function TickerSearch({ onAnalyse, disabled }: Props) {
+export default function TickerSearch({ onAnalyse, disabled, compact = false }: Props) {
   const [value, setValue]           = useState('');
   const [status, setStatus]         = useState<'idle' | 'loading' | 'valid' | 'invalid' | 'warn'>('idle');
   const [result, setResult]         = useState<ValidationResult | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const validSymbol = useRef<string | null>(null);
 
-  const validate = useCallback(async (sym: string) => {
+  const validate = useCallback(async (sym: string, exchange?: string) => {
     if (!sym) { setStatus('idle'); setResult(null); validSymbol.current = null; return; }
     setStatus('loading');
     try {
-      const res  = await fetch(`/api/validate/${sym}`);
+      const url = exchange ? `/api/validate/${sym}?exchange=${exchange}` : `/api/validate/${sym}`;
+      const res  = await fetch(url);
       const data: ValidationResult = await res.json();
       setResult(data);
       if (data.valid) {
@@ -51,9 +53,9 @@ export default function TickerSearch({ onAnalyse, disabled }: Props) {
     if (validSymbol.current) onAnalyse(validSymbol.current);
   };
 
-  const selectSuggestion = (sym: string) => {
+  const selectSuggestion = (sym: string, exchange?: string) => {
     setValue(sym);
-    validate(sym);
+    validate(sym, exchange);
   };
 
   const borderColor =
@@ -69,10 +71,12 @@ export default function TickerSearch({ onAnalyse, disabled }: Props) {
     status === 'warn'    ? <span className="text-hold">⚠</span> : null;
 
   return (
-    <div className="flex flex-col items-center gap-6 mb-12">
-      <p className="text-muted text-sm tracking-wide">
-        Enter an NSE or BSE stock ticker to begin your research
-      </p>
+    <div className={`flex flex-col items-center gap-4 ${compact ? 'mb-6' : 'mb-12'}`}>
+      {!compact && (
+        <p className="text-muted text-sm tracking-wide">
+          Enter an NSE or BSE stock ticker to begin your research
+        </p>
+      )}
 
       <div className="w-full max-w-lg flex flex-col items-center gap-3">
         {/* Input */}
@@ -85,12 +89,13 @@ export default function TickerSearch({ onAnalyse, disabled }: Props) {
             placeholder="e.g. TCS, RELIANCE, INFY"
             maxLength={20}
             spellCheck={false}
-            className={`w-full px-6 py-5 pr-14 bg-card border-2 rounded-xl
-              font-mono text-[22px] font-bold tracking-[2px] uppercase
+            className={`w-full pr-12 bg-card border-2 rounded-xl
+              font-mono font-bold tracking-[2px] uppercase
               text-tx placeholder:text-muted placeholder:font-normal placeholder:tracking-normal
               outline-none transition-all duration-200
               focus:shadow-[0_0_0_4px]
               disabled:opacity-40 disabled:cursor-not-allowed
+              ${compact ? 'px-4 py-3 text-base' : 'px-6 py-5 text-[22px]'}
               ${borderColor}`}
           />
           <span className="absolute right-5 top-1/2 -translate-y-1/2 text-lg">
@@ -102,8 +107,11 @@ export default function TickerSearch({ onAnalyse, disabled }: Props) {
         {status === 'valid' && result && (
           <div className="flex items-center gap-2 w-full">
             <span className="text-sm font-medium text-tx">{result.company}</span>
-            <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded bg-buy/10 text-buy border border-buy/20">
-              NSE
+            <span className={`text-[11px] font-mono font-semibold px-2 py-0.5 rounded border
+              ${result.exchange === 'BSE'
+                ? 'bg-hold/10 text-hold border-hold/20'
+                : 'bg-buy/10 text-buy border-buy/20'}`}>
+              {result.exchange ?? 'NSE'}
             </span>
           </div>
         )}
@@ -116,18 +124,33 @@ export default function TickerSearch({ onAnalyse, disabled }: Props) {
           <p className="text-sm text-muted w-full">Symbol not found on NSE / BSE</p>
         )}
 
-        {/* Suggestions */}
-        {result?.suggestions && result.suggestions.length > 0 && status !== 'valid' && (
+        {/* Suggestions — shown on invalid/warn AND as "also try" alternatives when valid */}
+        {result?.suggestions && result.suggestions.length > 0 && (
           <div className="w-full bg-card-hi border border-border-hi rounded-lg overflow-hidden">
+            {status === 'valid' && (
+              <p className="px-4 pt-2.5 pb-1 text-[11px] text-muted uppercase tracking-wide font-semibold">
+                Also try
+              </p>
+            )}
             {result.suggestions.map(s => (
               <button
-                key={s.symbol}
-                onClick={() => selectSuggestion(s.symbol)}
+                key={`${s.symbol}-${s.exchange}`}
+                onClick={() => selectSuggestion(s.symbol, s.exchange)}
                 className="w-full flex items-center justify-between px-4 py-2.5
                   text-sm hover:bg-border transition-colors text-left"
               >
-                <span className="font-mono font-semibold text-accent">{s.symbol}</span>
-                <span className="text-muted text-xs">{s.company}</span>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono font-semibold text-accent">{s.symbol}</span>
+                  {s.exchange && (
+                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border
+                      ${s.exchange === 'BSE'
+                        ? 'bg-hold/10 text-hold border-hold/20'
+                        : 'bg-buy/10 text-buy border-buy/20'}`}>
+                      {s.exchange}
+                    </span>
+                  )}
+                </div>
+                <span className="text-muted text-xs truncate max-w-[180px]">{s.company}</span>
               </button>
             ))}
           </div>
@@ -137,11 +160,12 @@ export default function TickerSearch({ onAnalyse, disabled }: Props) {
         <button
           onClick={handleAnalyse}
           disabled={status !== 'valid' || disabled}
-          className="mt-2 px-10 py-3.5 rounded-xl font-semibold text-[15px] tracking-wide
+          className={`rounded-xl font-semibold tracking-wide
             bg-accent text-white shadow-[0_4px_24px_#6c71f040]
             hover:opacity-90 hover:shadow-[0_6px_28px_#6c71f060]
             active:scale-[.98] transition-all duration-150
-            disabled:opacity-30 disabled:cursor-not-allowed disabled:shadow-none"
+            disabled:opacity-30 disabled:cursor-not-allowed disabled:shadow-none
+            ${compact ? 'mt-1 px-7 py-2.5 text-sm' : 'mt-2 px-10 py-3.5 text-[15px]'}`}
         >
           {disabled ? 'Running…' : 'Analyse Stock'}
         </button>
