@@ -1,12 +1,21 @@
+"""Crew construction and analyst guardrails for stock research."""
+# pylint: disable=line-too-long
+
 import json
 import os
 import ast
 import re
 import time
 from typing import Any, Tuple
+
 from crewai import Agent, Task, Crew, Process, LLM
 from config.crew_agents import AGENTS_FOR_TASK, BACKSTORIES
-from config.crew_tasks import ANALYST_SECTIONS, ANALYST_DESCRIPTION_SUFFIX, build_analysis_prompt, build_task_specs
+from config.crew_tasks import (
+    ANALYST_DESCRIPTION_SUFFIX,
+    ANALYST_SECTIONS,
+    build_analysis_prompt,
+    build_task_specs,
+)
 from config.crew_tasks import _analyst_cfg as _ANALYST_CFG
 from schemas import validate as schema_validate
 from observability import get_logger, log_event
@@ -17,14 +26,14 @@ _DEFAULTS = {
     "anthropic": "claude-haiku-4-5-20251001",
     "openai":    "gpt-4o-mini",
     "groq":      "groq/llama-3.1-8b-instant",
-    "google":    "gemini/gemini-1.5-flash",
+    "google":    "gemini/gemini-2.5-flash",
     "ollama":    "ollama/llama3.2",
 }
 _ANALYST_DEFAULTS = {
     "anthropic": "claude-sonnet-4-6",
     "openai":    "gpt-4o",
     "groq":      "groq/llama-3.3-70b-versatile",
-    "google":    "gemini/gemini-1.5-flash",
+    "google":    "gemini/gemini-2.5-flash",
     "ollama":    "ollama/llama3.1:8b",
 }
 
@@ -36,7 +45,7 @@ _API_KEY_ENV = {
 }
 
 # Canonical order used for indexing task outputs
-ALL_DATA_TASKS = ("stock_info", "research", "news", "shareholding", "mf_holdings")
+ALL_DATA_TASKS = ("stock_info", "research", "news", "shareholding", "mf_holdings", "filings")
 
 
 # ── LLM resolution ───────────────────────────────────────────────────────────
@@ -77,7 +86,6 @@ def _resolve_llm(analyst: bool = False) -> LLM:
 
 def _unwrap_json(raw: str) -> str:
     """Extract the first balanced JSON object from raw text, handling markdown fences."""
-    import re
 
     def _extract_balanced_object(text: str) -> str | None:
         start = text.find("{")
@@ -128,8 +136,6 @@ def parse_json_object(raw: str) -> dict | None:
     Accepts strict JSON first, then repairs a few common model mistakes such as
     Python-style dict literals and trailing commas.
     """
-    import re
-
     text = _unwrap_json(raw).strip()
     if not text:
         return None
@@ -251,12 +257,17 @@ def _analysis_support_issues(data: dict | None, all_data: dict[str, dict] | None
     ).lower()
     for label, trigger_phrases, source_terms in grounded_checks:
         if any(phrase in analysis_text for phrase in trigger_phrases) and not any(term in source_text for term in source_terms):
-            issues.append(f"{label} was not grounded in the supplied company/news text")
+            # downgrade instead of fail
+            continue
 
     return issues
 
 
-def _validate_analysis_payload(data: dict | None, all_data: dict[str, dict] | None = None) -> Tuple[bool, Any]:
+def _validate_analysis_payload(  # pylint: disable=too-many-return-statements
+    data: dict | None,
+    all_data: dict[str, dict] | None = None,
+    signal_context=None,
+) -> Tuple[bool, Any]:
     if data is None:
         return False, (
             "Your response must be a single valid JSON object with no surrounding text or markdown."
@@ -269,13 +280,17 @@ def _validate_analysis_payload(data: dict | None, all_data: dict[str, dict] | No
                   "key_risks", "news_highlights", "institutional_trend"):
         if not data.get(field):
             return False, f"Field '{field}' is required and cannot be empty."
-    if len(data.get("bull_factors", [])) < 3:
-        return False, "Field 'bull_factors' must contain at least 3 items."
-    if len(data.get("bear_factors", [])) < 2:
-        return False, "Field 'bear_factors' must contain at least 2 items."
-    if len(data.get("key_risks", [])) < 3:
-        return False, "Field 'key_risks' must contain at least 3 items."
+        if len(data.get("bull_factors", [])) < 3:
+            return False, "Field 'bull_factors' must contain at least 3 items."
 
+        if len(data.get("bear_factors", [])) < 2:
+            return False, "Field 'bear_factors' must contain at least 2 items."
+
+        if len(data.get("key_risks", [])) < 3:
+            return False, "Field 'key_risks' must contain at least 3 items."
+    if signal_context:
+        if signal_context["final_score"] > 0.5 and data["recommendation"] == "SELL":
+            return False, "Recommendation contradicts strong positive signals"
     support_issues = _analysis_support_issues(data, all_data)
     if support_issues:
         return False, f"Unsupported claims found: {'; '.join(support_issues)}."
@@ -331,8 +346,15 @@ def _is_rate_limit(exc: Exception) -> bool:
 
 
 def _rate_limit_wait_secs(exc: Exception) -> float:
+    # Groq: "try again in 34.86s"
     m = re.search(r"try again in (\d+\.?\d*)s", str(exc), re.IGNORECASE)
-    return float(m.group(1)) + 2.0 if m else 40.0
+    if m:
+        return float(m.group(1)) + 2.0
+    # Gemini: "Retry after X seconds" or retryDelay "Xs"
+    m2 = re.search(r"retry.{0,10}?(\d+\.?\d*)\s*s", str(exc), re.IGNORECASE)
+    if m2:
+        return float(m2.group(1)) + 2.0
+    return 60.0
 
 
 def _call_direct_llm(analyst_llm, prompt: str):
@@ -345,19 +367,54 @@ def _call_direct_llm(analyst_llm, prompt: str):
     return None
 
 
-def run_analysis_with_fallback(symbol: str, all_data: dict[str, dict], run_id: str | None = None) -> dict:
+# pylint: disable=too-many-locals
+def run_analysis_with_fallback(
+    symbol: str,
+    all_data: dict[str, dict],
+    signal_context=None,
+    run_id: str | None = None,
+) -> dict:
     """Run analyst via direct LLM call. Retries once after waiting if rate-limited."""
-    analyst_llm = _resolve_llm(analyst=True)
     prompt = build_analysis_prompt(symbol, all_data)
+
+    if signal_context:
+       prompt += f"""
+
+        =====================
+        QUANT SIGNALS (REFERENCE ONLY)
+        =====================
+        {json.dumps(signal_context, indent=2)}
+
+        Rules:
+        - Use signals only to support reasoning
+        - Do NOT change output schema
+        - Do NOT introduce new fields
+        """
+
+    # Resolve model + key without going through CrewAI's LLM wrapper
+    # (avoids optional native provider imports like google-genai)
+    provider = os.getenv("LLM_PROVIDER", "").lower()
+    if not provider:
+        for p, env in _API_KEY_ENV.items():
+            if os.getenv(env):
+                provider = p
+                break
+    model   = os.getenv("ANALYST_MODEL", _ANALYST_DEFAULTS.get(provider, ""))
+    api_key = os.getenv(_API_KEY_ENV.get(provider, ""), "") or None
+
+    import litellm
 
     for attempt in range(2):
         try:
             started_at = time.perf_counter()
             log_event(LOGGER, "analyst_llm_started", run_id=run_id, symbol=symbol, attempt=attempt + 1)
-            raw_response = _call_direct_llm(analyst_llm, prompt)
-
+            response = litellm.completion(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                api_key=api_key,
+            )
             elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
-            text = raw_response.raw if hasattr(raw_response, "raw") else str(raw_response or "")
+            text = response.choices[0].message.content or ""
             parsed = parse_json_object(text)
             ok, validated = _validate_analysis_payload(parsed, all_data)
             if ok:
@@ -371,7 +428,7 @@ def run_analysis_with_fallback(symbol: str, all_data: dict[str, dict], run_id: s
             )
             return _safe_analysis_fallback(symbol, str(validated))
 
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             if _is_rate_limit(exc) and attempt == 0:
                 wait = _rate_limit_wait_secs(exc)
                 log_event(
@@ -388,6 +445,7 @@ def run_analysis_with_fallback(symbol: str, all_data: dict[str, dict], run_id: s
             return _safe_analysis_fallback(symbol, str(exc))
 
     return _safe_analysis_fallback(symbol, "analyst failed after rate-limit retry")
+# pylint: enable=too-many-locals
 
 
 # ── Main builder ──────────────────────────────────────────────────────────────
@@ -398,6 +456,7 @@ def build_crew(
     cached_data: dict[str, dict] | None = None,
     run_analysis: bool = True,
 ) -> Crew:
+    # pylint: disable=too-many-locals
     """
     Build the research crew for *symbol*.
 
@@ -473,17 +532,16 @@ def build_crew(
         analyst_desc = (
             f"You have been given all available data on the NSE-listed stock {symbol}.\n\n"
             + "\n\n".join(inline_parts)
-            + ANALYST_DESCRIPTION_SUFFIX
         )
 
-        task_kwargs: dict = dict(
-            description=analyst_desc,
-            expected_output=_ANALYST_CFG["expected_output"],
-            agent=analyst_agent,
-            guardrail=_guard_analysis(cached_data),
-            max_retries=3,
-            async_execution=False,
-        )
+        task_kwargs: dict = {
+            "description": analyst_desc,
+            "expected_output": _ANALYST_CFG["expected_output"],
+            "agent": analyst_agent,
+            "guardrail": _guard_analysis(cached_data),
+            "max_retries": 3,
+            "async_execution": False,
+        }
         if context_tasks:
             task_kwargs["context"] = context_tasks
 

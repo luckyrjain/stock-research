@@ -50,10 +50,24 @@ export interface Analysis {
   institutional_trend: string;
 }
 
+export interface SignalItem {
+  name: string;
+  value: string;
+  score: number;
+  meta: Record<string, number | string | null>;
+}
+
+export interface SignalSummary {
+  final_score: number;
+  verdict: 'BUY' | 'SELL' | 'HOLD' | string;
+  signals: Record<string, SignalItem>;
+}
+
 export interface Report {
   symbol: string;
   generated_at: string;
   analysis: Partial<Analysis>;
+  signals?: Partial<SignalSummary>;
   stock_info: Partial<StockInfo>;
   research: { ratios?: Record<string, string>; about?: string };
   news: { title: string; source: string; published_at: string; url: string }[];

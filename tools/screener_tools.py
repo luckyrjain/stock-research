@@ -1,4 +1,5 @@
 import json
+import re
 import requests
 from bs4 import BeautifulSoup
 from crewai.tools import tool
@@ -29,7 +30,8 @@ def _resolve_screener_slug(symbol: str) -> str:
     )
     results = search.json() if search.ok else []
     if results:
-        slug = (results[0].get("url") or "").strip("/").split("/")[-1]
+        parts = (results[0].get("url") or "").strip("/").split("/")
+        slug = parts[1] if len(parts) >= 2 else parts[0] if parts else ""
         if slug:
             return slug
     return upper  # best effort
@@ -45,6 +47,74 @@ def _fetch_soup(symbol: str) -> BeautifulSoup:
 
 def _clean(text: str) -> str:
     return text.strip().replace("₹", "").replace(",", "").strip()
+
+
+def _extract_compounded_growth(text: str, block_label: str, period_label: str) -> str:
+    """Extract CAGR-style growth percentages from Screener summary blocks."""
+    pattern = rf"{re.escape(block_label)}.*?{re.escape(period_label)}\s*:\s*([+-]?\d+(?:\.\d+)?%)"
+    match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+    return match.group(1) if match else ""
+
+
+def _extract_growth_metrics(soup: BeautifulSoup) -> dict[str, str]:
+    """Extract 3Y/5Y sales and profit growth from Screener growth blocks."""
+    metrics: dict[str, str] = {}
+    block_map = {
+        "Compounded Sales Growth": "Sales growth",
+        "Compounded Profit Growth": "Profit growth",
+    }
+
+    for block_label, output_prefix in block_map.items():
+        block_text = ""
+        for tag in soup.find_all(["section", "div", "table"]):
+            text = " ".join(tag.stripped_strings)
+            if block_label.lower() in text.lower():
+                block_text = text
+                break
+
+        if not block_text:
+            full_text = soup.get_text("\n", strip=True)
+            three_year = _extract_compounded_growth(full_text, block_label, "3 Years")
+            five_year = _extract_compounded_growth(full_text, block_label, "5 Years")
+            if three_year:
+                metrics[f"{output_prefix} 3Y"] = three_year
+            if five_year:
+                metrics[f"{output_prefix} 5Y"] = five_year
+            continue
+
+        for period in ("3 Years", "5 Years"):
+            match = re.search(
+                rf"{re.escape(period)}\s*:?\s*([+-]?\d+(?:\.\d+)?%)",
+                block_text,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                metrics[f"{output_prefix} {'3Y' if period == '3 Years' else '5Y'}"] = match.group(1)
+
+    return metrics
+
+
+def _extract_latest_metric_from_tables(soup: BeautifulSoup, labels: tuple[str, ...]) -> str:
+    """Find the latest value for a metric row from visible tables."""
+    normalized_labels = tuple(label.lower().replace(" ", "") for label in labels)
+
+    for row in soup.select("tr"):
+        cells = row.find_all(["th", "td"])
+        if len(cells) < 2:
+            continue
+        row_label = _clean(cells[0].get_text(" ", strip=True)).lower().replace(" ", "")
+        if not any(lbl in row_label for lbl in normalized_labels):
+            continue
+
+        values: list[str] = []
+        for cell in cells[1:]:
+            value = _clean(cell.get_text(" ", strip=True))
+            if not value or value == "-":
+                continue
+            values.append(value)
+        if values:
+            return values[-1]
+    return ""
 
 
 @tool("Get Screener.in Fundamentals")
@@ -65,6 +135,16 @@ def get_fundamentals(symbol: str) -> str:
                 val = _clean(val_el.get_text(" ", strip=True))
                 if key:
                     ratios[key] = val
+
+        growth_metrics = _extract_growth_metrics(soup)
+        ebitda_margin = _extract_latest_metric_from_tables(
+            soup, ("EBITDA Margin", "EBITDA %", "Operating Profit Margin", "OPM %")
+        )
+
+        for metric_key, metric_value in growth_metrics.items():
+            ratios[metric_key] = metric_value
+        if ebitda_margin:
+            ratios["EBITDA margin"] = ebitda_margin
 
         about_el = (
             soup.select_one(".company-profile p")

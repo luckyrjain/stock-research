@@ -110,6 +110,10 @@ def _norm_mf_holdings(d: dict) -> dict:
         ],
     }
 
+def _norm_filings(data: dict) -> dict:
+    return {
+        "filings": data.get("filings", [])
+    }
 
 CONTRACTS: dict[str, dict] = {
     "stock_info": {
@@ -132,6 +136,7 @@ CONTRACTS: dict[str, dict] = {
         "required":  ["symbol", "mutual_funds"],
         "normalize": _norm_mf_holdings,
     },
+    "filings": _norm_filings
 }
 
 
@@ -169,3 +174,4 @@ def validate(task_name: str, data: dict) -> tuple[bool, str]:
             return False, f"Required field '{field}' is missing or empty"
 
     return True, ""
+

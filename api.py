@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import time
 import uuid
 import re
@@ -9,6 +8,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from observability import get_logger, log_event
+from signals.interpreter import interpret
 
 load_dotenv()
 
@@ -21,20 +21,19 @@ _NSE_HEADERS = {
     "Accept": "application/json",
 }
 
-# ── ISIN cache (NSE equity master list, refreshed hourly) ─────────────────────
-_ISIN_CACHE: tuple[float, dict[str, dict]] | None = None
-_ISIN_CACHE_TTL = 3600
+# ── ISIN resolution (NSE equity master, cached 1 h) ──────────────────────────
+
+_ISIN_CACHE: tuple[float, dict] | None = None
 
 
 def _is_isin(s: str) -> bool:
     return bool(re.match(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$", s))
 
 
-def _load_isin_map() -> dict[str, dict]:
-    """Download and parse NSE's equity master CSV into an ISIN → {symbol, company} map."""
+def _load_isin_map() -> dict:
     global _ISIN_CACHE
     now = time.monotonic()
-    if _ISIN_CACHE and now - _ISIN_CACHE[0] < _ISIN_CACHE_TTL:
+    if _ISIN_CACHE and now - _ISIN_CACHE[0] < 3600:
         return _ISIN_CACHE[1]
     import requests
     try:
@@ -43,15 +42,13 @@ def _load_isin_map() -> dict[str, dict]:
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=10,
         )
-        mapping: dict[str, dict] = {}
+        mapping: dict = {}
         for line in r.text.splitlines()[1:]:
             parts = line.split(",")
             if len(parts) >= 7:
-                symbol = parts[0].strip()
-                company = parts[1].strip()
-                isin = parts[6].strip()
-                if isin and symbol:
-                    mapping[isin] = {"symbol": symbol, "company": company}
+                sym, company, isin = parts[0].strip(), parts[1].strip(), parts[6].strip()
+                if isin and sym:
+                    mapping[isin] = {"symbol": sym, "company": company}
         _ISIN_CACHE = (now, mapping)
         return mapping
     except Exception:
@@ -157,8 +154,9 @@ def _bse_autocomplete_sync(query: str) -> list[dict]:
         results = r.json() or []
         output = []
         for item in results[:8]:
-            # Derive symbol from Screener URL slug (e.g. /company/505685/ → 505685)
-            slug = (item.get("url") or "").strip("/").split("/")[-1]
+            # URL is /company/{slug}/ or /company/{slug}/consolidated/ — take second segment
+            parts = (item.get("url") or "").strip("/").split("/")
+            slug = parts[1] if len(parts) >= 2 else ""
             if not slug:
                 continue
             output.append({
@@ -201,22 +199,6 @@ def _company_name_from_result(result: dict) -> str:
     return ""
 
 
-def _quote_company_name_sync(symbol: str) -> str:
-    import requests
-    try:
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=_NSE_HEADERS, timeout=6)
-        r = s.get(
-            f"https://www.nseindia.com/api/quote-equity?symbol={symbol}",
-            headers=_NSE_HEADERS,
-            timeout=6,
-        )
-        info = r.json().get("info", {})
-        return (info.get("companyName") or "").strip()
-    except Exception:
-        return ""
-
-
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
@@ -244,6 +226,55 @@ async def health():
 async def validate_symbol(symbol: str, exchange: str = ""):
     sym = symbol.upper().strip()
     loop = asyncio.get_running_loop()
+
+    # ── ISIN PATH ─────────────────────────────────────────────
+    if _is_isin(sym):
+        # Look up NSE symbol from the equity master CSV
+        isin_map = await loop.run_in_executor(None, _load_isin_map)
+        nse_entry = isin_map.get(sym)
+        if nse_entry:
+            # Re-run as a normal NSE symbol lookup to get full metadata
+            sym = nse_entry["symbol"]
+        else:
+            # Not in NSE CSV — try yfinance (supports ISIN lookup natively)
+            def _yf_isin_lookup(isin: str) -> dict:
+                try:
+                    import yfinance as yf
+                    info = yf.Ticker(isin).info
+                    yf_sym = info.get("symbol", "")
+                    if not yf_sym:
+                        return {}
+                    # yfinance returns "SYMBOL.NS" or "SYMBOL.BO"
+                    ticker, _, suffix = yf_sym.partition(".")
+                    exchange = "NSE" if suffix == "NS" else "BSE" if suffix == "BO" else "NSE"
+                    return {
+                        "symbol": ticker,
+                        "company": info.get("longName") or info.get("shortName") or "",
+                        "exchange": exchange,
+                    }
+                except Exception:
+                    return {}
+
+            isin_str = sym
+            yf_result = await loop.run_in_executor(None, _yf_isin_lookup, isin_str)
+            if yf_result.get("symbol"):
+                sym = yf_result["symbol"]
+                # For BSE-only stocks fall through won't hit NSE autocomplete; return directly
+                if yf_result["exchange"] == "BSE":
+                    return {
+                        "found": True,
+                        "valid": True,
+                        "symbol": sym,
+                        "company": yf_result["company"],
+                        "exchange": "BSE",
+                        "isin": isin_str,
+                        "suspended": False,
+                        "suggestions": [],
+                    }
+                # NSE-listed — fall through with resolved symbol for full metadata
+            else:
+                return {"found": False, "valid": False, "symbol": isin_str, "company": "", "suggestions": []}
+        # Fall through with resolved NSE symbol
 
     # ── BSE-FORCED PATH (user selected a BSE suggestion) ─────
     # sym may be a Screener slug (e.g. "505685" or "TAPARIA-TOOLS") — resolve it
@@ -346,7 +377,8 @@ async def validate_symbol(symbol: str, exchange: str = ""):
 
     if search_results:
         best = search_results[0]
-        slug = best.get("url", "").strip("/").split("/")[-1]
+        parts = best.get("url", "").strip("/").split("/")
+        slug = parts[1] if len(parts) >= 2 else parts[0] if parts else ""
         details = await loop.run_in_executor(None, _screener_company_page_sync, slug)
 
         if details:
@@ -377,6 +409,8 @@ async def analyse(symbol: str, force: bool = False):
             from crew import ALL_DATA_TASKS
             from main import _fetch_task, _build_report
             from schemas import normalize as schema_normalize, validate as schema_validate
+            from signals.engine import run_signal_engine
+            from signals.store import save_signal
 
             # ── Determine what needs fetching ─────────────────────────────
             stale = [n for n in ALL_DATA_TASKS if force or not cache.is_fresh(sym, n)]
@@ -415,6 +449,16 @@ async def analyse(symbol: str, force: bool = False):
                 yield _sse({"event": "error", "message": f"Symbol not valid: {err}"})
                 return
 
+            signal_result = run_signal_engine(sym, all_data)
+            signal_insight = interpret(signal_result)
+            save_signal(signal_result)
+            signal_context = {
+                "final_score": signal_result.final_score,
+                "verdict": signal_result.verdict,
+                "insight": signal_insight,
+                "signals": {k: v.__dict__ for k, v in signal_result.signals.items()},
+            }
+
             # ── Run analyst (LLM, slow) ───────────────────────────────────
             run_analysis = bool(stale) or not cache.is_fresh(sym, "analysis")
             analysis: dict = {}
@@ -424,7 +468,9 @@ async def analyse(symbol: str, force: bool = False):
 
                 def _run_analyst():
                     from crew import run_analysis_with_fallback
-                    return run_analysis_with_fallback(sym, all_data, run_id=run_id)
+                    return run_analysis_with_fallback(
+                        sym, all_data, signal_context=signal_context, run_id=run_id
+                    )
 
                 # Run analyst in thread; send heartbeats so the connection stays alive
                 done_q: asyncio.Queue = asyncio.Queue()
@@ -481,7 +527,7 @@ async def analyse(symbol: str, force: bool = False):
             else:
                 analysis = cache.load(sym, "analysis") or {}
 
-            report = _build_report(sym, all_data, analysis)
+            report = _build_report(sym, all_data, analysis, signal_context)
             log_event(LOGGER, "api_analysis_completed", run_id=run_id, symbol=sym)
             yield _sse({"event": "done", "report": report})
 

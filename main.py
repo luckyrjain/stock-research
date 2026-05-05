@@ -1,14 +1,32 @@
+"""Run stock research pipeline and generate analysis/report outputs."""
+# pylint: disable=line-too-long
+
 import argparse
-import json
-import os
-import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
+from datetime import datetime, timezone
+import json
+import os
 from pathlib import Path
+import time
+import uuid
+
+import requests
 
 from dotenv import load_dotenv
+
+import cache
+from crew import ALL_DATA_TASKS, parse_json_object, run_analysis_with_fallback
 from observability import get_logger, log_event
+from schemas import normalize as schema_normalize
+from schemas import validate as schema_validate
+from signals.engine import run_signal_engine
+from signals.store import save_signal
+from signals.interpreter import interpret
+from tools.news_tools import get_latest_news
+from tools.nse_tools import get_mf_holdings, get_stock_quote
+from tools.screener_tools import get_fundamentals, get_holdings
+from tools.nse_filings_tools import get_nse_filings
 
 load_dotenv()
 
@@ -17,11 +35,23 @@ LOGGER = get_logger("main")
 
 # ── Tool dispatch ─────────────────────────────────────────────────────────────
 
+def _save_raw_tool_output(symbol: str, task_name: str, raw_payload: object) -> None:
+    """Persist raw tool output for selected tasks to aid debugging and auditability."""
+    if task_name not in {"research", "shareholding", "filings"}:
+        return
+
+    symbol_dir = Path("output") / symbol.upper()
+    symbol_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = symbol_dir / f"{task_name}_raw.json"
+
+    payload = {
+        "_meta": {"fetched_at": datetime.now(timezone.utc).isoformat(), "task": task_name},
+        "raw_output": raw_payload if isinstance(raw_payload, dict) else str(raw_payload),
+    }
+    raw_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
 def _fetch_task(task_name: str, symbol: str, run_id: str, max_attempts: int = 3) -> dict:
     """Call the appropriate data tool directly (no LLM involved)."""
-    from tools.nse_tools import get_stock_quote, get_mf_holdings
-    from tools.screener_tools import get_fundamentals, get_holdings
-    from tools.news_tools import get_latest_news
 
     dispatch = {
         "stock_info":   lambda: get_stock_quote.run(symbol),
@@ -29,8 +59,8 @@ def _fetch_task(task_name: str, symbol: str, run_id: str, max_attempts: int = 3)
         "news":         lambda: get_latest_news.run(f"{symbol} India stock latest news"),
         "shareholding": lambda: get_holdings.run(symbol),
         "mf_holdings":  lambda: get_mf_holdings.run(symbol),
+        "filings": lambda: get_nse_filings(symbol),
     }
-    from crew import parse_json_object
     last_error = "unknown error"
 
     for attempt in range(1, max_attempts + 1):
@@ -46,6 +76,7 @@ def _fetch_task(task_name: str, symbol: str, run_id: str, max_attempts: int = 3)
         )
         try:
             raw = dispatch[task_name]()
+            _save_raw_tool_output(symbol, task_name, raw)
             if isinstance(raw, dict):
                 elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
                 log_event(
@@ -78,7 +109,7 @@ def _fetch_task(task_name: str, symbol: str, run_id: str, max_attempts: int = 3)
                 return parsed
 
             last_error = "tool returned an unparseable payload"
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             last_error = str(exc)
 
         elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
@@ -109,7 +140,7 @@ def _fetch_all_parallel(task_names: list[str], symbol: str, run_id: str) -> dict
             try:
                 results[name] = future.result()
                 print(f"  [ok] {name}")
-            except Exception as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
                 print(f"  [err] {name}: {exc}")
                 results[name] = {"error": str(exc), "symbol": symbol}
     return results
@@ -117,24 +148,14 @@ def _fetch_all_parallel(task_names: list[str], symbol: str, run_id: str) -> dict
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _parse_analyst_output(raw) -> dict:
-    from crew import parse_json_object
-
-    text = raw.raw if hasattr(raw, "raw") else str(raw)
-    parsed = parse_json_object(text)
-    if parsed is not None:
-        return parsed
-    return {"raw_output": text}
-
-
 def _strip_meta(data: dict) -> dict:
+    """Strip _meta field from a dictionary."""
     return {k: v for k, v in data.items() if k != "_meta"}
 
 
 def _nse_autocomplete(query: str) -> list[dict]:
     """Return raw NSE autocomplete results for a query."""
     try:
-        import requests
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://www.nseindia.com",
@@ -148,13 +169,14 @@ def _nse_autocomplete(query: str) -> list[dict]:
             timeout=6,
         )
         return resp.json().get("symbols", [])
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         return []
 
 
 def _validate_stock_data(symbol: str, stock_info: dict) -> None:
-    """Abort early if stock_info indicates the symbol is invalid or data is garbage."""
+    """Validate the stock data for a given symbol."""
     def _abort(reason: str) -> None:
+        """Abort with a given reason."""
         results = _nse_autocomplete(symbol)
         msg = f"Error: {reason}"
 
@@ -180,14 +202,13 @@ def _validate_stock_data(symbol: str, stock_info: dict) -> None:
 
         raise SystemExit(msg)
 
-    from schemas import validate as schema_validate
     ok, err = schema_validate("stock_info", stock_info)
     if not ok:
         _abort(f"no valid market data found for '{symbol}' on NSE or BSE — {err}.")
 
 
 def _print_status(symbol: str) -> None:
-    import cache
+    """Print the cache status for a given symbol."""
     statuses = cache.status(symbol)
     print(f"Cache status for {symbol}:")
     for name, label in statuses.items():
@@ -197,13 +218,18 @@ def _print_status(symbol: str) -> None:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def main():
+def main():  # pylint: disable=too-many-locals,too-many-statements
+    """Run the CLI stock research pipeline for a given NSE symbol."""
+
     parser = argparse.ArgumentParser(description="NSE stock research pipeline")
     parser.add_argument("symbol", help="NSE stock symbol (e.g. RELIANCE, TCS)")
     parser.add_argument("--force", action="store_true", help="Ignore cache and re-fetch all data")
     args = parser.parse_args()
 
-    has_key = any(os.getenv(k) for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY", "GOOGLE_API_KEY"))
+    has_key = any(
+        os.getenv(k)
+        for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY", "GOOGLE_API_KEY")
+    )
     is_ollama = os.getenv("LLM_PROVIDER", "").lower() == "ollama"
     if not has_key and not is_ollama:
         print("Error: No API key or local provider found.")
@@ -215,9 +241,6 @@ def main():
     run_id = uuid.uuid4().hex[:12]
     log_event(LOGGER, "pipeline_started", run_id=run_id, symbol=symbol, force_refresh=args.force)
     print(f"\nStock research pipeline: {symbol}\n{'='*50}")
-
-    import cache
-    from crew import ALL_DATA_TASKS
 
     _print_status(symbol)
 
@@ -239,7 +262,7 @@ def main():
         print("All data is fresh — loading from cache.\n")
         all_data = {n: cache.load(symbol, n) for n in ALL_DATA_TASKS}
         analysis = cache.load(symbol, "analysis") or {}
-        _print_report(symbol, all_data, analysis)
+        _print_report(all_data, analysis)
         return
 
     # ── Step 1: fetch stale data tasks directly (no LLM) ─────────────────────
@@ -253,7 +276,6 @@ def main():
         freshly_fetched = _fetch_all_parallel(stale_tasks, symbol, run_id)
 
         # Normalize to canonical schema before any downstream use
-        from schemas import normalize as schema_normalize
         freshly_fetched = {name: schema_normalize(name, data) for name, data in freshly_fetched.items()}
 
         # Validate before saving anything or running the analyst
@@ -265,18 +287,30 @@ def main():
 
     all_data = {**cached_data, **freshly_fetched}
 
+    signal_result = run_signal_engine(symbol, all_data)
+    signal_insight = interpret(signal_result)
+    save_signal(signal_result)
+
+    signal_context = {
+    "final_score": signal_result.final_score,
+    "verdict": signal_result.verdict,
+    "insight": signal_insight,
+    "signals": {
+        k: v.__dict__ for k, v in signal_result.signals.items()
+        }
+    }
+
     # ── Step 2: run analyst via LLM ───────────────────────────────────────────
     analysis: dict = {}
     if run_analysis:
         print("\nRunning analyst...")
-        from crew import run_analysis_with_fallback
-        analysis = run_analysis_with_fallback(symbol, all_data, run_id=run_id)
+        analysis = run_analysis_with_fallback(symbol, all_data, signal_context=signal_context, run_id=run_id)
         cache.save(symbol, "analysis", analysis)
 
-    _print_report(symbol, all_data, analysis)
+    _print_report(all_data, analysis)
 
     # ── Step 3: save merged report ────────────────────────────────────────────
-    report = _build_report(symbol, all_data, analysis)
+    report = _build_report(symbol, all_data, analysis, signal_context)
     report_dir = Path("output") / symbol
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f"report_{date.today()}.json"
@@ -285,7 +319,7 @@ def main():
     log_event(LOGGER, "pipeline_completed", run_id=run_id, symbol=symbol, report_path=str(report_path))
 
 
-def _build_report(symbol: str, all_data: dict, analysis: dict) -> dict:
+def _build_report(symbol: str, all_data: dict, analysis: dict, signals: dict | None = None) -> dict:
     stock       = _strip_meta(all_data.get("stock_info", {}))
     research    = _strip_meta(all_data.get("research", {}))
     news_raw    = _strip_meta(all_data.get("news", {}))
@@ -298,6 +332,7 @@ def _build_report(symbol: str, all_data: dict, analysis: dict) -> dict:
         "symbol": symbol,
         "generated_at": date.today().isoformat(),
         "analysis": _strip_meta(analysis),
+        "signals": signals or {},
         "stock_info": stock,
         "research": research,
         "news": news_raw.get("articles", []) if isinstance(news_raw, dict) else [],
@@ -305,7 +340,7 @@ def _build_report(symbol: str, all_data: dict, analysis: dict) -> dict:
     }
 
 
-def _print_report(symbol: str, all_data: dict, analysis: dict) -> None:
+def _print_report(all_data: dict, analysis: dict) -> None:  # pylint: disable=too-many-branches
     stock = all_data.get("stock_info", {})
     print(f"\n{'='*50}")
 
@@ -317,7 +352,7 @@ def _print_report(symbol: str, all_data: dict, analysis: dict) -> None:
         print(f"  {analysis['summary']}")
 
     if stock.get("company_name"):
-        print(f"\nMarket data:")
+        print("\nMarket data:")
         print(f"  Company  : {stock['company_name']}")
     if stock.get("prices_by_exchange"):
         print("  Quotes   :")
@@ -339,15 +374,15 @@ def _print_report(symbol: str, all_data: dict, analysis: dict) -> None:
     if analysis.get("business_quality"):
         print(f"\nBusiness quality: {analysis['business_quality']}")
     if analysis.get("bull_factors"):
-        print(f"\nBull factors:")
+        print("\nBull factors:")
         for f in analysis["bull_factors"]:
             print(f"  + {f}")
     if analysis.get("bear_factors"):
-        print(f"\nBear factors:")
+        print("\nBear factors:")
         for f in analysis["bear_factors"]:
             print(f"  - {f}")
     if analysis.get("key_risks"):
-        print(f"\nKey risks:")
+        print("\nKey risks:")
         for r in analysis["key_risks"]:
             print(f"  ! {r}")
     if analysis.get("news_highlights"):

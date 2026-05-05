@@ -182,12 +182,14 @@ function fmtRatio(raw: string): string {
 }
 
 function summaryBullets(text: string): string[] {
-  const sentences = text.match(/[^.!?]+[.!?]+/g) ?? [];
+  // Split only where a sentence ends: [.!?] followed by whitespace + uppercase letter.
+  // This avoids splitting on decimal numbers (5.04) or mid-sentence abbreviations.
+  const sentences = text.split(/(?<=[.!?])\s+(?=[A-Z])/);
   return sentences.map(s => s.trim()).filter(s => s.length > 5);
 }
 
 export default function ResultsDashboard({ report, onHardRefresh }: Props) {
-  const { analysis: a, stock_info: s, research: r, news, holdings: h } = report;
+  const { analysis: a, signals: sig, stock_info: s, research: r, news, holdings: h } = report;
 
   const rec = (a?.recommendation ?? 'HOLD') as 'BUY' | 'SELL' | 'HOLD';
   const cfg = REC_CONFIG[rec];
@@ -346,6 +348,29 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                 a.valuation.verdict === 'Overvalued'  ? 'text-sell' : 'text-hold'
               }`}>{a.valuation.verdict}</p>
               <p className="text-sm text-muted leading-relaxed">{a.valuation.comment}</p>
+            </Card>
+          )}
+
+          {sig?.signals && Object.keys(sig.signals).length > 0 && (
+            <Card title="Quant Signals">
+              {sig.final_score != null && (
+                <MetricRow
+                  label="Final Score"
+                  value={fmt(sig.final_score, 2)}
+                  colorClass={sig.final_score > 0 ? 'text-buy' : sig.final_score < 0 ? 'text-sell' : 'text-muted'}
+                />
+              )}
+              {sig.verdict && (
+                <MetricRow label="Signal Verdict" value={sig.verdict} />
+              )}
+              {Object.entries(sig.signals).map(([name, signal]) => (
+                <MetricRow
+                  key={name}
+                  label={`${name} (${signal.value})`}
+                  value={fmt(signal.score, 2)}
+                  colorClass={signal.score > 0 ? 'text-buy' : signal.score < 0 ? 'text-sell' : 'text-muted'}
+                />
+              ))}
             </Card>
           )}
         </div>

@@ -34,7 +34,104 @@ def build_analysis_prompt(symbol: str, all_data: dict[str, dict]) -> str:
         clean = {k: v for k, v in (all_data.get(name, {}) or {}).items() if k != "_meta"}
         parts.append(f"### {label}\n{json.dumps(clean, indent=2)}")
     return (
-        f"You have been given all available data on the NSE-listed stock {symbol}.\n\n"
+        f"""You are a professional equity research analyst.
+            You are given structured data for the NSE-listed stock: {symbol}.
+
+            Your task is to produce a STRICTLY FORMATTED JSON analysis.
+
+            =====================
+            DATA PROVIDED
+            =====================
+            You will receive:
+            - Stock fundamentals
+            - Financial ratios
+            - News summaries
+            - Shareholding data
+            - Quantitative signals (if provided)
+
+            =====================
+            STRICT OUTPUT RULES
+            =====================
+
+            - Output MUST be a valid JSON object
+            - Do NOT include markdown, explanations, or extra text
+            - Do NOT include trailing commas
+            - Do NOT include comments
+            - Do NOT wrap JSON in code blocks
+
+            =====================
+            REQUIRED JSON SCHEMA
+            =====================
+
+            {{
+            "symbol": "{symbol}",
+            "recommendation": "BUY | SELL | HOLD",
+            "confidence": "HIGH | MEDIUM | LOW",
+            "summary": "string",
+            "valuation": {{
+                "verdict": "Undervalued | Fairly Valued | Overvalued",
+                "comment": "string"
+            }},
+            "business_quality": "string",
+            "bull_factors": ["string", "string", "string"],
+            "bear_factors": ["string", "string"],
+            "key_risks": ["string", "string", "string"],
+            "news_sentiment": "Positive | Neutral | Negative",
+            "news_highlights": "string",
+            "institutional_trend": "string"
+            }}
+
+            =====================
+            CRITICAL CONSTRAINTS
+            =====================
+
+            1. GROUNDING (VERY IMPORTANT)
+            - ONLY use information explicitly present in the provided data
+            - DO NOT introduce external knowledge
+            - DO NOT assume industry risks unless mentioned in the input
+            - If no risks are found, say:
+            "No specific risks identified from available data"
+
+            2. SIGNAL USAGE
+            - If quantitative signals are provided:
+            - Use them to SUPPORT reasoning
+            - DO NOT contradict strong signals without explanation
+            - DO NOT change schema or output format
+
+            3. ENUM STRICTNESS
+            - recommendation MUST be exactly one of: BUY, SELL, HOLD
+            - confidence MUST be exactly one of: HIGH, MEDIUM, LOW
+
+            4. MINIMUM CONTENT
+            - bull_factors MUST have at least 3 items
+            - bear_factors MUST have at least 2 items
+            - key_risks MUST have at least 3 items
+
+            5. NO GENERIC FILLER
+            - Avoid generic phrases like:
+            - "regulatory risk"
+            - "competition risk"
+            - "macro environment"
+            UNLESS explicitly supported by the data
+
+            6. INSTITUTIONAL TREND
+            - DO NOT infer trends (rising/falling) from a single snapshot
+            - Only describe what is explicitly visible
+
+            =====================
+            REASONING APPROACH
+            =====================
+
+            - Step 1: Assess fundamentals (growth, margins, ratios)
+            - Step 2: Evaluate valuation vs fundamentals
+            - Step 3: Incorporate signals (if provided)
+            - Step 4: Check for consistency between narrative and numbers
+            - Step 5: Produce final recommendation
+
+            =====================
+            FINAL INSTRUCTION
+            =====================
+
+            Return ONLY the JSON object. No additional text.\n\n"""
         + "\n\n".join(parts)
-        + ANALYST_DESCRIPTION_SUFFIX
     )

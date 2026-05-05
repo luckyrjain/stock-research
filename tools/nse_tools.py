@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import requests
 import yfinance as yf
@@ -75,7 +77,8 @@ def get_stock_quote(symbol: str) -> str:
     quotes_by_exchange = {}
     for suffix, exchange in (("NS", "NSE"), ("BO", "BSE")):
         try:
-            info = yf.Ticker(f"{sym}.{suffix}").info
+            with contextlib.redirect_stderr(io.StringIO()):
+                info = yf.Ticker(f"{sym}.{suffix}").info
             if not _is_valid_quote(info):
                 last_err = f"No valid market data for {sym} on {exchange}"
                 continue
