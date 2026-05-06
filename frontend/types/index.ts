@@ -87,3 +87,59 @@ export type SSEMessage =
   | { event: 'analysing' }
   | { event: 'done';      report: Report }
   | { event: 'error';     message: string };
+
+// ── Market Picks ─────────────────────────────────────────────────────────────
+
+export interface PickSource {
+  name: string;
+  type: 'news' | 'brokerage' | 'platform';
+  url?: string;
+  headline?: string;
+  direction?: 'BUY' | 'SELL' | 'NEUTRAL';
+}
+
+export interface MarketPick {
+  rank: number;
+  symbol: string;
+  company: string;
+  exchange: string;
+  mention_count: number;
+  sources: PickSource[];
+  confidence_score: number;   // 0–100
+  signal_score: number;       // –1 to 1
+  signal_verdict: string;
+  recommendation: 'BUY' | 'WATCHLIST' | 'HOLD' | 'SELL';
+  trend: 'rising' | 'falling' | 'stable' | 'new';
+  trend_delta: number | null;
+  current_price: number | null;
+  change_pct: number;
+  pe_ratio: number | null;
+  market_cap_cr: number | null;
+  summary: string;
+  bull_factors: string[];
+  bear_factors: string[];
+  entry_price: number | null;
+  target_price: number | null;
+  stop_loss: number | null;
+  action_score: number;        // 0–1 directional conviction
+  upside_pct: number | null;   // (target - price) / price * 100
+  ranking_reasons: string[];   // why this stock ranked here
+  is_recent_ipo: boolean;      // listed < 8 months ago (IPO momentum flag)
+}
+
+export type MarketPicksPhase =
+  | 'idle' | 'scanning' | 'extracting' | 'consolidating' | 'researching' | 'scoring' | 'done' | 'error';
+
+export type MarketPicksSSEMessage =
+  | { event: 'picks_start';       sources: { name: string; type: string }[] }
+  | { event: 'source_done';       source: string; articles: number; status: 'ok' | 'empty' }
+  | { event: 'extracting';        total_articles: number; total_batches: number }
+  | { event: 'extract_progress';  batch: number; total_batches: number; found_so_far: number }
+  | { event: 'consolidating';     total_raw: number; unique: number }
+  | { event: 'validate_progress'; symbol: string; ok: boolean }
+  | { event: 'researching';       stocks: string[]; total: number }
+  | { event: 'stock_researched';  symbol: string; ok: boolean }
+  | { event: 'scoring' }
+  | { event: 'analysis_error'; symbols: string[]; reason: string }
+  | { event: 'done'; picks: MarketPick[]; generated_at: string; total_picks: number; from_cache?: boolean }
+  | { event: 'error'; message: string };

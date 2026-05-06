@@ -1,124 +1,161 @@
 # Tools Reference
 
-The Python data layer is built from tool functions in `tools/`. These tools fetch external data and return JSON-shaped results used by the CLI, API, cache layer, and analyst step.
+The Python data layer is split into two groups: **stock analysis tools** (one per data task) and **market picks scrapers** (one per financial source).
 
-## `get_stock_quote`
+---
+
+## Stock analysis tools
+
+### `get_stock_quote`
 
 - File: `tools/nse_tools.py`
-- Source: Yahoo Finance via `yfinance`
-- Input: `symbol`
+- Source: Yahoo Finance via `yfinance`; supplemented by NSE API
 
-Returns quote and company metadata, including:
+Returns quote and company metadata:
 
-- `symbol`
-- `exchange`
-- `primary_exchange`
-- `company_name`
-- `current_price`
-- `previous_close`
-- `change_pct`
-- `volume`
-- `avg_volume_10d`
-- `market_cap_cr`
-- `pe_ratio`
-- `eps`
-- `book_value`
-- `price_to_book`
-- `52w_high`
-- `52w_low`
-- `dividend_yield_pct`
-- `beta`
-- `sector`
-- `industry`
-- `about`
-- `prices_by_exchange`
+| Field | Type | Description |
+|---|---|---|
+| `symbol` | string | NSE/BSE ticker |
+| `exchange` | string | Primary exchange |
+| `company_name` | string | Full company name |
+| `current_price` | number | Last traded price |
+| `previous_close` | number | Prior session close |
+| `change_pct` | number | % change from previous close |
+| `volume` | number | Session volume |
+| `avg_volume_10d` | number | 10-day average volume |
+| `market_cap_cr` | number | Market cap in crores |
+| `pe_ratio` | number | Trailing P/E |
+| `eps` | number | Trailing EPS |
+| `book_value` | number | Book value per share |
+| `price_to_book` | number | Price-to-book ratio |
+| `52w_high` | number | 52-week high |
+| `52w_low` | number | 52-week low |
+| `dividend_yield_pct` | number | Dividend yield % |
+| `beta` | number | Beta vs index |
+| `sector` | string | Sector classification |
+| `industry` | string | Industry classification |
+| `about` | string | Company description |
+| `prices_by_exchange` | object | Per-exchange price map (NSE, BSE) |
 
-`prices_by_exchange` is a map keyed by exchange code such as `NSE` and `BSE`, where each value contains the same quote fields listed above for that exchange.
+---
 
-## `get_fundamentals`
+### `get_fundamentals`
 
 - File: `tools/screener_tools.py`
 - Source: Screener.in
-- Input: `symbol`
 
 Returns:
 
-- `symbol`
-- `ratios`
-- `about`
+| Field | Type | Description |
+|---|---|---|
+| `symbol` | string | Ticker |
+| `ratios` | object | Metric name → string value (e.g. `"ROCE": "76.7"`) |
+| `about` | string | Company description |
 
-`ratios` is typically a map of metric name to string value, for example:
+---
+
+### `get_holdings`
+
+- File: `tools/screener_tools.py`
+- Source: Screener.in
+
+Returns:
+
+| Field | Type | Description |
+|---|---|---|
+| `symbol` | string | Ticker |
+| `shareholding_pattern` | object | Category → % (Promoters, FIIs, DIIs, Government, Public) |
+
+---
+
+### `get_mf_holdings`
+
+- File: `tools/nse_tools.py`
+- Source: NSE shareholding API + XBRL parsing
+
+Returns:
+
+| Field | Type | Description |
+|---|---|---|
+| `symbol` | string | Ticker |
+| `as_of_date` | string | Reporting date |
+| `mutual_funds` | array | `[{ fund, holding_pct }]` |
+
+---
+
+### `get_latest_news`
+
+- File: `tools/news_tools.py`
+- Source: Google News RSS via `gnews`
+
+Returns:
+
+| Field | Type | Description |
+|---|---|---|
+| `query` | string | Search query used |
+| `articles` | array | `[{ title, description, source, published_at, url }]` |
+
+---
+
+### `get_nse_filings`
+
+- File: `tools/nse_tools.py`
+- Source: NSE corporate announcements API
+
+Returns recent corporate filings (results, AGM notices, board meetings, etc.).
+
+---
+
+## Market picks scrapers
+
+Scrapers live in `tools/market_picks_tools.py` and `tools/hdfc_sec_agent.py`. All return the same shape:
 
 ```json
 {
-  "ROCE": "76.7",
-  "ROE": "65.2",
-  "Stock P/E": "16.6"
+  "source": "Source Name",
+  "type": "news | brokerage",
+  "articles": [
+    {
+      "title": "Headline",
+      "summary": "Short excerpt (up to 500 chars)",
+      "url": "https://...",
+      "published_at": "2026-05-06T10:00:00+00:00"
+    }
+  ]
 }
 ```
 
-## `get_holdings`
+### Source registry
 
-- File: `tools/screener_tools.py`
-- Source: Screener.in
-- Input: `symbol`
+| Source name | Type | Mechanism | Credibility weight |
+|---|---|---|---|
+| `ET Markets` | news | RSS feed | 0.60 |
+| `LiveMint` | news | RSS feed | 0.60 |
+| `NDTV Profit` | news | RSS feed | 0.55 |
+| `Hindu BusinessLine` | news | RSS feed | 0.55 |
+| `Zerodha Z-Connect` | brokerage | RSS feed | 0.70 |
+| `GNews — Moneycontrol` | news | GNews query | 0.65 |
+| `Morgan Stanley / JPMorgan` | brokerage | GNews query | 1.00 |
+| `Jefferies / Macquarie / Citi` | brokerage | GNews query | 0.95 |
+| `HSBC / BofA / Bernstein / Investec` | brokerage | GNews query | 0.95 |
+| `ShareKhan / Mirae Asset` | brokerage | GNews query | 0.80 |
+| `SMIFS / IDBI Capital / Geojit / Deven Choksey` | brokerage | GNews query | 0.75 |
+| `HDFC Securities Fundamental` | brokerage | GNews query | 0.85 |
+| `HDFC Securities Technical` | brokerage | GNews query | 0.75 |
 
-Returns:
+Credibility weights are defined in `_SOURCE_CREDIBILITY` in `market_picks_pipeline.py`. Sources not in the dict default to **0.50**.
 
-- `symbol`
-- `shareholding_pattern`
+### Adding a new source
 
-Example shareholding categories:
+1. Define scraper functions in a new module (e.g. `tools/my_brokerage.py`)
+2. Export `MY_SOURCES` (list of `(name, type, fn_name)` tuples) and `MY_SCRAPERS` (dict of `name → fn`)
+3. Import and merge into `SOURCES` and `SCRAPER_FNS` at the bottom of `tools/market_picks_tools.py`
+4. Add a credibility entry in `_SOURCE_CREDIBILITY` in `market_picks_pipeline.py`
 
-- `Promoters`
-- `FIIs`
-- `DIIs`
-- `Government`
-- `Public`
+---
 
-## `get_mf_holdings`
+## Normalization
 
-- File: `tools/nse_tools.py`
-- Source: NSE shareholding API plus XBRL parsing
-- Input: `symbol`
+Raw tool output is always normalized through `schemas.normalize(task_name, raw)` before it is passed to the cache, signal engine, guardrails, or analyst prompt. If a tool changes its output shape, only `schemas.py` needs updating.
 
-Returns:
-
-- `symbol`
-- `as_of_date`
-- `mutual_funds`
-
-Each mutual fund item typically contains:
-
-- `fund`
-- `holding_pct`
-
-## `get_latest_news`
-
-- File: `tools/news_tools.py`
-- Source: Google News RSS through `gnews`
-- Input: `query`
-
-Returns:
-
-- `query`
-- `articles`
-
-Each article typically contains:
-
-- `title`
-- `description`
-- `source`
-- `published_at`
-- `url`
-
-## Notes on normalization
-
-Raw tool output is normalized by `schemas.py` before downstream use.
-
-Current normalization rules:
-
-- `news.json` stores articles under `articles`
-- `report_<DATE>.json` exposes news as a top-level `news` array
-- `shareholding` and `mf_holdings` are merged into the final `holdings` object
-- `_meta.fetched_at` is added only when cache files are written
+All tool functions must return `{"error": "...", "symbol": sym}` on failure — never raise. The cache layer silently discards error payloads; guardrails detect them and trigger retries.

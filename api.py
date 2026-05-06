@@ -3,14 +3,47 @@ import json
 import time
 import uuid
 import re
+from datetime import datetime, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.responses import StreamingResponse
 from observability import get_logger, log_event
 from signals.interpreter import interpret
 
 load_dotenv()
+
+# ── Market picks cache ────────────────────────────────────────────────────────
+_PICKS_CACHE_PATH = Path("output/_market_picks/picks.json")
+_PICKS_CACHE_TTL_HOURS = 6
+
+
+def _load_picks_cache() -> dict | None:
+    if not _PICKS_CACHE_PATH.exists():
+        return None
+    try:
+        data = json.loads(_PICKS_CACHE_PATH.read_text(encoding="utf-8"))
+        fetched_at = datetime.fromisoformat(data["_meta"]["fetched_at"])
+        age_h = (datetime.now(timezone.utc) - fetched_at).total_seconds() / 3600
+        return data if age_h <= _PICKS_CACHE_TTL_HOURS else None
+    except Exception:
+        return None
+
+
+def _save_picks_cache(picks: list, generated_at: str) -> None:
+    try:
+        _PICKS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _PICKS_CACHE_PATH.write_text(
+            json.dumps({
+                "picks":        picks,
+                "generated_at": generated_at,
+                "_meta":        {"fetched_at": datetime.now(timezone.utc).isoformat()},
+            }, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 app = FastAPI(title="StockResearch AI")
 LOGGER = get_logger("api")
@@ -534,6 +567,77 @@ async def analyse(symbol: str, force: bool = False):
         except Exception as exc:
             log_event(LOGGER, "api_analysis_failed", level="error", run_id=run_id, symbol=sym, error=str(exc))
             yield _sse({"event": "error", "message": str(exc)})
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/market-picks")
+async def market_picks(force: bool = Query(default=False)):
+    """Stream market-picks pipeline events as SSE.
+
+    ?force=true  — skip cache and run a fresh pipeline.
+    """
+    run_id = uuid.uuid4().hex[:12]
+
+    async def stream():
+        # ── Serve from cache if fresh and caller didn't force a rescan ──
+        if not force:
+            cached = _load_picks_cache()
+            if cached:
+                log_event(LOGGER, "market_picks_cache_hit", run_id=run_id)
+                yield _sse({
+                    "event":        "done",
+                    "picks":        cached["picks"],
+                    "generated_at": cached["generated_at"],
+                    "total_picks":  len(cached["picks"]),
+                    "from_cache":   True,
+                })
+                return
+
+        # ── Full pipeline run ─────────────────────────────────────────────
+        loop = asyncio.get_running_loop()
+        q: asyncio.Queue = asyncio.Queue()
+
+        def on_event(payload: dict):
+            loop.call_soon_threadsafe(q.put_nowait, payload)
+
+        def run_pipeline():
+            try:
+                from market_picks_pipeline import MarketPicksPipeline
+                pipeline = MarketPicksPipeline()
+                picks = pipeline.run(on_event=on_event)
+                generated_at = datetime.now(timezone.utc).isoformat()
+                _save_picks_cache(picks, generated_at)
+                loop.call_soon_threadsafe(q.put_nowait, {
+                    "event":        "done",
+                    "picks":        picks,
+                    "generated_at": generated_at,
+                    "total_picks":  len(picks),
+                    "from_cache":   False,
+                })
+            except Exception as exc:
+                log_event(LOGGER, "market_picks_failed", level="error", run_id=run_id, error=str(exc))
+                loop.call_soon_threadsafe(q.put_nowait, {"event": "error", "message": str(exc)})
+
+        log_event(LOGGER, "market_picks_started", run_id=run_id)
+
+        async def _launch():
+            await loop.run_in_executor(None, run_pipeline)
+
+        asyncio.create_task(_launch())
+
+        while True:
+            try:
+                payload = await asyncio.wait_for(q.get(), timeout=20.0)
+                yield _sse(payload)
+                if payload.get("event") in ("done", "error"):
+                    break
+            except asyncio.TimeoutError:
+                yield _heartbeat()
 
     return StreamingResponse(
         stream(),

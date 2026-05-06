@@ -1,19 +1,19 @@
 # Stock Research Documentation
 
-This project is an Indian equity research app for NSE-listed stocks. It combines:
+This project is a full-stack Indian equity research platform with two modes:
 
-- A Python backend that fetches market data, fundamentals, news, and ownership data
-- An analyst step that turns those inputs into a structured `BUY` / `SELL` / `HOLD` recommendation
-- A Next.js frontend that validates symbols, streams task progress, and renders the final report
+**Stock Analysis** — validates a ticker (NSE, BSE, or ISIN), fetches live market data, fundamentals, news, shareholding, MF holdings, and NSE filings in parallel, runs a quantitative signal engine, and calls an LLM analyst to produce a structured `BUY` / `SELL` / `HOLD` recommendation streamed to the browser via SSE.
+
+**Market Picks** — a multi-agent pipeline that scrapes 13 Indian and global financial sources, extracts stock recommendations with an LLM, validates symbols against the NSE equity master, runs due diligence, and returns a confidence-ranked watchlist with `BUY` / `WATCHLIST` / `HOLD` / `SELL` ratings.
 
 ## Documentation map
 
 | Doc | What it covers |
 |-----|----------------|
 | [Setup & Configuration](setup.md) | Backend/frontend install, environment variables, local development |
-| [Architecture](architecture.md) | End-to-end request flow, config layer, caching, services, and file layout |
-| [Tools Reference](tools.md) | Data-fetching tools, sources, and output shapes |
-| [Output Schema](output-schema.md) | Final report JSON structure and cache files |
+| [Architecture](architecture.md) | Request flows, pipeline phases, caching, agent layers, file layout |
+| [Tools Reference](tools.md) | Data-fetching tools, market picks scrapers, sources, and output shapes |
+| [Output Schema](output-schema.md) | Report JSON structure, cache files, market picks pick schema |
 
 ## Quick start
 
@@ -22,33 +22,29 @@ This project is an Indian equity research app for NSE-listed stocks. It combines
 /opt/homebrew/bin/python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
+cp .env.example .env   # add your LLM provider key
 
 # 2. Frontend
-cd frontend
-npm install
+cd frontend && npm install
 
-# 3. Run both apps in separate terminals
-# Terminal A
-cd /path/to/stock-research
+# 3. Run both in separate terminals
+# Terminal A — backend
 source .venv/bin/activate
 uvicorn api:app --reload --port 8000
 
-# Terminal B
-cd /path/to/stock-research/frontend
-npm run dev
+# Terminal B — frontend
+cd frontend && npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open [http://localhost:3000](http://localhost:3000) for stock analysis.
+Open [http://localhost:3000/market-picks](http://localhost:3000/market-picks) for the weekly picks dashboard.
 
-## Outputs
+## Output locations
 
-Reports and cache files are written under `output/<SYMBOL>/`, for example:
-
-- `output/TCS/stock_info.json`
-- `output/TCS/research.json`
-- `output/TCS/news.json`
-- `output/TCS/shareholding.json`
-- `output/TCS/mf_holdings.json`
-- `output/TCS/analysis.json`
-- `output/TCS/report_2026-04-25.json`
+| Path | Contents |
+|---|---|
+| `output/<SYMBOL>/` | Per-symbol task caches and report JSON |
+| `output/_extract_cache/` | LLM extraction cache for market picks (6 h TTL) |
+| `output/_history/` | Daily pick snapshots for trend tracking |
+| `output/_market_picks/` | Market picks result cache (6 h TTL) |
+| `output/_nse_master.txt` | NSE equity symbol master (refreshed every 24 h) |

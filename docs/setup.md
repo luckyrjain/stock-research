@@ -2,16 +2,11 @@
 
 ## What you need
 
-- Python `3.10` to `3.13`
-- Node.js `18+`
+- Python 3.13
+- Node.js 18+
 - `npm`
-- Internet access for market/news data and, during Next.js builds, Google Fonts
-- One LLM provider configured:
-  - `ANTHROPIC_API_KEY`
-  - `OPENAI_API_KEY`
-  - `GROQ_API_KEY`
-  - `GOOGLE_API_KEY`
-  - or `LLM_PROVIDER=ollama` for a local model
+- Internet access (market/news data; Google Fonts during `npm run build`)
+- One LLM provider configured (see below)
 
 ## Backend setup
 
@@ -29,109 +24,102 @@ Then edit `.env` and set the provider you want to use.
 ### Backend environment variables
 
 | Variable | Required | Description |
-|----------|----------|-------------|
-| `LLM_PROVIDER` | No | `anthropic`, `openai`, `groq`, `google`, or `ollama` |
-| `ANTHROPIC_API_KEY` | One provider required | Anthropic API key |
-| `OPENAI_API_KEY` | One provider required | OpenAI API key |
-| `GROQ_API_KEY` | One provider required | Groq API key |
-| `GOOGLE_API_KEY` | One provider required | Gemini API key |
-| `LLM_MODEL` | No | Model for the data/worker agents |
-| `ANALYST_MODEL` | No | Model for the final analyst step |
-| `OLLAMA_BASE_URL` | Only for Ollama | Base URL for local Ollama |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | One key required | Anthropic API key |
+| `OPENAI_API_KEY` | One key required | OpenAI API key |
+| `GROQ_API_KEY` | One key required | Groq API key |
+| `GOOGLE_API_KEY` | One key required | Google Gemini API key |
+| `LLM_PROVIDER` | No | `anthropic` / `openai` / `groq` / `google` / `ollama` — auto-detected if unset |
+| `LLM_MODEL` | No | Model for data/worker agents (fast/cheap tier) |
+| `ANALYST_MODEL` | No | Model for the final analyst step (stronger tier) |
+| `OLLAMA_BASE_URL` | Ollama only | Default: `http://localhost:11434` |
+| `LOG_LEVEL` | No | `DEBUG` / `INFO` / `WARNING` — default: `INFO` |
 
-### Default models
+If `LLM_PROVIDER` is unset, the backend auto-detects the first key present in this order: `anthropic`, `openai`, `groq`, `google`.
 
-| Provider | Data agents | Analyst agent |
-|----------|-------------|---------------|
+### Default models per provider
+
+| Provider | Data agents | Analyst / market picks |
+|---|---|---|
 | `anthropic` | `claude-haiku-4-5-20251001` | `claude-sonnet-4-6` |
 | `openai` | `gpt-4o-mini` | `gpt-4o` |
 | `groq` | `groq/llama-3.1-8b-instant` | `groq/llama-3.3-70b-versatile` |
-| `google` | `gemini/gemini-1.5-flash` | `gemini/gemini-1.5-flash` |
+| `google` | `gemini/gemini-1.5-flash` | `gemini/gemini-2.5-flash` |
 | `ollama` | `ollama/llama3.2` | `ollama/llama3.1:8b` |
 
-If `LLM_PROVIDER` is not set, the backend auto-detects the first available API key in this order: `anthropic`, `openai`, `groq`, `google`.
-
 ## Frontend setup
-
-From the `frontend/` directory:
 
 ```bash
 cd frontend
 npm install
 ```
 
-The Next.js app proxies requests to the Python backend using `API_URL`.
-
 ### Frontend environment variables
 
-Create `frontend/.env.local` if you want to override the default backend URL:
+Create `frontend/.env.local` only when overriding the default backend URL:
 
 ```env
 API_URL=http://localhost:8000
 ```
 
-If unset, the frontend already defaults to `http://localhost:8000`.
+The frontend already defaults to `http://localhost:8000`.
 
 ## Running locally
 
-Run the backend and frontend in separate terminals.
-
-### Terminal A: backend
+**Terminal A — backend:**
 
 ```bash
-cd /path/to/stock-research
 source .venv/bin/activate
 uvicorn api:app --reload --port 8000
 ```
 
 Backend endpoints:
 
-- `GET /api/validate/{symbol}`
-- `GET /api/analyse/{symbol}`
+| Endpoint | Description |
+|---|---|
+| `GET /api/validate/{symbol}` | Ticker / ISIN / company name lookup |
+| `GET /api/analyse/{symbol}` | Stock analysis SSE stream |
+| `GET /api/market-picks` | Market picks SSE stream (`?force=true` bypasses cache) |
 
-### Terminal B: frontend
+**Terminal B — frontend:**
 
 ```bash
-cd /path/to/stock-research/frontend
+cd frontend
 npm run dev
 ```
 
-Frontend URL:
-
-- [http://localhost:3000](http://localhost:3000)
+- Stock analysis: [http://localhost:3000](http://localhost:3000)
+- Market picks: [http://localhost:3000/market-picks](http://localhost:3000/market-picks)
 
 ## CLI mode
-
-You can also run the pipeline without the frontend:
 
 ```bash
 source .venv/bin/activate
 python main.py TCS
-python main.py RELIANCE --force
+python main.py RELIANCE --force   # bypass cache
 ```
-
-Use `--force` to bypass cache freshness and fetch all data again.
 
 ## Cache and output
 
-Results are stored under `output/<SYMBOL>/`.
+Per-symbol caches under `output/<SYMBOL>/` with these TTLs:
 
-- `stock_info.json`
-- `research.json`
-- `news.json`
-- `shareholding.json`
-- `mf_holdings.json`
-- `analysis.json`
-- `report_<DATE>.json`
+| Task | TTL |
+|---|---|
+| `stock_info` | 1 hour |
+| `news` | 1 hour |
+| `research` | 24 hours |
+| `analysis` | 24 hours |
+| `shareholding` | 7 days |
+| `mf_holdings` | 7 days |
 
-Freshness rules are enforced per task:
+Market picks-specific caches:
 
-- `stock_info`: 1 hour
-- `news`: 1 hour
-- `research`: 24 hours
-- `analysis`: 24 hours
-- `shareholding`: 7 days
-- `mf_holdings`: 7 days
+| Path | TTL | Description |
+|---|---|---|
+| `output/_market_picks/picks.json` | 6 hours | Full pipeline result |
+| `output/_extract_cache/` | 6 hours | Per-source LLM extraction |
+| `output/_nse_master.txt` | 24 hours | NSE equity symbol list |
+| `output/_history/` | Permanent | Daily snapshots for trend labels |
 
 ## Useful commands
 
@@ -146,30 +134,48 @@ cd frontend
 npm run dev
 npm run build
 npm run start
-
-# Frontend type-check
-npx tsc --noEmit
+npx tsc --noEmit   # type-check (the only automated check)
 ```
 
 ## Troubleshooting
 
 ### No provider configured
 
-If the backend exits with "No API key or local provider found", set one of the supported API keys in `.env`, or configure Ollama with:
+If the backend exits with "No API key or local provider found":
 
 ```env
+# Add one of these to .env
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+GROQ_API_KEY=gsk_...
+GOOGLE_API_KEY=AIza...
+
+# Or for Ollama
 LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://localhost:11434
 ```
 
 ### Frontend shows backend unavailable
 
-Make sure the Python backend is running on port `8000`, or update `frontend/.env.local`:
+Make sure the backend is running on port 8000, or set:
 
 ```env
+# frontend/.env.local
 API_URL=http://your-backend-host:8000
 ```
 
+### Market picks returns no results
+
+The pipeline fetches from external RSS feeds and GNews. If all sources return empty:
+
+- Check internet connectivity from the server
+- Run with `?force=true` to bypass the result cache
+- Set `LOG_LEVEL=DEBUG` in `.env` for verbose source-fetch logs
+
+### NSE equity master download fails
+
+The pipeline fails open when `output/_nse_master.txt` cannot be downloaded — all tickers are allowed through. If validation is too permissive, delete the stale cache file and ensure `nsearchives.nseindia.com` is reachable.
+
 ### Next.js build fails on Google Fonts
 
-The frontend layout uses `next/font/google` for `Inter` and `JetBrains Mono`. A production build needs network access to `fonts.googleapis.com` unless you switch to local fonts.
+`npm run build` fetches `Inter` and `JetBrains Mono` from `fonts.googleapis.com`. To build offline, replace the font imports in `frontend/app/layout.tsx` with local font files.

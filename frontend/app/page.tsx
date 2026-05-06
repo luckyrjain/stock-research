@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useCallback } from 'react';
+import Link from 'next/link';
 import type { TaskName, TaskStatus, Phase, SSEMessage, Report } from '@/types';
 import TickerSearch     from '@/components/ticker-search';
 import ProgressTracker  from '@/components/progress-tracker';
@@ -103,15 +104,29 @@ export default function HomePage() {
                 Stock<span className="text-accent">Research</span> AI
               </h1>
               <p className="text-muted text-sm">AI-powered equity research for Indian markets</p>
+              <Link
+                href="/market-picks"
+                className="inline-flex items-center gap-1.5 mt-4 px-4 py-1.5 rounded-full
+                           bg-accent/10 border border-accent/20 text-accent text-xs font-semibold
+                           hover:bg-accent/20 transition-colors"
+              >
+                📈 See this week's top picks →
+              </Link>
             </div>
             <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} />
           </div>
         ) : (
           <>
-            <div className="flex items-center gap-3 mb-5 pb-4 border-b border-border">
+            <div className="flex items-center gap-4 mb-5 pb-4 border-b border-border">
               <span className="text-base font-black tracking-tight text-tx">
                 Stock<span className="text-accent">Research</span> AI
               </span>
+              <Link
+                href="/market-picks"
+                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
+              >
+                Market Picks →
+              </Link>
             </div>
 
             <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} compact />

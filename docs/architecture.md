@@ -2,209 +2,252 @@
 
 ## Overview
 
-The project has two user-facing entrypoints:
+The project has two user-facing entrypoints and three backend flows:
 
-- The web app in `frontend/`
-- The CLI entrypoint in `main.py`
+| Flow | Entrypoint | Description |
+|---|---|---|
+| Stock analysis | `frontend/app/page.tsx` → `GET /api/analyse/{symbol}` | Validate → fetch → signal engine → LLM analyst → report |
+| Market picks | `frontend/app/market-picks/page.tsx` → `GET /api/market-picks` | Scrape → extract → consolidate → research → analyze → score |
+| CLI | `python main.py <SYMBOL>` | Same as stock analysis, no frontend |
 
-Both flows use the same Python data-fetching and report-building logic.
+---
 
-## High-level flow
+## Stock analysis flow
 
 ```text
 Browser (Next.js on :3000)
-  -> /api/validate/[symbol]
-  -> /api/analyse/[symbol]
-  -> proxies to Python backend on :8000
+  └─ EventSource → /api/analyse/{symbol}
+        └─ Next.js proxy → FastAPI :8000
 
-Python backend (FastAPI)
-  -> checks cache freshness
-  -> fetches stale data tasks in parallel
-  -> validates normalized output
-  -> runs analyst crew if needed
-  -> builds merged report
-  -> streams SSE progress + final report
+FastAPI /api/analyse/{symbol}
+  1. Check cache freshness for each of the 6 tasks
+  2. Fetch stale tasks concurrently (ThreadPoolExecutor)
+       task_done SSE event per task as each completes
+  3. Normalize all outputs through schemas.normalize()
+  4. Run signal engine (synchronous, fast)
+  5. Run LLM analyst in a thread; send heartbeats every 15 s
+  6. Emit done SSE event with merged report
 ```
 
-## Components
+### SSE events emitted
 
-### 1. Next.js frontend
+| Event | When |
+|---|---|
+| `start` | Immediately; lists stale vs cached tasks |
+| `task_done` | Each time one of the 6 data tasks completes |
+| `analysing` | When the LLM analyst call starts |
+| `done` | Report is ready |
+| `error` | Unrecoverable failure |
 
-Main files:
+---
 
-- `frontend/app/page.tsx`
-- `frontend/components/ticker-search.tsx`
-- `frontend/components/progress-tracker.tsx`
-- `frontend/components/results-dashboard.tsx`
-- `frontend/app/api/validate/[symbol]/route.ts`
-- `frontend/app/api/analyse/[symbol]/route.ts`
+## Symbol validation flow (`GET /api/validate/{symbol}`)
 
-Responsibilities:
+The endpoint handles three input forms:
 
-- Validate ticker input before analysis
-- Proxy browser requests to the backend using `API_URL`
-- Stream progress events with Server-Sent Events
-- Render recommendation, market data, holdings, and news
+1. **ISIN** (e.g. `INE009A01021`) — checks NSE equity master CSV first; falls back to yfinance's native ISIN lookup; for BSE-only results returns directly, for NSE results falls through to full metadata fetch.
+2. **BSE-forced** (`?exchange=BSE`) — resolves a Screener.in slug (e.g. `505685` or `TAPARIA-TOOLS`) to the proper NSE/BSE ticker via the Screener company page.
+3. **Ticker / company name** — NSE autocomplete + BSE autocomplete (via Screener.in) run in parallel. NSE result is enriched with ISIN via `_quote_meta_sync`; BSE symbol is looked up by ISIN. Screener.in is used as a final fallback if both miss.
 
-## 2. FastAPI backend
+---
 
-Main file:
+## Market picks flow
 
-- `api.py`
+```text
+Browser (Next.js on :3000)
+  └─ EventSource → /api/market-picks[?force=true]
+        └─ Next.js proxy → FastAPI :8000
 
-Responsibilities:
+FastAPI /api/market-picks
+  1. Check output/_market_picks/picks.json (6 h TTL)
+     → cache hit: emit done event immediately, return
+  2. Run MarketPicksPipeline.run() in ThreadPoolExecutor
+     → on_event() → loop.call_soon_threadsafe → asyncio.Queue → SSE
+  3. Pipeline phases run synchronously inside the executor thread
+  4. Final picks saved to output/_market_picks/picks.json
+```
 
-- Expose `/api/validate/{symbol}` for symbol lookup
-- Expose `/api/analyse/{symbol}` for streaming analysis progress
-- Read/write cache files
-- Run stale fetch tasks concurrently
-- Run the analyst step and return the merged report
+### Pipeline phases
 
-## 3. CLI pipeline
+| Phase | Workers | What it does |
+|---|---|---|
+| `_phase_scrape` | 6 | Parallel fetch from 13 sources (5 RSS + 8 GNews). Emits `source_done` per source. |
+| `_phase_extract` | 6 | One LLM call per source in parallel. Checks `output/_extract_cache/` first (6 h, content-aware key). Detects syndicated articles across sources (Jaccard title similarity ≥ 0.60) and marks them for down-weighting. Emits `extracting` then `extract_progress` per batch. |
+| `_phase_consolidate` | 8 | Groups picks by ticker; validates against NSE equity master (`output/_nse_master.txt`, refreshed every 24 h); confirms live price via yfinance (rejects pre-IPO / unlisted names); uses rapidfuzz for fuzzy company-name matching. Emits `consolidating` then `validate_progress` per symbol. |
+| `_phase_research` | 4 | Fetches `stock_info` + `research` + signal engine per stock. Detects recent IPOs (< 8 months of monthly history). Emits `researching` then `stock_researched` per symbol. |
+| `_phase_analyze` | 4 | Batched LLM calls (8 stocks per batch). Returns qualitative `summary`, `bull_factors`, `bear_factors`. Does **not** ask the LLM for prices. Emits `scoring` at start; `analysis_error` if a batch fails. |
+| `_phase_score` | — | Deterministic. Computes confidence (50 % signal engine + 30 % consensus + 20 % recency). Assigns 4-tier recommendation. Computes entry/target/stop-loss from signal score and 52-week range. Sector-balances (max 2 per sector in primary list). Saves daily snapshot to `output/_history/`. Emits `done`. |
 
-Main file:
+### Market picks SSE events
 
-- `main.py`
+| Event | When |
+|---|---|
+| `picks_start` | Pipeline started; lists all sources |
+| `source_done` | Each source fetch completes |
+| `extracting` | Extraction phase begins |
+| `extract_progress` | Each source LLM extraction completes |
+| `consolidating` | Consolidation phase begins |
+| `validate_progress` | Each symbol validated/rejected |
+| `researching` | Research phase begins |
+| `stock_researched` | Each stock researched |
+| `scoring` | Scoring/analysis phase begins |
+| `analysis_error` | A batch LLM call failed (non-fatal; fallback used) |
+| `done` | Final ranked picks |
+| `error` | Unrecoverable failure |
 
-Responsibilities:
+### Confidence scoring formula
 
-- Support direct terminal usage: `python main.py TCS`
-- Check cache freshness
-- Fetch stale tasks in parallel
-- Run the analyst step when inputs changed or analysis is stale
-- Save the merged `report_<DATE>.json`
+```
+confidence = 50 % × signal_score_component   (quant: valuation + growth + volume + filings)
+           + 30 % × consensus_component       (log-scaled quality-weighted source signal)
+           + 20 % × recency_component         (credibility-weighted mean exp(-age_days / 3))
+```
 
-## 4. Crew / analyst layer
+### 4-tier recommendation logic
 
-Main file:
+```
+combined_dir = 0.55 × consensus_norm + 0.45 × signal_score
 
-- `crew.py`
+BUY       if combined_dir ≥ 0.35 and signal_score ≥ -0.3
+WATCHLIST if combined_dir ≥ 0.15 (or BUY demoted by strong negative signal)
+SELL      if combined_dir ≤ -0.30
+HOLD      otherwise
+```
 
-The analyst is built with CrewAI. The current repo behavior is:
+---
 
-- Data tasks are fetched directly from Python in `main.py` / `api.py`
-- The analyst step still uses CrewAI and the configured LLM provider
-- Cached task data is inlined into the analyst prompt
-- Fresh task data can also be passed through task context when needed
+## Agent layers
 
-This means the pipeline is hybrid:
+### Layer 1 — Data agents (CrewAI)
 
-- deterministic data collection
-- LLM-based synthesis for the final recommendation
+`build_crew()` in `crew.py` wires five agents, each wrapping exactly one tool. In production, the API and CLI call `_fetch_task()` directly using `ThreadPoolExecutor` — CrewAI is bypassed for performance.
 
-## 5. Config layer
+| Task | Tool | Source |
+|---|---|---|
+| `stock_info` | `get_stock_quote` | yfinance + NSE API |
+| `research` | `get_fundamentals` | Screener.in |
+| `news` | `get_latest_news` | gnews (Google News) |
+| `shareholding` | `get_holdings` | Screener.in |
+| `mf_holdings` | `get_mf_holdings` | NSE API |
+| `filings` | `get_nse_filings` (direct) | NSE corporate announcements |
 
-Directory: `config/`
+### Layer 2 — Analyst (direct LLM call)
 
-All agent and task configuration is stored as JSON and loaded at startup. The Python files in `config/` are thin loaders that wire JSON definitions to live tool callables and CrewAI objects.
+`run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI. It receives all six data slices plus signal engine context and must return the JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structure; failures return a safe HOLD via `_safe_analysis_fallback()`.
+
+### Layer 3 — Market picks pipeline
+
+`MarketPicksPipeline` in `market_picks_pipeline.py`. Six phases; all blocking work runs in `ThreadPoolExecutor`. Bridges back to the async SSE loop via `loop.call_soon_threadsafe(q.put_nowait, payload)`.
+
+---
+
+## Signal engine
+
+`signals/engine.run_signal_engine(symbol, all_data)` returns a `SignalResult` with:
+
+- `final_score` — float in –1..1
+- `verdict` — `BUY` / `HOLD` / `SELL`
+- `signals` — dict of named `SignalItem` objects (valuation, growth, volume, filings)
+
+`signals/interpreter.interpret(signal_result)` returns a plain-English insight string.
+
+Signal results are persisted by `signals/store.save_signal()` for the stock analysis flow. The market picks pipeline uses the signal engine's `final_score` and `verdict` directly as 50 % of the confidence score.
+
+---
+
+## Config layer
+
+All agent and task definitions are JSON; Python files are thin loaders.
 
 | File | Content |
-|------|---------|
-| `agents.json` | Per-task agent role, backstory, and tool name |
-| `tasks.json` | Per-task description template, expected output, max retries |
-| `analyst.json` | Analyst agent persona, section labels, analysis rules, valuation guidance, output schema |
-| `crew_agents.py` | Reads `agents.json`, maps tool names to callables, exports `AGENTS_FOR_TASK` and `BACKSTORIES` |
-| `crew_tasks.py` | Reads `tasks.json` + `analyst.json`, exports `build_task_specs`, `build_analysis_prompt`, `ANALYST_SECTIONS`, `ANALYST_DESCRIPTION_SUFFIX` |
+|---|---|
+| `config/agents.json` | Per-task agent role, backstory, and tool name |
+| `config/tasks.json` | Per-task description template, expected output, max retries |
+| `config/analyst.json` | Analyst persona, section labels, rules, valuation guidance, output schema |
+| `config/crew_agents.py` | Reads `agents.json`, maps tool names to callables, exports `AGENTS_FOR_TASK` |
+| `config/crew_tasks.py` | Reads `tasks.json` + `analyst.json`, exports task specs and analyst prompt builder |
 
-To tune agent behaviour or the analyst prompt, edit the JSON files only — no Python changes are needed.
-
-## Data tasks
-
-Canonical task order:
-
-1. `stock_info`
-2. `research`
-3. `news`
-4. `shareholding`
-5. `mf_holdings`
-
-These tasks are fetched in parallel when stale. Their normalized outputs are stored in `output/<SYMBOL>/`.
-
-## Analyst output
-
-The analyst produces:
-
-- `recommendation`
-- `confidence`
-- `summary`
-- `valuation`
-- `business_quality`
-- `bull_factors`
-- `bear_factors`
-- `key_risks`
-- `news_sentiment`
-- `news_highlights`
-- `institutional_trend`
-
-## Validation and normalization
-
-Main file:
-
-- `schemas.py`
-
-Responsibilities:
-
-- Normalize raw tool output into a canonical shape
-- Validate required fields before continuing
-- Prevent invalid `stock_info` data from producing a bad report
+---
 
 ## Cache layer
 
-Main file:
+`cache.py` manages per-symbol task caches under `output/<SYMBOL>/`. Each file has a top-level `_meta.fetched_at` timestamp.
 
-- `cache.py`
+| Task | TTL |
+|---|---|
+| `stock_info` | 1 hour |
+| `news` | 1 hour |
+| `research` | 24 hours |
+| `analysis` | 24 hours |
+| `shareholding` | 7 days |
+| `mf_holdings` | 7 days |
 
-Each task is cached separately with `_meta.fetched_at`.
+Market picks caches:
 
-TTL policy:
+| Path | TTL | Purpose |
+|---|---|---|
+| `output/_market_picks/picks.json` | 6 hours | Full pipeline result |
+| `output/_extract_cache/<hash>.json` | 6 hours | Per-source LLM extraction result |
+| `output/_nse_master.txt` | 24 hours | NSE equity symbol master |
+| `output/_history/<YYYY-MM-DD>.json` | Permanent | Daily pick snapshot for trend tracking |
 
-- `stock_info`: 1 hour
-- `news`: 1 hour
-- `research`: 24 hours
-- `analysis`: 24 hours
-- `shareholding`: 7 days
-- `mf_holdings`: 7 days
+---
 
-This allows the app to re-fetch only stale sections instead of re-running the entire pipeline every time.
+## SSE bridge pattern
 
-## Streaming flow
+```python
+# CORRECT — create_task requires a coroutine
+async def _launch():
+    await loop.run_in_executor(None, blocking_fn)
 
-`GET /api/analyse/{symbol}` uses Server-Sent Events and emits:
+asyncio.create_task(_launch())
+```
 
-- `start`
-- `task_done`
-- `analysing`
-- `done`
-- `error`
+Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns a `Future`, not a coroutine, and raises `TypeError` at runtime.
 
-The frontend uses those events to update the progress tracker and render the final report when the `done` event arrives.
+---
 
 ## File layout
 
 ```text
 stock-research/
-├── api.py
-├── main.py
-├── crew.py
-├── cache.py
-├── schemas.py
-├── tools/
-│   ├── nse_tools.py
-│   ├── screener_tools.py
-│   └── news_tools.py
+├── api.py                  FastAPI server
+├── main.py                 CLI + shared _fetch_task, _build_report
+├── crew.py                 LLM resolution, analyst, guardrails
+├── cache.py                TTL cache
+├── schemas.py              Normalisation contracts
+├── market_picks_pipeline.py  6-phase picks pipeline
+├── observability.py        Structured JSON logging
+├── requirements.txt
+├── .env.example
 ├── config/
-│   ├── agents.json         ← agent roles, backstories, tool mapping
-│   ├── tasks.json          ← task descriptions, expected outputs, retry counts
-│   ├── analyst.json        ← analyst persona, prompt rules, output schema
-│   ├── crew_agents.py      ← loader: JSON → AGENTS_FOR_TASK, BACKSTORIES
-│   └── crew_tasks.py       ← loader: JSON → task specs, analyst prompt builder
+│   ├── agents.json
+│   ├── tasks.json
+│   ├── analyst.json
+│   ├── crew_agents.py
+│   └── crew_tasks.py
+├── tools/
+│   ├── market_picks_tools.py   RSS + GNews scrapers (11 sources)
+│   ├── hdfc_sec_agent.py       HDFC Securities scrapers (2 sources)
+│   └── ...                     nse_tools, screener_tools, news_tools, etc.
+├── signals/
+│   ├── engine.py
+│   ├── interpreter.py
+│   └── store.py
+├── tests/
 ├── frontend/
 │   ├── app/
+│   │   ├── page.tsx                Stock analysis page
+│   │   ├── market-picks/page.tsx   Market picks page
+│   │   └── api/                    Proxy routes
 │   ├── components/
-│   ├── types/
+│   ├── types/index.ts
 │   └── package.json
 ├── docs/
-├── output/
-├── requirements.txt
-└── .env.example
+└── output/
+    ├── <SYMBOL>/
+    ├── _extract_cache/
+    ├── _history/
+    ├── _market_picks/
+    └── _nse_master.txt
 ```
