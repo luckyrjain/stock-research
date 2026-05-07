@@ -646,6 +646,32 @@ async def market_picks(force: bool = Query(default=False)):
     )
 
 
+@app.get("/api/prices")
+async def get_prices(symbols: str = Query(...)):
+    """Return LTP + day change% for a comma-separated list of NSE/BSE symbols."""
+    sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()][:50]
+    loop = asyncio.get_running_loop()
+
+    def _fetch_one(sym: str) -> tuple[str, dict]:
+        try:
+            import yfinance as yf
+            for suffix in (".NS", ".BO"):
+                fi = yf.Ticker(sym + suffix).fast_info
+                price = getattr(fi, "last_price", None)
+                prev  = getattr(fi, "previous_close", None)
+                if price and price > 0:
+                    chg = round((price - prev) / prev * 100, 2) if prev else 0.0
+                    return sym, {"price": round(price, 2), "change_pct": chg}
+        except Exception:
+            pass
+        return sym, {}
+
+    results = await asyncio.gather(
+        *[loop.run_in_executor(None, _fetch_one, s) for s in sym_list]
+    )
+    return {"prices": dict(results)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)

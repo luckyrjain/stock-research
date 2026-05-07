@@ -125,6 +125,7 @@ export interface MarketPick {
   upside_pct: number | null;   // (target - price) / price * 100
   ranking_reasons: string[];   // why this stock ranked here
   is_recent_ipo: boolean;      // listed < 8 months ago (IPO momentum flag)
+  horizon?: 'short' | 'medium' | 'long';  // investment horizon from LLM analysis
 }
 
 export type MarketPicksPhase =

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback, useMemo } from 'react';
+import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import Link from 'next/link';
 import type {
   MarketPicksPhase,
@@ -38,6 +38,46 @@ const PIPELINE_STEPS: { id: MarketPicksPhase; label: string; desc: string }[] = 
 const PHASE_ORDER: MarketPicksPhase[] = [
   'scanning', 'extracting', 'consolidating', 'researching', 'scoring', 'done',
 ];
+
+const SKEL_CLASS =
+  'rounded bg-gradient-to-r from-border via-border-hi to-border animate-shimmer bg-[length:200%_auto]';
+
+function TableSkeleton() {
+  return (
+    <div className="mt-10 animate-fade-up">
+      <p className="text-[10px] text-muted/30 text-center mb-4 tracking-[0.2em] uppercase">
+        Results will appear here
+      </p>
+      <div className="rounded-xl border border-border/30 overflow-hidden pointer-events-none select-none">
+        {/* fake header */}
+        <div className="bg-surface/60 px-4 py-3 border-b border-border/30 flex items-center gap-4">
+          {[16, 100, 120, 52, 48, 60, 36, 32].map((w, i) => (
+            <div key={i} className={`h-2 flex-shrink-0 ${SKEL_CLASS}`} style={{ width: w }} />
+          ))}
+        </div>
+        {[...Array(6)].map((_, i) => (
+          <div key={i} className="px-4 py-4 border-b border-border/20 last:border-0 flex items-center gap-4"
+               style={{ opacity: 1 - i * 0.13 }}>
+            <div className={`h-5 w-5 rounded-full flex-shrink-0 ${SKEL_CLASS}`} />
+            <div className="flex flex-col gap-1.5 flex-shrink-0 w-[110px]">
+              <div className={`h-3 ${SKEL_CLASS}`} />
+              <div className={`h-2.5 w-3/4 ${SKEL_CLASS}`} />
+            </div>
+            <div className="flex items-center gap-2 w-[120px] flex-shrink-0">
+              <div className={`flex-1 h-1.5 rounded-full ${SKEL_CLASS}`} />
+              <div className={`h-3 w-7 ${SKEL_CLASS}`} />
+            </div>
+            <div className={`h-6 w-14 rounded-full flex-shrink-0 ${SKEL_CLASS}`} />
+            <div className={`h-5 w-12 rounded flex-shrink-0 ${SKEL_CLASS}`} />
+            <div className={`h-3.5 w-16 flex-shrink-0 ${SKEL_CLASS}`} />
+            <div className={`h-3.5 w-10 flex-shrink-0 ${SKEL_CLASS}`} />
+            <div className={`h-3.5 w-8 flex-shrink-0 ${SKEL_CLASS}`} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function PipelineStepper({ phase }: { phase: MarketPicksPhase }) {
   const currentIdx = PHASE_ORDER.indexOf(phase);
@@ -122,9 +162,35 @@ export default function MarketPicksPage() {
   const [generatedAt, setGeneratedAt] = useState('');
   const [fromCache, setFromCache] = useState(false);
   const [error, setError]         = useState<string | null>(null);
+  const [pricesLastUpdated, setPricesLastUpdated] = useState<Date | null>(null);
 
   const esRef   = useRef<EventSource | null>(null);
   const doneRef = useRef(false);
+
+  // Refresh LTP every 30 s once picks are loaded
+  useEffect(() => {
+    if (phase !== 'done' || picks.length === 0) return;
+    const symbols = picks.map(p => p.symbol).join(',');
+
+    const fetchPrices = async () => {
+      try {
+        const res = await fetch(`/api/prices?symbols=${encodeURIComponent(symbols)}`);
+        if (!res.ok) return;
+        const data = await res.json() as { prices: Record<string, { price: number; change_pct: number }> };
+        setPicks(prev => prev.map(p => {
+          const live = data.prices[p.symbol];
+          return live ? { ...p, current_price: live.price, change_pct: live.change_pct } : p;
+        }));
+        setPricesLastUpdated(new Date());
+      } catch {
+        // silently ignore — stale price is fine
+      }
+    };
+
+    fetchPrices();
+    const id = setInterval(fetchPrices, 30_000);
+    return () => clearInterval(id);
+  }, [phase, picks.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startScan = useCallback((force = false) => {
     esRef.current?.close();
@@ -261,38 +327,40 @@ export default function MarketPicksPage() {
 
         {/* ── Idle ── */}
         {phase === 'idle' && (
-          <div className="max-w-2xl mx-auto text-center animate-fade-up">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full
-                            bg-accent/10 border border-accent/20 text-accent text-xs font-semibold mb-6">
-              Multi-agent · 10 sources · AI-ranked
+          <div className="animate-fade-up">
+            {/* Hero */}
+            <div className="max-w-2xl mx-auto text-center">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full
+                              bg-accent/10 border border-accent/20 text-accent text-xs font-semibold mb-6">
+                Multi-agent · 16 sources · AI-ranked
+              </div>
+              <h1 className="text-4xl font-black tracking-tight mb-3">
+                Top Picks<span className="text-accent"> This Week</span>
+              </h1>
+              <p className="text-muted text-sm leading-relaxed mb-6 max-w-lg mx-auto">
+                Scans ET Markets, LiveMint, NDTV Profit, HDFC Securities, NSE bulk deals,
+                and 11 more sources. Runs AI due diligence on every stock and ranks by confidence.
+              </p>
+              {/* Compact feature strip */}
+              <div className="flex items-center justify-center gap-5 mb-8 text-xs text-muted">
+                <span>🔍 16 sources scraped</span>
+                <span className="text-border">|</span>
+                <span>🤖 AI signal engine</span>
+                <span className="text-border">|</span>
+                <span>📈 Confidence ranked</span>
+                <span className="text-border">|</span>
+                <span>⏱ Entry · Target · Stop</span>
+              </div>
+              <button
+                onClick={() => startScan()}
+                className="px-8 py-3.5 rounded-xl bg-accent text-white font-bold text-sm
+                           hover:bg-accent/90 active:scale-95 transition-all shadow-lg shadow-accent/20"
+              >
+                Scan This Week&apos;s Picks
+              </button>
             </div>
-            <h1 className="text-4xl font-black tracking-tight mb-3">
-              Top Picks<span className="text-accent"> This Week</span>
-            </h1>
-            <p className="text-muted text-sm leading-relaxed mb-8 max-w-lg mx-auto">
-              Scans ET Markets, LiveMint, NDTV Profit, Hindu BusinessLine, broker research and more.
-              Runs due diligence on every stock and ranks by confidence score.
-            </p>
-            <div className="grid grid-cols-3 gap-4 mb-10 text-left">
-              {[
-                { icon: '🔍', title: 'Scan 10 sources', desc: 'News, brokerages, analyst picks' },
-                { icon: '🤖', title: 'AI due diligence', desc: 'Signals, fundamentals, momentum' },
-                { icon: '📈', title: 'Confidence ranked', desc: 'Sorted by score · firms count' },
-              ].map(({ icon, title, desc }) => (
-                <div key={title} className="bg-card border border-border rounded-xl p-4">
-                  <div className="text-2xl mb-2">{icon}</div>
-                  <div className="text-sm font-semibold text-tx">{title}</div>
-                  <div className="text-xs text-muted mt-0.5">{desc}</div>
-                </div>
-              ))}
-            </div>
-            <button
-              onClick={() => startScan()}
-              className="px-8 py-3.5 rounded-xl bg-accent text-white font-bold text-sm
-                         hover:bg-accent/90 active:scale-95 transition-all shadow-lg shadow-accent/20"
-            >
-              Scan This Week's Picks
-            </button>
+            {/* Skeleton preview — shows where the table will appear */}
+            <TableSkeleton />
           </div>
         )}
 
@@ -528,6 +596,7 @@ export default function MarketPicksPage() {
             generatedAt={generatedAt}
             fromCache={fromCache}
             onRescan={() => startScan(true)}
+            pricesLastUpdated={pricesLastUpdated}
           />
         )}
 

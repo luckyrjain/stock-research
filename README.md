@@ -4,14 +4,14 @@ Stock Research is a full-stack Indian equity research platform with two modes:
 
 **Stock Analysis** — given a symbol like `TCS` or `RELIANCE`, the app validates the ticker (NSE, BSE, or ISIN), fetches live market data, fundamentals, news, shareholding, MF holdings, and NSE filings in parallel, runs a quantitative signal engine, then calls an LLM analyst to produce a structured `BUY`, `SELL`, or `HOLD` recommendation. Progress and the final report are streamed to the browser via Server-Sent Events.
 
-**Market Picks** — a multi-agent pipeline that scrapes 13 Indian and global financial sources (RSS feeds + GNews), extracts stock recommendations with an LLM, validates symbols against the NSE equity master, runs due diligence on each, and returns a confidence-ranked watchlist with `BUY` / `WATCHLIST` / `HOLD` / `SELL` ratings and deterministic entry/target/stop-loss levels.
+**Market Picks** — a multi-agent pipeline that scrapes 16 Indian and global financial sources (RSS feeds + GNews), extracts stock recommendations with an LLM, validates symbols against the NSE equity master, runs due diligence on each, and returns a confidence-ranked watchlist with `BUY` / `WATCHLIST` / `HOLD` / `SELL` ratings and deterministic entry/target/stop-loss levels.
 
 ## Tech stack
 
 - **Backend**: Python 3.13, FastAPI, CrewAI, litellm, signals engine
 - **Frontend**: Next.js 15, React 19, TypeScript, Tailwind CSS
 - **Data sources**: Yahoo Finance, Screener.in, Google News, NSE API, BSE API, RSS feeds
-- **LLM providers**: Anthropic, OpenAI, Groq, Google, Ollama (auto-detected from env)
+- **LLM providers**: Anthropic, OpenAI, Groq, Google, OpenRouter, Ollama (auto-detected from env)
 - **Storage**: file-based cache in `output/`
 
 ## Project structure
@@ -34,9 +34,12 @@ stock-research/
 │   ├── crew_agents.py
 │   └── crew_tasks.py
 ├── tools/
-│   ├── market_picks_tools.py   RSS + GNews scrapers for 11 sources
-│   ├── hdfc_sec_agent.py       HDFC Securities Fundamental + Technical scrapers
-│   └── ...                     yfinance, Screener.in, gnews, NSE filings tools
+│   ├── market_picks_tools.py       RSS + GNews scrapers; source registry
+│   ├── hdfc_sec_agent.py           HDFC Securities Fundamental + Technical (GNews)
+│   ├── nse_bulk_block_deals.py     NSE bulk/block deal institutional activity
+│   ├── screener_scanner.py         Screener.in public fundamental screener
+│   ├── trendlyne_agent.py          Trendlyne analyst consensus + upgrade alerts
+│   └── ...                         yfinance, Screener.in, gnews, NSE filings tools
 ├── signals/                Quantitative signal engine
 ├── tests/
 ├── frontend/

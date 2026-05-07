@@ -4,7 +4,7 @@ This project is a full-stack Indian equity research platform with two modes:
 
 **Stock Analysis** — validates a ticker (NSE, BSE, or ISIN), fetches live market data, fundamentals, news, shareholding, MF holdings, and NSE filings in parallel, runs a quantitative signal engine, and calls an LLM analyst to produce a structured `BUY` / `SELL` / `HOLD` recommendation streamed to the browser via SSE.
 
-**Market Picks** — a multi-agent pipeline that scrapes 13 Indian and global financial sources, extracts stock recommendations with an LLM, validates symbols against the NSE equity master, runs due diligence, and returns a confidence-ranked watchlist with `BUY` / `WATCHLIST` / `HOLD` / `SELL` ratings.
+**Market Picks** — a multi-agent pipeline that scrapes 16 Indian and global financial sources, extracts stock recommendations with an LLM, validates symbols against the NSE equity master, runs due diligence, and returns a confidence-ranked watchlist with `BUY` / `WATCHLIST` / `HOLD` / `SELL` ratings.
 
 ## Documentation map
 

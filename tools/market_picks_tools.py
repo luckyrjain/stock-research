@@ -17,6 +17,9 @@ _HEADERS = {
 _CUTOFF_DAYS = 14  # look back 2 weeks to capture more articles
 
 from tools.hdfc_sec_agent import HDFC_SEC_SOURCES
+from tools.nse_bulk_block_deals import NSE_BULK_SOURCES
+from tools.screener_scanner import SCREENER_SCAN_SOURCES
+from tools.trendlyne_agent import TRENDLYNE_SOURCES
 
 # Registry used by the pipeline to run all scrapers
 SOURCES = [
@@ -34,7 +37,7 @@ SOURCES = [
     # ── India-focused brokerages ────────────────────────────────────────────────
     ("ShareKhan / Mirae Asset",             "brokerage", "fetch_gnews_sharekhan_mirae"),
     ("SMIFS / IDBI Capital / Geojit / Deven Choksey", "brokerage", "fetch_gnews_india_brokers"),
-] + HDFC_SEC_SOURCES
+] + HDFC_SEC_SOURCES + NSE_BULK_SOURCES + SCREENER_SCAN_SOURCES + TRENDLYNE_SOURCES
 
 
 def _session() -> requests.Session:
@@ -176,6 +179,9 @@ def fetch_gnews_india_brokers() -> dict:
 
 
 from tools.hdfc_sec_agent import HDFC_SEC_SOURCES, HDFC_SEC_SCRAPERS
+from tools.nse_bulk_block_deals import NSE_BULK_SCRAPERS
+from tools.screener_scanner import SCREENER_SCAN_SCRAPERS
+from tools.trendlyne_agent import TRENDLYNE_SCRAPERS
 
 # Map source name → function (used by pipeline)
 SCRAPER_FNS: dict = {
@@ -191,4 +197,7 @@ SCRAPER_FNS: dict = {
     "ShareKhan / Mirae Asset":                        fetch_gnews_sharekhan_mirae,
     "SMIFS / IDBI Capital / Geojit / Deven Choksey":  fetch_gnews_india_brokers,
     **HDFC_SEC_SCRAPERS,
+    **NSE_BULK_SCRAPERS,
+    **SCREENER_SCAN_SCRAPERS,
+    **TRENDLYNE_SCRAPERS,
 }

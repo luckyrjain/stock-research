@@ -29,13 +29,14 @@ Then edit `.env` and set the provider you want to use.
 | `OPENAI_API_KEY` | One key required | OpenAI API key |
 | `GROQ_API_KEY` | One key required | Groq API key |
 | `GOOGLE_API_KEY` | One key required | Google Gemini API key |
-| `LLM_PROVIDER` | No | `anthropic` / `openai` / `groq` / `google` / `ollama` — auto-detected if unset |
+| `OPENROUTER_API_KEY` | One key required | OpenRouter API key (access to 300+ models) |
+| `LLM_PROVIDER` | No | `anthropic` / `openai` / `groq` / `google` / `openrouter` / `ollama` — auto-detected if unset |
 | `LLM_MODEL` | No | Model for data/worker agents (fast/cheap tier) |
 | `ANALYST_MODEL` | No | Model for the final analyst step (stronger tier) |
 | `OLLAMA_BASE_URL` | Ollama only | Default: `http://localhost:11434` |
 | `LOG_LEVEL` | No | `DEBUG` / `INFO` / `WARNING` — default: `INFO` |
 
-If `LLM_PROVIDER` is unset, the backend auto-detects the first key present in this order: `anthropic`, `openai`, `groq`, `google`.
+If `LLM_PROVIDER` is unset, the backend auto-detects the first key present in this order: `anthropic`, `openai`, `groq`, `google`, `openrouter`.
 
 ### Default models per provider
 
@@ -44,7 +45,8 @@ If `LLM_PROVIDER` is unset, the backend auto-detects the first key present in th
 | `anthropic` | `claude-haiku-4-5-20251001` | `claude-sonnet-4-6` |
 | `openai` | `gpt-4o-mini` | `gpt-4o` |
 | `groq` | `groq/llama-3.1-8b-instant` | `groq/llama-3.3-70b-versatile` |
-| `google` | `gemini/gemini-1.5-flash` | `gemini/gemini-2.5-flash` |
+| `google` | `gemini/gemini-2.5-flash` | `gemini/gemini-2.5-flash` |
+| `openrouter` | `openrouter/meta-llama/llama-3.1-8b-instruct` | `openrouter/meta-llama/llama-3.3-70b-instruct` |
 | `ollama` | `ollama/llama3.2` | `ollama/llama3.1:8b` |
 
 ## Frontend setup

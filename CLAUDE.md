@@ -14,7 +14,7 @@ A full-stack Indian equity research platform. Given an NSE/BSE ticker (e.g. `TCS
 4. Calls an LLM analyst to produce a structured `BUY`/`HOLD`/`SELL` recommendation
 5. Streams progress and the final report to the browser via Server-Sent Events
 
-A second mode — **Market Picks** — runs a multi-agent pipeline that scrapes 13 Indian and global financial sources, extracts stock recommendations with an LLM, validates symbols against the NSE equity master, runs due diligence on each, and returns a confidence-ranked watchlist with BUY / WATCHLIST / HOLD / SELL ratings.
+A second mode — **Market Picks** — runs a multi-agent pipeline that scrapes 16 Indian and global financial sources, extracts stock recommendations with an LLM, validates symbols against the NSE equity master, runs due diligence on each, and returns a confidence-ranked watchlist with BUY / WATCHLIST / HOLD / SELL ratings.
 
 ---
 
@@ -124,7 +124,7 @@ The system has **two distinct agent layers**:
 
 | Phase | What it does |
 |---|---|
-| `_phase_scrape` | Parallel fetch from 13 sources (5 RSS + 8 GNews). 6 workers. |
+| `_phase_scrape` | Parallel fetch from 16 sources (5 RSS + 8 GNews + 3 structured). 6 workers. |
 | `_phase_extract` | One LLM call per source (parallel, up to 6 workers). Checks extraction cache first. Detects syndicated articles (Jaccard ≥ 0.60) across sources to down-weight them. |
 | `_phase_consolidate` | Groups picks by ticker, validates against NSE equity master, confirms live price via yfinance (guards pre-IPO / unlisted names). Uses rapidfuzz for fuzzy company-name matching. |
 | `_phase_research` | Fetches `stock_info` + `research` + signal engine per stock (4 workers, up to `_MAX_STOCKS` stocks). |
@@ -204,6 +204,7 @@ All configuration is via `.env` (copy from `.env.example`).
 | `OPENAI_API_KEY` | OpenAI provider |
 | `GROQ_API_KEY` | Groq provider |
 | `GOOGLE_API_KEY` | Google Gemini provider |
+| `OPENROUTER_API_KEY` | OpenRouter (access to 300+ models) |
 
 Provider is auto-detected from whichever key is present (checked in the order above). Set `LLM_PROVIDER` explicitly to override.
 
@@ -211,7 +212,7 @@ Provider is auto-detected from whichever key is present (checked in the order ab
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `LLM_PROVIDER` | auto | `anthropic` / `openai` / `groq` / `google` / `ollama` |
+| `LLM_PROVIDER` | auto | `anthropic` / `openai` / `groq` / `google` / `openrouter` / `ollama` |
 | `LLM_MODEL` | provider default | Model for data-fetching agents (fast/cheap tier) |
 | `ANALYST_MODEL` | provider default | Model for analyst LLM call (stronger tier) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Only needed when `LLM_PROVIDER=ollama` |

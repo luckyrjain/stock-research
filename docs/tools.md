@@ -142,6 +142,9 @@ Scrapers live in `tools/market_picks_tools.py` and `tools/hdfc_sec_agent.py`. Al
 | `SMIFS / IDBI Capital / Geojit / Deven Choksey` | brokerage | GNews query | 0.75 |
 | `HDFC Securities Fundamental` | brokerage | GNews query | 0.85 |
 | `HDFC Securities Technical` | brokerage | GNews query | 0.75 |
+| `NSE Bulk/Block Deals` | brokerage | NSE API (`/api/bulk-deals`, `/api/block-deals`) | 0.85 |
+| `Screener.in Fundamental Screen` | brokerage | Screener `/screen/raw/` + GNews fallback | 0.70 |
+| `Trendlyne / Analyst Consensus` | brokerage | GNews queries (upgrades, initiations, target raises) | 0.75 |
 
 Credibility weights are defined in `_SOURCE_CREDIBILITY` in `market_picks_pipeline.py`. Sources not in the dict default to **0.50**.
 

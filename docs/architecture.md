@@ -71,7 +71,7 @@ FastAPI /api/market-picks
 
 | Phase | Workers | What it does |
 |---|---|---|
-| `_phase_scrape` | 6 | Parallel fetch from 13 sources (5 RSS + 8 GNews). Emits `source_done` per source. |
+| `_phase_scrape` | 6 | Parallel fetch from 16 sources (5 RSS + 8 GNews + 3 structured). Emits `source_done` per source. |
 | `_phase_extract` | 6 | One LLM call per source in parallel. Checks `output/_extract_cache/` first (6 h, content-aware key). Detects syndicated articles across sources (Jaccard title similarity ≥ 0.60) and marks them for down-weighting. Emits `extracting` then `extract_progress` per batch. |
 | `_phase_consolidate` | 8 | Groups picks by ticker; validates against NSE equity master (`output/_nse_master.txt`, refreshed every 24 h); confirms live price via yfinance (rejects pre-IPO / unlisted names); uses rapidfuzz for fuzzy company-name matching. Emits `consolidating` then `validate_progress` per symbol. |
 | `_phase_research` | 4 | Fetches `stock_info` + `research` + signal engine per stock. Detects recent IPOs (< 8 months of monthly history). Emits `researching` then `stock_researched` per symbol. |

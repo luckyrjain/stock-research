@@ -23,25 +23,28 @@ from observability import get_logger, log_event
 LOGGER = get_logger("crew")
 
 _DEFAULTS = {
-    "anthropic": "claude-haiku-4-5-20251001",
-    "openai":    "gpt-4o-mini",
-    "groq":      "groq/llama-3.1-8b-instant",
-    "google":    "gemini/gemini-2.5-flash",
-    "ollama":    "ollama/llama3.2",
+    "anthropic":   "claude-haiku-4-5-20251001",
+    "openai":      "gpt-4o-mini",
+    "groq":        "groq/llama-3.1-8b-instant",
+    "google":      "gemini/gemini-2.5-flash",
+    "ollama":      "ollama/llama3.2",
+    "openrouter":  "openrouter/meta-llama/llama-3.1-8b-instruct",
 }
 _ANALYST_DEFAULTS = {
-    "anthropic": "claude-sonnet-4-6",
-    "openai":    "gpt-4o",
-    "groq":      "groq/llama-3.3-70b-versatile",
-    "google":    "gemini/gemini-2.5-flash",
-    "ollama":    "ollama/llama3.1:8b",
+    "anthropic":   "claude-sonnet-4-6",
+    "openai":      "gpt-4o",
+    "groq":        "groq/llama-3.3-70b-versatile",
+    "google":      "gemini/gemini-2.5-flash",
+    "ollama":      "ollama/llama3.1:8b",
+    "openrouter":  "openrouter/meta-llama/llama-3.3-70b-instruct",
 }
 
 _API_KEY_ENV = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai":    "OPENAI_API_KEY",
-    "groq":      "GROQ_API_KEY",
-    "google":    "GOOGLE_API_KEY",
+    "anthropic":  "ANTHROPIC_API_KEY",
+    "openai":     "OPENAI_API_KEY",
+    "groq":       "GROQ_API_KEY",
+    "google":     "GOOGLE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
 
 # Canonical order used for indexing task outputs
@@ -61,7 +64,7 @@ def _resolve_llm(analyst: bool = False) -> LLM:
         if not provider:
             raise EnvironmentError(
                 "No API key found. Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, "
-                "GROQ_API_KEY, GOOGLE_API_KEY — or set LLM_PROVIDER=ollama for local."
+                "GROQ_API_KEY, GOOGLE_API_KEY, OPENROUTER_API_KEY — or set LLM_PROVIDER=ollama for local."
             )
 
     defaults = _ANALYST_DEFAULTS if analyst else _DEFAULTS
@@ -71,7 +74,7 @@ def _resolve_llm(analyst: bool = False) -> LLM:
     if not model:
         raise ValueError(
             f"Unknown LLM_PROVIDER '{provider}'. "
-            "Supported: anthropic, openai, groq, google, ollama."
+            "Supported: anthropic, openai, groq, google, ollama, openrouter."
         )
 
     if provider == "ollama":
@@ -399,7 +402,7 @@ def run_analysis_with_fallback(
             if os.getenv(env):
                 provider = p
                 break
-    model   = os.getenv("ANALYST_MODEL", _ANALYST_DEFAULTS.get(provider, ""))
+    model   = os.getenv("ANALYST_MODEL", _ANALYST_DEFAULTS.get(provider, "claude-sonnet-4-6"))
     api_key = os.getenv(_API_KEY_ENV.get(provider, ""), "") or None
 
     import litellm
