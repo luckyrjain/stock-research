@@ -404,7 +404,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
           </h2>
           <div className="flex items-center gap-2.5 mt-1 flex-wrap">
             <p className="text-xs text-muted">
-              {fromCache ? 'Cached scan from' : 'Generated at'} {genDate}
+              {fromCache ? 'Cached · ' : 'Last scan: '}{genDate}
             </p>
             {fromCache && (
               <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wider
@@ -529,31 +529,38 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                         <RankBadge rank={pick.rank} />
                       </td>
 
-                      {/* Stock — all on one line to keep row heights uniform */}
-                      <td className="px-4 py-4 max-w-[230px]">
-                        <div className="flex items-center gap-1.5 min-w-0">
-                          <span className="font-semibold text-tx text-sm truncate min-w-0">
-                            {pick.company}
-                          </span>
-                          <span className="font-mono text-[10px] text-muted/60 bg-muted/10
-                                           px-1.5 py-0.5 rounded border border-muted/15
-                                           shrink-0 whitespace-nowrap">
-                            {pick.symbol}
-                          </span>
-                          {pick.trend === 'rising'  && (
-                            <span className="text-[10px] text-buy font-bold shrink-0"
-                                  title="Confidence rising vs recent avg">↑</span>
-                          )}
-                          {pick.trend === 'falling' && (
-                            <span className="text-[10px] text-sell font-bold shrink-0"
-                                  title="Confidence falling vs recent avg">↓</span>
-                          )}
-                          {pick.is_recent_ipo && (
-                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0
-                                             bg-accent/15 text-accent border border-accent/30"
-                                  title="IPO < 8 months ago">
-                              IPO
+                      {/* Stock — name + ticker on first line, why-reason on second */}
+                      <td className="px-4 py-4 max-w-[240px]">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span className="font-semibold text-tx text-sm truncate min-w-0">
+                              {pick.company}
                             </span>
+                            <span className="font-mono text-[10px] text-muted/60 bg-muted/10
+                                             px-1.5 py-0.5 rounded border border-muted/15
+                                             shrink-0 whitespace-nowrap">
+                              {pick.symbol}
+                            </span>
+                            {pick.trend === 'rising'  && (
+                              <span className="text-[10px] text-buy font-bold shrink-0"
+                                    title="Confidence rising vs recent avg">↑</span>
+                            )}
+                            {pick.trend === 'falling' && (
+                              <span className="text-[10px] text-sell font-bold shrink-0"
+                                    title="Confidence falling vs recent avg">↓</span>
+                            )}
+                            {pick.is_recent_ipo && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0
+                                               bg-accent/15 text-accent border border-accent/30"
+                                    title="IPO < 8 months ago">
+                                IPO
+                              </span>
+                            )}
+                          </div>
+                          {pick.ranking_reasons?.[0] && (
+                            <div className="text-[10px] text-muted/45 mt-1 truncate leading-tight">
+                              {pick.ranking_reasons[0]}
+                            </div>
                           )}
                         </div>
                       </td>

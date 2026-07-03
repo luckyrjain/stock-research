@@ -131,6 +131,28 @@ export interface MarketPick {
 export type MarketPicksPhase =
   | 'idle' | 'scanning' | 'extracting' | 'consolidating' | 'researching' | 'scoring' | 'done' | 'error';
 
+// ── SME EMA Signals ──────────────────────────────────────────────────────────
+
+export interface SmeSignal {
+  symbol:          string;
+  name:            string | null;
+  exchange:        string;
+  trade_date:      string;           // 'YYYY-MM-DD'
+  close_price:     number | null;
+  ema20:           number | null;
+  ema50:           number | null;
+  crossed_ema20:   boolean;
+  crossed_ema50:   boolean;
+  cross_direction: 'bullish' | 'bearish' | null;
+  crossed:         'EMA20' | 'EMA50' | 'EMA20+EMA50';
+}
+
+export interface SmeSignalsResponse {
+  signals:          SmeSignal[];
+  total_monitored:  number;
+  last_run:         string | null;   // ISO timestamp or null
+}
+
 export type MarketPicksSSEMessage =
   | { event: 'picks_start';       sources: { name: string; type: string }[] }
   | { event: 'source_done';       source: string; articles: number; status: 'ok' | 'empty' }

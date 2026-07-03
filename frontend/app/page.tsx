@@ -127,6 +127,12 @@ export default function HomePage() {
               >
                 Market Picks →
               </Link>
+              <Link
+                href="/sme-signals"
+                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
+              >
+                SME Signals →
+              </Link>
             </div>
 
             <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} compact />

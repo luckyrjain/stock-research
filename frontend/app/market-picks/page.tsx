@@ -39,41 +39,76 @@ const PHASE_ORDER: MarketPicksPhase[] = [
   'scanning', 'extracting', 'consolidating', 'researching', 'scoring', 'done',
 ];
 
-const SKEL_CLASS =
-  'rounded bg-gradient-to-r from-border via-border-hi to-border animate-shimmer bg-[length:200%_auto]';
 
-function TableSkeleton() {
+function SamplePickCard() {
   return (
-    <div className="mt-10 animate-fade-up">
-      <p className="text-[10px] text-muted/30 text-center mb-4 tracking-[0.2em] uppercase">
-        Results will appear here
-      </p>
-      <div className="rounded-xl border border-border/30 overflow-hidden pointer-events-none select-none">
-        {/* fake header */}
-        <div className="bg-surface/60 px-4 py-3 border-b border-border/30 flex items-center gap-4">
-          {[16, 100, 120, 52, 48, 60, 36, 32].map((w, i) => (
-            <div key={i} className={`h-2 flex-shrink-0 ${SKEL_CLASS}`} style={{ width: w }} />
-          ))}
-        </div>
-        {[...Array(6)].map((_, i) => (
-          <div key={i} className="px-4 py-4 border-b border-border/20 last:border-0 flex items-center gap-4"
-               style={{ opacity: 1 - i * 0.13 }}>
-            <div className={`h-5 w-5 rounded-full flex-shrink-0 ${SKEL_CLASS}`} />
-            <div className="flex flex-col gap-1.5 flex-shrink-0 w-[110px]">
-              <div className={`h-3 ${SKEL_CLASS}`} />
-              <div className={`h-2.5 w-3/4 ${SKEL_CLASS}`} />
+    <div className="glass rounded-xl overflow-hidden relative">
+      {/* Sample watermark */}
+      <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-[0.035]">
+        <span className="text-6xl font-black text-tx rotate-[-20deg] select-none">SAMPLE</span>
+      </div>
+
+      {/* Header */}
+      <div className="px-4 pt-4 pb-3 border-b border-border/50">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="font-semibold text-tx text-sm truncate">Tata Consultancy Services</span>
+              <span className="font-mono text-[10px] text-muted/60 bg-muted/10 px-1.5 py-0.5 rounded border border-muted/15 shrink-0">TCS</span>
+              <span className="text-[10px] text-buy font-bold shrink-0" title="Confidence rising">↑</span>
             </div>
-            <div className="flex items-center gap-2 w-[120px] flex-shrink-0">
-              <div className={`flex-1 h-1.5 rounded-full ${SKEL_CLASS}`} />
-              <div className={`h-3 w-7 ${SKEL_CLASS}`} />
-            </div>
-            <div className={`h-6 w-14 rounded-full flex-shrink-0 ${SKEL_CLASS}`} />
-            <div className={`h-5 w-12 rounded flex-shrink-0 ${SKEL_CLASS}`} />
-            <div className={`h-3.5 w-16 flex-shrink-0 ${SKEL_CLASS}`} />
-            <div className={`h-3.5 w-10 flex-shrink-0 ${SKEL_CLASS}`} />
-            <div className={`h-3.5 w-8 flex-shrink-0 ${SKEL_CLASS}`} />
+            <div className="text-[10px] text-muted mt-0.5">IT Services · NSE · 7 sources this week</div>
           </div>
-        ))}
+          <div className="w-6 h-6 rounded-full bg-accent flex items-center justify-center text-[10px] font-black text-white shrink-0 shadow-sm shadow-accent/30">
+            1
+          </div>
+        </div>
+      </div>
+
+      <div className="px-4 py-3 space-y-3">
+        {/* Confidence */}
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[10px] text-muted/70 uppercase tracking-wider">Confidence</span>
+            <span className="text-[11px] font-bold text-buy font-mono">82</span>
+          </div>
+          <div className="h-1.5 rounded-full bg-muted/15">
+            <div className="h-full w-[82%] rounded-full bg-buy" />
+          </div>
+        </div>
+
+        {/* Badges */}
+        <div className="flex items-center gap-1.5">
+          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border bg-buy/12 text-buy border-buy/25">BUY</span>
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold border text-accent/80 border-accent/20 bg-accent/8">Mid</span>
+          <span className="ml-auto text-[10px] text-muted font-mono tabular-nums">₹3,842 <span className="text-buy">↑1.24%</span></span>
+        </div>
+
+        {/* Trade levels */}
+        <div className="grid grid-cols-3 divide-x divide-border border border-border rounded-lg overflow-hidden">
+          <div className="px-3 py-2.5">
+            <div className="text-[9px] text-muted/70 uppercase tracking-wider mb-1">Entry</div>
+            <div className="text-xs font-black text-tx tabular-nums">₹3,820</div>
+          </div>
+          <div className="px-3 py-2.5">
+            <div className="text-[9px] text-muted/70 uppercase tracking-wider mb-1">Target</div>
+            <div className="text-xs font-black text-buy tabular-nums">₹4,350</div>
+            <div className="text-[9px] text-buy/60">+13.9%</div>
+          </div>
+          <div className="px-3 py-2.5">
+            <div className="text-[9px] text-muted/70 uppercase tracking-wider mb-1">Stop</div>
+            <div className="text-xs font-black text-sell tabular-nums">₹3,540</div>
+            <div className="text-[9px] text-sell/60">−7.3%</div>
+          </div>
+        </div>
+
+        {/* Why this pick */}
+        <div className="bg-surface/60 rounded-lg px-3 py-2.5">
+          <div className="text-[9px] text-muted/60 uppercase tracking-wider mb-1">Why this pick</div>
+          <p className="text-[11px] text-tx/70 leading-snug">
+            7 sources covering same week · Signal engine BUY · Strong Q3 beat with institutional buying
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -315,6 +350,10 @@ export default function MarketPicksPage() {
           </Link>
           <span className="text-border-hi">|</span>
           <span className="text-sm font-semibold text-accent">Market Picks</span>
+          <span className="text-border-hi">|</span>
+          <Link href="/sme-signals" className="text-sm text-muted hover:text-tx transition-colors">
+            SME Signals
+          </Link>
           {isRunning && (
             <button
               onClick={() => { esRef.current?.close(); setPhase('idle'); }}
@@ -328,39 +367,62 @@ export default function MarketPicksPage() {
         {/* ── Idle ── */}
         {phase === 'idle' && (
           <div className="animate-fade-up">
-            {/* Hero */}
-            <div className="max-w-2xl mx-auto text-center">
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full
-                              bg-accent/10 border border-accent/20 text-accent text-xs font-semibold mb-6">
-                Multi-agent · 16 sources · AI-ranked
+            {/* Hero — 2-col layout: left = copy + CTA, right = sample pick */}
+            <div className="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-10 md:gap-16 items-start mb-16">
+
+              {/* Left: headline + how-it-works + CTA */}
+              <div>
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full
+                                bg-accent/10 border border-accent/20 text-accent text-xs font-semibold mb-5">
+                  Multi-agent · 16 sources · AI-ranked
+                </div>
+                <h1 className="text-4xl font-black tracking-tight mb-3 leading-tight">
+                  Top Indian Stocks<br />
+                  <span className="text-accent">This Week</span>
+                </h1>
+                <p className="text-muted text-sm leading-relaxed mb-8 max-w-md">
+                  Every week, our AI pipeline scrapes 16 financial sources, validates each stock on NSE,
+                  runs a quantitative signal engine, and returns a confidence-ranked watchlist with
+                  entry, target, and stop-loss levels.
+                </p>
+
+                {/* How it works — 3 steps */}
+                <div className="space-y-3.5 mb-9">
+                  {([
+                    { n: '01', title: 'Scrapes 16 sources', sub: 'ET Markets, HDFC Securities, NSE bulk deals + 13 more' },
+                    { n: '02', title: 'AI validates on NSE', sub: 'Extracts tickers, deduplicates, confirms live price' },
+                    { n: '03', title: 'Signal engine ranks', sub: 'Confidence score + entry · target · stop for each pick' },
+                  ] as const).map(({ n, title, sub }) => (
+                    <div key={n} className="flex items-start gap-3">
+                      <span className="text-[11px] font-black text-accent/40 font-mono w-5 shrink-0 pt-[1px]">{n}</span>
+                      <div>
+                        <div className="text-sm font-semibold text-tx leading-none">{title}</div>
+                        <div className="text-[11px] text-muted mt-0.5 leading-snug">{sub}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex items-center gap-4 flex-wrap">
+                  <button
+                    onClick={() => startScan()}
+                    className="px-7 py-3 rounded-xl bg-accent text-white font-bold text-sm
+                               hover:bg-accent/90 active:scale-95 transition-all shadow-lg shadow-accent/20"
+                  >
+                    See This Week&apos;s Picks →
+                  </button>
+                  <span className="text-xs text-muted">~2 min · 35 stocks max</span>
+                </div>
               </div>
-              <h1 className="text-4xl font-black tracking-tight mb-3">
-                Top Picks<span className="text-accent"> This Week</span>
-              </h1>
-              <p className="text-muted text-sm leading-relaxed mb-6 max-w-lg mx-auto">
-                Scans ET Markets, LiveMint, NDTV Profit, HDFC Securities, NSE bulk deals,
-                and 11 more sources. Runs AI due diligence on every stock and ranks by confidence.
-              </p>
-              {/* Compact feature strip */}
-              <div className="flex items-center justify-center gap-5 mb-8 text-xs text-muted">
-                <span>🔍 16 sources scraped</span>
-                <span className="text-border">|</span>
-                <span>🤖 AI signal engine</span>
-                <span className="text-border">|</span>
-                <span>📈 Confidence ranked</span>
-                <span className="text-border">|</span>
-                <span>⏱ Entry · Target · Stop</span>
+
+              {/* Right: sample pick card */}
+              <div>
+                <div className="text-[10px] font-bold text-muted/40 uppercase tracking-[0.15em] mb-3">
+                  Sample output
+                </div>
+                <SamplePickCard />
               </div>
-              <button
-                onClick={() => startScan()}
-                className="px-8 py-3.5 rounded-xl bg-accent text-white font-bold text-sm
-                           hover:bg-accent/90 active:scale-95 transition-all shadow-lg shadow-accent/20"
-              >
-                Scan This Week&apos;s Picks
-              </button>
             </div>
-            {/* Skeleton preview — shows where the table will appear */}
-            <TableSkeleton />
           </div>
         )}
 

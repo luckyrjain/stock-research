@@ -9,19 +9,29 @@
 html { scroll-behavior: smooth; }
 
 body {
-  background: #08090d;
-  color: #e4e8f4;
+  background: #0b1120;
+  color: #e2e8f4;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
 }
 
 ::selection {
-  background: #6c71f040;
-  color: #e4e8f4;
+  background: #4d7fff40;
+  color: #e2e8f4;
 }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: #0e1117; }
-::-webkit-scrollbar-thumb { background: #2c3450; border-radius: 3px; }
+::-webkit-scrollbar-track { background: #0f1829; }
+::-webkit-scrollbar-thumb { background: #243860; border-radius: 3px; }
+
+/* Glass card — use on hero sections, featured picks, elevated surfaces */
+@layer components {
+  .glass {
+    background: rgba(19, 32, 64, 0.65);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+}

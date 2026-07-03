@@ -155,6 +155,10 @@ cd frontend && npx tsc --noEmit
 
 There is no ESLint config and no frontend test suite. TypeScript strict mode (`"strict": true`) is the primary code quality gate.
 
+### Design system
+
+All UI work must follow `design.md` (AlphaPulse Design System) — the single source of truth for colors, typography, spacing, component patterns (cards, badges, buttons, tables, animations), and responsive strategy. Do not hard-code hex values or invent new patterns; always use the existing design tokens from `tailwind.config.ts`.
+
 ### Key libraries and patterns
 
 - **Next.js 15** with App Router; all pages are `'use client'` components

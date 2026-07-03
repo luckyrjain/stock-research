@@ -672,6 +672,85 @@ async def get_prices(symbols: str = Query(...)):
     return {"prices": dict(results)}
 
 
+@app.get("/api/sme-signals")
+async def get_sme_signals(
+    lookback:  int = Query(5, ge=1, le=30, description="Trading days back to check for crossovers"),
+    direction: str = Query("all",  description="all | bullish | bearish"),
+    ema:       str = Query("all",  description="all | ema20 | ema50"),
+):
+    """Return SME stocks that crossed EMA 20 or EMA 50 in the last N days."""
+    import os
+
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the SME pipeline first.")
+
+    def _query_sync() -> dict:
+        from sqlalchemy import create_engine, text as _text
+
+        engine = create_engine(database_url)
+
+        # Build WHERE clauses for EMA filter
+        if ema == "ema20":
+            ema_filter = "e.crossed_ema20 = TRUE"
+        elif ema == "ema50":
+            ema_filter = "e.crossed_ema50 = TRUE"
+        else:
+            ema_filter = "(e.crossed_ema20 OR e.crossed_ema50)"
+
+        dir_filter = ""
+        if direction in ("bullish", "bearish"):
+            dir_filter = f"AND e.cross_direction = '{direction}'"
+
+        with engine.connect() as conn:
+            rows = conn.execute(_text(f"""
+                SELECT
+                    s.symbol,
+                    s.name,
+                    s.exchange,
+                    e.trade_date::text   AS trade_date,
+                    e.close_price::float AS close_price,
+                    e.ema20::float       AS ema20,
+                    e.ema50::float       AS ema50,
+                    e.crossed_ema20,
+                    e.crossed_ema50,
+                    e.cross_direction,
+                    CASE
+                        WHEN e.crossed_ema20 AND e.crossed_ema50 THEN 'EMA20+EMA50'
+                        WHEN e.crossed_ema20                     THEN 'EMA20'
+                        ELSE                                          'EMA50'
+                    END AS crossed
+                FROM ema_signals e
+                JOIN sme_stocks  s USING (symbol)
+                WHERE {ema_filter}
+                  {dir_filter}
+                  AND e.trade_date >= CURRENT_DATE - (:lookback * INTERVAL '1 day')
+                ORDER BY e.trade_date DESC, s.symbol
+            """), {"lookback": lookback}).mappings().fetchall()
+
+            total_monitored = conn.execute(
+                _text("SELECT COUNT(*) FROM sme_stocks")
+            ).scalar() or 0
+
+            last_run = conn.execute(
+                _text("SELECT MAX(run_at)::text FROM ema_signals")
+            ).scalar()
+
+        return {
+            "signals":         [dict(r) for r in rows],
+            "total_monitored": int(total_monitored),
+            "last_run":        last_run,
+        }
+
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, _query_sync)
+    except Exception as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail=f"Database error: {exc}")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)

@@ -7,8 +7,8 @@ const inter = Inter({ subsets: ['latin'], variable: '--font-sans' });
 const mono  = JetBrains_Mono({ subsets: ['latin'], variable: '--font-mono' });
 
 export const metadata: Metadata = {
-  title: 'StockResearch AI',
-  description: 'AI-powered Indian equity research — NSE & BSE',
+  title: 'AlphaPulse — AI Stock Research',
+  description: 'Institutional-grade AI stock research for Indian markets — NSE & BSE',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
