@@ -17,3 +17,6 @@ rapidfuzz>=3.0.0
 # Optional providers (install only what you need)
 groq>=0.8.0
 google-generativeai>=0.8.0
+
+# Dev / test
+pytest>=8.0.0
