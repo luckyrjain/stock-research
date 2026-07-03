@@ -18,12 +18,10 @@ CREATE TABLE IF NOT EXISTS ema_signals (
     close_price     NUMERIC(12, 4),
     ema20           NUMERIC(12, 4),
     ema50           NUMERIC(12, 4),
-    crossed_ema20   BOOLEAN     DEFAULT FALSE,
-    crossed_ema50   BOOLEAN     DEFAULT FALSE,
-    cross_direction VARCHAR(10),          -- 'bullish' | 'bearish' | NULL
+    cross_type      VARCHAR(10),          -- 'golden' | 'death' | NULL
     run_at          TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(symbol, trade_date)
 );
 
 CREATE INDEX IF NOT EXISTS idx_ema_signals_date  ON ema_signals(trade_date);
-CREATE INDEX IF NOT EXISTS idx_ema_signals_cross ON ema_signals(crossed_ema20, crossed_ema50);
+CREATE INDEX IF NOT EXISTS idx_ema_signals_cross ON ema_signals(cross_type);
