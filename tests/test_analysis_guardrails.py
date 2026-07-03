@@ -1,3 +1,4 @@
+import json
 import unittest
 import sys
 from types import SimpleNamespace
@@ -23,7 +24,41 @@ sys.modules.setdefault(
 import crew
 
 
+def _llm_response(content: str) -> SimpleNamespace:
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+
 class AnalysisGuardrailFallbackTest(unittest.TestCase):
+    _INVALID_PAYLOAD = {
+        "symbol": "TCS",
+        "recommendation": "HOLD",
+        "confidence": "LOW",
+        "summary": "Sentence one. Sentence two. Sentence three. Sentence four.",
+        "valuation": {"verdict": "Fairly Valued", "comment": "P/E 20, ROCE 25, ROE 18."},
+        "business_quality": "Reasonable return ratios.",
+        "bull_factors": ["Only one", "Only two"],
+        "bear_factors": ["Risk one", "Risk two"],
+        "key_risks": ["Risk A", "Risk B", "Risk C"],
+        "news_highlights": "Headline summary",
+        "institutional_trend": "Promoters 50%, FIIs 10%, DIIs 12%",
+        "news_sentiment": "Neutral",
+    }
+
+    _VALID_PAYLOAD = {
+        "symbol": "SAILIFE",
+        "recommendation": "HOLD",
+        "confidence": "LOW",
+        "summary": "Sentence one. Sentence two. Sentence three. Sentence four.",
+        "valuation": {"verdict": "Fairly Valued", "comment": "P/E 64.8, P/B 9.4, ROCE 14.1, ROE 11.0."},
+        "business_quality": "ROCE is 14.1 and ROE is 11.0.",
+        "bull_factors": ["P/E is 64.8.", "ROCE is 14.1.", "DIIs hold 31.54%."],
+        "bear_factors": ["P/B is 9.4.", "Promoters hold 34.61%."],
+        "key_risks": ["Premium valuation at P/E 64.8.", "Limited news coverage.", "Promoter ownership is 34.61%."],
+        "news_highlights": "One RSI-based headline was available.",
+        "institutional_trend": "Promoters hold 34.61%, FIIs 21.17%, DIIs 31.54%.",
+        "news_sentiment": "Neutral",
+    }
+
     def setUp(self) -> None:
         self.all_data = {
             "stock_info": {
@@ -145,35 +180,36 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
         self.assertTrue(parsed["ok"])
 
     def test_invalid_structured_analysis_falls_back_safely(self) -> None:
-        invalid_analysis = """
-        {
-          "symbol": "TCS",
-          "recommendation": "HOLD",
-          "confidence": "LOW",
-          "summary": "Sentence one. Sentence two. Sentence three. Sentence four.",
-          "valuation": {"verdict": "Fairly Valued", "comment": "P/E 20, ROCE 25, ROE 18."},
-          "business_quality": "Reasonable return ratios.",
-          "bull_factors": ["Only one", "Only two"],
-          "bear_factors": ["Risk one", "Risk two"],
-          "key_risks": ["Risk A", "Risk B", "Risk C"],
-          "news_highlights": "Headline summary",
-          "institutional_trend": "Promoters 50%, FIIs 10%, DIIs 12%",
-          "news_sentiment": "Neutral"
-        }
-        """
+        # Both attempts return an invalid payload (too few bull_factors) →
+        # guardrail retry fires once, then the safe HOLD fallback is used.
+        with patch("litellm.completion", return_value=_llm_response(json.dumps(self._INVALID_PAYLOAD))) as mock_completion:
+            analysis = crew.run_analysis_with_fallback("TCS", {name: {} for name in crew.ALL_DATA_TASKS})
 
-        fake_result = SimpleNamespace(tasks_output=[SimpleNamespace(raw=invalid_analysis)])
-        fake_crew = SimpleNamespace(kickoff=lambda: fake_result)
-        all_data = {name: {} for name in crew.ALL_DATA_TASKS}
-
-        with patch.object(crew, "build_crew", return_value=fake_crew), \
-             patch.object(crew, "_resolve_llm", side_effect=RuntimeError("llm unavailable")):
-            analysis = crew.run_analysis_with_fallback("TCS", all_data)
-
+        self.assertEqual(mock_completion.call_count, 2)
         self.assertEqual(analysis["recommendation"], "HOLD")
         self.assertEqual(analysis["confidence"], "LOW")
         self.assertEqual(len(analysis["bull_factors"]), 3)
         self.assertIn("bull_factors", analysis["valuation"]["comment"])
+
+    def test_guardrail_failure_retries_once_then_succeeds(self) -> None:
+        responses = [
+            _llm_response(json.dumps(self._INVALID_PAYLOAD)),
+            _llm_response(json.dumps(self._VALID_PAYLOAD)),
+        ]
+        with patch("litellm.completion", side_effect=responses) as mock_completion:
+            analysis = crew.run_analysis_with_fallback("SAILIFE", self.all_data)
+
+        self.assertEqual(mock_completion.call_count, 2)
+        self.assertEqual(analysis["bull_factors"], self._VALID_PAYLOAD["bull_factors"])
+        second_messages = mock_completion.call_args_list[1].kwargs["messages"]
+        self.assertIn("failed validation", second_messages[-1]["content"])
+
+    def test_llm_exception_returns_safe_fallback(self) -> None:
+        with patch("litellm.completion", side_effect=RuntimeError("boom")):
+            analysis = crew.run_analysis_with_fallback("TCS", {name: {} for name in crew.ALL_DATA_TASKS})
+
+        self.assertEqual(analysis["recommendation"], "HOLD")
+        self.assertIn("boom", analysis["valuation"]["comment"])
 
 
 if __name__ == "__main__":
