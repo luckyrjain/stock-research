@@ -45,6 +45,20 @@ def _save_picks_cache(picks: list, generated_at: str) -> None:
     except Exception:
         pass
 
+
+# ── SME signals: shared engine + refresh state ───────────────────────────────
+_SME_ENGINE = None
+_SME_REFRESHING = False
+
+
+def _get_sme_engine():
+    global _SME_ENGINE
+    if _SME_ENGINE is None:
+        from db.models import get_engine
+        _SME_ENGINE = get_engine()
+    return _SME_ENGINE
+
+
 app = FastAPI(title="StockResearch AI")
 LOGGER = get_logger("api")
 
@@ -674,37 +688,29 @@ async def get_prices(symbols: str = Query(...)):
 
 @app.get("/api/sme-signals")
 async def get_sme_signals(
-    lookback:  int = Query(5, ge=1, le=30, description="Trading days back to check for crossovers"),
-    direction: str = Query("all",  description="all | bullish | bearish"),
-    ema:       str = Query("all",  description="all | ema20 | ema50"),
+    lookback:  int = Query(5, ge=1, le=30, description="Days back to check for crosses"),
+    direction: str = Query("all", description="all | golden | death"),
 ):
-    """Return SME stocks that crossed EMA 20 or EMA 50 in the last N days."""
+    """Return SME stocks with an EMA20/EMA50 golden or death cross in the last N days."""
     import os
+    from fastapi import HTTPException
 
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        from fastapi import HTTPException
+    if direction not in ("all", "golden", "death"):
+        raise HTTPException(status_code=422, detail="direction must be one of: all, golden, death")
+    if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the SME pipeline first.")
 
     def _query_sync() -> dict:
-        from sqlalchemy import create_engine, text as _text
+        from sqlalchemy import text as _text
 
-        engine = create_engine(database_url)
-
-        # Build WHERE clauses for EMA filter
-        if ema == "ema20":
-            ema_filter = "e.crossed_ema20 = TRUE"
-        elif ema == "ema50":
-            ema_filter = "e.crossed_ema50 = TRUE"
-        else:
-            ema_filter = "(e.crossed_ema20 OR e.crossed_ema50)"
-
-        dir_filter = ""
-        if direction in ("bullish", "bearish"):
-            dir_filter = f"AND e.cross_direction = '{direction}'"
-
+        engine = _get_sme_engine()
         with engine.connect() as conn:
-            rows = conn.execute(_text(f"""
+            rows = conn.execute(_text("""
+                WITH latest AS (
+                    SELECT DISTINCT ON (symbol) symbol, (ema20 > ema50) AS in_golden_cross
+                    FROM ema_signals
+                    ORDER BY symbol, trade_date DESC
+                )
                 SELECT
                     s.symbol,
                     s.name,
@@ -713,25 +719,28 @@ async def get_sme_signals(
                     e.close_price::float AS close_price,
                     e.ema20::float       AS ema20,
                     e.ema50::float       AS ema50,
-                    e.crossed_ema20,
-                    e.crossed_ema50,
-                    e.cross_direction,
-                    CASE
-                        WHEN e.crossed_ema20 AND e.crossed_ema50 THEN 'EMA20+EMA50'
-                        WHEN e.crossed_ema20                     THEN 'EMA20'
-                        ELSE                                          'EMA50'
-                    END AS crossed
+                    e.cross_type         AS "cross",
+                    COALESCE(l.in_golden_cross, FALSE) AS in_golden_cross
                 FROM ema_signals e
                 JOIN sme_stocks  s USING (symbol)
-                WHERE {ema_filter}
-                  {dir_filter}
+                LEFT JOIN latest l USING (symbol)
+                WHERE e.cross_type IS NOT NULL
+                  AND (:direction = 'all' OR e.cross_type = :direction)
                   AND e.trade_date >= CURRENT_DATE - (:lookback * INTERVAL '1 day')
                 ORDER BY e.trade_date DESC, s.symbol
-            """), {"lookback": lookback}).mappings().fetchall()
+            """), {"lookback": lookback, "direction": direction}).mappings().fetchall()
 
             total_monitored = conn.execute(
                 _text("SELECT COUNT(*) FROM sme_stocks")
             ).scalar() or 0
+
+            golden_now = conn.execute(_text("""
+                SELECT COUNT(*) FROM (
+                    SELECT DISTINCT ON (symbol) (ema20 > ema50) AS ig
+                    FROM ema_signals
+                    ORDER BY symbol, trade_date DESC
+                ) t WHERE t.ig
+            """)).scalar() or 0
 
             last_run = conn.execute(
                 _text("SELECT MAX(run_at)::text FROM ema_signals")
@@ -740,15 +749,49 @@ async def get_sme_signals(
         return {
             "signals":         [dict(r) for r in rows],
             "total_monitored": int(total_monitored),
+            "golden_now":      int(golden_now),
             "last_run":        last_run,
+            "refreshing":      _SME_REFRESHING,
         }
 
     loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(None, _query_sync)
     except Exception as exc:
-        from fastapi import HTTPException
         raise HTTPException(status_code=503, detail=f"Database error: {exc}")
+
+
+@app.post("/api/sme-signals/refresh", status_code=202)
+async def refresh_sme_signals():
+    """Run the SME EMA pipeline in the background. 409 if a run is in progress."""
+    import os
+    from fastapi import HTTPException
+
+    global _SME_REFRESHING
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+    if _SME_REFRESHING:
+        raise HTTPException(status_code=409, detail="A refresh is already running.")
+
+    _SME_REFRESHING = True
+    loop = asyncio.get_running_loop()
+
+    def _run_pipeline():
+        global _SME_REFRESHING
+        try:
+            from sme_ema_pipeline import run as run_sme_pipeline
+            run_sme_pipeline()
+        except Exception as exc:
+            log_event(LOGGER, "sme_refresh_failed", level="error", error=str(exc))
+        finally:
+            _SME_REFRESHING = False
+
+    async def _launch():
+        await loop.run_in_executor(None, _run_pipeline)
+
+    asyncio.create_task(_launch())
+    log_event(LOGGER, "sme_refresh_started")
+    return {"started": True}
 
 
 if __name__ == "__main__":
