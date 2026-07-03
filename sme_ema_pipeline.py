@@ -1,15 +1,16 @@
 """
 SME Stocks EMA Crossover Pipeline
 ==================================
-Fetches all Indian SME stocks (NSE Emerge + BSE SME), downloads 3 months of
-daily OHLCV, computes EMA 20 and EMA 50, detects crossovers (both bullish and
-bearish) and stores results in PostgreSQL.
+Fetches all Indian SME stocks (NSE Emerge + BSE SME), downloads 1 year of
+daily OHLCV, computes EMA 20 and EMA 50, detects golden/death crosses
+(EMA20 crossing EMA50) and stores the last ~3 months in PostgreSQL.
 
 Usage:
     python sme_ema_pipeline.py --setup-db   # create tables (idempotent)
     python sme_ema_pipeline.py              # run pipeline (24 h cache on stock lists)
     python sme_ema_pipeline.py --force      # bypass stock-list cache
     python sme_ema_pipeline.py --lookback 5 # days back to check crossovers (default 5)
+    python sme_ema_pipeline.py --reset-db   # drop and recreate DB tables, then exit
 """
 
 import argparse
@@ -34,7 +35,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _LOOKBACK_DAYS = 5
-_OHLCV_PERIOD  = "3mo"   # ~62 trading days — enough for stable EMA 50
+_OHLCV_PERIOD  = "1y"    # full year so EMA 50 is converged before the stored window
+_STORE_DAYS    = 63      # ~3 months of trading days kept in the DB
 _MAX_WORKERS   = 8
 
 
@@ -60,8 +62,10 @@ def _fetch_ohlcv(stock: dict) -> dict:
 
 def _compute_ema_signals(result: dict) -> list[dict]:
     """
-    Compute EMA 20/50 and crossover flags for one stock.
-    Returns a list of row dicts (one per trading day).
+    Compute EMA 20/50 and golden/death cross flags for one stock.
+    A golden cross fires when EMA20 crosses from <= EMA50 to > EMA50; death is the reverse.
+    EMAs are computed over the full fetched series so EMA50 is converged;
+    only the last _STORE_DAYS rows are returned for storage.
     """
     if "error" in result:
         return []
@@ -72,45 +76,25 @@ def _compute_ema_signals(result: dict) -> list[dict]:
     df["ema20"] = df["Close"].ewm(span=20, adjust=False).mean()
     df["ema50"] = df["Close"].ewm(span=50, adjust=False).mean()
 
-    prev_close = df["Close"].shift(1)
+    above = df["ema20"] > df["ema50"]
+    prev_above = above.shift(1)
+    golden = above & (prev_above == False)   # noqa: E712 — elementwise; NaN first row never flags
+    death  = (~above) & (prev_above == True)  # noqa: E712
+    df["cross"] = np.where(golden, "golden", np.where(death, "death", None))
 
-    for ema_col, flag_col in [("ema20", "crossed_ema20"), ("ema50", "crossed_ema50")]:
-        prev_ema = df[ema_col].shift(1)
-        bullish  = (prev_close < prev_ema) & (df["Close"] >= df[ema_col])
-        bearish  = (prev_close >= prev_ema) & (df["Close"] < df[ema_col])
-        df[flag_col] = bullish | bearish
-
-    # cross_direction: derived from EMA20 if it crossed, else EMA50
-    prev_ema20  = df["ema20"].shift(1)
-    prev_ema50  = df["ema50"].shift(1)
-    bullish20   = (prev_close < prev_ema20) & (df["Close"] >= df["ema20"])
-    bearish20   = (prev_close >= prev_ema20) & (df["Close"] < df["ema20"])
-    bullish50   = (prev_close < prev_ema50) & (df["Close"] >= df["ema50"])
-    bearish50   = (prev_close >= prev_ema50) & (df["Close"] < df["ema50"])
-
-    df["cross_direction"] = np.where(
-        bullish20, "bullish",
-        np.where(bearish20, "bearish",
-        np.where(bullish50, "bullish",
-        np.where(bearish50, "bearish", None)))
-    )
-    # Blank out direction on rows with no crossover
-    no_cross = ~(df["crossed_ema20"] | df["crossed_ema50"])
-    df.loc[no_cross, "cross_direction"] = None
+    df = df.iloc[-_STORE_DAYS:]
 
     rows = []
     for idx, row in df.iterrows():
         trade_date = idx.date() if hasattr(idx, "date") else idx
-        direction  = row["cross_direction"]
+        cross = row["cross"]
         rows.append({
-            "symbol":          symbol,
-            "trade_date":      trade_date,
-            "close_price":     _safe_float(row["Close"]),
-            "ema20":           _safe_float(row["ema20"]),
-            "ema50":           _safe_float(row["ema50"]),
-            "crossed_ema20":   bool(row["crossed_ema20"]),
-            "crossed_ema50":   bool(row["crossed_ema50"]),
-            "cross_direction": None if (direction is None or pd.isna(direction)) else str(direction),
+            "symbol":      symbol,
+            "trade_date":  trade_date,
+            "close_price": _safe_float(row["Close"]),
+            "ema20":       _safe_float(row["ema20"]),
+            "ema50":       _safe_float(row["ema50"]),
+            "cross":       None if (cross is None or pd.isna(cross)) else str(cross),
         })
     return rows
 
@@ -161,19 +145,15 @@ def _upsert_signals(engine, rows: list[dict]) -> None:
             conn.execute(
                 text("""
                     INSERT INTO ema_signals
-                        (symbol, trade_date, close_price, ema20, ema50,
-                         crossed_ema20, crossed_ema50, cross_direction, run_at)
+                        (symbol, trade_date, close_price, ema20, ema50, cross_type, run_at)
                     VALUES
-                        (:symbol, :trade_date, :close_price, :ema20, :ema50,
-                         :crossed_ema20, :crossed_ema50, :cross_direction, NOW())
+                        (:symbol, :trade_date, :close_price, :ema20, :ema50, :cross, NOW())
                     ON CONFLICT ON CONSTRAINT uq_ema_signals_symbol_date DO UPDATE SET
-                        close_price     = EXCLUDED.close_price,
-                        ema20           = EXCLUDED.ema20,
-                        ema50           = EXCLUDED.ema50,
-                        crossed_ema20   = EXCLUDED.crossed_ema20,
-                        crossed_ema50   = EXCLUDED.crossed_ema50,
-                        cross_direction = EXCLUDED.cross_direction,
-                        run_at          = NOW()
+                        close_price = EXCLUDED.close_price,
+                        ema20       = EXCLUDED.ema20,
+                        ema50       = EXCLUDED.ema50,
+                        cross_type  = EXCLUDED.cross_type,
+                        run_at      = NOW()
                 """),
                 batch,
             )
@@ -191,17 +171,12 @@ def _print_summary(engine, lookback_days: int) -> None:
             s.exchange,
             e.trade_date,
             e.close_price,
-            e.cross_direction,
-            CASE
-                WHEN e.crossed_ema20 AND e.crossed_ema50 THEN 'EMA20+EMA50'
-                WHEN e.crossed_ema20                     THEN 'EMA20'
-                ELSE                                          'EMA50'
-            END AS crossed,
+            e.cross_type,
             e.ema20,
             e.ema50
         FROM ema_signals e
         JOIN sme_stocks  s USING (symbol)
-        WHERE (e.crossed_ema20 OR e.crossed_ema50)
+        WHERE e.cross_type IS NOT NULL
           AND e.trade_date >= CURRENT_DATE - (:lookback * INTERVAL '1 day')
         ORDER BY e.trade_date DESC, s.symbol
     """)
@@ -209,14 +184,14 @@ def _print_summary(engine, lookback_days: int) -> None:
         result = conn.execute(query, {"lookback": lookback_days}).fetchall()
 
     if not result:
-        print(f"\nNo EMA crossovers found in the last {lookback_days} trading days.")
+        print(f"\nNo golden/death crosses found in the last {lookback_days} days.")
         return
 
     w = 80
     print(f"\n{'=' * w}")
-    print(f"  SME Stocks — EMA Crossovers (last {lookback_days} days)")
+    print(f"  SME Stocks — EMA20/EMA50 Golden & Death Crosses (last {lookback_days} days)")
     print(f"{'=' * w}")
-    hdr = f"{'Date':<12} {'Symbol':<16} {'Exch':<6} {'Crossed':<14} {'Direction':<10} {'Close':>9} {'EMA20':>9} {'EMA50':>9}"
+    hdr = f"{'Date':<12} {'Symbol':<16} {'Exch':<6} {'Cross':<10} {'Close':>9} {'EMA20':>9} {'EMA50':>9}"
     print(hdr)
     print("-" * w)
     for row in result:
@@ -224,13 +199,12 @@ def _print_summary(engine, lookback_days: int) -> None:
             f"{str(row.trade_date):<12} "
             f"{row.symbol:<16} "
             f"{row.exchange:<6} "
-            f"{row.crossed:<14} "
-            f"{(row.cross_direction or ''):<10} "
+            f"{(row.cross_type or ''):<10} "
             f"{float(row.close_price or 0):>9.2f} "
             f"{float(row.ema20 or 0):>9.2f} "
             f"{float(row.ema50 or 0):>9.2f}"
         )
-    print(f"\n  {len(result)} crossover event(s)\n")
+    print(f"\n  {len(result)} cross event(s)\n")
 
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
@@ -271,8 +245,8 @@ def run(force: bool = False, lookback_days: int = _LOOKBACK_DAYS) -> None:
                 ohlcv_ok.append(res)
     logger.info("OHLCV: %d fetched, %d errors", len(ohlcv_ok), errors)
 
-    # Phase 3: compute EMAs + crossover flags
-    logger.info("Phase 3 — Computing EMA 20/50 crossovers...")
+    # Phase 3: compute EMAs + golden/death cross flags
+    logger.info("Phase 3 — Computing EMA20/EMA50 golden/death crosses...")
     all_rows = []
     for res in ohlcv_ok:
         all_rows.extend(_compute_ema_signals(res))
@@ -290,6 +264,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="SME EMA Crossover Pipeline")
     parser.add_argument("--setup-db",  action="store_true",
                         help="Create DB tables and exit")
+    parser.add_argument("--reset-db",  action="store_true",
+                        help="Drop and recreate DB tables, then exit")
     parser.add_argument("--force",     action="store_true",
                         help="Bypass 24 h cache on SME stock lists")
     parser.add_argument("--lookback",  type=int, default=_LOOKBACK_DAYS,
@@ -298,6 +274,13 @@ def main() -> None:
 
     if args.setup_db:
         setup_db(get_engine())
+        return
+
+    if args.reset_db:
+        engine = get_engine()
+        metadata.drop_all(engine)
+        metadata.create_all(engine)
+        logger.info("Database tables dropped and recreated")
         return
 
     run(force=args.force, lookback_days=args.lookback)
