@@ -28,6 +28,8 @@ stock-research/
 ├── cache.py                File-based TTL cache (output/<SYMBOL>/<task>.json)
 ├── schemas.py              Normalization contracts: raw tool output → canonical dicts
 ├── market_picks_pipeline.py  Multi-agent weekly picks pipeline (6 phases)
+├── sme_ema_pipeline.py     SME golden/death cross batch pipeline (PostgreSQL)
+├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
 ├── observability.py        Structured JSON logging via log_event()
 ├── requirements.txt
 ├── .env.example
@@ -39,6 +41,7 @@ stock-research/
 │   └── crew_tasks.py       Thin loader: builds task specs and analyst prompt string
 ├── tools/
 │   ├── market_picks_tools.py  RSS + GNews scrapers for 11 sources; exports SOURCES + SCRAPER_FNS
+│   ├── sme_tools.py           NSE Emerge + BSE SME stock-list fetchers
 │   ├── hdfc_sec_agent.py      HDFC Securities Fundamental + Technical scrapers (GNews-based)
 │   └── ...                    Other data-fetching functions (yfinance, Screener.in, gnews, NSE API)
 ├── signals/                Quantitative signal engine (features → signal scores → verdict)
@@ -257,6 +260,28 @@ Handles three input forms:
 3. On cache miss: wraps `MarketPicksPipeline.run()` in `run_in_executor`; bridges events via `asyncio.Queue`
 4. Pipeline calls `on_event(payload)` → `loop.call_soon_threadsafe(q.put_nowait, payload)` → SSE stream
 5. The six pipeline phases run synchronously inside the executor thread; final result saved to cache
+
+### SME golden cross flow
+
+`sme_ema_pipeline.py` is a standalone batch job (PostgreSQL, `DATABASE_URL` env var):
+
+1. Fetches all NSE Emerge + BSE SME stocks (`tools/sme_tools.py`, 24 h list cache)
+2. Downloads 1 year of daily OHLCV per stock via yfinance
+3. Computes EMA 20/50 over the full year; flags **golden crosses** (EMA20 crosses above
+   EMA50) and **death crosses** (crosses below); stores only the last ~3 months of rows
+4. `GET /api/sme-signals` serves cross events + current regime (`ema20 > ema50` on the
+   latest row); `POST /api/sme-signals/refresh` runs the pipeline in the background
+   (409 if already running; `refreshing` flag in the GET response)
+
+CLI: `--setup-db` (create tables), `--reset-db` (drop + recreate — required after schema
+changes; data is fully regenerable), `--force` (bypass list cache), `--lookback N`.
+
+The DB column for the cross is named `cross_type` (`'golden'`/`'death'`/`NULL`) because
+`CROSS` is a reserved SQL keyword; the API/TS field is `cross`.
+
+Daily auto-run (crontab, assumes system TZ is IST; NSE closes 15:30):
+
+    30 18 * * 1-5 cd /Users/luckyratanlaljain/project/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
 
 ### Shared state and queues
 
