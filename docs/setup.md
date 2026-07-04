@@ -7,6 +7,7 @@
 - `npm`
 - Internet access (market/news data; Google Fonts during `npm run build`)
 - One LLM provider configured (see below)
+- PostgreSQL (optional — only for the SME Signals screener)
 
 ## Backend setup
 
@@ -35,6 +36,7 @@ Then edit `.env` and set the provider you want to use.
 | `ANALYST_MODEL` | No | Model for the final analyst step (stronger tier) |
 | `OLLAMA_BASE_URL` | Ollama only | Default: `http://localhost:11434` |
 | `LOG_LEVEL` | No | `DEBUG` / `INFO` / `WARNING` — default: `INFO` |
+| `DATABASE_URL` | SME signals only | PostgreSQL DSN, e.g. `postgresql://user:pass@localhost:5432/sme_research` |
 
 If `LLM_PROVIDER` is unset, the backend auto-detects the first key present in this order: `anthropic`, `openai`, `groq`, `google`, `openrouter`.
 
@@ -82,6 +84,8 @@ Backend endpoints:
 | `GET /api/validate/{symbol}` | Ticker / ISIN / company name lookup |
 | `GET /api/analyse/{symbol}` | Stock analysis SSE stream |
 | `GET /api/market-picks` | Market picks SSE stream (`?force=true` bypasses cache) |
+| `GET /api/sme-signals` | SME golden/death cross events (`?lookback=1..30`, `?direction=all\|golden\|death`) |
+| `POST /api/sme-signals/refresh` | Run the SME pipeline in the background (202; 409 if already running) |
 
 **Terminal B — frontend:**
 
@@ -92,6 +96,7 @@ npm run dev
 
 - Stock analysis: [http://localhost:3000](http://localhost:3000)
 - Market picks: [http://localhost:3000/market-picks](http://localhost:3000/market-picks)
+- SME signals: [http://localhost:3000/sme-signals](http://localhost:3000/sme-signals)
 
 ## CLI mode
 
@@ -99,6 +104,25 @@ npm run dev
 source .venv/bin/activate
 python main.py TCS
 python main.py RELIANCE --force   # bypass cache
+```
+
+## SME signals pipeline
+
+Requires `DATABASE_URL` in `.env` and a running PostgreSQL. Create the database once (`createdb sme_research`), then:
+
+```bash
+source .venv/bin/activate
+python sme_ema_pipeline.py --setup-db   # create tables (idempotent)
+python sme_ema_pipeline.py              # fetch SME stocks, compute EMA20/EMA50 crosses, store
+python sme_ema_pipeline.py --reset-db   # drop + recreate tables (after schema changes; data is regenerable)
+python sme_ema_pipeline.py --force      # bypass the 24 h stock-list cache
+python sme_ema_pipeline.py --lookback 10  # report window for the CLI summary
+```
+
+The screener page's **Refresh Data** button triggers the same pipeline via `POST /api/sme-signals/refresh`. For daily automation after NSE close (assumes system TZ is IST):
+
+```cron
+30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
 ```
 
 ## Cache and output
@@ -131,12 +155,18 @@ source .venv/bin/activate
 python main.py INFY
 uvicorn api:app --reload --port 8000
 
+# SME signals pipeline
+python sme_ema_pipeline.py
+
+# Backend tests
+python -m pytest tests/
+
 # Frontend
 cd frontend
 npm run dev
 npm run build
 npm run start
-npx tsc --noEmit   # type-check (the only automated check)
+npx tsc --noEmit   # type-check (the only automated frontend check)
 ```
 
 ## Troubleshooting
@@ -177,6 +207,10 @@ The pipeline fetches from external RSS feeds and GNews. If all sources return em
 ### NSE equity master download fails
 
 The pipeline fails open when `output/_nse_master.txt` cannot be downloaded — all tickers are allowed through. If validation is too permissive, delete the stale cache file and ensure `nsearchives.nseindia.com` is reachable.
+
+### SME signals page returns 503
+
+`GET /api/sme-signals` returns 503 when `DATABASE_URL` is not set or PostgreSQL is unreachable. Set `DATABASE_URL` in `.env`, make sure the database exists, and run `python sme_ema_pipeline.py --setup-db` followed by a pipeline run so the tables have data.
 
 ### Next.js build fails on Google Fonts
 

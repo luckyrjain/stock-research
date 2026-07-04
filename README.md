@@ -6,13 +6,15 @@ Stock Research is a full-stack Indian equity research platform with two modes:
 
 **Market Picks** — a multi-agent pipeline that scrapes 16 Indian and global financial sources (RSS feeds + GNews), extracts stock recommendations with an LLM, validates symbols against the NSE equity master, runs due diligence on each, and returns a confidence-ranked watchlist with `BUY` / `WATCHLIST` / `HOLD` / `SELL` ratings and deterministic entry/target/stop-loss levels.
 
+**SME Signals** — a PostgreSQL-backed batch pipeline that screens all NSE Emerge + BSE SME stocks for EMA20/EMA50 **golden cross** and **death cross** events. It downloads a year of daily prices per stock, detects crosses, and serves recent events plus each stock's current regime (in or out of golden cross) on a dedicated screener page with an on-demand refresh button.
+
 ## Tech stack
 
 - **Backend**: Python 3.13, FastAPI, CrewAI, litellm, signals engine
 - **Frontend**: Next.js 15, React 19, TypeScript, Tailwind CSS
 - **Data sources**: Yahoo Finance, Screener.in, Google News, NSE API, BSE API, RSS feeds
 - **LLM providers**: Anthropic, OpenAI, Groq, Google, OpenRouter, Ollama (auto-detected from env)
-- **Storage**: file-based cache in `output/`
+- **Storage**: file-based cache in `output/`; PostgreSQL for SME signals
 
 ## Project structure
 
@@ -24,6 +26,8 @@ stock-research/
 ├── cache.py                File-based TTL cache (output/<SYMBOL>/<task>.json)
 ├── schemas.py              Normalisation contracts: raw tool output → canonical dicts
 ├── market_picks_pipeline.py  6-phase market picks pipeline
+├── sme_ema_pipeline.py     SME golden/death cross batch pipeline (PostgreSQL)
+├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
 ├── observability.py        Structured JSON logging via log_event()
 ├── requirements.txt
 ├── .env.example
@@ -39,12 +43,14 @@ stock-research/
 │   ├── nse_bulk_block_deals.py     NSE bulk/block deal institutional activity
 │   ├── screener_scanner.py         Screener.in public fundamental screener
 │   ├── trendlyne_agent.py          Trendlyne analyst consensus + upgrade alerts
+│   ├── sme_tools.py                NSE Emerge + BSE SME stock-list fetchers
 │   └── ...                         yfinance, Screener.in, gnews, NSE filings tools
 ├── signals/                Quantitative signal engine
 ├── tests/
 ├── frontend/
-│   ├── app/page.tsx              Stock analysis page
+│   ├── app/page.tsx              Stock analysis page (supports ?symbol= deep links)
 │   ├── app/market-picks/page.tsx Market Picks page
+│   ├── app/sme-signals/page.tsx  SME golden cross screener
 │   ├── components/               Dashboard, search, progress tracker, market picks dashboard
 │   ├── app/api/                  Next.js proxy routes → FastAPI backend
 │   └── types/index.ts            Canonical TS types for all SSE messages and reports
@@ -63,6 +69,7 @@ stock-research/
 - `npm`
 - Internet access
 - One configured LLM provider: Anthropic, OpenAI, Groq, Google, or local Ollama
+- PostgreSQL (optional — only for the SME Signals screener)
 
 ## Backend setup
 
@@ -86,6 +93,9 @@ OPENAI_API_KEY=sk-...
 # Ollama
 LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://localhost:11434
+
+# Optional — only for the SME Signals screener
+DATABASE_URL=postgresql://user:password@localhost:5432/sme_research
 ```
 
 ## Frontend setup
@@ -120,6 +130,22 @@ npm run dev
 Open [http://localhost:3000](http://localhost:3000).
 
 The Market Picks page is at [http://localhost:3000/market-picks](http://localhost:3000/market-picks).
+The SME Signals screener is at [http://localhost:3000/sme-signals](http://localhost:3000/sme-signals) (needs `DATABASE_URL` and one pipeline run — see below).
+
+## Run the SME signals pipeline
+
+```bash
+source .venv/bin/activate
+python sme_ema_pipeline.py --setup-db   # create tables (first run only)
+python sme_ema_pipeline.py              # fetch, compute crosses, store
+python sme_ema_pipeline.py --reset-db   # drop + recreate tables (after schema changes)
+```
+
+Data can also be refreshed from the SME Signals page (Refresh Data button) or scheduled daily after NSE close:
+
+```cron
+30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
+```
 
 ## Run the CLI pipeline
 
@@ -136,12 +162,19 @@ python main.py RELIANCE --force   # bypass cache
 uvicorn api:app --reload --port 8000
 python main.py INFY
 
+# SME signals pipeline
+python sme_ema_pipeline.py --setup-db
+python sme_ema_pipeline.py
+
+# Tests
+python -m pytest tests/
+
 # Frontend
 cd frontend
 npm run dev
 npm run build
 npm run start
-npx tsc --noEmit    # type-check (no lint config, no test suite)
+npx tsc --noEmit    # type-check (no lint config, no frontend test suite)
 ```
 
 ## API endpoints
@@ -151,8 +184,10 @@ npx tsc --noEmit    # type-check (no lint config, no test suite)
 | `GET /api/validate/{symbol}` | Symbol lookup — accepts ticker, ISIN, or company name; returns NSE/BSE metadata |
 | `GET /api/analyse/{symbol}` | Stock analysis — SSE stream of task progress + final report |
 | `GET /api/market-picks` | Market picks — SSE stream of pipeline progress + ranked watchlist |
+| `GET /api/sme-signals` | SME golden/death cross events + current regime (`?lookback=`, `?direction=all\|golden\|death`) |
+| `POST /api/sme-signals/refresh` | Run the SME pipeline in the background (202; 409 if already running) |
 
-The Next.js app proxies all three through `frontend/app/api/`.
+The Next.js app proxies all of these through `frontend/app/api/`.
 
 `/api/market-picks` supports `?force=true` to bypass the 6 h result cache.
 

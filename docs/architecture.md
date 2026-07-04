@@ -8,6 +8,7 @@ The project has two user-facing entrypoints and three backend flows:
 |---|---|---|
 | Stock analysis | `frontend/app/page.tsx` → `GET /api/analyse/{symbol}` | Validate → fetch → signal engine → LLM analyst → report |
 | Market picks | `frontend/app/market-picks/page.tsx` → `GET /api/market-picks` | Scrape → extract → consolidate → research → analyze → score |
+| SME signals | `frontend/app/sme-signals/page.tsx` → `GET /api/sme-signals` | Batch pipeline (PostgreSQL) → golden/death cross screener |
 | CLI | `python main.py <SYMBOL>` | Same as stock analysis, no frontend |
 
 ---
@@ -116,6 +117,28 @@ HOLD      otherwise
 
 ---
 
+## SME golden cross flow
+
+`sme_ema_pipeline.py` is a standalone batch job that persists to PostgreSQL (`DATABASE_URL`):
+
+```text
+Phase 1  Fetch NSE Emerge + BSE SME stock lists (tools/sme_tools.py, 24 h cache)
+Phase 2  Download 1 year of daily OHLCV per stock (yfinance, 8 workers)
+Phase 3  Compute EMA 20/50 over the full year; flag golden crosses (EMA20 crosses
+         above EMA50) and death crosses (crosses below); keep last 63 trading days
+Phase 4  Idempotent upserts into sme_stocks + ema_signals (unique on symbol+trade_date)
+Phase 5  Print CLI summary of crosses in the lookback window
+```
+
+Serving:
+
+- `GET /api/sme-signals?lookback=&direction=` — cross events in the window plus each stock's current regime (`in_golden_cross` = `ema20 > ema50` on its latest stored row) and `golden_now` (count of stocks currently in golden-cross regime). Uses one lazily created module-level engine; `direction` is a bound SQL parameter.
+- `POST /api/sme-signals/refresh` — runs the pipeline in a background executor (202 on start, 409 while running); the GET response's `refreshing` flag lets the UI poll until completion.
+
+The DB column is `cross_type` (`'golden'`/`'death'`/`NULL`) because `CROSS` is a reserved SQL keyword; the API/TypeScript field is `cross`. CLI flags: `--setup-db`, `--reset-db` (drop + recreate; data is fully regenerable), `--force`, `--lookback N`.
+
+---
+
 ## Agent layers
 
 ### Layer 1 — Data agents (CrewAI)
@@ -133,7 +156,7 @@ HOLD      otherwise
 
 ### Layer 2 — Analyst (direct LLM call)
 
-`run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI. It receives all six data slices plus signal engine context and must return the JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structure; failures return a safe HOLD via `_safe_analysis_fallback()`.
+`run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI. It receives all six data slices plus signal engine context and must return the JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structure and grounded-claims checks; a guardrail failure triggers one corrective LLM retry with the validation error appended, then a safe HOLD via `_safe_analysis_fallback()` if the retry also fails. A rate-limit error gets one separate retry with a parsed wait.
 
 ### Layer 3 — Market picks pipeline
 
@@ -217,6 +240,8 @@ stock-research/
 ├── cache.py                TTL cache
 ├── schemas.py              Normalisation contracts
 ├── market_picks_pipeline.py  6-phase picks pipeline
+├── sme_ema_pipeline.py     SME golden/death cross batch pipeline
+├── db/                     SQLAlchemy Core tables + schema.sql
 ├── observability.py        Structured JSON logging
 ├── requirements.txt
 ├── .env.example
@@ -237,8 +262,9 @@ stock-research/
 ├── tests/
 ├── frontend/
 │   ├── app/
-│   │   ├── page.tsx                Stock analysis page
+│   │   ├── page.tsx                Stock analysis page (?symbol= deep links)
 │   │   ├── market-picks/page.tsx   Market picks page
+│   │   ├── sme-signals/page.tsx    SME golden cross screener
 │   │   └── api/                    Proxy routes
 │   ├── components/
 │   ├── types/index.ts

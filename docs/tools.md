@@ -1,6 +1,6 @@
 # Tools Reference
 
-The Python data layer is split into two groups: **stock analysis tools** (one per data task) and **market picks scrapers** (one per financial source).
+The Python data layer is split into three groups: **stock analysis tools** (one per data task), **market picks scrapers** (one per financial source), and **SME stock-list fetchers** (for the golden cross pipeline).
 
 ---
 
@@ -154,6 +154,18 @@ Credibility weights are defined in `_SOURCE_CREDIBILITY` in `market_picks_pipeli
 2. Export `MY_SOURCES` (list of `(name, type, fn_name)` tuples) and `MY_SCRAPERS` (dict of `name → fn`)
 3. Import and merge into `SOURCES` and `SCRAPER_FNS` at the bottom of `tools/market_picks_tools.py`
 4. Add a credibility entry in `_SOURCE_CREDIBILITY` in `market_picks_pipeline.py`
+
+---
+
+## SME stock-list fetchers
+
+Used only by `sme_ema_pipeline.py`. Live in `tools/sme_tools.py`; lists are cached under `output/` for 24 h.
+
+| Function | Source | Returns |
+|---|---|---|
+| `fetch_nse_emerge_stocks(force=False)` | NSE `/api/live-analysis-emerge` | NSE Emerge (SME) stocks; names enriched via Screener.in |
+| `fetch_bse_sme_stocks(force=False)` | BSE `ListofScripData` API (Groups M + MS) | BSE SME stocks (symbol = numeric scrip code) |
+| `get_all_sme_stocks(force=False)` | both of the above | Merged list of `{symbol, name, isin, series, exchange}` dicts |
 
 ---
 

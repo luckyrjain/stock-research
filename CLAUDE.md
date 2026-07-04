@@ -16,6 +16,8 @@ A full-stack Indian equity research platform. Given an NSE/BSE ticker (e.g. `TCS
 
 A second mode — **Market Picks** — runs a multi-agent pipeline that scrapes 16 Indian and global financial sources, extracts stock recommendations with an LLM, validates symbols against the NSE equity master, runs due diligence on each, and returns a confidence-ranked watchlist with BUY / WATCHLIST / HOLD / SELL ratings.
 
+A third mode — **SME Signals** — is a PostgreSQL-backed batch pipeline (`sme_ema_pipeline.py`) that screens all NSE Emerge + BSE SME stocks for EMA20/EMA50 **golden cross** and **death cross** events, served at `/sme-signals` via `GET /api/sme-signals`.
+
 ---
 
 ## Repo Structure
@@ -47,8 +49,9 @@ stock-research/
 ├── signals/                Quantitative signal engine (features → signal scores → verdict)
 ├── tests/                  unittest-based tests (no pytest plugins needed)
 ├── frontend/               Next.js 15 app (TypeScript, Tailwind CSS)
-│   ├── app/page.tsx              Stock analysis page
+│   ├── app/page.tsx              Stock analysis page (supports ?symbol= deep links)
 │   ├── app/market-picks/page.tsx Weekly picks page
+│   ├── app/sme-signals/page.tsx  SME golden cross screener
 │   ├── components/               Dashboard, search, progress tracker, market picks dashboard
 │   ├── app/api/                  Thin Next.js proxy routes → FastAPI backend
 │   └── types/index.ts            Canonical TS types for all SSE messages and reports
@@ -121,7 +124,7 @@ The system has **two distinct agent layers**:
 | `mf_holdings` | MF Holdings Analyst | `get_mf_holdings` | NSE API |
 | `filings` | — (direct call, no CrewAI agent) | `get_nse_filings` | NSE corporate announcements |
 
-**Layer 2 — Analyst (direct LLM call)**: `run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI involved. It receives all six data slices plus signal engine context, and must return a specific JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structural rules; failures return a safe HOLD fallback via `_safe_analysis_fallback()`.
+**Layer 2 — Analyst (direct LLM call)**: `run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI involved. It receives all six data slices plus signal engine context, and must return a specific JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structural rules and grounded-claims checks; a guardrail failure triggers one corrective LLM retry with the validation error appended, and only if that also fails does it return a safe HOLD fallback via `_safe_analysis_fallback()`.
 
 **Layer 3 — Market picks pipeline** (`market_picks_pipeline.py`): Six sequential phases, all blocking work offloaded to `ThreadPoolExecutor`. Communicates back to the SSE stream via `on_event` callbacks bridged through `asyncio.Queue` with `loop.call_soon_threadsafe`.
 
@@ -224,6 +227,7 @@ Provider is auto-detected from whichever key is present (checked in the order ab
 | `ANALYST_MODEL` | provider default | Model for analyst LLM call (stronger tier) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Only needed when `LLM_PROVIDER=ollama` |
 | `LOG_LEVEL` | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`) |
+| `DATABASE_URL` | unset | PostgreSQL DSN — required only for the SME signals pipeline and `/api/sme-signals` endpoints |
 
 ### Frontend
 
@@ -287,7 +291,7 @@ Daily auto-run (crontab, assumes system TZ is IST; NSE closes 15:30):
 
 - **No shared in-memory state** between requests. Each request runs its own pipeline instance.
 - **Inter-phase communication** within the market picks pipeline uses direct function return values (not queues). The `asyncio.Queue` is only used to bridge the blocking thread back to the async SSE loop.
-- **Cache** (`output/`) is the only persistent shared state; concurrent writes to different symbols are safe (each symbol has its own subdirectory).
+- **Cache** (`output/`) is the persistent shared state for stock analysis and market picks; concurrent writes to different symbols are safe (each symbol has its own subdirectory). SME signals persist to PostgreSQL instead (idempotent upserts keyed on symbol + trade_date).
 
 ### SSE bridge pattern (critical)
 
