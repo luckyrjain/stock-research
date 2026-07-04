@@ -116,7 +116,9 @@ export default function SmeSignalsPage() {
       setError('Could not reach the backend. Is the server running?');
       setData(null);
     } finally {
-      if (abortRef.current === ac && !silent) setLoading(false);
+      // Whoever owns the latest request clears loading — a silent poll that
+      // aborted a non-silent fetch must clear it too, or the skeleton sticks.
+      if (abortRef.current === ac) setLoading(false);
     }
   }, []);
 
