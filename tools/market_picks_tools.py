@@ -18,6 +18,7 @@ _CUTOFF_DAYS = 14  # look back 2 weeks to capture more articles
 
 from tools.hdfc_sec_agent import HDFC_SEC_SOURCES
 from tools.nse_bulk_block_deals import NSE_BULK_SOURCES
+from tools.nse_insider_trades import INSIDER_SOURCES
 from tools.screener_scanner import SCREENER_SCAN_SOURCES
 from tools.trendlyne_agent import TRENDLYNE_SOURCES
 
@@ -30,6 +31,8 @@ SOURCES = [
     ("Hindu BusinessLine",                  "news",      "fetch_hindu_bl"),
     ("Zerodha Z-Connect",                   "brokerage", "fetch_zerodha"),
     ("GNews — Moneycontrol",                "news",      "fetch_gnews_moneycontrol"),
+    ("GNews — Business Standard",           "news",      "fetch_gnews_business_standard"),
+    ("GNews — Financial Express",           "news",      "fetch_gnews_financial_express"),
     # ── Global bulge-bracket & research firms ───────────────────────────────────
     ("Morgan Stanley / JPMorgan",           "brokerage", "fetch_gnews_ms_jpm"),
     ("Jefferies / Macquarie / Citi",        "brokerage", "fetch_gnews_jefferies_mac_citi"),
@@ -37,7 +40,8 @@ SOURCES = [
     # ── India-focused brokerages ────────────────────────────────────────────────
     ("ShareKhan / Mirae Asset",             "brokerage", "fetch_gnews_sharekhan_mirae"),
     ("SMIFS / IDBI Capital / Geojit / Deven Choksey", "brokerage", "fetch_gnews_india_brokers"),
-] + HDFC_SEC_SOURCES + NSE_BULK_SOURCES + SCREENER_SCAN_SOURCES + TRENDLYNE_SOURCES
+    ("Motilal Oswal / ICICI Direct / Axis Securities", "brokerage", "fetch_gnews_motilal_icici_axis"),
+] + HDFC_SEC_SOURCES + NSE_BULK_SOURCES + INSIDER_SOURCES + SCREENER_SCAN_SOURCES + TRENDLYNE_SOURCES
 
 
 def _session() -> requests.Session:
@@ -178,8 +182,26 @@ def fetch_gnews_india_brokers() -> dict:
     return {"source": "SMIFS / IDBI Capital / Geojit / Deven Choksey", "type": "brokerage", "articles": arts}
 
 
+def fetch_gnews_motilal_icici_axis() -> dict:
+    arts = _gnews('"Motilal Oswal" OR "ICICI Direct" OR "Axis Securities" India stock buy recommendation target 2026', max_results=15)
+    return {"source": "Motilal Oswal / ICICI Direct / Axis Securities", "type": "brokerage", "articles": arts}
+
+
+def fetch_gnews_business_standard() -> dict:
+    # Direct RSS is Akamai-blocked; GNews is the reliable path
+    arts = _gnews("business standard India stock buy recommendation target price", max_results=15)
+    return {"source": "GNews — Business Standard", "type": "news", "articles": arts}
+
+
+def fetch_gnews_financial_express() -> dict:
+    # Site feeds are disabled (WordPress 410); GNews is the reliable path
+    arts = _gnews("financial express India stock buy recommendation target price", max_results=15)
+    return {"source": "GNews — Financial Express", "type": "news", "articles": arts}
+
+
 from tools.hdfc_sec_agent import HDFC_SEC_SOURCES, HDFC_SEC_SCRAPERS
 from tools.nse_bulk_block_deals import NSE_BULK_SCRAPERS
+from tools.nse_insider_trades import INSIDER_SCRAPERS
 from tools.screener_scanner import SCREENER_SCAN_SCRAPERS
 from tools.trendlyne_agent import TRENDLYNE_SCRAPERS
 
@@ -191,13 +213,17 @@ SCRAPER_FNS: dict = {
     "Hindu BusinessLine":                             fetch_hindu_bl,
     "Zerodha Z-Connect":                              fetch_zerodha,
     "GNews — Moneycontrol":                           fetch_gnews_moneycontrol,
+    "GNews — Business Standard":                      fetch_gnews_business_standard,
+    "GNews — Financial Express":                      fetch_gnews_financial_express,
     "Morgan Stanley / JPMorgan":                      fetch_gnews_ms_jpm,
     "Jefferies / Macquarie / Citi":                   fetch_gnews_jefferies_mac_citi,
     "HSBC / BofA / Bernstein / Investec":             fetch_gnews_intl_banks,
     "ShareKhan / Mirae Asset":                        fetch_gnews_sharekhan_mirae,
     "SMIFS / IDBI Capital / Geojit / Deven Choksey":  fetch_gnews_india_brokers,
+    "Motilal Oswal / ICICI Direct / Axis Securities": fetch_gnews_motilal_icici_axis,
     **HDFC_SEC_SCRAPERS,
     **NSE_BULK_SCRAPERS,
+    **INSIDER_SCRAPERS,
     **SCREENER_SCAN_SCRAPERS,
     **TRENDLYNE_SCRAPERS,
 }
