@@ -204,6 +204,31 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
         second_messages = mock_completion.call_args_list[1].kwargs["messages"]
         self.assertIn("failed validation", second_messages[-1]["content"])
 
+    def test_validate_analysis_payload_rejects_sell_against_strong_positive_signals(self) -> None:
+        payload = dict(self._VALID_PAYLOAD, recommendation="SELL")
+
+        ok, message = crew._validate_analysis_payload(
+            payload, self.all_data, signal_context={"final_score": 0.8}
+        )
+        self.assertFalse(ok)
+        self.assertEqual(message, "Recommendation contradicts strong positive signals")
+
+    def test_run_analysis_passes_signal_context_to_guardrail(self) -> None:
+        sell_payload = dict(self._VALID_PAYLOAD, recommendation="SELL")
+        responses = [
+            _llm_response(json.dumps(sell_payload)),
+            _llm_response(json.dumps(self._VALID_PAYLOAD)),
+        ]
+        with patch("litellm.completion", side_effect=responses) as mock_completion:
+            analysis = crew.run_analysis_with_fallback(
+                "SAILIFE", self.all_data, signal_context={"final_score": 0.8}
+            )
+
+        self.assertEqual(mock_completion.call_count, 2)
+        self.assertEqual(analysis["recommendation"], "HOLD")
+        second_messages = mock_completion.call_args_list[1].kwargs["messages"]
+        self.assertIn("contradicts strong positive signals", second_messages[-1]["content"])
+
     def test_llm_exception_returns_safe_fallback(self) -> None:
         with patch("litellm.completion", side_effect=RuntimeError("boom")):
             analysis = crew.run_analysis_with_fallback("TCS", {name: {} for name in crew.ALL_DATA_TASKS})

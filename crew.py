@@ -424,7 +424,7 @@ def run_analysis_with_fallback(
             elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
             text = response.choices[0].message.content or ""
             parsed = parse_json_object(text)
-            ok, validated = _validate_analysis_payload(parsed, all_data)
+            ok, validated = _validate_analysis_payload(parsed, all_data, signal_context)
             if ok:
                 log_event(LOGGER, "analyst_llm_succeeded", run_id=run_id, symbol=symbol, latency_ms=elapsed_ms)
                 return parsed

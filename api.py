@@ -758,7 +758,8 @@ async def get_sme_signals(
     try:
         return await loop.run_in_executor(None, _query_sync)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Database error: {exc}")
+        log_event(LOGGER, "sme_signals_query_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
 
 
 @app.post("/api/sme-signals/refresh", status_code=202)

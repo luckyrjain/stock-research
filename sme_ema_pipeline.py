@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 _LOOKBACK_DAYS = 5
 _OHLCV_PERIOD  = "1y"    # full year so EMA 50 is converged before the stored window
 _STORE_DAYS    = 63      # ~3 months of trading days kept in the DB
+_RETENTION_DAYS = 100    # calendar days ≈ _STORE_DAYS trading days + buffer; older rows pruned
 _MAX_WORKERS   = 8
 
 
@@ -161,6 +162,18 @@ def _upsert_signals(engine, rows: list[dict]) -> None:
     logger.info("Upserted %d signal rows into ema_signals", total)
 
 
+def _prune_signals(engine) -> None:
+    with engine.begin() as conn:
+        deleted = conn.execute(
+            text("""
+                DELETE FROM ema_signals
+                WHERE trade_date < CURRENT_DATE - (:days * INTERVAL '1 day')
+            """),
+            {"days": _RETENTION_DAYS},
+        ).rowcount
+    logger.info("Pruned %d signal rows older than %d days", deleted, _RETENTION_DAYS)
+
+
 # ── Phase 5: Summary output ───────────────────────────────────────────────────
 
 def _print_summary(engine, lookback_days: int) -> None:
@@ -255,6 +268,7 @@ def run(force: bool = False, lookback_days: int = _LOOKBACK_DAYS) -> None:
     # Phase 4: write to PostgreSQL
     logger.info("Phase 4 — Writing to PostgreSQL...")
     _upsert_signals(engine, all_rows)
+    _prune_signals(engine)
 
     # Phase 5: print crossover summary
     _print_summary(engine, lookback_days)
