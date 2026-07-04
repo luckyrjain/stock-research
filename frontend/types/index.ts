@@ -141,16 +141,16 @@ export interface SmeSignal {
   close_price:     number | null;
   ema20:           number | null;
   ema50:           number | null;
-  crossed_ema20:   boolean;
-  crossed_ema50:   boolean;
-  cross_direction: 'bullish' | 'bearish' | null;
-  crossed:         'EMA20' | 'EMA50' | 'EMA20+EMA50';
+  cross:           'golden' | 'death';
+  in_golden_cross: boolean;
 }
 
 export interface SmeSignalsResponse {
   signals:          SmeSignal[];
   total_monitored:  number;
+  golden_now:       number;          // stocks currently in golden-cross regime
   last_run:         string | null;   // ISO timestamp or null
+  refreshing:       boolean;         // a pipeline refresh is running server-side
 }
 
 export type MarketPicksSSEMessage =

@@ -1,14 +1,13 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
-import type { SmeSignal, SmeSignalsResponse } from '@/types';
+import type { SmeSignalsResponse } from '@/types';
 
 // ── Filter types ──────────────────────────────────────────────────────────────
 
 type Lookback  = 1 | 3 | 5 | 10;
-type Direction = 'all' | 'bullish' | 'bearish';
-type EmaFilter = 'all' | 'ema20' | 'ema50';
+type Direction = 'all' | 'golden' | 'death';
 
 // ── Helper components ─────────────────────────────────────────────────────────
 
@@ -18,24 +17,25 @@ function Skeleton({ className }: { className: string }) {
   );
 }
 
-function DirectionBadge({ dir }: { dir: 'bullish' | 'bearish' | null }) {
-  if (!dir) return <span className="text-muted text-[10px]">—</span>;
-  return dir === 'bullish' ? (
+function CrossBadge({ cross }: { cross: 'golden' | 'death' }) {
+  return cross === 'golden' ? (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border bg-buy/12 text-buy border-buy/25">
-      ↑ Bullish
+      ⚡ Golden
     </span>
   ) : (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border bg-sell/12 text-sell border-sell/25">
-      ↓ Bearish
+      💀 Death
     </span>
   );
 }
 
-function CrossedBadge({ val }: { val: SmeSignal['crossed'] }) {
-  return (
-    <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border bg-accent/10 text-accent border-accent/25">
-      {val}
+function RegimeBadge({ inGolden }: { inGolden: boolean }) {
+  return inGolden ? (
+    <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border bg-buy/12 text-buy border-buy/25">
+      In Golden Cross
     </span>
+  ) : (
+    <span className="text-muted text-[10px]">—</span>
   );
 }
 
@@ -87,23 +87,23 @@ function SkeletonRows() {
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function SmeSignalsPage() {
-  const [data,      setData]      = useState<SmeSignalsResponse | null>(null);
-  const [loading,   setLoading]   = useState(true);
-  const [error,     setError]     = useState<string | null>(null);
-  const [lookback,  setLookback]  = useState<Lookback>(5);
-  const [direction, setDirection] = useState<Direction>('all');
-  const [ema,       setEma]       = useState<EmaFilter>('all');
+  const [data,       setData]       = useState<SmeSignalsResponse | null>(null);
+  const [loading,    setLoading]    = useState(true);
+  const [error,      setError]      = useState<string | null>(null);
+  const [lookback,   setLookback]   = useState<Lookback>(5);
+  const [direction,  setDirection]  = useState<Direction>('all');
+  const [refreshing, setRefreshing] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
 
-  const fetchSignals = useCallback(async (lb: Lookback, dir: Direction, e: EmaFilter) => {
-    setLoading(true);
+  const fetchSignals = useCallback(async (lb: Lookback, dir: Direction, silent = false) => {
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    if (!silent) setLoading(true);
     setError(null);
     try {
-      const qs = new URLSearchParams({
-        lookback:  String(lb),
-        direction: dir,
-        ema:       e,
-      });
-      const res = await fetch(`/api/sme-signals?${qs}`);
+      const qs = new URLSearchParams({ lookback: String(lb), direction: dir });
+      const res = await fetch(`/api/sme-signals?${qs}`, { signal: ac.signal });
       const json = await res.json() as SmeSignalsResponse & { error?: string };
       if (!res.ok) {
         setError(json.error ?? `Error ${res.status}`);
@@ -111,23 +111,43 @@ export default function SmeSignalsPage() {
       } else {
         setData(json);
       }
-    } catch {
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') return;
       setError('Could not reach the backend. Is the server running?');
       setData(null);
     } finally {
-      setLoading(false);
+      if (abortRef.current === ac && !silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchSignals(lookback, direction, ema);
-  }, [lookback, direction, ema, fetchSignals]);
+    fetchSignals(lookback, direction);
+  }, [lookback, direction, fetchSignals]);
+
+  // Track server-side refresh state; poll while a refresh runs, reload when done.
+  useEffect(() => {
+    if (data) setRefreshing(data.refreshing);
+  }, [data]);
+
+  useEffect(() => {
+    if (!refreshing) return;
+    const t = setInterval(() => fetchSignals(lookback, direction, true), 10000);
+    return () => clearInterval(t);
+  }, [refreshing, lookback, direction, fetchSignals]);
+
+  const startRefresh = useCallback(async () => {
+    try {
+      const res = await fetch('/api/sme-signals/refresh', { method: 'POST' });
+      if (res.status === 202 || res.status === 409) setRefreshing(true);
+    } catch {
+      setError('Could not reach the backend. Is the server running?');
+    }
+  }, []);
 
   const signals = data?.signals ?? [];
 
   // Derived stats
-  const bullishCount = signals.filter(s => s.cross_direction === 'bullish').length;
-  const bearishCount = signals.filter(s => s.cross_direction === 'bearish').length;
+  const deathCount = signals.filter(s => s.cross === 'death').length;
 
   const lastRunLabel = data?.last_run
     ? new Date(data.last_run).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })
@@ -148,26 +168,36 @@ export default function SmeSignalsPage() {
           </Link>
           <span className="text-border-hi">|</span>
           <span className="text-sm font-semibold text-accent">SME Signals</span>
-          <button
-            onClick={() => fetchSignals(lookback, direction, ema)}
-            disabled={loading}
-            className="ml-auto text-xs text-muted hover:text-tx transition-colors disabled:opacity-40"
-          >
-            {loading ? 'Loading…' : '↺ Refresh'}
-          </button>
+          <div className="ml-auto flex items-center gap-3">
+            <button
+              onClick={startRefresh}
+              disabled={refreshing}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-accent/40 text-accent
+                         hover:bg-accent/10 transition-colors disabled:opacity-40"
+            >
+              {refreshing ? 'Refreshing data…' : '⟳ Refresh Data'}
+            </button>
+            <button
+              onClick={() => fetchSignals(lookback, direction)}
+              disabled={loading}
+              className="text-xs text-muted hover:text-tx transition-colors disabled:opacity-40"
+            >
+              {loading ? 'Loading…' : '↺ Reload'}
+            </button>
+          </div>
         </div>
 
         {/* Header */}
         <div className="mb-8 animate-fade-up">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full
                           bg-accent/10 border border-accent/20 text-accent text-xs font-semibold mb-4">
-            NSE Emerge · BSE SME · EMA Crossover Screener
+            NSE Emerge · BSE SME · Golden Cross Screener
           </div>
           <h1 className="text-4xl font-black tracking-tight mb-2">
-            SME EMA <span className="text-accent">Signals</span>
+            SME Golden <span className="text-accent">Cross</span> Signals
           </h1>
           <p className="text-muted text-sm max-w-xl leading-relaxed">
-            SME-listed stocks (NSE Emerge + BSE SME) that crossed their EMA 20 or EMA 50 in the selected window.
+            SME-listed stocks (NSE Emerge + BSE SME) whose EMA 20 crossed their EMA 50 (golden/death cross) in the selected window.
             Data is computed by the <code className="text-accent/80 text-[11px] bg-accent/8 px-1.5 py-0.5 rounded">sme_ema_pipeline</code> batch job.
           </p>
         </div>
@@ -175,30 +205,10 @@ export default function SmeSignalsPage() {
         {/* Stats strip */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
           {[
-            {
-              label: 'Stocks Monitored',
-              value: data?.total_monitored ?? '—',
-              color: 'text-tx',
-              sub:   'NSE Emerge + BSE SME',
-            },
-            {
-              label: 'Crossovers Found',
-              value: loading ? '—' : signals.length,
-              color: 'text-accent',
-              sub:   `last ${lookback} day${lookback > 1 ? 's' : ''}`,
-            },
-            {
-              label: 'Bullish',
-              value: loading ? '—' : bullishCount,
-              color: 'text-buy',
-              sub:   'price crossed above EMA',
-            },
-            {
-              label: 'Bearish',
-              value: loading ? '—' : bearishCount,
-              color: 'text-sell',
-              sub:   'price crossed below EMA',
-            },
+            { label: 'Stocks Monitored',    value: data?.total_monitored ?? '—',        color: 'text-tx',     sub: 'NSE Emerge + BSE SME' },
+            { label: 'Crosses Found',       value: loading ? '—' : signals.length,      color: 'text-accent', sub: `last ${lookback} day${lookback > 1 ? 's' : ''}` },
+            { label: 'In Golden Cross Now', value: data?.golden_now ?? '—',             color: 'text-buy',    sub: 'EMA20 above EMA50 today' },
+            { label: 'Death Crosses',       value: loading ? '—' : deathCount,          color: 'text-sell',   sub: `last ${lookback} day${lookback > 1 ? 's' : ''}` },
           ].map(({ label, value, color, sub }) => (
             <div key={label} className="rounded-xl border border-border bg-card px-4 py-3">
               <div className={`text-2xl font-black font-mono tabular-nums ${color}`}>{value}</div>
@@ -228,30 +238,12 @@ export default function SmeSignalsPage() {
             <div className="flex gap-1.5">
               {(
                 [
-                  { value: 'all',     label: 'All'     },
-                  { value: 'bullish', label: '↑ Bullish' },
-                  { value: 'bearish', label: '↓ Bearish' },
+                  { value: 'all',    label: 'All'      },
+                  { value: 'golden', label: '⚡ Golden' },
+                  { value: 'death',  label: '💀 Death'  },
                 ] as { value: Direction; label: string }[]
               ).map(({ value, label }) => (
                 <FilterChip key={value} value={value} active={direction === value} onClick={setDirection} label={label} />
-              ))}
-            </div>
-          </div>
-
-          <div className="w-px h-5 bg-border" />
-
-          {/* EMA */}
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-bold text-muted uppercase tracking-wider">EMA</span>
-            <div className="flex gap-1.5">
-              {(
-                [
-                  { value: 'all',   label: 'All'   },
-                  { value: 'ema20', label: 'EMA 20' },
-                  { value: 'ema50', label: 'EMA 50' },
-                ] as { value: EmaFilter; label: string }[]
-              ).map(({ value, label }) => (
-                <FilterChip key={value} value={value} active={ema === value} onClick={setEma} label={label} />
               ))}
             </div>
           </div>
@@ -283,18 +275,18 @@ export default function SmeSignalsPage() {
                 <thead>
                   <tr className="border-b border-border bg-surface sticky top-0 z-10">
                     {[
-                      { label: 'Symbol',    align: 'left'  },
-                      { label: 'Company',   align: 'left'  },
-                      { label: 'Date',      align: 'left'  },
-                      { label: 'Crossed',   align: 'left'  },
-                      { label: 'Direction', align: 'left'  },
-                      { label: 'Close',     align: 'right' },
-                      { label: 'EMA 20',    align: 'right' },
-                      { label: 'EMA 50',    align: 'right' },
-                    ].map(({ label, align }) => (
+                      { label: 'Symbol',     cls: 'text-left'  },
+                      { label: 'Company',    cls: 'text-left'  },
+                      { label: 'Cross Date', cls: 'text-left'  },
+                      { label: 'Cross',      cls: 'text-left'  },
+                      { label: 'Regime',     cls: 'text-left'  },
+                      { label: 'Close',      cls: 'text-right' },
+                      { label: 'EMA 20',     cls: 'text-right' },
+                      { label: 'EMA 50',     cls: 'text-right' },
+                    ].map(({ label, cls }) => (
                       <th
                         key={label}
-                        className={`px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider text-${align}`}
+                        className={`px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider ${cls}`}
                       >
                         {label}
                       </th>
@@ -325,12 +317,16 @@ export default function SmeSignalsPage() {
                         {/* Symbol */}
                         <td className="px-4 py-4">
                           <div className="flex items-center gap-1.5">
-                            <Link
-                              href={`/?symbol=${s.symbol}`}
-                              className="font-semibold text-tx hover:text-accent transition-colors text-sm"
-                            >
-                              {s.symbol}
-                            </Link>
+                            {s.exchange === 'NSE' ? (
+                              <Link
+                                href={`/?symbol=${s.symbol}`}
+                                className="font-semibold text-tx hover:text-accent transition-colors text-sm"
+                              >
+                                {s.symbol}
+                              </Link>
+                            ) : (
+                              <span className="font-semibold text-tx text-sm">{s.symbol}</span>
+                            )}
                             <ExchangeBadge exchange={s.exchange} />
                           </div>
                         </td>
@@ -342,21 +338,21 @@ export default function SmeSignalsPage() {
                           </span>
                         </td>
 
-                        {/* Date */}
+                        {/* Cross Date */}
                         <td className="px-4 py-4">
                           <span className="text-xs font-mono text-muted/80 tabular-nums">
                             {s.trade_date}
                           </span>
                         </td>
 
-                        {/* Crossed */}
+                        {/* Cross */}
                         <td className="px-4 py-4">
-                          <CrossedBadge val={s.crossed} />
+                          <CrossBadge cross={s.cross} />
                         </td>
 
-                        {/* Direction */}
+                        {/* Regime */}
                         <td className="px-4 py-4">
-                          <DirectionBadge dir={s.cross_direction} />
+                          <RegimeBadge inGolden={s.in_golden_cross} />
                         </td>
 
                         {/* Close price */}
@@ -368,18 +364,14 @@ export default function SmeSignalsPage() {
 
                         {/* EMA 20 */}
                         <td className="px-4 py-4 text-right">
-                          <span className={`font-mono tabular-nums text-xs ${
-                            s.crossed_ema20 ? 'text-accent' : 'text-muted'
-                          }`}>
+                          <span className="font-mono tabular-nums text-xs text-muted">
                             {s.ema20 != null ? s.ema20.toFixed(2) : '—'}
                           </span>
                         </td>
 
                         {/* EMA 50 */}
                         <td className="px-4 py-4 text-right">
-                          <span className={`font-mono tabular-nums text-xs ${
-                            s.crossed_ema50 ? 'text-accent' : 'text-muted'
-                          }`}>
+                          <span className="font-mono tabular-nums text-xs text-muted">
                             {s.ema50 != null ? s.ema50.toFixed(2) : '—'}
                           </span>
                         </td>
@@ -395,7 +387,7 @@ export default function SmeSignalsPage() {
         {/* Footer hint */}
         {!loading && !error && signals.length > 0 && (
           <p className="text-[10px] text-muted/50 mt-3">
-            Click a symbol to run full analysis. EMA values highlighted when that EMA was crossed.
+            Click an NSE symbol to run full analysis. BSE SME symbols are scrip codes and can&apos;t be analysed directly.
           </p>
         )}
 
