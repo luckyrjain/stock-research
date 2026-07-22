@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useId } from 'react';
 import type { MarketPick, PickSource } from '@/types';
 import InfoTooltip from './info-tooltip';
 
@@ -120,10 +120,23 @@ function RankBadge({ rank }: { rank: number }) {
 
 function SourcesPopover({ sources }: { sources: PickSource[] }) {
   const [open, setOpen] = useState(false);
+  const panelId = useId();
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [open]);
+
   return (
     <div className="relative">
       <button
+        type="button"
         onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+        aria-controls={panelId}
+        aria-label={`${sources.length} source${sources.length !== 1 ? 's' : ''} reported this pick`}
         className="flex items-center gap-1 px-2.5 py-1 rounded-full
                    bg-accent/10 text-accent text-[11px] font-semibold
                    border border-accent/20 hover:bg-accent/20 transition-colors"
@@ -134,7 +147,11 @@ function SourcesPopover({ sources }: { sources: PickSource[] }) {
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 top-full mt-2 z-20 w-64 bg-card border border-border
+          <div
+            id={panelId}
+            role="dialog"
+            aria-label="Reported by"
+            className="absolute left-0 top-full mt-2 z-20 w-64 bg-card border border-border
                           rounded-xl shadow-2xl shadow-black/60 overflow-hidden">
             <div className="px-3 py-2.5 border-b border-border">
               <span className="text-[10px] font-bold text-muted uppercase tracking-wider">Reported by</span>
@@ -332,19 +349,23 @@ function SortableHeader({ label, sortK, currentKey, currentDir, onSort, tooltip 
 }) {
   const active = currentKey === sortK;
   return (
-    <th onClick={() => onSort(sortK)}
-        className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider
-                   whitespace-nowrap cursor-pointer hover:text-tx transition-colors select-none group">
+    <th
+      aria-sort={active ? (currentDir === 'desc' ? 'descending' : 'ascending') : 'none'}
+      className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider whitespace-nowrap"
+    >
       <span className="inline-flex items-center gap-1">
-        {label}
-        <span className={`text-[9px] transition-colors ${active ? 'text-accent' : 'text-muted/25 group-hover:text-muted/60'}`}>
-          {active ? (currentDir === 'desc' ? '↓' : '↑') : '↕'}
-        </span>
-        {tooltip && (
-          <span onClick={e => e.stopPropagation()} className="normal-case font-normal">
-            {tooltip}
+        <button
+          type="button"
+          onClick={() => onSort(sortK)}
+          className="inline-flex items-center gap-1 uppercase tracking-wider
+                     cursor-pointer hover:text-tx transition-colors select-none group"
+        >
+          {label}
+          <span className={`text-[9px] transition-colors ${active ? 'text-accent' : 'text-muted/25 group-hover:text-muted/60'}`}>
+            {active ? (currentDir === 'desc' ? '↓' : '↑') : '↕'}
           </span>
-        )}
+        </button>
+        {tooltip}
       </span>
     </th>
   );
@@ -477,6 +498,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
             <button
               key={id}
               onClick={() => setConfFilter(id)}
+              aria-pressed={confFilter === id}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-semibold
                           border transition-colors
                 ${confFilter === id
@@ -545,6 +567,12 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                   <React.Fragment key={pick.symbol}>
                     <tr
                       onClick={() => toggle(pick.symbol)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(pick.symbol); }
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      aria-expanded={isOpen}
                       className={`border-b border-border/60 cursor-pointer transition-colors
                         ${isOpen ? 'bg-card-hi' : 'hover:bg-surface/60'}`}
                     >

@@ -54,6 +54,7 @@ function FilterChip<T extends string | number>({
   return (
     <button
       onClick={() => onClick(value)}
+      aria-pressed={active}
       className={`px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-colors
         ${active
           ? 'bg-accent/15 border-accent/40 text-accent'
@@ -344,6 +345,12 @@ export default function SmeSignalsPage() {
                       <Fragment key={rowKey}>
                       <tr
                         onClick={() => toggleExpand(s.symbol)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(s.symbol); }
+                        }}
+                        role="button"
+                        tabIndex={0}
+                        aria-expanded={isExpanded}
                         className="border-b border-border/60 hover:bg-surface/60 transition-colors cursor-pointer"
                       >
                         {/* Symbol */}

@@ -35,7 +35,15 @@ export default function EmaChart({ series, width = 640, height = 220 }: Props) {
 
   return (
     <div>
-      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="w-full h-auto" preserveAspectRatio="none">
+      <svg
+        width={width}
+        height={height}
+        viewBox={`0 0 ${width} ${height}`}
+        className="w-full h-auto"
+        preserveAspectRatio="none"
+        role="img"
+        aria-label={`Close price, EMA20, and EMA50 over ${usable.length} trading days, with markers on golden/death cross days`}
+      >
         <polyline points={lineFor('close_price')} fill="none" stroke="currentColor" strokeWidth={1.25} className="text-muted/50" />
         <polyline points={lineFor('ema50')} fill="none" stroke="currentColor" strokeWidth={1.75} className="text-hold" />
         <polyline points={lineFor('ema20')} fill="none" stroke="currentColor" strokeWidth={1.75} className="text-accent" />
