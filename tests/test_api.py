@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import tempfile
@@ -119,6 +120,64 @@ class MarketPicksForceRateLimitTest(unittest.TestCase):
         api._RATE_LIMIT_CALLS["market_picks_force:testclient"] = [api.time.monotonic()] * 3
         resp = client.get("/api/market-picks?force=true")
         self.assertEqual(resp.status_code, 429)
+
+
+class MarketPicksHistoryEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-picks-history-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._history_patch = patch.object(api, "_PICKS_HISTORY_DIR", Path(self._tmpdir))
+        self._history_patch.start()
+        self.addCleanup(self._history_patch.stop)
+
+    def _write_snapshot(self, date: str, picks: list) -> None:
+        (Path(self._tmpdir) / f"{date}.json").write_text(json.dumps({"date": date, "picks": picks}))
+
+    def test_no_history_dir_returns_empty(self) -> None:
+        shutil.rmtree(self._tmpdir)
+        resp = client.get("/api/market-picks/history")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"symbols": [], "snapshot_count": 0})
+
+    def test_computes_change_pct_across_snapshots(self) -> None:
+        self._write_snapshot("2026-07-01", [
+            {"symbol": "ABC", "confidence": 60, "mention_count": 2, "current_price": 100.0, "recommendation": "BUY"},
+        ])
+        self._write_snapshot("2026-07-08", [
+            {"symbol": "ABC", "confidence": 75, "mention_count": 4, "current_price": 110.0, "recommendation": "BUY"},
+        ])
+        resp = client.get("/api/market-picks/history")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["snapshot_count"], 2)
+        self.assertEqual(len(body["symbols"]), 1)
+        row = body["symbols"][0]
+        self.assertEqual(row["symbol"], "ABC")
+        self.assertEqual(row["first_seen"], "2026-07-01")
+        self.assertEqual(row["last_seen"], "2026-07-08")
+        self.assertEqual(row["times_picked"], 2)
+        self.assertAlmostEqual(row["change_pct"], 10.0, places=2)
+
+    def test_legacy_snapshot_without_price_yields_null_change_pct(self) -> None:
+        # Snapshots written before current_price/recommendation were added to the schema.
+        self._write_snapshot("2026-06-01", [
+            {"symbol": "XYZ", "confidence": 50, "mention_count": 1},
+        ])
+        resp = client.get("/api/market-picks/history")
+        body = resp.json()
+        self.assertEqual(len(body["symbols"]), 1)
+        self.assertIsNone(body["symbols"][0]["change_pct"])
+
+    def test_malformed_snapshot_file_is_skipped_not_fatal(self) -> None:
+        (Path(self._tmpdir) / "2026-07-01.json").write_text("{not valid json")
+        self._write_snapshot("2026-07-02", [
+            {"symbol": "ABC", "confidence": 60, "mention_count": 2, "current_price": 100.0, "recommendation": "BUY"},
+        ])
+        resp = client.get("/api/market-picks/history")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["snapshot_count"], 1)
+        self.assertEqual(len(body["symbols"]), 1)
 
 
 class PricesEndpointTest(unittest.TestCase):

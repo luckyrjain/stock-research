@@ -58,7 +58,8 @@ stock-research/
 └── output/                 Cache files (gitignored); also where CLI saves report JSON
     ├── <SYMBOL>/           Per-symbol task caches
     ├── _extract_cache/     LLM extraction cache (6 h TTL) — avoids re-calling LLM on re-runs
-    ├── _history/           Daily pick snapshots for trend tracking (YYYY-MM-DD.json)
+    ├── _history/           Daily pick snapshots (YYYY-MM-DD.json) — powers both the in-pipeline
+    │                       trend/trend_delta fields and GET /api/market-picks/history (/market-picks/history page)
     ├── _market_picks/      Market picks result cache (6 h TTL) for the SSE endpoint
     └── _nse_master.txt     NSE equity symbol master, refreshed every 24 h
 ```
@@ -321,3 +322,4 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
 - **Source credibility weights** in `_SOURCE_CREDIBILITY` determine how much each source contributes to confidence scoring. Adding a new source requires adding a credibility entry; missing sources default to 0.50.
 - **HDFC Securities sources** live in `tools/hdfc_sec_agent.py` and are merged into `SOURCES` / `SCRAPER_FNS` at import time in `tools/market_picks_tools.py`. Adding a new brokerage source follows the same pattern: define scrapers in a separate module, export `*_SOURCES` and `*_SCRAPERS`, merge in `market_picks_tools.py`.
 - **Rate limiting** is a single-process, in-memory sliding window (`api.py`'s `_rate_limit()`), applied only to expensive/abusable routes: `/api/analyse/{symbol}` (20 req / 5 min per IP), `/api/market-picks?force=true` (3 req / hour per IP), `/api/sme-signals/refresh` (3 req / hour per IP, on top of the existing single-run guard). It does not survive a multi-worker deployment — that would need a shared store (e.g. Redis) instead.
+- **`output/_history/<date>.json` snapshot schema** (`symbol`, `confidence`, `effective_signal`, `mention_count`, `current_price`, `recommendation`) is read by two independent consumers: the in-pipeline `_load_trend()` (confidence trend) and `GET /api/market-picks/history` (price track record, `/market-picks/history` page). Snapshots written before `current_price`/`recommendation` were added won't have them — the history endpoint handles this by returning `change_pct: null` rather than guessing. Keep both consumers in mind if the snapshot shape changes.

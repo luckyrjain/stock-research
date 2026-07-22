@@ -345,6 +345,9 @@ export default function MarketPicksPage() {
           <Link href="/sme-signals" className="text-sm text-muted hover:text-tx transition-colors">
             SME Signals
           </Link>
+          <Link href="/market-picks/history" className="text-sm text-muted hover:text-tx transition-colors">
+            Track Record
+          </Link>
           {isRunning && (
             <button
               onClick={() => { esRef.current?.close(); setPhase('idle'); }}

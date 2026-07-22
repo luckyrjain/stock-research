@@ -698,6 +698,71 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
     )
 
 
+_PICKS_HISTORY_DIR = Path("output/_history")
+
+
+@app.get("/api/market-picks/history")
+async def get_market_picks_history():
+    """Aggregate output/_history/<date>.json daily snapshots into a per-symbol
+    track record: first/last seen, confidence trend, and price performance
+    since first seen. Price/recommendation were only added to the snapshot
+    schema recently — older snapshot files won't have them, so change_pct is
+    null wherever price_then or price_now is missing rather than guessed at.
+    """
+
+    def _load_sync() -> dict:
+        if not _PICKS_HISTORY_DIR.exists():
+            return {"symbols": [], "snapshot_count": 0}
+
+        by_symbol: dict[str, list[dict]] = {}
+        snapshot_count = 0
+        for path in sorted(_PICKS_HISTORY_DIR.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            date_str = data.get("date", path.stem)
+            snapshot_count += 1
+            for row in data.get("picks", []):
+                sym = row.get("symbol")
+                if not sym:
+                    continue
+                by_symbol.setdefault(sym, []).append({**row, "date": date_str})
+
+        symbols = []
+        for sym, rows in by_symbol.items():
+            rows.sort(key=lambda r: r["date"])
+            first, last = rows[0], rows[-1]
+            price_then = first.get("current_price")
+            price_now = last.get("current_price")
+            change_pct = (
+                round((price_now - price_then) / price_then * 100, 2)
+                if price_then and price_now
+                else None
+            )
+            symbols.append({
+                "symbol":              sym,
+                "first_seen":          first["date"],
+                "last_seen":           last["date"],
+                "times_picked":        len(rows),
+                "recommendation_then": first.get("recommendation"),
+                "recommendation_now":  last.get("recommendation"),
+                "price_then":          price_then,
+                "price_now":           price_now,
+                "change_pct":          change_pct,
+                "confidence_then":     first.get("confidence"),
+                "confidence_now":      last.get("confidence"),
+            })
+
+        # Symbols with a computed change_pct first (best performers first), then
+        # the rest (no price data yet) grouped at the end.
+        symbols.sort(key=lambda s: (s["change_pct"] is None, -(s["change_pct"] or 0)))
+        return {"symbols": symbols, "snapshot_count": snapshot_count}
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _load_sync)
+
+
 @app.get("/api/prices")
 async def get_prices(symbols: str = Query(...)):
     """Return LTP + day change% for a comma-separated list of NSE/BSE symbols."""

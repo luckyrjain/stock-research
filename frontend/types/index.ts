@@ -140,6 +140,27 @@ export interface MarketPick {
 export type MarketPicksPhase =
   | 'idle' | 'scanning' | 'extracting' | 'consolidating' | 'researching' | 'scoring' | 'done' | 'error';
 
+// ── Market Picks track record (output/_history/ aggregated) ──────────────────
+
+export interface MarketPickTrackRecord {
+  symbol:              string;
+  first_seen:          string;    // 'YYYY-MM-DD'
+  last_seen:           string;    // 'YYYY-MM-DD'
+  times_picked:        number;
+  recommendation_then: string | null;
+  recommendation_now:  string | null;
+  price_then:          number | null;
+  price_now:           number | null;
+  change_pct:          number | null;   // null if either price is missing (legacy snapshot)
+  confidence_then:     number | null;
+  confidence_now:      number | null;
+}
+
+export interface MarketPicksHistoryResponse {
+  symbols:        MarketPickTrackRecord[];
+  snapshot_count: number;
+}
+
 // ── SME EMA Signals ──────────────────────────────────────────────────────────
 
 export interface SmeSignal {

@@ -192,6 +192,9 @@ export default function SmeSignalsPage() {
           </Link>
           <span className="text-border-hi">|</span>
           <span className="text-sm font-semibold text-accent">SME Signals</span>
+          <Link href="/market-picks/history" className="text-sm text-muted hover:text-tx transition-colors">
+            Track Record
+          </Link>
           <div className="ml-auto flex items-center gap-3">
             <button
               onClick={startRefresh}

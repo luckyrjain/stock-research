@@ -282,6 +282,8 @@ def _save_history(picks: list[dict]) -> None:
             "confidence":       p["confidence_score"],
             "effective_signal": round(_effective_signal(p.get("_sources_raw", [])), 3),
             "mention_count":    p["mention_count"],
+            "current_price":    p.get("current_price"),
+            "recommendation":   p.get("recommendation"),
         }
         for p in picks
     ]
