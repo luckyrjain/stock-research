@@ -1,5 +1,7 @@
 # Stock Research
 
+[![CI](https://github.com/luckyrjain/stock-research/actions/workflows/ci.yml/badge.svg)](https://github.com/luckyrjain/stock-research/actions/workflows/ci.yml)
+
 Stock Research is a full-stack Indian equity research platform with two modes:
 
 **Stock Analysis** — given a symbol like `TCS` or `RELIANCE`, the app validates the ticker (NSE, BSE, or ISIN), fetches live market data, fundamentals, news, shareholding, MF holdings, and NSE filings in parallel, runs a quantitative signal engine, then calls an LLM analyst to produce a structured `BUY`, `SELL`, or `HOLD` recommendation. Progress and the final report are streamed to the browser via Server-Sent Events.
