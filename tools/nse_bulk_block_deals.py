@@ -8,10 +8,13 @@ Both are strong institutional activity signals. Each deal is formatted as a
 plain-language article so the extraction LLM can assign BUY/SELL direction.
 """
 
+import logging
 import time
 from datetime import datetime, timezone
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 _NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -21,6 +24,25 @@ _NSE_HEADERS = {
 
 _MIN_BULK_QTY  = 50_000   # 50K shares
 _MIN_BLOCK_QTY = 100_000  # 1L shares
+
+# NSE's bulk-deals and block-deals endpoints have historically used different
+# field-naming conventions (and NSE has changed them across API versions), so
+# every field is looked up through a list of known aliases rather than a
+# single hard-coded key.
+_SYMBOL_KEYS    = ("symbol", "BD_SYMBOL", "BQ_SYMBOL")
+_CLIENT_KEYS    = ("clientName", "client_name", "BD_CLIENT_NAME", "BQ_CLIENT_NAME")
+_QTY_KEYS       = ("bdQty", "qty", "BD_QTY_TRD", "BQ_QTY_TRD")
+_PRICE_KEYS     = ("bdPrice", "price", "BD_TP_WATP", "BQ_TP_WATP")
+_BUY_SELL_KEYS  = ("buySell", "buy_sell", "BD_BUY_SELL", "BQ_BUY_SELL")
+_DATE_KEYS      = ("date", "deal_date", "BD_DT_DATE", "BQ_DT_DATE")
+
+
+def _first(deal: dict, keys: tuple) -> object | None:
+    for key in keys:
+        val = deal.get(key)
+        if val not in (None, ""):
+            return val
+    return None
 
 
 def _nse_session() -> requests.Session:
@@ -43,12 +65,12 @@ def _fmt_qty(n: int) -> str:
 
 
 def _deal_to_article(deal: dict, deal_type: str) -> dict | None:
-    symbol    = (deal.get("symbol") or "").upper().strip()
-    client    = (deal.get("clientName") or deal.get("client_name") or "").strip()
-    qty_raw   = deal.get("bdQty") or deal.get("qty") or 0
-    price_raw = deal.get("bdPrice") or deal.get("price") or 0
-    buy_sell  = (deal.get("buySell") or deal.get("buy_sell") or "").strip().upper()
-    date_str  = (deal.get("date") or deal.get("deal_date") or "").strip()
+    symbol    = str(_first(deal, _SYMBOL_KEYS) or "").upper().strip()
+    client    = str(_first(deal, _CLIENT_KEYS) or "").strip()
+    qty_raw   = _first(deal, _QTY_KEYS) or 0
+    price_raw = _first(deal, _PRICE_KEYS) or 0
+    buy_sell  = str(_first(deal, _BUY_SELL_KEYS) or "").strip().upper()
+    date_str  = str(_first(deal, _DATE_KEYS) or "").strip()
 
     try:
         qty   = int(qty_raw)
@@ -95,7 +117,7 @@ def _fetch_deals(sess: requests.Session, endpoint: str, min_qty: int, deal_type:
     try:
         r = sess.get(f"https://www.nseindia.com/api/{endpoint}", timeout=10)
         r.raise_for_status()
-        raw = r.json().get("data", [])
+        raw = r.json().get("data") or []
     except Exception:
         return []
 
@@ -103,12 +125,13 @@ def _fetch_deals(sess: requests.Session, endpoint: str, min_qty: int, deal_type:
     seen: set[str] = set()
     for deal in raw:
         try:
-            qty = int(deal.get("bdQty") or deal.get("qty") or 0)
-        except (TypeError, ValueError):
+            qty = int(_first(deal, _QTY_KEYS) or 0)
+            if qty < min_qty:
+                continue
+            art = _deal_to_article(deal, deal_type)
+        except Exception as exc:
+            logger.debug("Skipping malformed %s row: %s", deal_type, exc)
             continue
-        if qty < min_qty:
-            continue
-        art = _deal_to_article(deal, deal_type)
         if not art:
             continue
         key = art["title"]
@@ -116,6 +139,13 @@ def _fetch_deals(sess: requests.Session, endpoint: str, min_qty: int, deal_type:
             continue
         seen.add(key)
         articles.append(art)
+
+    if raw and not articles:
+        logger.warning(
+            "%s: NSE returned %d raw rows but 0 parsed as articles — "
+            "field names may have drifted from the expected schema",
+            deal_type, len(raw),
+        )
 
     return articles
 

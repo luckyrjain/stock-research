@@ -11,10 +11,13 @@ Filters applied to cut ESOP/pledge noise:
 - transaction value must be at least _MIN_VALUE_INR
 """
 
+import logging
 import time
 from datetime import date, datetime, timedelta, timezone
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 _NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -119,18 +122,29 @@ def fetch_insider_trades() -> dict:
             timeout=15,
         )
         r.raise_for_status()
-        raw = r.json().get("data", [])
+        raw = r.json().get("data") or []
     except Exception:
         raw = []
 
     articles: list[dict] = []
     seen: set[str] = set()
     for row in raw:
-        art = _trade_to_article(row)
+        try:
+            art = _trade_to_article(row)
+        except Exception as exc:
+            logger.debug("Skipping malformed insider-trade row: %s", exc)
+            continue
         if not art or art["title"] in seen:
             continue
         seen.add(art["title"])
         articles.append(art)
+
+    if raw and not articles:
+        logger.debug(
+            "NSE insider trades: %d raw rows returned but 0 parsed as articles "
+            "(likely filtered out by category/mode/value thresholds)",
+            len(raw),
+        )
 
     return {"source": "NSE Insider Trades", "type": "brokerage", "articles": articles}
 

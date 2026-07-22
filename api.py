@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 import time
 import uuid
 import re
@@ -47,15 +48,22 @@ def _save_picks_cache(picks: list, generated_at: str) -> None:
 
 
 # ── SME signals: shared engine + refresh state ───────────────────────────────
+# _SME_REFRESHING is a single-process guard (see refresh_sme_signals below) —
+# running the API with multiple worker processes would let each worker start
+# its own refresh; the upserts are idempotent per (symbol, trade_date) so this
+# wastes NSE/yfinance quota rather than corrupting data.
 _SME_ENGINE = None
+_SME_ENGINE_LOCK = threading.Lock()
 _SME_REFRESHING = False
 
 
 def _get_sme_engine():
     global _SME_ENGINE
     if _SME_ENGINE is None:
-        from db.models import get_engine
-        _SME_ENGINE = get_engine()
+        with _SME_ENGINE_LOCK:
+            if _SME_ENGINE is None:  # re-check: another thread may have won the race
+                from db.models import get_engine
+                _SME_ENGINE = get_engine()
     return _SME_ENGINE
 
 

@@ -176,10 +176,9 @@ function SourceCard({ s }: { s: SourceState }) {
 
 function ShimmerPill() {
   return (
-    <div className="h-8 w-24 rounded-lg bg-surface border border-border overflow-hidden relative">
-      <div className="absolute inset-0 -translate-x-full animate-[shimmer_1.5s_infinite]
-                      bg-gradient-to-r from-transparent via-accent/10 to-transparent" />
-    </div>
+    <div className="h-8 w-24 rounded-lg border border-border
+                    bg-gradient-to-r from-border via-border-hi to-border
+                    bg-[length:200%_auto] animate-shimmer" />
   );
 }
 
@@ -333,14 +332,6 @@ export default function MarketPicksPage() {
 
   return (
     <main className="min-h-screen bg-bg text-tx">
-      {/* keyframes for shimmer — injected via style tag */}
-      <style>{`
-        @keyframes shimmer {
-          0%   { transform: translateX(-100%); }
-          100% { transform: translateX(200%); }
-        }
-      `}</style>
-
       <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
 
         {/* Nav */}

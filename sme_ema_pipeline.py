@@ -39,6 +39,12 @@ _OHLCV_PERIOD  = "1y"    # full year so EMA 50 is converged before the stored wi
 _STORE_DAYS    = 63      # ~3 months of trading days kept in the DB
 _RETENTION_DAYS = 100    # calendar days ≈ _STORE_DAYS trading days + buffer; older rows pruned
 _MAX_WORKERS   = 8
+# Recently-listed SME stocks can have well under a year of history. With
+# adjust=False, an "EMA50" computed on too few bars is really just a
+# recency-weighted average of all of them, not a converged 50-day EMA, and
+# produces spurious crosses right after listing. Require a healthy margin
+# above the 50-span before trusting a cross flag.
+_MIN_HISTORY_DAYS = 75
 
 
 # ── Phase 2: OHLCV fetch ──────────────────────────────────────────────────────
@@ -73,15 +79,22 @@ def _compute_ema_signals(result: dict) -> list[dict]:
 
     symbol = result["symbol"]
     df = result["df"].copy()
+    has_enough_history = len(df) >= _MIN_HISTORY_DAYS
 
     df["ema20"] = df["Close"].ewm(span=20, adjust=False).mean()
     df["ema50"] = df["Close"].ewm(span=50, adjust=False).mean()
 
-    above = df["ema20"] > df["ema50"]
-    prev_above = above.shift(1)
-    golden = above & (prev_above == False)   # noqa: E712 — elementwise; NaN first row never flags
-    death  = (~above) & (prev_above == True)  # noqa: E712
-    df["cross"] = np.where(golden, "golden", np.where(death, "death", None))
+    if has_enough_history:
+        above = df["ema20"] > df["ema50"]
+        prev_above = above.shift(1)
+        golden = above & (prev_above == False)   # noqa: E712 — elementwise; NaN first row never flags
+        death  = (~above) & (prev_above == True)  # noqa: E712
+        df["cross"] = np.where(golden, "golden", np.where(death, "death", None))
+    else:
+        # EMA50 isn't converged yet — still store price/EMA for the current-regime
+        # view, but never claim a golden/death cross event on unreliable data.
+        logger.debug("%s: only %d trading days (< %d) — suppressing cross flags", symbol, len(df), _MIN_HISTORY_DAYS)
+        df["cross"] = None
 
     df = df.iloc[-_STORE_DAYS:]
 

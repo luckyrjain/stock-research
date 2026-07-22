@@ -11,11 +11,14 @@ assign a BUY direction based on the fundamental rationale in the summary.
 Falls back to GNews when the screener URL is unavailable or requires login.
 """
 
+import logging
 import time
 import urllib.parse
 
 import requests
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
 
 _HEADERS = {
     "User-Agent": (
@@ -121,6 +124,7 @@ def fetch_screener_scanner() -> dict:
     articles: list[dict] = []
     seen_titles: set[str] = set()
 
+    screen_worked = False
     for query, label in _QUERIES:
         try:
             url = (
@@ -128,8 +132,14 @@ def fetch_screener_scanner() -> dict:
                 f"sort=&filters=&query={urllib.parse.quote(query)}&limit=50"
             )
             r = session.get(url, timeout=12)
-            if r.status_code == 200 and ("data-table" in r.text or "<table" in r.text):
-                for art in _parse_screen_html(r.text, label):
+            # Require the actual results-table class, not a bare "<table" match —
+            # a login-wall or error page can still contain unrelated <table> markup
+            # elsewhere (nav, footer), which would falsely look like a successful screen.
+            if r.status_code == 200 and "login" not in r.url and "data-table" in r.text:
+                parsed = _parse_screen_html(r.text, label)
+                if parsed:
+                    screen_worked = True
+                for art in parsed:
                     if art["title"] not in seen_titles:
                         seen_titles.add(art["title"])
                         articles.append(art)
@@ -138,8 +148,11 @@ def fetch_screener_scanner() -> dict:
         time.sleep(0.5)
 
     if not articles:
+        logger.info("Screener.in fundamental screen returned no results; falling back to GNews")
         articles = _gnews_fallback()
+        return {"source": "Screener.in Fundamental Screen", "type": "news", "articles": articles}
 
+    logger.debug("Screener.in fundamental screen succeeded: %d picks, real_screen=%s", len(articles), screen_worked)
     return {"source": "Screener.in Fundamental Screen", "type": "brokerage", "articles": articles}
 
 

@@ -41,21 +41,20 @@ function ConfidenceBar({ score }: { score: number }) {
   );
 }
 
-function SignalBadge({ verdict }: { verdict: string }) {
-  const cfg: Record<string, string> = {
+function SignalBadge({ verdict }: { verdict: MarketPick['recommendation'] }) {
+  const cfg: Record<MarketPick['recommendation'], string> = {
     BUY:       'bg-buy/12 text-buy border-buy/25',
     WATCHLIST: 'bg-buy/8 text-buy/75 border-buy/15',
     HOLD:      'bg-hold/12 text-hold border-hold/25',
-    AVOID:     'bg-sell/8 text-sell/75 border-sell/15',
     SELL:      'bg-sell/12 text-sell border-sell/25',
   };
-  const labels: Record<string, string> = {
-    BUY: 'BUY', WATCHLIST: 'WATCH', HOLD: 'HOLD', AVOID: 'AVOID', SELL: 'SELL',
+  const labels: Record<MarketPick['recommendation'], string> = {
+    BUY: 'BUY', WATCHLIST: 'WATCH', HOLD: 'HOLD', SELL: 'SELL',
   };
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold
-                      border tracking-wide ${cfg[verdict] ?? cfg.HOLD}`}>
-      {labels[verdict] ?? verdict}
+                      border tracking-wide ${cfg[verdict]}`}>
+      {labels[verdict]}
     </span>
   );
 }
@@ -478,7 +477,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                   : 'bg-transparent border-border text-muted hover:text-tx hover:border-border-hi'}`}
             >
               {dot && <span className={`w-1.5 h-1.5 rounded-full inline-block
-                ${confFilter === id ? dot : dot}`} />}
+                ${dot} ${confFilter === id ? '' : 'opacity-50'}`} />}
               {label}
             </button>
           ))}

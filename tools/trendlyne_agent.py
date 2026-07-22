@@ -1,13 +1,15 @@
 """
-Trendlyne analyst consensus scraper for the market picks pipeline.
+Trendlyne analyst consensus source for the market picks pipeline.
 
 Trendlyne aggregates analyst recommendations from 20+ Indian brokerages and
 provides consensus ratings, target prices, and upgrade/downgrade alerts.
-
-This scraper targets three distinct signals via GNews:
-  1. Analyst upgrades and new BUY initiations (high conviction)
-  2. Consensus target price raises (broad analyst agreement)
-  3. Trendlyne-cited picks in financial media (validation signal)
+This module does not scrape trendlyne.com directly — it searches GNews for
+articles that explicitly cite Trendlyne, so every query requires the
+"Trendlyne" term to avoid duplicating the generic brokerage-upgrade queries
+already covered by other sources in market_picks_tools.py:
+  1. Trendlyne-cited analyst upgrades and new BUY initiations (high conviction)
+  2. Trendlyne-cited consensus target price raises (broad analyst agreement)
+  3. Trendlyne-cited picks in financial media generally (validation signal)
 
 Source type: brokerage — aggregated analyst consensus is institutional-grade.
 """
@@ -41,10 +43,10 @@ def _gnews(query: str, max_results: int = 12) -> list[dict]:
 
 
 _QUERIES = [
-    # Analyst upgrades and fresh BUY initiations
-    '"upgrades to buy" OR "initiates with buy" OR "initiates coverage" India NSE stock 2026',
-    # Consensus target price raises
-    '"target price raised" OR "target raised" OR "price target increased" India NSE analyst 2026',
+    # Trendlyne-cited analyst upgrades and fresh BUY initiations
+    '"Trendlyne" ("upgrades to buy" OR "initiates with buy" OR "initiates coverage") India NSE stock 2026',
+    # Trendlyne-cited consensus target price raises
+    '"Trendlyne" ("target price raised" OR "target raised" OR "price target increased") India NSE 2026',
     # Trendlyne-cited picks in financial media
     '"Trendlyne" buy recommendation analyst India NSE stock 2026',
 ]

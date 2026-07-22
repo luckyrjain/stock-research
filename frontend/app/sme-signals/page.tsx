@@ -226,7 +226,7 @@ export default function SmeSignalsPage() {
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-bold text-muted uppercase tracking-wider">Period</span>
             <div className="flex gap-1.5">
-              {([1, 3, 5, 10] as Lookback[]).map(v => (
+              {([1, 3, 5, 10] as const).map(v => (
                 <FilterChip key={v} value={v} active={lookback === v} onClick={setLookback} label={`${v}d`} />
               ))}
             </div>
@@ -243,7 +243,7 @@ export default function SmeSignalsPage() {
                   { value: 'all',    label: 'All'      },
                   { value: 'golden', label: '⚡ Golden' },
                   { value: 'death',  label: '💀 Death'  },
-                ] as { value: Direction; label: string }[]
+                ] as const
               ).map(({ value, label }) => (
                 <FilterChip key={value} value={value} active={direction === value} onClick={setDirection} label={label} />
               ))}
