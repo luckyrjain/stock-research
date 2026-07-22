@@ -340,14 +340,14 @@ Info/cached:
 ```html
 <div class="flex items-center gap-4 mb-8 pb-4 border-b border-border">
   <a class="text-base font-black tracking-tight text-tx">
-    Stock<span class="text-accent">Research</span> AI
+    Alpha<span class="text-accent">Pulse</span>
   </a>
   <span class="text-border-hi">|</span>
   <span class="text-sm font-semibold text-accent">Current Section</span>
 </div>
 ```
 
-Logo lockup: word + `text-accent` colored suffix — e.g., `Stock` + `Research` in accent.
+Logo lockup: word + `text-accent` colored suffix — e.g., `Alpha` + `Pulse` in accent.
 
 ---
 

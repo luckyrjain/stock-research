@@ -1,4 +1,5 @@
 import type { Report, StockInfo } from '@/types';
+import InfoTooltip from './info-tooltip';
 
 interface Props {
   report: Report;
@@ -34,10 +35,10 @@ const SENT_COLOR: Record<string, string> = {
   Positive: 'text-buy', Neutral: 'text-muted', Negative: 'text-sell',
 };
 
-function Card({ title, children, className = '' }: { title: string; children: React.ReactNode; className?: string }) {
+function Card({ title, children, className = '' }: { title: React.ReactNode; children: React.ReactNode; className?: string }) {
   return (
     <div className={`bg-card border border-border rounded-xl p-5 ${className}`}>
-      <p className="text-[11px] font-semibold text-muted tracking-[1px] uppercase mb-3">{title}</p>
+      <p className="text-[11px] font-semibold text-muted tracking-[1px] uppercase mb-3 flex items-center gap-1.5">{title}</p>
       {children}
     </div>
   );
@@ -231,7 +232,14 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
 
           {/* Verdict */}
           <div className="flex flex-col items-center gap-2 shrink-0">
-            <span className={`text-3xl font-black px-8 py-2.5 rounded-xl ${cfg.badge}`}>{rec}</span>
+            <div className="flex items-center gap-1.5">
+              <span className={`text-3xl font-black px-8 py-2.5 rounded-xl ${cfg.badge}`}>{rec}</span>
+              <InfoTooltip title="What does this mean?">
+                <p><span className="text-buy font-semibold">BUY</span> — bullish thesis, favorable valuation and signals.</p>
+                <p><span className="text-hold font-semibold">HOLD</span> — mixed or fairly-valued; no strong edge either way.</p>
+                <p><span className="text-sell font-semibold">SELL</span> — bearish thesis, unfavorable valuation or signals.</p>
+              </InfoTooltip>
+            </div>
             <div className="flex items-center gap-3">
               {a?.confidence && (
                 <span className={`text-[11px] font-semibold tracking-widest uppercase ${CONF_COLOR[a.confidence]}`}>
@@ -352,7 +360,13 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
           )}
 
           {sig?.signals && Object.keys(sig.signals).length > 0 && (
-            <Card title="Quant Signals">
+            <Card title={<>
+              Quant Signals
+              <InfoTooltip title="Quant Signals" align="left">
+                <p>A composite score from valuation, growth, volume, and filings signals, each scored −1 (bearish) to +1 (bullish) and blended into the Final Score.</p>
+                <p>This runs independently of the AI analyst and is one input to its recommendation.</p>
+              </InfoTooltip>
+            </>}>
               {sig.final_score != null && (
                 <MetricRow
                   label="Final Score"

@@ -337,7 +337,7 @@ export default function MarketPicksPage() {
         {/* Nav */}
         <div className="flex items-center gap-4 mb-8 pb-4 border-b border-border">
           <Link href="/" className="text-base font-black tracking-tight text-tx">
-            Stock<span className="text-accent">Research</span> AI
+            Alpha<span className="text-accent">Pulse</span>
           </Link>
           <span className="text-border-hi">|</span>
           <span className="text-sm font-semibold text-accent">Market Picks</span>

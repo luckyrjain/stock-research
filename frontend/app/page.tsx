@@ -114,7 +114,7 @@ function HomePageInner() {
           <div className="max-w-2xl mx-auto">
             <div className="mb-12 text-center">
               <h1 className="text-4xl font-black tracking-tight text-tx mb-2">
-                Stock<span className="text-accent">Research</span> AI
+                Alpha<span className="text-accent">Pulse</span>
               </h1>
               <p className="text-muted text-sm">AI-powered equity research for Indian markets</p>
               <Link
@@ -132,7 +132,7 @@ function HomePageInner() {
           <>
             <div className="flex items-center gap-4 mb-5 pb-4 border-b border-border">
               <span className="text-base font-black tracking-tight text-tx">
-                Stock<span className="text-accent">Research</span> AI
+                Alpha<span className="text-accent">Pulse</span>
               </span>
               <Link
                 href="/market-picks"

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from observability import get_logger, log_event
 from signals.interpreter import interpret
@@ -67,7 +67,33 @@ def _get_sme_engine():
     return _SME_ENGINE
 
 
-app = FastAPI(title="StockResearch AI")
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+# Simple in-memory sliding-window limiter, keyed by (bucket, client IP). Only
+# guards the expensive/abusable routes (fresh LLM calls, forced full rescans,
+# forced SME pipeline runs) — single-process only, same assumption as
+# _SME_REFRESHING above; a multi-worker deployment would need a shared store
+# (e.g. Redis) instead.
+_RATE_LIMIT_CALLS: dict[str, list[float]] = {}
+_RATE_LIMIT_LOCK = threading.Lock()
+
+
+def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: float) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"{bucket}:{client_ip}"
+    now = time.monotonic()
+    with _RATE_LIMIT_LOCK:
+        calls = [t for t in _RATE_LIMIT_CALLS.get(key, []) if now - t < window_seconds]
+        if len(calls) >= max_calls:
+            _RATE_LIMIT_CALLS[key] = calls
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded: max {max_calls} requests per {int(window_seconds)}s on this endpoint. Try again later.",
+            )
+        calls.append(now)
+        _RATE_LIMIT_CALLS[key] = calls
+
+
+app = FastAPI(title="AlphaPulse")
 LOGGER = get_logger("api")
 
 _NSE_HEADERS = {
@@ -267,7 +293,7 @@ def _heartbeat() -> str:
 @app.get("/")
 async def index():
     return {
-        "service": "StockResearch AI API",
+        "service": "AlphaPulse API",
         "status": "ok",
         "message": "Use /health for a simple health check, /api/validate/{symbol} to validate a symbol, and /api/analyse/{symbol} to stream analysis events.",
     }
@@ -453,7 +479,8 @@ async def validate_symbol(symbol: str, exchange: str = ""):
     return {"found": False, "valid": False, "symbol": sym, "company": "", "suggestions": []}
 
 @app.get("/api/analyse/{symbol}")
-async def analyse(symbol: str, force: bool = False):
+async def analyse(symbol: str, request: Request, force: bool = False):
+    _rate_limit(request, "analyse", max_calls=20, window_seconds=300)
     sym = symbol.upper().strip()
     run_id = uuid.uuid4().hex[:12]
 
@@ -598,11 +625,14 @@ async def analyse(symbol: str, force: bool = False):
 
 
 @app.get("/api/market-picks")
-async def market_picks(force: bool = Query(default=False)):
+async def market_picks(request: Request, force: bool = Query(default=False)):
     """Stream market-picks pipeline events as SSE.
 
     ?force=true  — skip cache and run a fresh pipeline.
     """
+    if force:
+        # Only the cache-bypassing path is rate-limited — normal cached reads are cheap.
+        _rate_limit(request, "market_picks_force", max_calls=3, window_seconds=3600)
     run_id = uuid.uuid4().hex[:12]
 
     async def stream():
@@ -701,7 +731,6 @@ async def get_sme_signals(
 ):
     """Return SME stocks with an EMA20/EMA50 golden or death cross in the last N days."""
     import os
-    from fastapi import HTTPException
 
     if direction not in ("all", "golden", "death"):
         raise HTTPException(status_code=422, detail="direction must be one of: all, golden, death")
@@ -771,16 +800,16 @@ async def get_sme_signals(
 
 
 @app.post("/api/sme-signals/refresh", status_code=202)
-async def refresh_sme_signals():
+async def refresh_sme_signals(request: Request):
     """Run the SME EMA pipeline in the background. 409 if a run is in progress."""
     import os
-    from fastapi import HTTPException
 
     global _SME_REFRESHING
     if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
     if _SME_REFRESHING:
         raise HTTPException(status_code=409, detail="A refresh is already running.")
+    _rate_limit(request, "sme_refresh", max_calls=3, window_seconds=3600)
 
     _SME_REFRESHING = True
     loop = asyncio.get_running_loop()

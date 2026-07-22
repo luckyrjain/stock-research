@@ -2,6 +2,7 @@
 
 import React, { useState, useMemo } from 'react';
 import type { MarketPick, PickSource } from '@/types';
+import InfoTooltip from './info-tooltip';
 
 type SortKey    = 'confidence_score' | 'change_pct' | 'pe_ratio';
 type ConfFilter = 'all' | 'high' | 'medium' | 'low';
@@ -321,12 +322,13 @@ function ExpandedRow({ pick }: { pick: MarketPick }) {
   );
 }
 
-function SortableHeader({ label, sortK, currentKey, currentDir, onSort }: {
+function SortableHeader({ label, sortK, currentKey, currentDir, onSort, tooltip }: {
   label: string;
   sortK: SortKey;
   currentKey: SortKey | null;
   currentDir: 'asc' | 'desc';
   onSort: (k: SortKey) => void;
+  tooltip?: React.ReactNode;
 }) {
   const active = currentKey === sortK;
   return (
@@ -338,6 +340,11 @@ function SortableHeader({ label, sortK, currentKey, currentDir, onSort }: {
         <span className={`text-[9px] transition-colors ${active ? 'text-accent' : 'text-muted/25 group-hover:text-muted/60'}`}>
           {active ? (currentDir === 'desc' ? '↓' : '↑') : '↕'}
         </span>
+        {tooltip && (
+          <span onClick={e => e.stopPropagation()} className="normal-case font-normal">
+            {tooltip}
+          </span>
+        )}
       </span>
     </th>
   );
@@ -492,9 +499,27 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
               <tr className="border-b border-border bg-surface sticky top-0 z-10">
                 <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider w-8">#</th>
                 <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider">Stock</th>
-                <SortableHeader label="Confidence" sortK="confidence_score" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
+                <SortableHeader
+                  label="Confidence" sortK="confidence_score" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort}
+                  tooltip={
+                    <InfoTooltip title="Confidence Score" align="left">
+                      <p>50% signal engine + 30% cross-source consensus + 20% recency, 0–100.</p>
+                      <p><span className="text-buy font-semibold">≥70</span> high · <span className="text-hold font-semibold">45–69</span> medium · <span className="text-sell font-semibold">&lt;45</span> low.</p>
+                    </InfoTooltip>
+                  }
+                />
                 <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider">Firms</th>
-                <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider">Rating</th>
+                <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider">
+                  <span className="inline-flex items-center gap-1">
+                    Rating
+                    <InfoTooltip title="Rating" align="left">
+                      <p><span className="text-buy font-semibold">BUY</span> — high conviction.</p>
+                      <p><span className="text-buy/75 font-semibold">WATCHLIST</span> — lower-conviction bullish, worth tracking.</p>
+                      <p><span className="text-hold font-semibold">HOLD</span> — neutral.</p>
+                      <p><span className="text-sell font-semibold">SELL</span> — bearish.</p>
+                    </InfoTooltip>
+                  </span>
+                </th>
                 <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider">LTP</th>
                 <SortableHeader label="±%" sortK="change_pct" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
                 <SortableHeader label="P/E" sortK="pe_ratio"  currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />

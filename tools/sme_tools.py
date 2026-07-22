@@ -5,6 +5,14 @@ Fetchers for Indian SME stocks:
 
 NSE list is cached for 24 h under output/.
 Deduplication by ISIN where available; NSE records preferred over BSE.
+
+KNOWN LIMITATION: the NSE Emerge endpoint (fetch_nse_emerge_stocks) does not
+return an ISIN, so every NSE record has isin=None. Dedup therefore never
+matches an NSE record against a BSE one in practice — a company listed on
+both NSE Emerge and BSE SME will currently appear twice in get_all_sme_stocks.
+Fixing this needs a separate ISIN lookup (e.g. NSE equity master or Screener.in)
+cross-referenced by symbol/name; deferred as out of scope for the initial
+golden-cross screener.
 """
 
 import json
@@ -169,6 +177,10 @@ def get_all_sme_stocks(force: bool = False) -> list[dict]:
     """
     Merged NSE Emerge + BSE SME list, deduplicated by ISIN.
     NSE records are preferred over BSE when ISIN matches (yfinance .NS is more reliable).
+
+    NOTE: NSE Emerge records never have an ISIN (see module docstring), so this
+    dedup currently only ever compares BSE records against each other — dual-listed
+    NSE Emerge + BSE SME companies are not merged and will appear twice.
     """
     nse = fetch_nse_emerge_stocks(force=force)
     bse = fetch_bse_sme_stocks(force=force)
