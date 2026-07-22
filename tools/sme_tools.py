@@ -4,25 +4,50 @@ Fetchers for Indian SME stocks:
   - BSE SME:     BSE public API (best-effort; skipped gracefully if unavailable)
 
 NSE list is cached for 24 h under output/.
-Deduplication by ISIN where available; NSE records preferred over BSE.
 
-KNOWN LIMITATION: the NSE Emerge endpoint (fetch_nse_emerge_stocks) does not
-return an ISIN, so every NSE record has isin=None. Dedup therefore never
-matches an NSE record against a BSE one in practice — a company listed on
-both NSE Emerge and BSE SME will currently appear twice in get_all_sme_stocks.
-Fixing this needs a separate ISIN lookup (e.g. NSE equity master or Screener.in)
-cross-referenced by symbol/name; deferred as out of scope for the initial
-golden-cross screener.
+Deduplication: primarily by ISIN, but the NSE Emerge endpoint doesn't return
+one (every NSE record has isin=None), so ISIN matching alone never catches a
+company dual-listed on both exchanges. As a fallback, get_all_sme_stocks()
+also fuzzy-matches normalized company names (rapidfuzz, high score cutoff to
+avoid merging genuinely different companies) — NSE Emerge names are already
+enriched via Screener.in by fetch_nse_emerge_stocks(), so this is usually
+available. A company whose NSE and BSE names diverge enough to miss both
+checks (or whose Screener.in name lookup failed) will still appear twice;
+this is a best-effort dedup, not a guarantee.
 """
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
+from rapidfuzz import fuzz, process
 
 logger = logging.getLogger(__name__)
+
+# Same suffix-stripping approach as market_picks_pipeline.py's _norm_company,
+# kept as a local copy so this module doesn't depend on the pipeline module.
+_COMPANY_SUFFIXES = re.compile(
+    r'\b(limited|ltd|industries|industry|technologies|technology|'
+    r'enterprises|solutions|holdings|group|corporation|corp|'
+    r'international|india|infotech|infosystems|systems|services|'
+    r'private|pvt|company|co)\b',
+    re.IGNORECASE,
+)
+_NAME_MATCH_SCORE_CUTOFF = 90  # high bar — a miss is cheaper than a wrong merge
+_MIN_NORMALIZED_NAME_LEN = 3   # skip fuzzy matching on near-empty normalized names
+
+
+def _norm_company_name(name: str | None) -> str:
+    """Strip common suffixes/punctuation for cleaner company-name comparison."""
+    if not name:
+        return ""
+    n = _COMPANY_SUFFIXES.sub("", name)
+    n = re.sub(r"[^\w\s]", " ", n)
+    n = re.sub(r"\s+", " ", n).strip().upper()
+    return n
 
 _NSE_EMERGE_CACHE = Path("output/_nse_emerge_master.json")
 _BSE_SME_CACHE    = Path("output/_bse_sme_master.json")
@@ -175,27 +200,45 @@ def fetch_bse_sme_stocks(force: bool = False) -> list[dict]:
 
 def get_all_sme_stocks(force: bool = False) -> list[dict]:
     """
-    Merged NSE Emerge + BSE SME list, deduplicated by ISIN.
-    NSE records are preferred over BSE when ISIN matches (yfinance .NS is more reliable).
-
-    NOTE: NSE Emerge records never have an ISIN (see module docstring), so this
-    dedup currently only ever compares BSE records against each other — dual-listed
-    NSE Emerge + BSE SME companies are not merged and will appear twice.
+    Merged NSE Emerge + BSE SME list, deduplicated by ISIN first, then by a
+    high-confidence company-name match (see module docstring for why both are
+    needed). NSE records are preferred over BSE — yfinance's .NS suffix is
+    more reliable than .BO for these thinly-traded names.
     """
     nse = fetch_nse_emerge_stocks(force=force)
     bse = fetch_bse_sme_stocks(force=force)
 
     nse_isins = {s["isin"] for s in nse if s.get("isin")}
 
+    nse_names: list[str] = []
+    for s in nse:
+        norm = _norm_company_name(s.get("name"))
+        if len(norm) >= _MIN_NORMALIZED_NAME_LEN:
+            nse_names.append(norm)
+
     merged = list(nse)
+    isin_dupes = 0
+    name_dupes = 0
     for s in bse:
-        # Skip BSE record if NSE already has this ISIN
         if s.get("isin") and s["isin"] in nse_isins:
+            isin_dupes += 1
             continue
+
+        bse_name = _norm_company_name(s.get("name"))
+        if len(bse_name) >= _MIN_NORMALIZED_NAME_LEN and nse_names:
+            match = process.extractOne(
+                bse_name, nse_names, scorer=fuzz.token_sort_ratio,
+                score_cutoff=_NAME_MATCH_SCORE_CUTOFF,
+            )
+            if match:
+                name_dupes += 1
+                continue
+
         merged.append(s)
 
     logger.info(
-        "SME master: %d total (%d NSE Emerge, %d BSE-only)",
-        len(merged), len(nse), len(merged) - len(nse),
+        "SME master: %d total (%d NSE Emerge, %d BSE-only; "
+        "skipped %d ISIN-matched + %d name-matched BSE duplicates)",
+        len(merged), len(nse), len(merged) - len(nse), isin_dupes, name_dupes,
     )
     return merged

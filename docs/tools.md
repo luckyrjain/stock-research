@@ -167,12 +167,13 @@ Used only by `sme_ema_pipeline.py`. Live in `tools/sme_tools.py`; lists are cach
 | `fetch_bse_sme_stocks(force=False)` | BSE `ListofScripData` API (Groups M + MS) | BSE SME stocks (symbol = numeric scrip code) |
 | `get_all_sme_stocks(force=False)` | both of the above | Merged list of `{symbol, name, isin, series, exchange}` dicts |
 
-> **Known limitation:** dedup between the two lists is ISIN-based, but the NSE Emerge
-> endpoint never returns an ISIN (`isin` is always `None` on NSE records). In practice
-> this means dedup only ever collapses BSE-vs-BSE duplicates — a company dual-listed
-> on NSE Emerge and BSE SME currently appears twice in `get_all_sme_stocks`. See the
-> docstrings in `tools/sme_tools.py` for detail; fixing this needs a separate
-> symbol/name-based ISIN cross-reference and is deferred.
+> **Dedup note:** the NSE Emerge endpoint never returns an ISIN (`isin` is always `None`
+> on NSE records), so ISIN matching alone can't catch a company dual-listed on both
+> exchanges. `get_all_sme_stocks` falls back to a high-confidence fuzzy match on
+> normalized company name (rapidfuzz, score cutoff 90) using the Screener.in-enriched
+> NSE names. This is best-effort, not a guarantee — a company whose NSE and BSE names
+> diverge too much, or whose Screener.in name lookup failed, can still appear twice.
+> See the docstrings in `tools/sme_tools.py` for detail.
 
 ---
 
