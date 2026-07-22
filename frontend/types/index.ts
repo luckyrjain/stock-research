@@ -77,6 +77,15 @@ export interface Report {
   };
 }
 
+// Standalone daily-close series for sparklines — fetched separately from the
+// six-task pipeline above, so it's not part of TaskName/SSEMessage.
+export interface PriceHistory {
+  symbol:   string;
+  exchange: string | null;
+  dates:    string[];   // 'YYYY-MM-DD', oldest first
+  closes:   number[];   // aligned with dates
+}
+
 export type TaskName = 'stock_info' | 'research' | 'news' | 'shareholding' | 'mf_holdings';
 export type TaskStatus = 'idle' | 'running' | 'ok' | 'fail' | 'cached';
 export type Phase = 'idle' | 'fetching' | 'analysing' | 'done' | 'error';
@@ -151,6 +160,21 @@ export interface SmeSignalsResponse {
   golden_now:       number;          // stocks currently in golden-cross regime
   last_run:         string | null;   // ISO timestamp or null
   refreshing:       boolean;         // a pipeline refresh is running server-side
+}
+
+export interface SmeSignalHistoryRow {
+  trade_date:  string;               // 'YYYY-MM-DD'
+  close_price: number | null;
+  ema20:       number | null;
+  ema50:       number | null;
+  cross:       'golden' | 'death' | null;
+}
+
+export interface SmeSignalHistoryResponse {
+  symbol:   string;
+  name:     string | null;
+  exchange: string | null;
+  series:   SmeSignalHistoryRow[];   // up to ~63 trading days, oldest first
 }
 
 export type MarketPicksSSEMessage =

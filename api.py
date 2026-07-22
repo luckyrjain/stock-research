@@ -724,6 +724,43 @@ async def get_prices(symbols: str = Query(...)):
     return {"prices": dict(results)}
 
 
+@app.get("/api/prices/history/{symbol}")
+async def get_price_history(symbol: str, days: int = Query(180, ge=7, le=365)):
+    """Return a daily-close series for sparklines. Cached like the six data
+    slices (6 h TTL) but intentionally outside ALL_DATA_TASKS — this is a
+    standalone, on-demand series, not part of the six-task analysis pipeline.
+    """
+    sym = symbol.upper().strip()
+    loop = asyncio.get_running_loop()
+
+    def _fetch_sync() -> dict:
+        import cache
+
+        cached = cache.load(sym, "price_history")
+        if cached and len(cached.get("closes", [])) >= 5:
+            return {k: v for k, v in cached.items() if k != "_meta"}
+
+        import yfinance as yf
+        for suffix, exch in ((".NS", "NSE"), (".BO", "BSE")):
+            try:
+                df = yf.Ticker(sym + suffix).history(period=f"{days}d", interval="1d", auto_adjust=True)
+                if df.empty:
+                    continue
+                result = {
+                    "symbol":   sym,
+                    "exchange": exch,
+                    "dates":    [d.strftime("%Y-%m-%d") for d in df.index],
+                    "closes":   [round(float(c), 2) for c in df["Close"].tolist()],
+                }
+                cache.save(sym, "price_history", result)
+                return result
+            except Exception:
+                continue
+        return {"symbol": sym, "exchange": None, "dates": [], "closes": []}
+
+    return await loop.run_in_executor(None, _fetch_sync)
+
+
 @app.get("/api/sme-signals")
 async def get_sme_signals(
     lookback:  int = Query(5, ge=1, le=30, description="Days back to check for crosses"),
@@ -797,6 +834,57 @@ async def get_sme_signals(
     except Exception as exc:
         log_event(LOGGER, "sme_signals_query_failed", level="error", error=str(exc))
         raise HTTPException(status_code=503, detail="Database error. See server logs.")
+
+
+@app.get("/api/sme-signals/{symbol}/history")
+async def get_sme_signal_history(symbol: str):
+    """Return the stored EMA20/EMA50/close series for one SME stock, for charting
+    around a golden/death cross. Up to ~63 trading days (sme_ema_pipeline._STORE_DAYS).
+    """
+    import os
+
+    sym = symbol.upper().strip()
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the SME pipeline first.")
+
+    def _query_sync() -> dict:
+        from sqlalchemy import text as _text
+
+        engine = _get_sme_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(_text("""
+                SELECT
+                    e.trade_date::text   AS trade_date,
+                    e.close_price::float AS close_price,
+                    e.ema20::float       AS ema20,
+                    e.ema50::float       AS ema50,
+                    e.cross_type         AS "cross"
+                FROM ema_signals e
+                WHERE e.symbol = :symbol
+                ORDER BY e.trade_date ASC
+            """), {"symbol": sym}).mappings().fetchall()
+
+            stock = conn.execute(_text("""
+                SELECT name, exchange FROM sme_stocks WHERE symbol = :symbol
+            """), {"symbol": sym}).mappings().first()
+
+        return {
+            "symbol":   sym,
+            "name":     stock["name"] if stock else None,
+            "exchange": stock["exchange"] if stock else None,
+            "series":   [dict(r) for r in rows],
+        }
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, _query_sync)
+    except Exception as exc:
+        log_event(LOGGER, "sme_signal_history_failed", level="error", symbol=sym, error=str(exc))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+
+    if not result["series"]:
+        raise HTTPException(status_code=404, detail=f"No stored EMA history for {sym}.")
+    return result
 
 
 @app.post("/api/sme-signals/refresh", status_code=202)

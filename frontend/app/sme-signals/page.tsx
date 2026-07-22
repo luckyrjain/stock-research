@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, Fragment } from 'react';
 import Link from 'next/link';
-import type { SmeSignalsResponse } from '@/types';
+import type { SmeSignalHistoryResponse, SmeSignalsResponse } from '@/types';
+import EmaChart from '@/components/ema-chart';
 
 // ── Filter types ──────────────────────────────────────────────────────────────
 
@@ -93,7 +94,28 @@ export default function SmeSignalsPage() {
   const [lookback,   setLookback]   = useState<Lookback>(5);
   const [direction,  setDirection]  = useState<Direction>('all');
   const [refreshing, setRefreshing] = useState(false);
+  const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
+  const [historyBySymbol, setHistoryBySymbol] = useState<Record<string, SmeSignalHistoryResponse | 'loading' | 'error'>>({});
   const abortRef = useRef<AbortController | null>(null);
+
+  const toggleExpand = useCallback((symbol: string) => {
+    setExpandedSymbol(prev => (prev === symbol ? null : symbol));
+  }, []);
+
+  // Fetch (and cache) the EMA history series the first time a row is expanded.
+  useEffect(() => {
+    if (!expandedSymbol || historyBySymbol[expandedSymbol]) return;
+    const symbol = expandedSymbol;
+    setHistoryBySymbol(prev => ({ ...prev, [symbol]: 'loading' }));
+    fetch(`/api/sme-signals/${encodeURIComponent(symbol)}/history`)
+      .then(res => (res.ok ? res.json() : Promise.reject()))
+      .then((json: SmeSignalHistoryResponse) => {
+        setHistoryBySymbol(prev => ({ ...prev, [symbol]: json }));
+      })
+      .catch(() => {
+        setHistoryBySymbol(prev => ({ ...prev, [symbol]: 'error' }));
+      });
+  }, [expandedSymbol, historyBySymbol]);
 
   const fetchSignals = useCallback(async (lb: Lookback, dir: Direction, silent = false) => {
     abortRef.current?.abort();
@@ -311,17 +333,24 @@ export default function SmeSignalsPage() {
                       </td>
                     </tr>
                   ) : (
-                    signals.map((s, i) => (
+                    signals.map((s, i) => {
+                      const rowKey = `${s.symbol}-${s.trade_date}-${i}`;
+                      const isExpanded = expandedSymbol === s.symbol;
+                      const history = historyBySymbol[s.symbol];
+                      return (
+                      <Fragment key={rowKey}>
                       <tr
-                        key={`${s.symbol}-${s.trade_date}-${i}`}
-                        className="border-b border-border/60 hover:bg-surface/60 transition-colors"
+                        onClick={() => toggleExpand(s.symbol)}
+                        className="border-b border-border/60 hover:bg-surface/60 transition-colors cursor-pointer"
                       >
                         {/* Symbol */}
                         <td className="px-4 py-4">
                           <div className="flex items-center gap-1.5">
+                            <span className={`text-[9px] text-muted/60 transition-transform ${isExpanded ? 'rotate-90' : ''}`}>▸</span>
                             {s.exchange === 'NSE' ? (
                               <Link
                                 href={`/?symbol=${s.symbol}`}
+                                onClick={e => e.stopPropagation()}
                                 className="font-semibold text-tx hover:text-accent transition-colors text-sm"
                               >
                                 {s.symbol}
@@ -378,7 +407,22 @@ export default function SmeSignalsPage() {
                           </span>
                         </td>
                       </tr>
-                    ))
+                      {isExpanded && (
+                        <tr className="border-b border-border/60 bg-card/60">
+                          <td colSpan={8} className="px-6 py-5">
+                            {history === 'loading' || history === undefined ? (
+                              <p className="text-xs text-muted py-8 text-center">Loading chart…</p>
+                            ) : history === 'error' ? (
+                              <p className="text-xs text-sell py-8 text-center">Could not load EMA history for {s.symbol}.</p>
+                            ) : (
+                              <EmaChart series={history.series} />
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
+                      );
+                    })
                   )}
                 </tbody>
               </table>

@@ -1,10 +1,15 @@
 import os
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 from fastapi.testclient import TestClient
 
 import api
+import cache
 
 client = TestClient(api.app)
 
@@ -156,6 +161,69 @@ class PricesEndpointTest(unittest.TestCase):
         self.assertEqual(len(resp.json()["prices"]), 50)
 
 
+class PriceHistoryEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-price-history-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
+        self._cache_patch.start()
+        self.addCleanup(self._cache_patch.stop)
+
+    def _fake_history_df(self, n: int = 40) -> pd.DataFrame:
+        idx = pd.date_range("2026-01-01", periods=n, freq="D")
+        return pd.DataFrame({"Close": [100.0 + i for i in range(n)]}, index=idx)
+
+    def test_returns_series_from_yfinance_and_caches_it(self) -> None:
+        fake_ticker = MagicMock()
+        fake_ticker.history.return_value = self._fake_history_df(40)
+
+        with patch("yfinance.Ticker", return_value=fake_ticker):
+            resp = client.get("/api/prices/history/TCS?days=180")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["symbol"], "TCS")
+        self.assertEqual(body["exchange"], "NSE")
+        self.assertEqual(len(body["closes"]), 40)
+        self.assertEqual(body["closes"][0], 100.0)
+
+        # second call must be served from cache — no yfinance access needed at all.
+        with patch("yfinance.Ticker", side_effect=AssertionError("should not hit yfinance again")):
+            resp2 = client.get("/api/prices/history/TCS?days=180")
+        self.assertEqual(resp2.status_code, 200)
+        self.assertEqual(len(resp2.json()["closes"]), 40)
+
+    def test_falls_back_to_bse_when_nse_has_no_data(self) -> None:
+        empty_ticker = MagicMock()
+        empty_ticker.history.return_value = pd.DataFrame()
+        bse_ticker = MagicMock()
+        bse_ticker.history.return_value = self._fake_history_df(10)
+
+        def _ticker_side_effect(sym: str):
+            return empty_ticker if sym.endswith(".NS") else bse_ticker
+
+        with patch("yfinance.Ticker", side_effect=_ticker_side_effect):
+            resp = client.get("/api/prices/history/SOMESTOCK?days=30")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["exchange"], "BSE")
+
+    def test_no_data_on_either_exchange_returns_empty_series(self) -> None:
+        empty_ticker = MagicMock()
+        empty_ticker.history.return_value = pd.DataFrame()
+
+        with patch("yfinance.Ticker", return_value=empty_ticker):
+            resp = client.get("/api/prices/history/NOSUCHSYMBOL")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["closes"], [])
+        self.assertIsNone(body["exchange"])
+
+    def test_days_query_param_is_bounded(self) -> None:
+        resp = client.get("/api/prices/history/TCS?days=1000")
+        self.assertEqual(resp.status_code, 422)
+        resp2 = client.get("/api/prices/history/TCS?days=1")
+        self.assertEqual(resp2.status_code, 422)
+
+
 class SmeSignalsEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
@@ -201,6 +269,63 @@ class SmeSignalsEndpointTest(unittest.TestCase):
         # The raw exception (which could leak DSN/credentials) must not reach the client.
         self.assertNotIn("password", resp.text)
         self.assertNotIn("exposed", resp.text)
+
+
+class SmeSignalHistoryEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        api._SME_ENGINE = None
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._SME_ENGINE = None
+
+    def _fake_history_engine(self, series_rows, stock_row):
+        series_result = MagicMock()
+        series_result.mappings.return_value.fetchall.return_value = series_rows
+        stock_result = MagicMock()
+        stock_result.mappings.return_value.first.return_value = stock_row
+
+        conn = _FakeConn([series_result, stock_result])
+        engine = MagicMock()
+        engine.connect.return_value = conn
+        return engine
+
+    def test_missing_database_url_returns_503(self) -> None:
+        resp = client.get("/api/sme-signals/ABC/history")
+        self.assertEqual(resp.status_code, 503)
+
+    def test_returns_series_with_mocked_engine(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        series = [
+            {"trade_date": "2026-05-01", "close_price": 10.0, "ema20": 9.5, "ema50": 9.0, "cross": None},
+            {"trade_date": "2026-05-02", "close_price": 10.5, "ema20": 9.8, "ema50": 9.1, "cross": "golden"},
+        ]
+        fake_engine = self._fake_history_engine(series, {"name": "ABC Corp", "exchange": "NSE"})
+        with patch("api._get_sme_engine", return_value=fake_engine):
+            resp = client.get("/api/sme-signals/abc/history")
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["symbol"], "ABC")
+        self.assertEqual(body["name"], "ABC Corp")
+        self.assertEqual(len(body["series"]), 2)
+        self.assertEqual(body["series"][1]["cross"], "golden")
+
+    def test_unknown_symbol_returns_404(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        fake_engine = self._fake_history_engine([], None)
+        with patch("api._get_sme_engine", return_value=fake_engine):
+            resp = client.get("/api/sme-signals/NOSUCH/history")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_db_error_returns_sanitized_503(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("api._get_sme_engine", side_effect=RuntimeError("connection refused: password exposed")):
+            resp = client.get("/api/sme-signals/ABC/history")
+        self.assertEqual(resp.status_code, 503)
+        self.assertNotIn("password", resp.text)
 
 
 class SmeRefreshEndpointTest(unittest.TestCase):

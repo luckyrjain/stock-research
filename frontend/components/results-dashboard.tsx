@@ -1,5 +1,31 @@
-import type { Report, StockInfo } from '@/types';
+'use client';
+
+import { useEffect, useState } from 'react';
+import type { PriceHistory, Report, StockInfo } from '@/types';
 import InfoTooltip from './info-tooltip';
+import Sparkline from './sparkline';
+
+function PriceSparkline({ symbol }: { symbol: string }) {
+  const [history, setHistory] = useState<PriceHistory | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/prices/history/${encodeURIComponent(symbol)}?days=180`)
+      .then(res => (res.ok ? res.json() : null))
+      .then((data: PriceHistory | null) => { if (!cancelled) setHistory(data); })
+      .catch(() => { if (!cancelled) setHistory(null); });
+    return () => { cancelled = true; };
+  }, [symbol]);
+
+  if (!history || history.closes.length < 2) return null;
+
+  return (
+    <div className="flex flex-col items-end gap-1 shrink-0">
+      <span className="text-[9px] font-semibold text-muted uppercase tracking-wider">6M trend</span>
+      <Sparkline closes={history.closes} width={110} height={30} />
+    </div>
+  );
+}
 
 interface Props {
   report: Report;
@@ -259,7 +285,10 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
           </div>
 
           {/* Price */}
-          <ExchangeTable quotes={exchangeQuotes} primaryExchange={primaryExchange} />
+          <div className="flex items-center gap-4">
+            <ExchangeTable quotes={exchangeQuotes} primaryExchange={primaryExchange} />
+            <PriceSparkline symbol={report.symbol} />
+          </div>
         </div>
       </div>
 
