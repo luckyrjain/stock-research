@@ -36,7 +36,7 @@ body {
   }
 }
 
-/* Respect the OS-level motion preference for all animate-*/transition-*
+/* Respect the OS-level motion preference for all animate-* and transition-*
    utilities (fade-up, shimmer, spin-slow, pulse) without touching every
    component — near-zero duration still applies the end state instantly. */
 @media (prefers-reduced-motion: reduce) {
