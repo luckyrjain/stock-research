@@ -219,6 +219,21 @@ The pipeline fails open when `output/_nse_master.txt` cannot be downloaded — a
 
 `GET /api/sme-signals` returns 503 when `DATABASE_URL` is not set or PostgreSQL is unreachable. Set `DATABASE_URL` in `.env`, make sure the database exists, and run `python sme_ema_pipeline.py --setup-db` followed by a pipeline run so the tables have data.
 
+### LLM provider outage or rate limit mid-analysis
+
+The analyst step never hangs or crashes an analysis run — `run_analysis_with_fallback()` in `crew.py` degrades gracefully:
+
+- **Rate limit** (429 or similar from the provider): retried once after a computed backoff. If it's still rate-limited on the retry, or if any other exception occurs (connection refused, provider 5xx, invalid/expired API key, timeout), the analyst step returns a labeled fallback immediately — no further retries.
+- **Guardrail validation failure** (the model returned malformed or ungrounded JSON): one corrective retry with the validation error appended to the prompt, then the same fallback if it still fails.
+
+The fallback report is a `HOLD` recommendation with `LOW` confidence and a summary explicitly stating structured analysis was unavailable — the underlying market data (price, fundamentals, news, etc.) is still fetched and shown normally, only the LLM-generated verdict is degraded. To confirm this happened rather than a genuine bearish HOLD call, check the server logs for an `analyst_llm_failed` event (set `LOG_LEVEL=DEBUG` for full detail) — its `failure_stage` field is `"exception"` (provider/network issue) or `"guardrail"` (formatting issue after a retry). Once the provider recovers, force a fresh analysis with `?force=true` on `/api/analyse/{symbol}` (subject to the 20-req/5-min rate limit) rather than waiting for the 24 h cache TTL.
+
+### SME pipeline dies mid-run from a lost Postgres connection
+
+`sme_ema_pipeline.py` isn't fully atomic across a whole run — `_upsert_stocks` is one transaction for the entire stock list (an early connection loss there rolls back cleanly and nothing is written), but `_upsert_signals` commits in 500-row batches, each its own transaction. A connection loss partway through signal writes means the batches that already committed stay committed, and the run then crashes with a traceback — so `ema_signals` can be left with a mix of freshly-updated rows and stale rows from a previous run for that same day.
+
+This is always safe to recover from by just re-running the pipeline (`python sme_ema_pipeline.py`, or trigger `.github/workflows/sme-cron.yml` manually) once the database is reachable again — every upsert is idempotent per `(symbol, trade_date)` via `ON CONFLICT ... DO UPDATE`, so a re-run reconciles any partial state without manual cleanup. To check whether a given day's data is actually complete, compare `total_monitored` from `GET /api/sme-signals` against the row count you'd expect, or check the GitHub Actions run log if using the scheduled workflow.
+
 ### Next.js build fails on Google Fonts
 
 `npm run build` fetches `Inter` and `JetBrains Mono` from `fonts.googleapis.com`. To build offline, replace the font imports in `frontend/app/layout.tsx` with local font files.
