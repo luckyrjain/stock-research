@@ -8,28 +8,11 @@ import re
 import time
 from typing import Any, Tuple
 
-from crewai import Agent, Task, Crew, Process, LLM
-from config.crew_agents import AGENTS_FOR_TASK, BACKSTORIES
-from config.crew_tasks import (
-    ANALYST_DESCRIPTION_SUFFIX,
-    ANALYST_SECTIONS,
-    build_analysis_prompt,
-    build_task_specs,
-)
-from config.crew_tasks import _analyst_cfg as _ANALYST_CFG
-from schemas import validate as schema_validate
+from config.crew_tasks import build_analysis_prompt
 from observability import get_logger, log_event
 
 LOGGER = get_logger("crew")
 
-_DEFAULTS = {
-    "anthropic":   "claude-haiku-4-5-20251001",
-    "openai":      "gpt-4o-mini",
-    "groq":        "groq/llama-3.1-8b-instant",
-    "google":      "gemini/gemini-2.5-flash",
-    "ollama":      "ollama/llama3.2",
-    "openrouter":  "openrouter/meta-llama/llama-3.1-8b-instruct",
-}
 _ANALYST_DEFAULTS = {
     "anthropic":   "claude-sonnet-4-6",
     "openai":      "gpt-4o",
@@ -49,40 +32,6 @@ _API_KEY_ENV = {
 
 # Canonical order used for indexing task outputs
 ALL_DATA_TASKS = ("stock_info", "research", "news", "shareholding", "mf_holdings", "filings")
-
-
-# ── LLM resolution ───────────────────────────────────────────────────────────
-
-def _resolve_llm(analyst: bool = False) -> LLM:
-    provider = os.getenv("LLM_PROVIDER", "").lower()
-    if not provider:
-        # Auto-detect from whichever API key is present
-        for p, env in _API_KEY_ENV.items():
-            if os.getenv(env):
-                provider = p
-                break
-        if not provider:
-            raise EnvironmentError(
-                "No API key found. Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, "
-                "GROQ_API_KEY, GOOGLE_API_KEY, OPENROUTER_API_KEY — or set LLM_PROVIDER=ollama for local."
-            )
-
-    defaults = _ANALYST_DEFAULTS if analyst else _DEFAULTS
-    env_var  = "ANALYST_MODEL" if analyst else "LLM_MODEL"
-    model    = os.getenv(env_var, defaults.get(provider, ""))
-
-    if not model:
-        raise ValueError(
-            f"Unknown LLM_PROVIDER '{provider}'. "
-            "Supported: anthropic, openai, groq, google, ollama, openrouter."
-        )
-
-    if provider == "ollama":
-        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        return LLM(model=model, base_url=base_url)
-
-    api_key = os.getenv(_API_KEY_ENV.get(provider, ""), "")
-    return LLM(model=model, api_key=api_key or None)
 
 
 # ── Guardrails ────────────────────────────────────────────────────────────────
@@ -163,26 +112,6 @@ def parse_json_object(raw: str) -> dict | None:
         return data if isinstance(data, dict) else None
     except (ValueError, SyntaxError):
         return None
-
-
-def _guard_data(task_name: str):
-    """
-    Factory returning a guardrail for data-fetching tasks.
-    Delegates field validation to schemas.validate() — no field names hardcoded here.
-    """
-    def guard(output) -> Tuple[bool, Any]:
-        raw = output.raw if hasattr(output, "raw") else str(output)
-        data = parse_json_object(raw)
-        if data is None:
-            return False, (
-                "Your response must be a valid JSON object only — no markdown, no prose. "
-                "Return the exact JSON string from the tool."
-            )
-        ok, err = schema_validate(task_name, data)
-        if not ok:
-            return False, f"{err}. Return the complete JSON from the tool without modification."
-        return True, output
-    return guard
 
 
 def _source_text(all_data: dict[str, dict]) -> str:
@@ -309,18 +238,22 @@ def _guard_analysis(all_data: dict[str, dict] | None = None):
     return guard
 
 
-def _safe_analysis_fallback(symbol: str, reason: str) -> dict:
+def _safe_analysis_fallback(symbol: str, reason: str) -> dict:  # pylint: disable=unused-argument
+    # `reason` is already logged server-side (see analyst_llm_failed events) with the
+    # run_id for correlation — it's deliberately not echoed into this client-facing
+    # payload, since it can carry raw provider/exception text.
     return {
         "symbol": symbol,
         "recommendation": "HOLD",
         "confidence": "LOW",
+        "_degraded": True,
         "summary": (
             f"Automated analysis for {symbol} could not be fully structured because the analyst model "
             f"returned an invalid format. A neutral HOLD fallback was used while preserving fetched market data."
         ),
         "valuation": {
             "verdict": "Fairly Valued",
-            "comment": f"Structured valuation output was unavailable due to analyst formatting failure: {reason}",
+            "comment": "Structured valuation output was unavailable due to an analyst formatting failure.",
         },
         "business_quality": "Structured business-quality commentary was unavailable from the analyst model.",
         "bull_factors": [
@@ -469,110 +402,3 @@ def run_analysis_with_fallback(
             )
             return _safe_analysis_fallback(symbol, str(exc))
 # pylint: enable=too-many-locals
-
-
-# ── Main builder ──────────────────────────────────────────────────────────────
-
-def build_crew(
-    symbol: str,
-    active_tasks: set[str] | None = None,
-    cached_data: dict[str, dict] | None = None,
-    run_analysis: bool = True,
-) -> Crew:
-    # pylint: disable=too-many-locals
-    """
-    Build the research crew for *symbol*.
-
-    active_tasks  – names of data tasks to actually run (None = all five).
-    cached_data   – pre-loaded results for tasks NOT in active_tasks; these are
-                    inlined into the analyst description so the LLM sees them.
-    run_analysis  – whether to append the analyst task.
-
-    Note:
-    The production fetch path does not rely on CrewAI for concurrency. Data
-    collection happens in Python threads in main.py / api.py, and this Crew is
-    retained primarily for the analyst step plus compatibility with any direct
-    callers that still use build_crew().
-    """
-    if active_tasks is None:
-        active_tasks = set(ALL_DATA_TASKS)
-    cached_data = cached_data or {}
-
-    llm = _resolve_llm(analyst=False)
-    analyst_llm = _resolve_llm(analyst=True)
-
-    # Build one Agent per data task (always — even for cached tasks the agent
-    # object is needed in the Crew's agent list).
-    agents: dict[str, Agent] = {}
-    for name, (role, tools) in AGENTS_FOR_TASK.items():
-        agents[name] = Agent(
-            role=role,
-            goal=f"Complete the {name} data-fetching task for {symbol}",
-            backstory=BACKSTORIES[role],
-            tools=tools,
-            llm=llm,
-            verbose=False,
-        )
-
-    _a = _ANALYST_CFG["agent"]
-    analyst_agent = Agent(
-        role=_a["role"],
-        goal=_a["goal"],
-        backstory=_a["backstory"],
-        tools=[],
-        llm=analyst_llm,
-        verbose=False,
-    )
-
-    # ── Data tasks (only active ones are added to the crew) ──────────────
-    specs = build_task_specs(symbol, _guard_data)
-    active_list = [n for n in ALL_DATA_TASKS if n in active_tasks]
-    tasks: list[Task] = []
-    task_by_name: dict[str, Task] = {}
-
-    for name in active_list:
-        # CrewAI is not the performance-critical fetch path in this app.
-        # Actual parallel data collection is handled explicitly with Python
-        # threads before the analyst step runs.
-        t = Task(agent=agents[name], async_execution=False, **specs[name])
-        tasks.append(t)
-        task_by_name[name] = t
-
-    # ── Analyst task ─────────────────────────────────────────────────────
-    if run_analysis:
-        context_tasks: list[Task] = []
-        inline_parts: list[str] = []
-
-        for name, label in ANALYST_SECTIONS.items():
-            if name in cached_data:
-                clean = {k: v for k, v in cached_data[name].items() if k != "_meta"}
-                inline_parts.append(f"### {label}\n{json.dumps(clean, indent=2)}")
-            elif name in task_by_name:
-                context_tasks.append(task_by_name[name])
-                # Placeholder so the analyst knows this section will be in context
-                inline_parts.append(f"### {label}\n[provided via agent context]")
-
-        analyst_desc = (
-            f"You have been given all available data on the NSE-listed stock {symbol}.\n\n"
-            + "\n\n".join(inline_parts)
-        )
-
-        task_kwargs: dict = {
-            "description": analyst_desc,
-            "expected_output": _ANALYST_CFG["expected_output"],
-            "agent": analyst_agent,
-            "guardrail": _guard_analysis(cached_data),
-            "max_retries": 3,
-            "async_execution": False,
-        }
-        if context_tasks:
-            task_kwargs["context"] = context_tasks
-
-        tasks.append(Task(**task_kwargs))
-
-    return Crew(
-        agents=list(agents.values()) + [analyst_agent],
-        tasks=tasks,
-        process=Process.sequential,
-        verbose=True,
-    )

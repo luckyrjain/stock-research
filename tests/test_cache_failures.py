@@ -46,6 +46,17 @@ class CacheFailureHandlingTest(unittest.TestCase):
             self.assertIsNone(cache.load("TCS", "news"))
             self.assertFalse(cache.is_fresh("TCS", "news"))
 
+    def test_degraded_payload_is_not_saved(self) -> None:
+        # A safe-fallback analysis (e.g. crew._safe_analysis_fallback) has no "error"
+        # key but must still be excluded from the cache, or it gets served as a
+        # genuine 24h-fresh result — see the analysis-cache-poisoning fix.
+        with patch.object(cache, "CACHE_DIR", self.cache_dir):
+            cache.save("TCS", "analysis", {"symbol": "TCS", "recommendation": "HOLD", "_degraded": True})
+
+            self.assertFalse(cache.cache_path("TCS", "analysis").exists())
+            self.assertIsNone(cache.load("TCS", "analysis"))
+            self.assertFalse(cache.is_fresh("TCS", "analysis"))
+
     def test_cached_failed_payload_is_treated_as_stale(self) -> None:
         failed_payload = {
             "error": "temporary upstream failure",

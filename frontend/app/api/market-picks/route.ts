@@ -12,10 +12,15 @@ function sseError(message: string) {
   });
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  const force = new URL(req.url).searchParams.get('force');
+  const upstreamUrl = force
+    ? `${API}/api/market-picks?force=${encodeURIComponent(force)}`
+    : `${API}/api/market-picks`;
+
   let upstream: Response;
   try {
-    upstream = await fetch(`${API}/api/market-picks`, { cache: 'no-store' });
+    upstream = await fetch(upstreamUrl, { cache: 'no-store' });
   } catch {
     return sseError('Backend unavailable. Make sure the analysis service is running.');
   }

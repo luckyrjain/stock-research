@@ -72,7 +72,7 @@ FastAPI /api/market-picks
 
 | Phase | Workers | What it does |
 |---|---|---|
-| `_phase_scrape` | 6 | Parallel fetch from 16 sources (5 RSS + 8 GNews + 3 structured). Emits `source_done` per source. |
+| `_phase_scrape` | 6 | Parallel fetch from 20 sources (5 RSS + 12 GNews + 3 structured). Emits `source_done` per source. |
 | `_phase_extract` | 6 | One LLM call per source in parallel. Checks `output/_extract_cache/` first (6 h, content-aware key). Detects syndicated articles across sources (Jaccard title similarity ≥ 0.60) and marks them for down-weighting. Emits `extracting` then `extract_progress` per batch. |
 | `_phase_consolidate` | 8 | Groups picks by ticker; validates against NSE equity master (`output/_nse_master.txt`, refreshed every 24 h); confirms live price via yfinance (rejects pre-IPO / unlisted names); uses rapidfuzz for fuzzy company-name matching. Emits `consolidating` then `validate_progress` per symbol. |
 | `_phase_research` | 4 | Fetches `stock_info` + `research` + signal engine per stock. Detects recent IPOs (< 8 months of monthly history). Emits `researching` then `stock_researched` per symbol. |
@@ -141,9 +141,9 @@ The DB column is `cross_type` (`'golden'`/`'death'`/`NULL`) because `CROSS` is a
 
 ## Agent layers
 
-### Layer 1 — Data agents (CrewAI)
+### Data fetching
 
-`build_crew()` in `crew.py` wires five agents, each wrapping exactly one tool. In production, the API and CLI call `_fetch_task()` directly using `ThreadPoolExecutor` — CrewAI is bypassed for performance.
+The API and CLI call `_fetch_task()` directly using `ThreadPoolExecutor` — no agent orchestration involved.
 
 | Task | Tool | Source |
 |---|---|---|
@@ -154,11 +154,13 @@ The DB column is `cross_type` (`'golden'`/`'death'`/`NULL`) because `CROSS` is a
 | `mf_holdings` | `get_mf_holdings` | NSE API |
 | `filings` | `get_nse_filings` (direct) | NSE corporate announcements |
 
-### Layer 2 — Analyst (direct LLM call)
+These tools are decorated with `@tool` from `crewai.tools` purely for a stable `.run(**kwargs)` calling convention — that's the only thing this codebase still uses CrewAI for. An earlier `build_crew()` function wired per-task `Agent`/`Task`/`Crew` objects as a second, parallel orchestration path, but it had zero callers and zero test coverage (data collection has always gone through `_fetch_task()` in production) and was removed.
+
+### Analyst (direct LLM call)
 
 `run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI. It receives all six data slices plus signal engine context and must return the JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structure and grounded-claims checks; a guardrail failure triggers one corrective LLM retry with the validation error appended, then a safe HOLD via `_safe_analysis_fallback()` if the retry also fails. A rate-limit error gets one separate retry with a parsed wait.
 
-### Layer 3 — Market picks pipeline
+### Market picks pipeline
 
 `MarketPicksPipeline` in `market_picks_pipeline.py`. Six phases; all blocking work runs in `ThreadPoolExecutor`. Bridges back to the async SSE loop via `loop.call_soon_threadsafe(q.put_nowait, payload)`.
 
@@ -180,15 +182,10 @@ Signal results are persisted by `signals/store.save_signal()` for the stock anal
 
 ## Config layer
 
-All agent and task definitions are JSON; Python files are thin loaders.
-
 | File | Content |
 |---|---|
-| `config/agents.json` | Per-task agent role, backstory, and tool name |
-| `config/tasks.json` | Per-task description template, expected output, max retries |
 | `config/analyst.json` | Analyst persona, section labels, rules, valuation guidance, output schema |
-| `config/crew_agents.py` | Reads `agents.json`, maps tool names to callables, exports `AGENTS_FOR_TASK` |
-| `config/crew_tasks.py` | Reads `tasks.json` + `analyst.json`, exports task specs and analyst prompt builder |
+| `config/crew_tasks.py` | Reads `analyst.json`, exports `ANALYST_SECTIONS` + the analyst prompt builder |
 
 ---
 
@@ -246,13 +243,10 @@ stock-research/
 ├── requirements.txt
 ├── .env.example
 ├── config/
-│   ├── agents.json
-│   ├── tasks.json
 │   ├── analyst.json
-│   ├── crew_agents.py
 │   └── crew_tasks.py
 ├── tools/
-│   ├── market_picks_tools.py   RSS + GNews scrapers (11 sources)
+│   ├── market_picks_tools.py   RSS + GNews scrapers (14 sources; merges in 6 more → 20 total)
 │   ├── hdfc_sec_agent.py       HDFC Securities scrapers (2 sources)
 │   └── ...                     nse_tools, screener_tools, news_tools, etc.
 ├── signals/

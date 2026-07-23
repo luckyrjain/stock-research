@@ -6,6 +6,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     name: Backend (pytest)
@@ -25,7 +29,7 @@ jobs:
         run: python -m pytest tests/ -v
 
   frontend:
-    name: Frontend (tsc)
+    name: Frontend (tsc + build)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -44,3 +48,9 @@ jobs:
 
       - name: Type-check
         run: npx tsc --noEmit
+
+      - name: Production build
+        # tsc --noEmit alone doesn't catch everything — e.g. a CSS syntax
+        # error only surfaces under the production minifier, not tsc or
+        # `next dev`. Build once here so that class of bug can't land silently.
+        run: npm run build

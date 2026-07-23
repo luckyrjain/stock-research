@@ -189,7 +189,10 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
         self.assertEqual(analysis["recommendation"], "HOLD")
         self.assertEqual(analysis["confidence"], "LOW")
         self.assertEqual(len(analysis["bull_factors"]), 3)
-        self.assertIn("bull_factors", analysis["valuation"]["comment"])
+        # The raw guardrail error is logged server-side (see analyst_llm_failed),
+        # not echoed into the client-facing comment.
+        self.assertNotIn("bull_factors", analysis["valuation"]["comment"])
+        self.assertTrue(analysis["_degraded"])
 
     def test_guardrail_failure_retries_once_then_succeeds(self) -> None:
         responses = [
@@ -234,7 +237,10 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
             analysis = crew.run_analysis_with_fallback("TCS", {name: {} for name in crew.ALL_DATA_TASKS})
 
         self.assertEqual(analysis["recommendation"], "HOLD")
-        self.assertIn("boom", analysis["valuation"]["comment"])
+        # The raw exception is logged server-side (see analyst_llm_failed),
+        # not echoed into the client-facing comment.
+        self.assertNotIn("boom", analysis["valuation"]["comment"])
+        self.assertTrue(analysis["_degraded"])
 
 
 if __name__ == "__main__":

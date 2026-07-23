@@ -1,14 +1,16 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef, Fragment } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'react';
 import Link from 'next/link';
-import type { SmeSignalHistoryResponse, SmeSignalsResponse } from '@/types';
+import type { SmeSignal, SmeSignalHistoryResponse, SmeSignalsResponse } from '@/types';
 import EmaChart from '@/components/ema-chart';
 
 // ── Filter types ──────────────────────────────────────────────────────────────
 
 type Lookback  = 1 | 3 | 5 | 10;
 type Direction = 'all' | 'golden' | 'death';
+type ExchangeFilter = 'all' | 'NSE' | 'BSE';
+type SortKey = 'symbol' | 'trade_date' | 'close_price' | 'ema20' | 'ema50';
 
 // ── Helper components ─────────────────────────────────────────────────────────
 
@@ -65,6 +67,36 @@ function FilterChip<T extends string | number>({
   );
 }
 
+function SortableTh({ label, sortK, currentKey, currentDir, onSort, align = 'left' }: {
+  label: string;
+  sortK: SortKey;
+  currentKey: SortKey | null;
+  currentDir: 'asc' | 'desc';
+  onSort: (k: SortKey) => void;
+  align?: 'left' | 'right';
+}) {
+  const active = currentKey === sortK;
+  return (
+    <th
+      aria-sort={active ? (currentDir === 'desc' ? 'descending' : 'ascending') : 'none'}
+      className={`p-0 text-[10px] font-bold text-muted uppercase tracking-wider whitespace-nowrap ${align === 'right' ? 'text-right' : 'text-left'}`}
+    >
+      <button
+        type="button"
+        onClick={() => onSort(sortK)}
+        className={`inline-flex items-center gap-1 px-4 py-3 uppercase tracking-wider
+                   cursor-pointer hover:text-tx transition-colors select-none group
+                   ${align === 'right' ? 'flex-row-reverse' : ''}`}
+      >
+        {label}
+        <span className={`text-[9px] transition-colors ${active ? 'text-accent' : 'text-muted/25 group-hover:text-muted/60'}`}>
+          {active ? (currentDir === 'desc' ? '↓' : '↑') : '↕'}
+        </span>
+      </button>
+    </th>
+  );
+}
+
 // ── Loading skeleton rows ─────────────────────────────────────────────────────
 
 function SkeletonRows() {
@@ -95,6 +127,9 @@ export default function SmeSignalsPage() {
   const [lookback,   setLookback]   = useState<Lookback>(5);
   const [direction,  setDirection]  = useState<Direction>('all');
   const [refreshing, setRefreshing] = useState(false);
+  const [exchangeFilter, setExchangeFilter] = useState<ExchangeFilter>('all');
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
   const [historyBySymbol, setHistoryBySymbol] = useState<Record<string, SmeSignalHistoryResponse | 'loading' | 'error'>>({});
   const abortRef = useRef<AbortController | null>(null);
@@ -170,6 +205,41 @@ export default function SmeSignalsPage() {
   }, []);
 
   const signals = data?.signals ?? [];
+
+  const toggleSort = useCallback((k: SortKey) => {
+    setSortKey(prevKey => {
+      if (prevKey === k) {
+        setSortDir(prevDir => (prevDir === 'desc' ? 'asc' : 'desc'));
+        return k;
+      }
+      setSortDir('desc');
+      return k;
+    });
+  }, []);
+
+  // Exchange filter + sort are applied client-side — the API already returns
+  // every matching cross event for the selected period/direction, so there's
+  // no pagination to fight and no need for extra server round-trips.
+  const displayedSignals = useMemo(() => {
+    let out: SmeSignal[] = exchangeFilter === 'all'
+      ? signals
+      : signals.filter(s => s.exchange === exchangeFilter);
+
+    if (sortKey) {
+      out = [...out].sort((a, b) => {
+        const av = a[sortKey];
+        const bv = b[sortKey];
+        let cmp: number;
+        if (av == null && bv == null) cmp = 0;
+        else if (av == null) cmp = -1;
+        else if (bv == null) cmp = 1;
+        else if (typeof av === 'string' && typeof bv === 'string') cmp = av.localeCompare(bv);
+        else cmp = (av as number) - (bv as number);
+        return sortDir === 'desc' ? -cmp : cmp;
+      });
+    }
+    return out;
+  }, [signals, exchangeFilter, sortKey, sortDir]);
 
   // Derived stats
   const deathCount = signals.filter(s => s.cross === 'death').length;
@@ -275,6 +345,18 @@ export default function SmeSignalsPage() {
               ))}
             </div>
           </div>
+
+          <div className="w-px h-5 bg-border" />
+
+          {/* Exchange — filtered client-side, the API already returns both exchanges */}
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-bold text-muted uppercase tracking-wider">Exchange</span>
+            <div className="flex gap-1.5">
+              {(['all', 'NSE', 'BSE'] as const).map(v => (
+                <FilterChip key={v} value={v} active={exchangeFilter === v} onClick={setExchangeFilter} label={v === 'all' ? 'All' : v} />
+              ))}
+            </div>
+          </div>
         </div>
 
         {/* Last run label */}
@@ -302,32 +384,25 @@ export default function SmeSignalsPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border bg-surface sticky top-0 z-10">
-                    {[
-                      { label: 'Symbol',     cls: 'text-left'  },
-                      { label: 'Company',    cls: 'text-left'  },
-                      { label: 'Cross Date', cls: 'text-left'  },
-                      { label: 'Cross',      cls: 'text-left'  },
-                      { label: 'Regime',     cls: 'text-left'  },
-                      { label: 'Close',      cls: 'text-right' },
-                      { label: 'EMA 20',     cls: 'text-right' },
-                      { label: 'EMA 50',     cls: 'text-right' },
-                    ].map(({ label, cls }) => (
-                      <th
-                        key={label}
-                        className={`px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider ${cls}`}
-                      >
-                        {label}
-                      </th>
-                    ))}
+                    <SortableTh label="Symbol" sortK="symbol" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
+                    <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider">Company</th>
+                    <SortableTh label="Cross Date" sortK="trade_date" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
+                    <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider">Cross</th>
+                    <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider">Regime</th>
+                    <SortableTh label="Close" sortK="close_price" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
+                    <SortableTh label="EMA 20" sortK="ema20" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
+                    <SortableTh label="EMA 50" sortK="ema50" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
                   </tr>
                 </thead>
                 <tbody>
                   {loading ? (
                     <SkeletonRows />
-                  ) : signals.length === 0 ? (
+                  ) : displayedSignals.length === 0 ? (
                     <tr>
                       <td colSpan={8} className="px-4 py-16 text-center text-muted text-sm">
-                        No crossovers found for the selected filters.
+                        {signals.length === 0
+                          ? 'No crossovers found for the selected filters.'
+                          : `No ${exchangeFilter} crossovers in the current results.`}
                         {!data?.last_run && (
                           <div className="mt-2 text-xs text-muted/60">
                             Make sure you&apos;ve run{' '}
@@ -337,7 +412,7 @@ export default function SmeSignalsPage() {
                       </td>
                     </tr>
                   ) : (
-                    signals.map((s, i) => {
+                    displayedSignals.map((s, i) => {
                       const rowKey = `${s.symbol}-${s.trade_date}-${i}`;
                       const isExpanded = expandedSymbol === s.symbol;
                       const history = historyBySymbol[s.symbol];

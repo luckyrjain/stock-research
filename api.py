@@ -1,14 +1,18 @@
 import asyncio
 import json
+import os
 import threading
 import time
 import uuid
 import re
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from observability import get_logger, log_event
 from signals.interpreter import interpret
@@ -45,6 +49,36 @@ def _save_picks_cache(picks: list, generated_at: str) -> None:
         )
     except Exception:
         pass
+
+
+# ── Global LLM concurrency ceiling ───────────────────────────────────────────
+# The per-IP rate limiters (_rate_limit below) only slow down a single IP — they
+# don't stop N different IPs (e.g. rotated) from each driving a concurrent,
+# expensive LLM pipeline at the same time: a single-stock analyst call, or a
+# full market-picks run (up to 35 stocks, dozens of LLM calls). This is a
+# coarse, single-process backstop: cap how many such pipelines can run at once,
+# regardless of caller or IP. Like the other in-memory guards in this file, it
+# does not survive a multi-worker deployment (see docs/deployment.md).
+_LLM_CONCURRENCY_LIMIT = int(os.getenv("LLM_CONCURRENCY_LIMIT", "4"))
+_LLM_CONCURRENCY_LOCK = threading.Lock()
+_llm_concurrency_count = 0
+
+
+def _acquire_llm_slot() -> bool:
+    """Non-blocking: claims a slot and returns True if one is free, else False.
+    Every True must be paired with exactly one _release_llm_slot() call."""
+    global _llm_concurrency_count
+    with _LLM_CONCURRENCY_LOCK:
+        if _llm_concurrency_count >= _LLM_CONCURRENCY_LIMIT:
+            return False
+        _llm_concurrency_count += 1
+        return True
+
+
+def _release_llm_slot() -> None:
+    global _llm_concurrency_count
+    with _LLM_CONCURRENCY_LOCK:
+        _llm_concurrency_count = max(0, _llm_concurrency_count - 1)
 
 
 # ── SME signals: shared engine + refresh state ───────────────────────────────
@@ -93,8 +127,49 @@ def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: f
         _RATE_LIMIT_CALLS[key] = calls
 
 
-app = FastAPI(title="AlphaPulse")
+# A dedicated, explicitly-sized executor for this app's blocking work (LLM
+# calls, scraping, yfinance, etc.), set as the event loop's default executor at
+# startup. Every `run_in_executor(None, ...)` call in this file then uses it.
+# asyncio's own default executor is implicitly sized min(32, cpu_count + 4) —
+# fine on a beefy box, but on a small/constrained container that can be just a
+# handful of threads shared by *everything* the server does. Sizing it
+# explicitly makes capacity predictable. This is deliberately larger than
+# _LLM_CONCURRENCY_LIMIT (below) so quick requests (validate, prices,
+# sme-signals queries) always have headroom even when every LLM slot is busy.
+_EXECUTOR_MAX_WORKERS = int(os.getenv("EXECUTOR_MAX_WORKERS", "16"))
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    executor = ThreadPoolExecutor(max_workers=_EXECUTOR_MAX_WORKERS, thread_name_prefix="api-worker")
+    asyncio.get_running_loop().set_default_executor(executor)
+    try:
+        yield
+    finally:
+        executor.shutdown(wait=False)
+
+
+app = FastAPI(title="AlphaPulse", lifespan=_lifespan)
 LOGGER = get_logger("api")
+
+# CORS: the browser only ever talks to this backend through the Next.js
+# proxy routes (server-to-server fetch, same-origin from the browser's
+# perspective) — this is defense in depth against a direct cross-origin
+# browser request, not something normal operation relies on. Configure via
+# ALLOWED_ORIGINS (comma-separated) for non-default deployments; defaults to
+# the local Next.js dev server.
+_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 _NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -109,6 +184,9 @@ _ISIN_CACHE: tuple[float, dict] | None = None
 
 def _is_isin(s: str) -> bool:
     return bool(re.match(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$", s))
+
+
+_TICKER_RE = re.compile(r"^[A-Z0-9&\-]{1,20}$")
 
 
 def _load_isin_map() -> dict:
@@ -304,7 +382,8 @@ async def health():
     return {"status": "ok"}
 
 @app.get("/api/validate/{symbol}")
-async def validate_symbol(symbol: str, exchange: str = ""):
+async def validate_symbol(symbol: str, request: Request, exchange: str = ""):
+    _rate_limit(request, "validate", max_calls=30, window_seconds=60)
     sym = symbol.upper().strip()
     loop = asyncio.get_running_loop()
 
@@ -486,6 +565,7 @@ async def analyse(symbol: str, request: Request, force: bool = False):
 
     async def stream():
         loop = asyncio.get_running_loop()
+        llm_slot_acquired = False
         try:
             import cache
             from crew import ALL_DATA_TASKS
@@ -546,6 +626,15 @@ async def analyse(symbol: str, request: Request, force: bool = False):
             analysis: dict = {}
 
             if run_analysis:
+                if not _acquire_llm_slot():
+                    log_event(LOGGER, "analyst_capacity_rejected", level="warning", run_id=run_id, symbol=sym)
+                    yield _sse({
+                        "event": "error",
+                        "message": "The AI analyst is at capacity right now — please try again in a moment.",
+                    })
+                    return
+                llm_slot_acquired = True
+
                 yield _sse({"event": "analysing"})
 
                 def _run_analyst():
@@ -563,17 +652,24 @@ async def analyse(symbol: str, request: Request, force: bool = False):
                     except Exception as exc:
                         # Never let the background task fail silently; convert it into
                         # a structured payload so the SSE loop can respond cleanly.
+                        # str(exc) is logged (not returned to the client) — see the
+                        # api_analysis_failed-style logging convention used elsewhere.
+                        log_event(
+                            LOGGER, "analyst_background_task_failed", level="error",
+                            run_id=run_id, symbol=sym, error=str(exc),
+                        )
                         result = {
                             "symbol": sym,
                             "recommendation": "HOLD",
                             "confidence": "LOW",
+                            "_degraded": True,
                             "summary": (
                                 f"Automated analysis for {sym} failed while running in the background. "
                                 "A safe fallback response was returned instead of terminating the stream."
                             ),
                             "valuation": {
                                 "verdict": "Fairly Valued",
-                                "comment": f"Analyst execution failed before structured valuation output was produced: {exc}",
+                                "comment": "Analyst execution failed before structured valuation output was produced.",
                             },
                             "business_quality": "Structured business-quality commentary was unavailable because the analyst task failed.",
                             "bull_factors": [
@@ -598,12 +694,16 @@ async def analyse(symbol: str, request: Request, force: bool = False):
 
                 asyncio.create_task(_run_and_signal())
 
-                while True:
-                    try:
-                        analysis = await asyncio.wait_for(done_q.get(), timeout=15)
-                        break
-                    except asyncio.TimeoutError:
-                        yield _heartbeat()
+                try:
+                    while True:
+                        try:
+                            analysis = await asyncio.wait_for(done_q.get(), timeout=15)
+                            break
+                        except asyncio.TimeoutError:
+                            yield _heartbeat()
+                finally:
+                    _release_llm_slot()
+                    llm_slot_acquired = False
 
                 cache.save(sym, "analysis", analysis)
             else:
@@ -616,6 +716,9 @@ async def analyse(symbol: str, request: Request, force: bool = False):
         except Exception as exc:
             log_event(LOGGER, "api_analysis_failed", level="error", run_id=run_id, symbol=sym, error=str(exc))
             yield _sse({"event": "error", "message": str(exc)})
+        finally:
+            if llm_slot_acquired:
+                _release_llm_slot()
 
     return StreamingResponse(
         stream(),
@@ -651,6 +754,17 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
                 return
 
         # ── Full pipeline run ─────────────────────────────────────────────
+        # A market-picks run makes dozens of LLM calls (one per source's extraction,
+        # plus batched analysis) — it takes one global slot for its whole duration,
+        # same as a single-stock analyst call, so it counts against the same ceiling.
+        if not _acquire_llm_slot():
+            log_event(LOGGER, "market_picks_capacity_rejected", level="warning", run_id=run_id)
+            yield _sse({
+                "event": "error",
+                "message": "The server is at capacity for AI-driven pipelines right now — please try again in a moment.",
+            })
+            return
+
         loop = asyncio.get_running_loop()
         q: asyncio.Queue = asyncio.Queue()
 
@@ -663,7 +777,18 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
                 pipeline = MarketPicksPipeline()
                 picks = pipeline.run(on_event=on_event)
                 generated_at = datetime.now(timezone.utc).isoformat()
-                _save_picks_cache(picks, generated_at)
+                # A pipeline run that completes without raising but yields zero picks, or
+                # that pipeline.healthy flags as substantially degraded (e.g. most scrape
+                # sources failed simultaneously), must not be cached — caching it would
+                # serve that broken result as "fresh" for 6h and mask the outage from
+                # every subsequent visitor.
+                if picks and pipeline.healthy:
+                    _save_picks_cache(picks, generated_at)
+                else:
+                    log_event(
+                        LOGGER, "market_picks_degraded_result_not_cached", level="warning",
+                        run_id=run_id, picks=len(picks), healthy=pipeline.healthy,
+                    )
                 loop.call_soon_threadsafe(q.put_nowait, {
                     "event":        "done",
                     "picks":        picks,
@@ -674,6 +799,8 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
             except Exception as exc:
                 log_event(LOGGER, "market_picks_failed", level="error", run_id=run_id, error=str(exc))
                 loop.call_soon_threadsafe(q.put_nowait, {"event": "error", "message": str(exc)})
+            finally:
+                _release_llm_slot()
 
         log_event(LOGGER, "market_picks_started", run_id=run_id)
 
@@ -702,13 +829,14 @@ _PICKS_HISTORY_DIR = Path("output/_history")
 
 
 @app.get("/api/market-picks/history")
-async def get_market_picks_history():
+async def get_market_picks_history(request: Request):
     """Aggregate output/_history/<date>.json daily snapshots into a per-symbol
     track record: first/last seen, confidence trend, and price performance
     since first seen. Price/recommendation were only added to the snapshot
     schema recently — older snapshot files won't have them, so change_pct is
     null wherever price_then or price_now is missing rather than guessed at.
     """
+    _rate_limit(request, "market_picks_history", max_calls=60, window_seconds=60)
 
     def _load_sync() -> dict:
         if not _PICKS_HISTORY_DIR.exists():
@@ -764,9 +892,12 @@ async def get_market_picks_history():
 
 
 @app.get("/api/prices")
-async def get_prices(symbols: str = Query(...)):
+async def get_prices(request: Request, symbols: str = Query(...)):
     """Return LTP + day change% for a comma-separated list of NSE/BSE symbols."""
-    sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()][:50]
+    # Up to 50 symbols means up to 50 yfinance calls per request — the biggest
+    # amplification factor of any endpoint here, so it gets the tightest limit.
+    _rate_limit(request, "prices", max_calls=30, window_seconds=60)
+    sym_list = [s.strip().upper() for s in symbols.split(",") if _TICKER_RE.match(s.strip())][:50]
     loop = asyncio.get_running_loop()
 
     def _fetch_one(sym: str) -> tuple[str, dict]:
@@ -790,11 +921,12 @@ async def get_prices(symbols: str = Query(...)):
 
 
 @app.get("/api/prices/history/{symbol}")
-async def get_price_history(symbol: str, days: int = Query(180, ge=7, le=365)):
+async def get_price_history(request: Request, symbol: str, days: int = Query(180, ge=7, le=365)):
     """Return a daily-close series for sparklines. Cached like the six data
     slices (6 h TTL) but intentionally outside ALL_DATA_TASKS — this is a
     standalone, on-demand series, not part of the six-task analysis pipeline.
     """
+    _rate_limit(request, "prices_history", max_calls=60, window_seconds=60)
     sym = symbol.upper().strip()
     loop = asyncio.get_running_loop()
 
@@ -971,7 +1103,13 @@ async def refresh_sme_signals(request: Request):
         global _SME_REFRESHING
         try:
             from sme_ema_pipeline import run as run_sme_pipeline
-            run_sme_pipeline()
+            healthy = run_sme_pipeline()
+            if not healthy:
+                log_event(
+                    LOGGER, "sme_refresh_unhealthy", level="warning",
+                    detail="Pipeline ran but reported an unhealthy result (empty stock list or "
+                           "too high an OHLCV fetch error rate) — see sme_ema_pipeline logs above.",
+                )
         except Exception as exc:
             log_event(LOGGER, "sme_refresh_failed", level="error", error=str(exc))
         finally:

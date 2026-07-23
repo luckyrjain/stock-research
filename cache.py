@@ -27,7 +27,10 @@ def cache_path(symbol: str, task_name: str) -> Path:
 
 
 def _is_failed_payload(data: object) -> bool:
-    return isinstance(data, dict) and bool(data.get("error"))
+    # `_degraded` marks a safe-fallback payload (e.g. crew._safe_analysis_fallback) —
+    # it has no "error" key of its own, but must not be cached as if it were a
+    # genuine result, or it'd be served as fresh for the rest of the TTL window.
+    return isinstance(data, dict) and bool(data.get("error") or data.get("_degraded"))
 
 
 def load(symbol: str, task_name: str) -> dict | None:

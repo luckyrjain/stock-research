@@ -149,8 +149,8 @@ def _fetch_all_parallel(task_names: list[str], symbol: str, run_id: str) -> dict
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _strip_meta(data: dict) -> dict:
-    """Strip _meta field from a dictionary."""
-    return {k: v for k, v in data.items() if k != "_meta"}
+    """Strip internal-only (underscore-prefixed, e.g. _meta, _degraded) fields."""
+    return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
 def _nse_autocomplete(query: str) -> list[dict]:

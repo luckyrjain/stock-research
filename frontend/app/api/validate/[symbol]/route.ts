@@ -1,12 +1,16 @@
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ symbol: string }> },
 ) {
   const { symbol } = await params;
+  const exchange = new URL(req.url).searchParams.get('exchange');
+  const upstreamUrl = exchange
+    ? `${API}/api/validate/${symbol}?exchange=${encodeURIComponent(exchange)}`
+    : `${API}/api/validate/${symbol}`;
   try {
-    const res = await fetch(`${API}/api/validate/${symbol}`, { cache: 'no-store' });
+    const res = await fetch(upstreamUrl, { cache: 'no-store' });
     const data = await res.json();
     return Response.json(data);
   } catch {

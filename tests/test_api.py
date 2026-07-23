@@ -58,6 +58,55 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
 
 
+class CorsTest(unittest.TestCase):
+    def test_allowed_origin_gets_cors_headers(self) -> None:
+        resp = client.options(
+            "/health",
+            headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "GET"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers.get("access-control-allow-origin"), "http://localhost:3000")
+
+    def test_disallowed_origin_is_rejected(self) -> None:
+        resp = client.options(
+            "/health",
+            headers={"Origin": "http://evil.example.com", "Access-Control-Request-Method": "GET"},
+        )
+        self.assertNotIn("access-control-allow-origin", {h.lower() for h in resp.headers})
+
+    def test_requests_without_an_origin_header_are_unaffected(self) -> None:
+        # The Next.js proxy routes talk to this backend server-to-server — no
+        # Origin header, so CORS never applies to that path.
+        resp = client.get("/health")
+        self.assertEqual(resp.status_code, 200)
+
+
+class LlmConcurrencyCeilingTest(unittest.TestCase):
+    def setUp(self) -> None:
+        api._llm_concurrency_count = 0
+
+    def tearDown(self) -> None:
+        api._llm_concurrency_count = 0
+
+    def test_acquire_up_to_limit_then_rejects(self) -> None:
+        with patch("api._LLM_CONCURRENCY_LIMIT", 2):
+            self.assertTrue(api._acquire_llm_slot())
+            self.assertTrue(api._acquire_llm_slot())
+            self.assertFalse(api._acquire_llm_slot())
+
+    def test_release_frees_a_slot_for_reuse(self) -> None:
+        with patch("api._LLM_CONCURRENCY_LIMIT", 1):
+            self.assertTrue(api._acquire_llm_slot())
+            self.assertFalse(api._acquire_llm_slot())
+            api._release_llm_slot()
+            self.assertTrue(api._acquire_llm_slot())
+
+    def test_release_below_zero_is_clamped_not_negative(self) -> None:
+        api._release_llm_slot()
+        api._release_llm_slot()
+        self.assertEqual(api._llm_concurrency_count, 0)
+
+
 class RateLimitHelperTest(unittest.TestCase):
     def setUp(self) -> None:
         api._RATE_LIMIT_CALLS.clear()
@@ -94,6 +143,129 @@ class RateLimitHelperTest(unittest.TestCase):
                 api._rate_limit(req_a, "bucket_c", max_calls=1, window_seconds=60)
 
 
+class ValidateSymbolEndpointTest(unittest.TestCase):
+    """Covers validate_symbol's branch-heavy paths: ISIN resolution (CSV hit and
+    yfinance fallback), the BSE-forced path, and the NSE/BSE/Screener fallback chain.
+    All network-touching helpers are mocked at the api.* boundary.
+    """
+
+    def test_isin_resolved_via_nse_master_falls_through_to_nse_lookup(self) -> None:
+        with patch("api._load_isin_map", return_value={"INE009A01021": {"symbol": "TCS"}}), \
+             patch("api._autocomplete_sync", return_value=[{"symbol": "TCS", "activeSeries": True}]), \
+             patch("api._bse_autocomplete_sync", return_value=[]), \
+             patch("api._quote_meta_sync", return_value={"company": "Tata Consultancy Services", "isin": "INE009A01021"}), \
+             patch("api._bse_search_by_isin", return_value={}):
+            resp = client.get("/api/validate/INE009A01021")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["valid"])
+        self.assertEqual(body["symbol"], "TCS")
+        self.assertEqual(body["exchange"], "NSE")
+
+    def test_isin_not_in_csv_resolves_via_yfinance_bse(self) -> None:
+        yf_info = {"symbol": "TAPARIA.BO", "longName": "Taparia Tools Ltd"}
+        fake_ticker = MagicMock()
+        fake_ticker.info = yf_info
+        with patch("api._load_isin_map", return_value={}), \
+             patch("yfinance.Ticker", return_value=fake_ticker):
+            resp = client.get("/api/validate/INE999Z99999")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["valid"])
+        self.assertEqual(body["exchange"], "BSE")
+        self.assertEqual(body["symbol"], "TAPARIA")
+
+    def test_isin_unresolvable_anywhere_returns_not_found(self) -> None:
+        fake_ticker = MagicMock()
+        fake_ticker.info = {}
+        with patch("api._load_isin_map", return_value={}), \
+             patch("yfinance.Ticker", return_value=fake_ticker):
+            resp = client.get("/api/validate/INE000000000")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["valid"])
+        self.assertFalse(body["found"])
+
+    def test_bse_forced_path_resolves_via_screener(self) -> None:
+        with patch("api._screener_company_page_sync",
+                    return_value={"nse": None, "bse": "TAPARIA", "company": "Taparia Tools", "isin": "INE123"}):
+            resp = client.get("/api/validate/505685?exchange=BSE")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["valid"])
+        self.assertEqual(body["exchange"], "BSE")
+        self.assertEqual(body["symbol"], "TAPARIA")
+
+    def test_bse_forced_path_unresolvable_returns_not_found(self) -> None:
+        with patch("api._screener_company_page_sync", return_value={}):
+            resp = client.get("/api/validate/NOPE?exchange=BSE")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["valid"])
+        self.assertFalse(body["found"])
+
+    def test_nse_exact_match_returns_valid_with_suggestions(self) -> None:
+        with patch("api._autocomplete_sync", return_value=[
+                {"symbol": "TCS", "activeSeries": True},
+                {"symbol": "TCSFIN", "activeSeries": True, "company": "TCS Finance"},
+            ]), \
+             patch("api._bse_autocomplete_sync", return_value=[]), \
+             patch("api._quote_meta_sync", return_value={"company": "Tata Consultancy Services", "isin": "INE009A01021"}), \
+             patch("api._bse_search_by_isin", return_value={}):
+            resp = client.get("/api/validate/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["valid"])
+        self.assertEqual(body["symbol"], "TCS")
+        self.assertEqual(body["exchange"], "NSE")
+        self.assertEqual(len(body["suggestions"]), 1)
+
+    def test_suspended_nse_symbol_is_found_but_not_valid(self) -> None:
+        with patch("api._autocomplete_sync", return_value=[{"symbol": "DEADCO", "activeSeries": False}]), \
+             patch("api._bse_autocomplete_sync", return_value=[]), \
+             patch("api._quote_meta_sync", return_value={"company": "Dead Co", "isin": None}), \
+             patch("api._bse_search_by_isin", return_value={}):
+            resp = client.get("/api/validate/DEADCO")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["found"])
+        self.assertFalse(body["valid"])
+        self.assertTrue(body["suspended"])
+
+    def test_nse_miss_falls_back_to_bse_match(self) -> None:
+        with patch("api._autocomplete_sync", return_value=[]), \
+             patch("api._bse_autocomplete_sync", return_value=[{"symbol": "505685", "company": "Taparia Tools"}]), \
+             patch("api._screener_company_page_sync",
+                    return_value={"nse": None, "bse": "TAPARIA", "company": "Taparia Tools", "isin": "INE123"}):
+            resp = client.get("/api/validate/TAPARIA")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["valid"])
+        self.assertEqual(body["exchange"], "BSE")
+
+    def test_nse_and_bse_miss_falls_back_to_screener_search(self) -> None:
+        with patch("api._autocomplete_sync", return_value=[]), \
+             patch("api._bse_autocomplete_sync", return_value=[]), \
+             patch("api._screener_search_sync", return_value=[{"url": "/company/500325/"}]), \
+             patch("api._screener_company_page_sync",
+                    return_value={"nse": "RELIANCE", "bse": None, "company": "Reliance Industries", "isin": "INE002A01018"}):
+            resp = client.get("/api/validate/RELIANC")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["valid"])
+        self.assertEqual(body["symbol"], "RELIANCE")
+
+    def test_nothing_found_returns_not_found(self) -> None:
+        with patch("api._autocomplete_sync", return_value=[]), \
+             patch("api._bse_autocomplete_sync", return_value=[]), \
+             patch("api._screener_search_sync", return_value=[]):
+            resp = client.get("/api/validate/ZZZNOTREAL")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["found"])
+        self.assertFalse(body["valid"])
+
+
 class AnalyseEndpointRateLimitTest(unittest.TestCase):
     def setUp(self) -> None:
         api._RATE_LIMIT_CALLS.clear()
@@ -119,6 +291,39 @@ class MarketPicksForceRateLimitTest(unittest.TestCase):
     def test_429_when_force_rescan_over_limit(self) -> None:
         api._RATE_LIMIT_CALLS["market_picks_force:testclient"] = [api.time.monotonic()] * 3
         resp = client.get("/api/market-picks?force=true")
+        self.assertEqual(resp.status_code, 429)
+
+
+class RemainingEndpointsRateLimitTest(unittest.TestCase):
+    """/api/prices, /api/validate, and the two history endpoints previously had
+    no rate limit at all — /api/prices was the worst offender (up to 50
+    yfinance calls per request, at unbounded request rate).
+    """
+
+    def setUp(self) -> None:
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_429_on_prices_when_over_limit(self) -> None:
+        api._RATE_LIMIT_CALLS["prices:testclient"] = [api.time.monotonic()] * 30
+        resp = client.get("/api/prices?symbols=TCS")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_429_on_validate_when_over_limit(self) -> None:
+        api._RATE_LIMIT_CALLS["validate:testclient"] = [api.time.monotonic()] * 30
+        resp = client.get("/api/validate/TCS")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_429_on_prices_history_when_over_limit(self) -> None:
+        api._RATE_LIMIT_CALLS["prices_history:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/prices/history/TCS")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_429_on_market_picks_history_when_over_limit(self) -> None:
+        api._RATE_LIMIT_CALLS["market_picks_history:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/market-picks/history")
         self.assertEqual(resp.status_code, 429)
 
 
@@ -218,6 +423,17 @@ class PricesEndpointTest(unittest.TestCase):
             resp = client.get(f"/api/prices?symbols={symbols}")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.json()["prices"]), 50)
+
+    def test_malformed_symbols_are_filtered_before_reaching_yfinance(self) -> None:
+        fake_ticker = MagicMock()
+        fake_ticker.fast_info = MagicMock(last_price=100.0, previous_close=90.0)
+        with patch("yfinance.Ticker", return_value=fake_ticker) as mocked:
+            resp = client.get("/api/prices?symbols=TCS,'; DROP TABLE x;--,../../etc/passwd,")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(list(body["prices"].keys()), ["TCS"])
+        called_symbols = {call.args[0].rsplit(".", 1)[0] for call in mocked.call_args_list}
+        self.assertEqual(called_symbols, {"TCS"})
 
 
 class PriceHistoryEndpointTest(unittest.TestCase):

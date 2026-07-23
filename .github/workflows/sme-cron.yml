@@ -1,0 +1,38 @@
+name: SME Golden Cross Pipeline
+
+on:
+  schedule:
+    # 18:30 IST (UTC+5:30) on weekdays = 13:00 UTC. NSE closes 15:30 IST,
+    # so this gives a ~3h buffer for end-of-day data to settle before the
+    # pipeline runs. Keep in sync with the schedule documented in CLAUDE.md.
+    - cron: '0 13 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    name: Run SME EMA pipeline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check DATABASE_URL is configured
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL secret is not set. Add a network-reachable Postgres connection string in repo Settings > Secrets and variables > Actions > New repository secret (name: DATABASE_URL) before this workflow can run."
+            exit 1
+          fi
+
+      - name: Run SME golden cross pipeline
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python sme_ema_pipeline.py

@@ -117,14 +117,28 @@ function HomePageInner() {
                 Alpha<span className="text-accent">Pulse</span>
               </h1>
               <p className="text-muted text-sm">AI-powered equity research for Indian markets</p>
-              <Link
-                href="/market-picks"
-                className="inline-flex items-center gap-1.5 mt-4 px-4 py-1.5 rounded-full
-                           bg-accent/10 border border-accent/20 text-accent text-xs font-semibold
-                           hover:bg-accent/20 transition-colors"
-              >
-                📈 See this week's top picks →
-              </Link>
+              <p className="text-muted/60 text-xs mt-3">
+                Research a stock you know, discover new ones, or catch technical breakouts —
+                three ways into the same data.
+              </p>
+              <div className="flex items-center justify-center gap-3 mt-4 flex-wrap">
+                <Link
+                  href="/market-picks"
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full
+                             bg-accent/10 border border-accent/20 text-accent text-xs font-semibold
+                             hover:bg-accent/20 transition-colors"
+                >
+                  📈 This week's top picks →
+                </Link>
+                <Link
+                  href="/sme-signals"
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full
+                             bg-accent/10 border border-accent/20 text-accent text-xs font-semibold
+                             hover:bg-accent/20 transition-colors"
+                >
+                  ⚡ SME golden cross screener →
+                </Link>
+              </div>
             </div>
             <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} />
           </div>

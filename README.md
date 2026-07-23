@@ -34,10 +34,7 @@ stock-research/
 ├── requirements.txt
 ├── .env.example
 ├── config/
-│   ├── agents.json
-│   ├── tasks.json
 │   ├── analyst.json
-│   ├── crew_agents.py
 │   └── crew_tasks.py
 ├── tools/
 │   ├── market_picks_tools.py       RSS + GNews scrapers; source registry
@@ -134,6 +131,20 @@ Open [http://localhost:3000](http://localhost:3000).
 The Market Picks page is at [http://localhost:3000/market-picks](http://localhost:3000/market-picks).
 The SME Signals screener is at [http://localhost:3000/sme-signals](http://localhost:3000/sme-signals) (needs `DATABASE_URL` and one pipeline run — see below).
 
+### Or with Docker
+
+```bash
+cp .env.example .env   # add at least one LLM provider key
+docker compose up --build
+docker compose exec backend python sme_ema_pipeline.py --setup-db   # first run only, for SME signals
+```
+
+Backend on `http://localhost:8000`, frontend on `http://localhost:3000`, Postgres included as its own
+service (`docker-compose.yml` sets `DATABASE_URL` to point at it automatically). See
+[docs/deployment.md](docs/deployment.md) for production notes — the default single-worker `CMD` in
+`Dockerfile` is intentional (see the comment there) and shouldn't be scaled up without also moving the
+in-memory rate limiter / SME refresh guard to a shared store.
+
 ## Run the SME signals pipeline
 
 ```bash
@@ -143,7 +154,10 @@ python sme_ema_pipeline.py              # fetch, compute crosses, store
 python sme_ema_pipeline.py --reset-db   # drop + recreate tables (after schema changes)
 ```
 
-Data can also be refreshed from the SME Signals page (Refresh Data button) or scheduled daily after NSE close:
+Data can also be refreshed from the SME Signals page (Refresh Data button), or it runs
+automatically on a schedule via `.github/workflows/sme-cron.yml` (weekdays, shortly after
+NSE close — add a `DATABASE_URL` repository secret for it to work). For a local/self-hosted
+alternative, a crontab entry works too:
 
 ```cron
 30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
@@ -208,15 +222,11 @@ Per-symbol task caches under `output/<SYMBOL>/`:
 
 Market picks result cache: `output/_market_picks/picks.json`, 6 h TTL.
 
-## Customising agent behaviour
-
-All agent and task configuration is in `config/` JSON files — no Python changes needed for prompt tuning:
+## Customising analyst behaviour
 
 | File | What to edit |
 |---|---|
-| `config/agents.json` | Agent roles, backstories, tool assignment per task |
-| `config/tasks.json` | Task descriptions, expected output shape, retry count |
-| `config/analyst.json` | Analyst persona, analysis rules, valuation guidance, output schema |
+| `config/analyst.json` | Analyst persona, analysis rules, valuation guidance, output schema, section labels |
 
 ## Notes
 

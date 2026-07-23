@@ -14,3 +14,4 @@ Untitled
 frontend/.next/
 frontend/node_modules/
 frontend/.env.local
+frontend/tsconfig.tsbuildinfo
