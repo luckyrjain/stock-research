@@ -309,18 +309,22 @@ def _guard_analysis(all_data: dict[str, dict] | None = None):
     return guard
 
 
-def _safe_analysis_fallback(symbol: str, reason: str) -> dict:
+def _safe_analysis_fallback(symbol: str, reason: str) -> dict:  # pylint: disable=unused-argument
+    # `reason` is already logged server-side (see analyst_llm_failed events) with the
+    # run_id for correlation — it's deliberately not echoed into this client-facing
+    # payload, since it can carry raw provider/exception text.
     return {
         "symbol": symbol,
         "recommendation": "HOLD",
         "confidence": "LOW",
+        "_degraded": True,
         "summary": (
             f"Automated analysis for {symbol} could not be fully structured because the analyst model "
             f"returned an invalid format. A neutral HOLD fallback was used while preserving fetched market data."
         ),
         "valuation": {
             "verdict": "Fairly Valued",
-            "comment": f"Structured valuation output was unavailable due to analyst formatting failure: {reason}",
+            "comment": "Structured valuation output was unavailable due to an analyst formatting failure.",
         },
         "business_quality": "Structured business-quality commentary was unavailable from the analyst model.",
         "bull_factors": [

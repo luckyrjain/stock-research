@@ -81,6 +81,32 @@ class CorsTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
 
 
+class LlmConcurrencyCeilingTest(unittest.TestCase):
+    def setUp(self) -> None:
+        api._llm_concurrency_count = 0
+
+    def tearDown(self) -> None:
+        api._llm_concurrency_count = 0
+
+    def test_acquire_up_to_limit_then_rejects(self) -> None:
+        with patch("api._LLM_CONCURRENCY_LIMIT", 2):
+            self.assertTrue(api._acquire_llm_slot())
+            self.assertTrue(api._acquire_llm_slot())
+            self.assertFalse(api._acquire_llm_slot())
+
+    def test_release_frees_a_slot_for_reuse(self) -> None:
+        with patch("api._LLM_CONCURRENCY_LIMIT", 1):
+            self.assertTrue(api._acquire_llm_slot())
+            self.assertFalse(api._acquire_llm_slot())
+            api._release_llm_slot()
+            self.assertTrue(api._acquire_llm_slot())
+
+    def test_release_below_zero_is_clamped_not_negative(self) -> None:
+        api._release_llm_slot()
+        api._release_llm_slot()
+        self.assertEqual(api._llm_concurrency_count, 0)
+
+
 class RateLimitHelperTest(unittest.TestCase):
     def setUp(self) -> None:
         api._RATE_LIMIT_CALLS.clear()
@@ -265,6 +291,39 @@ class MarketPicksForceRateLimitTest(unittest.TestCase):
     def test_429_when_force_rescan_over_limit(self) -> None:
         api._RATE_LIMIT_CALLS["market_picks_force:testclient"] = [api.time.monotonic()] * 3
         resp = client.get("/api/market-picks?force=true")
+        self.assertEqual(resp.status_code, 429)
+
+
+class RemainingEndpointsRateLimitTest(unittest.TestCase):
+    """/api/prices, /api/validate, and the two history endpoints previously had
+    no rate limit at all — /api/prices was the worst offender (up to 50
+    yfinance calls per request, at unbounded request rate).
+    """
+
+    def setUp(self) -> None:
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_429_on_prices_when_over_limit(self) -> None:
+        api._RATE_LIMIT_CALLS["prices:testclient"] = [api.time.monotonic()] * 30
+        resp = client.get("/api/prices?symbols=TCS")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_429_on_validate_when_over_limit(self) -> None:
+        api._RATE_LIMIT_CALLS["validate:testclient"] = [api.time.monotonic()] * 30
+        resp = client.get("/api/validate/TCS")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_429_on_prices_history_when_over_limit(self) -> None:
+        api._RATE_LIMIT_CALLS["prices_history:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/prices/history/TCS")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_429_on_market_picks_history_when_over_limit(self) -> None:
+        api._RATE_LIMIT_CALLS["market_picks_history:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/market-picks/history")
         self.assertEqual(resp.status_code, 429)
 
 

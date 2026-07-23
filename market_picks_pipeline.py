@@ -25,7 +25,11 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
+from observability import get_logger, log_event
+
 load_dotenv()
+
+LOGGER = get_logger("market_picks_pipeline")
 
 _NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -548,10 +552,21 @@ def _compute_confidence(
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
+_MAX_ACCEPTABLE_EMPTY_SOURCE_RATE = 0.7  # mirrors sme_ema_pipeline's health-check
+# pattern, but set more leniently: unlike OHLCV fetches, news/brokerage sources
+# legitimately go quiet some days, so only a clearly-broken scrape (most sources
+# returning nothing — usually every source getting blocked/rate-limited at once)
+# should be flagged, not ordinary day-to-day source variance.
+
+
 class MarketPicksPipeline:
     def __init__(self):
         self._run_id = uuid.uuid4().hex[:8]
         self._nse_session: requests.Session | None = None
+        # Set during run(): False when the scrape phase or final pick count looks
+        # substantially broken rather than just a quiet day — see run_pipeline()
+        # in api.py, which uses this to decide whether the result is safe to cache.
+        self.healthy: bool = True
 
     # ── public entry point ────────────────────────────────────────────────────
 
@@ -563,17 +578,62 @@ class MarketPicksPipeline:
                 except Exception:
                     pass
 
-        raw_sources   = self._phase_scrape(emit)
-        raw_picks     = self._phase_extract(raw_sources, emit)
-        consolidated  = self._phase_consolidate(raw_picks, emit)
+        def _timed_phase(name: str, fn, *args):
+            started = time.perf_counter()
+            log_event(LOGGER, "market_picks_phase_started", run_id=self._run_id, phase=name)
+            try:
+                result = fn(*args)
+            except Exception as exc:
+                log_event(
+                    LOGGER, "market_picks_phase_failed", level="error",
+                    run_id=self._run_id, phase=name,
+                    elapsed_ms=round((time.perf_counter() - started) * 1000, 2), error=str(exc),
+                )
+                raise
+            log_event(
+                LOGGER, "market_picks_phase_completed", run_id=self._run_id, phase=name,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                count=len(result) if hasattr(result, "__len__") else None,
+            )
+            return result
+
+        pipeline_started = time.perf_counter()
+        log_event(LOGGER, "market_picks_pipeline_started", run_id=self._run_id)
+
+        raw_sources   = _timed_phase("scrape", self._phase_scrape, emit)
+        raw_picks     = _timed_phase("extract", self._phase_extract, raw_sources, emit)
+        consolidated  = _timed_phase("consolidate", self._phase_consolidate, raw_picks, emit)
+
+        empty_sources = sum(1 for r in raw_sources.values() if not r.get("articles"))
+        empty_rate = empty_sources / len(raw_sources) if raw_sources else 1.0
+        if empty_rate > _MAX_ACCEPTABLE_EMPTY_SOURCE_RATE:
+            self.healthy = False
+            log_event(
+                LOGGER, "market_picks_scrape_unhealthy", level="warning", run_id=self._run_id,
+                empty_sources=empty_sources, total_sources=len(raw_sources),
+                empty_rate=round(empty_rate, 2),
+            )
 
         if not consolidated:
+            self.healthy = False
+            log_event(
+                LOGGER, "market_picks_pipeline_empty", level="warning", run_id=self._run_id,
+                elapsed_ms=round((time.perf_counter() - pipeline_started) * 1000, 2),
+                sources_scraped=len(raw_sources), raw_picks=len(raw_picks),
+            )
             emit({"event": "error", "message": "No valid stock picks found across all sources."})
             return []
 
-        research_data = self._phase_research(consolidated, emit)
-        analyses      = self._phase_analyze(consolidated, research_data, emit)
-        picks         = self._phase_score(consolidated, research_data, analyses, emit)
+        research_data = _timed_phase("research", self._phase_research, consolidated, emit)
+        analyses      = _timed_phase("analyze", self._phase_analyze, consolidated, research_data, emit)
+        picks         = _timed_phase("score", self._phase_score, consolidated, research_data, analyses, emit)
+
+        log_event(
+            LOGGER, "market_picks_pipeline_completed", run_id=self._run_id,
+            elapsed_ms=round((time.perf_counter() - pipeline_started) * 1000, 2),
+            sources_scraped=len(raw_sources), consolidated=len(consolidated), picks=len(picks),
+            healthy=self.healthy,
+        )
         return picks
 
     # ── Phase 1: Scrape ───────────────────────────────────────────────────────
