@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useId } from 'react';
 import type { ValidationResult } from '@/types';
 
 interface Props {
@@ -15,6 +15,7 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
   const [result, setResult]         = useState<ValidationResult | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const validSymbol = useRef<string | null>(null);
+  const suggestionsId = useId();
 
   const validate = useCallback(async (sym: string, exchange?: string) => {
     if (!sym) { setStatus('idle'); setResult(null); validSymbol.current = null; return; }
@@ -64,11 +65,17 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
     status === 'warn'    ? 'border-hold  focus:border-hold  shadow-hold/10'  :
     'border-border focus:border-accent shadow-accent/10';
 
+  const statusLabel =
+    status === 'loading' ? 'Checking symbol…' :
+    status === 'valid'   ? 'Symbol found' :
+    status === 'invalid' ? 'Symbol not found' :
+    status === 'warn'    ? 'Symbol suspended or delisted' : '';
+
   const statusIcon =
-    status === 'loading' ? <span className="animate-spin-slow inline-block text-muted">⟳</span> :
-    status === 'valid'   ? <span className="text-buy">✓</span> :
-    status === 'invalid' ? <span className="text-sell">✕</span> :
-    status === 'warn'    ? <span className="text-hold">⚠</span> : null;
+    status === 'loading' ? <span aria-hidden="true" className="animate-spin-slow inline-block text-muted">⟳</span> :
+    status === 'valid'   ? <span aria-hidden="true" className="text-buy">✓</span> :
+    status === 'invalid' ? <span aria-hidden="true" className="text-sell">✕</span> :
+    status === 'warn'    ? <span aria-hidden="true" className="text-hold">⚠</span> : null;
 
   return (
     <div className={`flex flex-col items-center gap-4 ${compact ? 'mb-6' : 'mb-12'}`}>
@@ -89,6 +96,8 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
             placeholder="e.g. TCS, RELIANCE, INFY"
             maxLength={20}
             spellCheck={false}
+            aria-label="NSE or BSE stock ticker"
+            aria-describedby={suggestionsId}
             className={`w-full pr-12 bg-card border-2 rounded-xl
               font-mono font-bold tracking-[2px] uppercase
               text-tx placeholder:text-muted placeholder:font-normal placeholder:tracking-normal
@@ -101,6 +110,9 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
           <span className="absolute right-5 top-1/2 -translate-y-1/2 text-lg">
             {statusIcon}
           </span>
+          {/* Visually hidden — announces validation status changes to screen readers,
+              which the icon-only indicator above doesn't. */}
+          <span id={suggestionsId} className="sr-only" aria-live="polite">{statusLabel}</span>
         </div>
 
         {/* Company row */}

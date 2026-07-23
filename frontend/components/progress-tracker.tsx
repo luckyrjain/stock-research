@@ -15,6 +15,10 @@ interface Props {
   phase: Phase;
 }
 
+const STATUS_LABELS: Record<TaskStatus, string> = {
+  idle: 'pending', running: 'fetching…', ok: 'done', fail: 'failed', cached: 'cached',
+};
+
 function StepChip({ name, status }: { name: TaskName; status: TaskStatus }) {
   const configs: Record<TaskStatus, { cls: string; icon: React.ReactNode }> = {
     idle:   { cls: 'bg-card border-border text-muted',              icon: '○' },
@@ -25,8 +29,11 @@ function StepChip({ name, status }: { name: TaskName; status: TaskStatus }) {
   };
   const { cls, icon } = configs[status];
   return (
-    <div className={`flex items-center gap-2 px-3.5 py-2 rounded-lg border text-[13px] font-medium transition-all duration-300 ${cls}`}>
-      <span className="text-[14px]">{icon}</span>
+    <div
+      aria-label={`${TASK_LABELS[name]}: ${STATUS_LABELS[status]}`}
+      className={`flex items-center gap-2 px-3.5 py-2 rounded-lg border text-[13px] font-medium transition-all duration-300 ${cls}`}
+    >
+      <span aria-hidden="true" className="text-[14px]">{icon}</span>
       <span>{TASK_LABELS[name]}</span>
       {status === 'cached' && <span className="text-[11px] text-muted/60">cached</span>}
     </div>
@@ -35,7 +42,7 @@ function StepChip({ name, status }: { name: TaskName; status: TaskStatus }) {
 
 export default function ProgressTracker({ taskStatus, phase }: Props) {
   return (
-    <div className="mb-12 animate-fade-up">
+    <div className="mb-12 animate-fade-up" role="status" aria-live="polite">
       <p className="text-[11px] font-semibold text-muted tracking-[1px] uppercase mb-4">
         Fetching Data
       </p>
@@ -51,7 +58,7 @@ export default function ProgressTracker({ taskStatus, phase }: Props) {
           ? 'bg-accent/10 border-accent text-accent'
           : 'bg-card border-border text-muted'
       }`}>
-        <span className={phase === 'analysing' ? 'inline-block animate-spin-slow' : 'opacity-40'}>
+        <span aria-hidden="true" className={phase === 'analysing' ? 'inline-block animate-spin-slow' : 'opacity-40'}>
           ⟳
         </span>
         <span>
