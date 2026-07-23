@@ -3,6 +3,7 @@
 import React, { useState, useMemo, useEffect, useId } from 'react';
 import type { MarketPick, PickSource } from '@/types';
 import InfoTooltip from './info-tooltip';
+import WatchlistButton from './watchlist-button';
 
 type SortKey    = 'confidence_score' | 'change_pct' | 'pe_ratio';
 type ConfFilter = 'all' | 'high' | 'medium' | 'low';
@@ -581,9 +582,17 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                       className={`border-b border-border/60 cursor-pointer transition-colors
                         ${isOpen ? 'bg-card-hi' : 'hover:bg-surface/60'}`}
                     >
-                      {/* Rank */}
+                      {/* Rank + watch */}
                       <td className="px-4 py-4">
-                        <RankBadge rank={pick.rank} />
+                        <div className="flex flex-col items-center gap-1">
+                          <RankBadge rank={pick.rank} />
+                          <WatchlistButton
+                            symbol={pick.symbol}
+                            company={pick.company}
+                            exchange={pick.exchange}
+                            size="sm"
+                          />
+                        </div>
                       </td>
 
                       {/* Stock — name + ticker on first line, why-reason on second */}

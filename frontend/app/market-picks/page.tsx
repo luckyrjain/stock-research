@@ -348,6 +348,10 @@ export default function MarketPicksPage() {
           <Link href="/market-picks/history" className="text-sm text-muted hover:text-tx transition-colors">
             Track Record
           </Link>
+          <span className="text-border-hi">|</span>
+          <Link href="/watchlist" className="text-sm text-muted hover:text-tx transition-colors">
+            Watchlist
+          </Link>
           {isRunning && (
             <button
               onClick={() => { esRef.current?.close(); setPhase('idle'); }}
