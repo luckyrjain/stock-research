@@ -9,7 +9,7 @@ def _to_float(x):
         x = x.replace("%", "").strip()
     try:
         return float(x)
-    except:
+    except (ValueError, TypeError):
         return None
 
 

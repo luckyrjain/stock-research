@@ -132,6 +132,9 @@ def _is_isin(s: str) -> bool:
     return bool(re.match(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$", s))
 
 
+_TICKER_RE = re.compile(r"^[A-Z0-9&\-]{1,20}$")
+
+
 def _load_isin_map() -> dict:
     global _ISIN_CACHE
     now = time.monotonic()
@@ -787,7 +790,7 @@ async def get_market_picks_history():
 @app.get("/api/prices")
 async def get_prices(symbols: str = Query(...)):
     """Return LTP + day change% for a comma-separated list of NSE/BSE symbols."""
-    sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()][:50]
+    sym_list = [s.strip().upper() for s in symbols.split(",") if _TICKER_RE.match(s.strip())][:50]
     loop = asyncio.get_running_loop()
 
     def _fetch_one(sym: str) -> tuple[str, dict]:
