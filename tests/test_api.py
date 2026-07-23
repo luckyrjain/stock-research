@@ -729,6 +729,33 @@ class WatchlistEndpointsTest(unittest.TestCase):
         resp = client.post("/api/watchlist", json={"client_id": "not valid!", "symbol": "TCS"})
         self.assertEqual(resp.status_code, 422)
 
+    def test_post_invalid_exchange_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.post("/api/watchlist", json={
+            "client_id": "client-abc", "symbol": "TCS", "exchange": "XYZ",
+        })
+        self.assertEqual(resp.status_code, 422)
+
+    def test_post_lowercase_exchange_is_normalized(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        lock_result = MagicMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = 0
+        insert_result = MagicMock()
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = [
+            {"symbol": "TCS", "company": "", "exchange": "BSE", "addedAt": "2026-01-01T00:00:00"},
+        ]
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = _FakeConn([lock_result, count_result, insert_result])
+        fake_engine.connect.return_value = _FakeConn([rows_result])
+
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.post("/api/watchlist", json={
+                "client_id": "client-abc", "symbol": "TCS", "exchange": "bse",
+            })
+        self.assertEqual(resp.status_code, 200)
+
     def test_post_adds_item_with_mocked_engine(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         lock_result = MagicMock()

@@ -1131,6 +1131,7 @@ async def refresh_sme_signals(request: Request):
 # only in one browser's localStorage.
 _CLIENT_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,36}$")  # matches watchlist_items.client_id VARCHAR(36)
 _MAX_WATCHLIST_ITEMS_PER_CLIENT = 200
+_VALID_EXCHANGES = {"NSE", "BSE"}
 
 
 def _require_client_id(client_id: str) -> str:
@@ -1183,6 +1184,9 @@ async def add_to_watchlist(request: Request, body: WatchlistAddRequest):
     symbol = body.symbol.upper().strip()
     if not _TICKER_RE.match(symbol):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
+    exchange = body.exchange.upper().strip()
+    if exchange not in _VALID_EXCHANGES:
+        raise HTTPException(status_code=422, detail="Invalid exchange.")
     if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
 
@@ -1206,7 +1210,7 @@ async def add_to_watchlist(request: Request, body: WatchlistAddRequest):
                 ON CONFLICT (client_id, symbol) DO NOTHING
             """), {
                 "client_id": body.client_id, "symbol": symbol,
-                "company": body.company[:200], "exchange": body.exchange[:5] or "NSE",
+                "company": body.company[:200], "exchange": exchange,
             })
         return _watchlist_rows_sync(body.client_id)
 
