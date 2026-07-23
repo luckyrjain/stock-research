@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import type { MarketPicksHistoryResponse, MarketPickTrackRecord } from '@/types';
+import HeaderSearch from '@/components/header-search';
 
 function RecBadge({ rec }: { rec: string | null }) {
   if (!rec) return <span className="text-muted text-xs">—</span>;
@@ -67,6 +68,9 @@ export default function MarketPicksHistoryPage() {
           </Link>
           <span className="text-border-hi">|</span>
           <span className="text-sm font-semibold text-accent">Track Record</span>
+          <div className="ml-auto flex items-center gap-3">
+            <HeaderSearch />
+          </div>
         </div>
 
         <div className="mb-6">

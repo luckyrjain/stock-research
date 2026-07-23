@@ -652,5 +652,116 @@ class SmeRefreshEndpointTest(unittest.TestCase):
         mocked_create_task.assert_called_once()
 
 
+class ConsolidatedEndpointTest(unittest.TestCase):
+    """The consolidated view is pure aggregation of what the three pipelines
+    have already cached/computed — no new fetching. Each section is
+    independently optional (null when that pipeline hasn't run for this
+    symbol, or its own cache has gone stale), and a failure in one section
+    (e.g. the SME DB) must not take down the other two.
+    """
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-consolidated-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
+        self._cache_patch.start()
+        self.addCleanup(self._cache_patch.stop)
+
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        api._SME_ENGINE = None
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._SME_ENGINE = None
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_invalid_symbol_returns_422(self) -> None:
+        resp = client.get("/api/consolidated/bad symbol")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_rate_limited_returns_429(self) -> None:
+        api._RATE_LIMIT_CALLS["consolidated:testclient"] = [api.time.monotonic()] * 30
+        resp = client.get("/api/consolidated/TCS")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_all_sections_null_when_nothing_cached(self) -> None:
+        with patch("api._load_picks_cache", return_value=None):
+            resp = client.get("/api/consolidated/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["symbol"], "TCS")
+        self.assertIsNone(body["analysis"])
+        self.assertIsNone(body["market_pick"])
+        self.assertIsNone(body["sme"])
+
+    def test_returns_cached_analysis(self) -> None:
+        cache.save("TCS", "analysis", {
+            "recommendation": "BUY", "confidence": "High", "summary": "Strong fundamentals.",
+        })
+        with patch("api._load_picks_cache", return_value=None):
+            resp = client.get("/api/consolidated/TCS")
+        self.assertEqual(resp.status_code, 200)
+        analysis = resp.json()["analysis"]
+        self.assertEqual(analysis["recommendation"], "BUY")
+        self.assertEqual(analysis["confidence"], "High")
+        self.assertIsNotNone(analysis["as_of"])
+
+    def test_returns_market_pick_when_present(self) -> None:
+        fake_cache = {
+            "picks": [{"symbol": "TCS", "rank": 3, "recommendation": "WATCHLIST", "confidence_score": 61, "summary": "Steady."}],
+            "generated_at": "2026-07-20T00:00:00Z",
+        }
+        with patch("api._load_picks_cache", return_value=fake_cache):
+            resp = client.get("/api/consolidated/TCS")
+        self.assertEqual(resp.status_code, 200)
+        pick = resp.json()["market_pick"]
+        self.assertEqual(pick["rank"], 3)
+        self.assertEqual(pick["recommendation"], "WATCHLIST")
+        self.assertEqual(pick["generated_at"], "2026-07-20T00:00:00Z")
+
+    def test_returns_none_when_symbol_not_in_market_picks(self) -> None:
+        fake_cache = {"picks": [{"symbol": "INFY", "rank": 1}], "generated_at": "2026-07-20T00:00:00Z"}
+        with patch("api._load_picks_cache", return_value=fake_cache):
+            resp = client.get("/api/consolidated/TCS")
+        self.assertIsNone(resp.json()["market_pick"])
+
+    def test_returns_sme_regime_when_present(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        row_result = MagicMock()
+        row_result.mappings.return_value.first.return_value = {
+            "trade_date": "2026-07-18", "cross": "golden", "in_golden_cross": True,
+            "name": "Example SME Ltd", "exchange": "BSE",
+        }
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value = _FakeConn([row_result])
+        with patch("api._load_picks_cache", return_value=None), \
+             patch("api._get_sme_engine", return_value=fake_engine):
+            resp = client.get("/api/consolidated/EXAMPLE")
+        self.assertEqual(resp.status_code, 200)
+        sme = resp.json()["sme"]
+        self.assertEqual(sme["cross"], "golden")
+        self.assertTrue(sme["in_golden_cross"])
+
+    def test_sme_query_failure_returns_none_not_500(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("api._load_picks_cache", return_value=None), \
+             patch("api._get_sme_engine", side_effect=RuntimeError("connection refused")):
+            resp = client.get("/api/consolidated/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertIsNone(body["sme"])
+        # the other two sections must still resolve normally despite the SME failure
+        self.assertIn("analysis", body)
+        self.assertIn("market_pick", body)
+
+    def test_sme_absent_when_database_url_unset(self) -> None:
+        with patch("api._load_picks_cache", return_value=None):
+            resp = client.get("/api/consolidated/TCS")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.json()["sme"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -211,3 +211,37 @@ export type MarketPicksSSEMessage =
   | { event: 'analysis_error'; symbols: string[]; reason: string }
   | { event: 'done'; picks: MarketPick[]; generated_at: string; total_picks: number; from_cache?: boolean }
   | { event: 'error'; message: string };
+
+// Pure aggregation of what stock analysis, market picks, and SME signals have
+// each already cached for a symbol — no new fetching. Any section is null
+// when that pipeline hasn't run for this symbol yet (or its cache has gone
+// stale), which is the common case, not an error.
+export interface ConsolidatedAnalysis {
+  recommendation: string | null;
+  confidence:     string | null;
+  summary:        string | null;
+  as_of:          string | null;   // ISO timestamp the analysis was cached at
+}
+
+export interface ConsolidatedMarketPick {
+  rank:             number | null;
+  recommendation:   'BUY' | 'WATCHLIST' | 'HOLD' | 'SELL' | null;
+  confidence_score: number | null;
+  summary:          string | null;
+  generated_at:     string;        // when the market-picks run that included this stock ran
+}
+
+export interface ConsolidatedSme {
+  trade_date:      string;
+  cross:           'golden' | 'death' | null;
+  in_golden_cross: boolean;
+  name:            string | null;
+  exchange:        string | null;
+}
+
+export interface ConsolidatedView {
+  symbol:      string;
+  analysis:    ConsolidatedAnalysis | null;
+  market_pick: ConsolidatedMarketPick | null;
+  sme:         ConsolidatedSme | null;
+}

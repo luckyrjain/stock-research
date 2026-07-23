@@ -85,6 +85,7 @@ Backend endpoints:
 | `GET /api/market-picks` | Market picks SSE stream (`?force=true` bypasses cache) |
 | `GET /api/sme-signals` | SME golden/death cross events (`?lookback=1..30`, `?direction=all\|golden\|death`) |
 | `POST /api/sme-signals/refresh` | Run the SME pipeline in the background (202; 409 if already running) |
+| `GET /api/consolidated/{symbol}` | Analysis verdict + market-pick membership + SME regime, aggregated from each mode's own cache — no new fetching |
 
 **Terminal B — frontend:**
 

@@ -18,6 +18,8 @@ A second mode — **Market Picks** — runs a multi-agent pipeline that scrapes 
 
 A third mode — **SME Signals** — is a PostgreSQL-backed batch pipeline (`sme_ema_pipeline.py`) that screens all NSE Emerge + BSE SME stocks for EMA20/EMA50 **golden cross** and **death cross** events, served at `/sme-signals` via `GET /api/sme-signals`.
 
+A shared **search box** (`HeaderSearch`, in every page's nav bar) answers "what does AlphaPulse think about X" in one query: `GET /api/consolidated/{symbol}` is pure aggregation of what the three modes above have already cached/computed for that symbol — no new fetching, no LLM calls. Any section is `null` when that pipeline hasn't run for the symbol yet (the common case), not an error.
+
 ---
 
 ## Repo Structure
@@ -51,6 +53,8 @@ stock-research/
 │   ├── app/market-picks/page.tsx Weekly picks page
 │   ├── app/sme-signals/page.tsx  SME golden cross screener
 │   ├── components/               Dashboard, search, progress tracker, market picks dashboard
+│   │   ├── header-search.tsx     Shared "what does AlphaPulse think about X" search box (every nav bar)
+│   │   └── consolidated-card.tsx Modal rendering GET /api/consolidated/{symbol}'s three sections
 │   ├── app/api/                  Thin Next.js proxy routes → FastAPI backend
 │   └── types/index.ts            Canonical TS types for all SSE messages and reports
 └── output/                 Cache files (gitignored); also where CLI saves report JSON
@@ -295,6 +299,28 @@ than genuinely bad symbols) — so a bad run fails the GitHub Actions job instea
 For a local/self-hosted alternative, a crontab entry works too:
 
     30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
+
+### Consolidated view flow
+
+`GET /api/consolidated/{symbol}` answers "what does AlphaPulse think about X" without
+visiting three pages. It is pure read-aggregation — no LLM calls, no scraping, no SME
+pipeline run:
+
+1. **Analysis** — `cache.load(symbol, "analysis")`, the same 24 h cache the stock analysis
+   flow writes to. `None` if never analyzed for this symbol, or the cache has gone stale.
+2. **Market pick** — `_load_picks_cache()` (the same 6 h `output/_market_picks/picks.json`
+   cache market picks serves from), matched by symbol. `None` if the symbol isn't on the
+   current picks list, or the cache itself is stale/missing.
+3. **SME regime** — one indexed query against `ema_signals`/`sme_stocks` for the latest
+   stored row. `None` if `DATABASE_URL` is unset, the symbol isn't an SME/Emerge stock, or
+   the query fails — a DB hiccup on this section must not fail the other two, so it's
+   caught and logged rather than raising.
+
+The three lookups run concurrently via `asyncio.gather` over `run_in_executor`. The
+frontend's `HeaderSearch` component (embedded in every page's nav bar) opens
+`ConsolidatedCard` on submit, which fetches this endpoint and renders each section
+independently — a `null` section shows "not yet analyzed" / "not on the picks list" /
+"no SME data" rather than an error, since that's the expected common case.
 
 ### Shared state and queues
 
