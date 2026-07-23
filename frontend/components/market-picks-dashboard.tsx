@@ -568,6 +568,9 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                     <tr
                       onClick={() => toggle(pick.symbol)}
                       onKeyDown={e => {
+                        // Ignore keydowns bubbled up from a nested interactive element
+                        // (e.g. the sources popover button) — only the row itself should toggle.
+                        if (e.target !== e.currentTarget) return;
                         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(pick.symbol); }
                       }}
                       role="button"

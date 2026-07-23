@@ -27,13 +27,18 @@ from rapidfuzz import fuzz, process
 
 logger = logging.getLogger(__name__)
 
-# Same suffix-stripping approach as market_picks_pipeline.py's _norm_company,
-# kept as a local copy so this module doesn't depend on the pipeline module.
+# Deliberately narrower than market_picks_pipeline.py's _norm_company (which
+# this was originally copied from). That version is used to widen a ticker
+# *search* — over-stripping there is safe because a live-price check catches
+# a wrong match afterward. Here the match result conclusively merges two
+# records, so only genuinely empty legal-entity terms are stripped. Words
+# like "international"/"group"/"systems"/"technologies"/"corporation" are
+# deliberately NOT stripped: Indian conglomerates commonly list multiple
+# separate companies sharing a family name root (e.g. "Tata Motors" vs
+# "Tata Technologies" vs "Tata International" are different companies) —
+# stripping those words would erase the only text that distinguishes them.
 _COMPANY_SUFFIXES = re.compile(
-    r'\b(limited|ltd|industries|industry|technologies|technology|'
-    r'enterprises|solutions|holdings|group|corporation|corp|'
-    r'international|india|infotech|infosystems|systems|services|'
-    r'private|pvt|company|co)\b',
+    r'\b(limited|ltd|private|pvt|company|co)\b',
     re.IGNORECASE,
 )
 _NAME_MATCH_SCORE_CUTOFF = 90  # high bar — a miss is cheaper than a wrong merge

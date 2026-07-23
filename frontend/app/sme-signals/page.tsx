@@ -346,6 +346,9 @@ export default function SmeSignalsPage() {
                       <tr
                         onClick={() => toggleExpand(s.symbol)}
                         onKeyDown={e => {
+                          // Ignore keydowns bubbled up from a nested interactive element
+                          // (e.g. the NSE symbol link) — only the row itself should toggle.
+                          if (e.target !== e.currentTarget) return;
                           if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(s.symbol); }
                         }}
                         role="button"

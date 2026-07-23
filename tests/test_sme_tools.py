@@ -5,9 +5,19 @@ from tools.sme_tools import _norm_company_name, get_all_sme_stocks
 
 
 class NormCompanyNameTest(unittest.TestCase):
-    def test_strips_common_suffixes_and_normalizes_case(self) -> None:
-        self.assertEqual(_norm_company_name("ABC Industries Limited"), "ABC")
-        self.assertEqual(_norm_company_name("abc industries ltd"), "ABC")
+    def test_strips_only_generic_legal_entity_suffixes(self) -> None:
+        self.assertEqual(_norm_company_name("ABC Limited"), "ABC")
+        self.assertEqual(_norm_company_name("abc private ltd"), "ABC")
+        self.assertEqual(_norm_company_name("ABC Co"), "ABC")
+
+    def test_does_not_strip_distinguishing_business_words(self) -> None:
+        # Deliberately narrower than a ticker-search normalizer: words like
+        # "Industries"/"Technologies"/"International" can be the only thing
+        # distinguishing two real, separately-listed companies (e.g. multiple
+        # "Tata X" entities), so they must survive normalization.
+        self.assertEqual(_norm_company_name("ABC Industries Limited"), "ABC INDUSTRIES")
+        self.assertEqual(_norm_company_name("Tata Technologies Limited"), "TATA TECHNOLOGIES")
+        self.assertEqual(_norm_company_name("Tata International Limited"), "TATA INTERNATIONAL")
 
     def test_none_and_empty_return_empty_string(self) -> None:
         self.assertEqual(_norm_company_name(None), "")
@@ -41,6 +51,15 @@ class GetAllSmeStocksDedupTest(unittest.TestCase):
     def test_different_companies_are_not_merged(self) -> None:
         nse = [{"symbol": "ABC", "name": "ABC Industries Limited", "isin": None, "series": "SM", "exchange": "NSE"}]
         bse = [{"symbol": "543210", "name": "XYZ Foods Limited", "isin": None, "series": "M", "exchange": "BSE"}]
+        merged = self._run(nse, bse)
+        self.assertEqual(len(merged), 2)
+
+    def test_shared_family_name_with_different_business_word_is_not_merged(self) -> None:
+        # The actual failure mode a too-aggressive suffix list would cause: two
+        # real, separately-listed companies sharing a conglomerate root name
+        # (common in India — multiple "Tata X" entities) must stay distinct.
+        nse = [{"symbol": "TATATECH", "name": "Tata Technologies Limited", "isin": None, "series": "SM", "exchange": "NSE"}]
+        bse = [{"symbol": "543211", "name": "Tata International Limited", "isin": None, "series": "M", "exchange": "BSE"}]
         merged = self._run(nse, bse)
         self.assertEqual(len(merged), 2)
 
