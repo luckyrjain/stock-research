@@ -1,0 +1,61 @@
+# Local/self-hosted deployment. Needs a .env file (copy .env.example) with
+# at least one LLM provider key; DATABASE_URL is set here to point at the
+# postgres service below, so leave it unset in .env for this compose setup.
+#
+#   docker compose up --build
+#
+# Backend:  http://localhost:8000
+# Frontend: http://localhost:3000
+#
+# First run only, to create the SME tables:
+#   docker compose exec backend python sme_ema_pipeline.py --setup-db
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-stockresearch}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stockresearch}
+      POSTGRES_DB: ${POSTGRES_DB:-stockresearch}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stockresearch}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-stockresearch}:${POSTGRES_PASSWORD:-stockresearch}@postgres:5432/${POSTGRES_DB:-stockresearch}
+      ALLOWED_ORIGINS: http://localhost:3000
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - backend_output:/app/output
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+    environment:
+      API_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  backend_output:

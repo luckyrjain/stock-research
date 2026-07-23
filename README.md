@@ -134,6 +134,20 @@ Open [http://localhost:3000](http://localhost:3000).
 The Market Picks page is at [http://localhost:3000/market-picks](http://localhost:3000/market-picks).
 The SME Signals screener is at [http://localhost:3000/sme-signals](http://localhost:3000/sme-signals) (needs `DATABASE_URL` and one pipeline run — see below).
 
+### Or with Docker
+
+```bash
+cp .env.example .env   # add at least one LLM provider key
+docker compose up --build
+docker compose exec backend python sme_ema_pipeline.py --setup-db   # first run only, for SME signals
+```
+
+Backend on `http://localhost:8000`, frontend on `http://localhost:3000`, Postgres included as its own
+service (`docker-compose.yml` sets `DATABASE_URL` to point at it automatically). See
+[docs/deployment.md](docs/deployment.md) for production notes — the default single-worker `CMD` in
+`Dockerfile` is intentional (see the comment there) and shouldn't be scaled up without also moving the
+in-memory rate limiter / SME refresh guard to a shared store.
+
 ## Run the SME signals pipeline
 
 ```bash

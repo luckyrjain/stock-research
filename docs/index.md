@@ -13,6 +13,7 @@ This project is a full-stack Indian equity research platform with three modes:
 | Doc | What it covers |
 |-----|----------------|
 | [Setup & Configuration](setup.md) | Backend/frontend install, environment variables, local development |
+| [Deployment](deployment.md) | Docker Compose, manual production deployment, scaling caveats |
 | [Architecture](architecture.md) | Request flows, pipeline phases, caching, agent layers, file layout |
 | [Tools Reference](tools.md) | Data-fetching tools, market picks scrapers, sources, and output shapes |
 | [Output Schema](output-schema.md) | Report JSON structure, cache files, market picks pick schema |
