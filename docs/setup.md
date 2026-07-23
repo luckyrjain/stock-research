@@ -35,7 +35,7 @@ Then edit `.env` and set the provider you want to use.
 | `ANALYST_MODEL` | No | Model for the analyst step (stock analysis) and market picks' extraction/analysis LLM calls |
 | `OLLAMA_BASE_URL` | Ollama only | Default: `http://localhost:11434` |
 | `LOG_LEVEL` | No | `DEBUG` / `INFO` / `WARNING` — default: `INFO` |
-| `DATABASE_URL` | SME signals only | PostgreSQL DSN, e.g. `postgresql://user:pass@localhost:5432/sme_research` |
+| `DATABASE_URL` | SME signals + watchlist | PostgreSQL DSN, e.g. `postgresql://user:pass@localhost:5432/sme_research` |
 
 If `LLM_PROVIDER` is unset, the backend auto-detects the first key present in this order: `anthropic`, `openai`, `groq`, `google`, `openrouter`.
 
@@ -97,6 +97,7 @@ npm run dev
 - Stock analysis: [http://localhost:3000](http://localhost:3000)
 - Market picks: [http://localhost:3000/market-picks](http://localhost:3000/market-picks)
 - SME signals: [http://localhost:3000/sme-signals](http://localhost:3000/sme-signals)
+- Watchlist: [http://localhost:3000/watchlist](http://localhost:3000/watchlist)
 
 ## CLI mode
 
@@ -131,6 +132,22 @@ Daily automation runs via `.github/workflows/sme-cron.yml` on GitHub Actions —
 instance; the workflow fails with a clear message rather than a Python traceback if it's
 missing. Trigger a one-off run from the Actions tab ("Run workflow"). If you'd rather run
 this locally/self-hosted instead of on GitHub Actions, a crontab entry works too:
+
+## Watchlist
+
+Requires `DATABASE_URL` in `.env` and a running PostgreSQL — the same database used for SME
+signals works fine, or a separate one. `watchlist_items` is defined in the same
+`db/models.py` metadata as the SME tables, so the usual setup command creates it too:
+
+```bash
+source .venv/bin/activate
+python sme_ema_pipeline.py --setup-db   # creates all tables, including watchlist_items
+```
+
+Watchlist rows are keyed by an anonymous `client_id` (a UUID generated in the browser and
+stored in `localStorage`) rather than a real user account — there's no login yet, so a
+watchlist doesn't follow you across browsers or devices. `GET /api/watchlist` returns 503 if
+`DATABASE_URL` is unset, matching the SME signals endpoints' behavior.
 
 ```cron
 30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
@@ -222,6 +239,10 @@ The pipeline fails open when `output/_nse_master.txt` cannot be downloaded — a
 ### SME signals page returns 503
 
 `GET /api/sme-signals` returns 503 when `DATABASE_URL` is not set or PostgreSQL is unreachable. Set `DATABASE_URL` in `.env`, make sure the database exists, and run `python sme_ema_pipeline.py --setup-db` followed by a pipeline run so the tables have data.
+
+### Watchlist star button does nothing / /watchlist page is empty
+
+`GET/POST/DELETE /api/watchlist` return 503 when `DATABASE_URL` is not set or PostgreSQL is unreachable, same as SME signals. Set `DATABASE_URL` and create the `watchlist_items` table (see [Watchlist](#watchlist) above). If the table exists but items still don't show up, check that the browser's `localStorage` still has an `alphapulse_client_id` entry — clearing site data resets it to a new anonymous ID with an empty watchlist.
 
 ### LLM provider outage or rate limit mid-analysis
 

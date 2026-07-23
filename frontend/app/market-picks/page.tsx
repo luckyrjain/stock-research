@@ -349,6 +349,10 @@ export default function MarketPicksPage() {
           <Link href="/market-picks/history" className="text-sm text-muted hover:text-tx transition-colors">
             Track Record
           </Link>
+          <span className="text-border-hi">|</span>
+          <Link href="/watchlist" className="text-sm text-muted hover:text-tx transition-colors">
+            Watchlist
+          </Link>
           <div className="ml-auto flex items-center gap-3">
             {isRunning && (
               <button

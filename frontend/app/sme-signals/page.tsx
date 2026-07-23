@@ -5,6 +5,7 @@ import Link from 'next/link';
 import type { SmeSignal, SmeSignalHistoryResponse, SmeSignalsResponse } from '@/types';
 import EmaChart from '@/components/ema-chart';
 import HeaderSearch from '@/components/header-search';
+import WatchlistButton from '@/components/watchlist-button';
 
 // ── Filter types ──────────────────────────────────────────────────────────────
 
@@ -267,6 +268,10 @@ export default function SmeSignalsPage() {
           <Link href="/market-picks/history" className="text-sm text-muted hover:text-tx transition-colors">
             Track Record
           </Link>
+          <span className="text-border-hi">|</span>
+          <Link href="/watchlist" className="text-sm text-muted hover:text-tx transition-colors">
+            Watchlist
+          </Link>
           <div className="ml-auto flex items-center gap-3">
             <HeaderSearch />
             <button
@@ -437,6 +442,12 @@ export default function SmeSignalsPage() {
                         <td className="px-4 py-4">
                           <div className="flex items-center gap-1.5">
                             <span className={`text-[9px] text-muted/60 transition-transform ${isExpanded ? 'rotate-90' : ''}`}>▸</span>
+                            <WatchlistButton
+                              symbol={s.symbol}
+                              company={s.name ?? s.symbol}
+                              exchange={s.exchange}
+                              size="sm"
+                            />
                             {s.exchange === 'NSE' ? (
                               <Link
                                 href={`/?symbol=${s.symbol}`}

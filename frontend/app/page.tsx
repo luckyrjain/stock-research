@@ -161,6 +161,12 @@ function HomePageInner() {
               >
                 SME Signals →
               </Link>
+              <Link
+                href="/watchlist"
+                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
+              >
+                Watchlist →
+              </Link>
               <div className="ml-auto flex items-center gap-3">
                 <HeaderSearch />
               </div>

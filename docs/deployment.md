@@ -10,7 +10,7 @@ running in production rather than `--reload`/`npm run dev`.
 ```bash
 cp .env.example .env   # add at least one LLM provider key
 docker compose up --build
-docker compose exec backend python sme_ema_pipeline.py --setup-db   # first run only, for SME signals
+docker compose exec backend python sme_ema_pipeline.py --setup-db   # first run only — creates SME + watchlist tables
 ```
 
 This starts three services (`docker-compose.yml`):
@@ -69,7 +69,7 @@ it however you like.
 
 Beyond an LLM provider key (see [Setup](setup.md)), production deployments should set:
 
-- `DATABASE_URL` — required for SME signals; Docker Compose sets this automatically
+- `DATABASE_URL` — required for SME signals and the watchlist; Docker Compose sets this automatically
 - `ALLOWED_ORIGINS` — add your real frontend origin (comma-separated for multiple), or direct browser
   calls to the backend get CORS-rejected; defaults to `http://localhost:3000` (see `api.py`)
 - `API_URL` (frontend) — point at your backend's real address if not using Docker Compose's automatic wiring

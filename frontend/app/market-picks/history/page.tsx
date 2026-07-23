@@ -68,6 +68,10 @@ export default function MarketPicksHistoryPage() {
           </Link>
           <span className="text-border-hi">|</span>
           <span className="text-sm font-semibold text-accent">Track Record</span>
+          <span className="text-border-hi">|</span>
+          <Link href="/watchlist" className="text-sm text-muted hover:text-tx transition-colors">
+            Watchlist
+          </Link>
           <div className="ml-auto flex items-center gap-3">
             <HeaderSearch />
           </div>
