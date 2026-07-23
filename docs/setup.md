@@ -120,6 +120,10 @@ python sme_ema_pipeline.py --lookback 10  # report window for the CLI summary
 ```
 
 The screener page's **Refresh Data** button triggers the same pipeline via `POST /api/sme-signals/refresh`.
+The CLI exits non-zero (and the API logs an `sme_refresh_unhealthy` warning) when a run was
+substantially unsuccessful — an empty stock list or too high an OHLCV fetch error rate — rather
+than silently completing with mostly-empty data. See `_MAX_ACCEPTABLE_ERROR_RATE` in
+`sme_ema_pipeline.py`.
 
 Daily automation runs via `.github/workflows/sme-cron.yml` on GitHub Actions — weekdays at
 13:00 UTC (18:30 IST), shortly after NSE close. Add a `DATABASE_URL` repository secret

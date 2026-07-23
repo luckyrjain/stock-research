@@ -1,8 +1,10 @@
 import unittest
 from datetime import date, timedelta
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
+import sme_ema_pipeline
 from sme_ema_pipeline import _compute_ema_signals, _STORE_DAYS
 
 
@@ -50,6 +52,61 @@ class ComputeEmaSignalsTest(unittest.TestCase):
 
     def test_error_result_returns_empty_list(self) -> None:
         self.assertEqual(_compute_ema_signals({"error": "no data", "symbol": "X"}), [])
+
+
+def _stock(symbol: str) -> dict:
+    return {"symbol": symbol, "name": symbol, "isin": None, "series": "SM", "exchange": "NSE"}
+
+
+class RunHealthSignalTest(unittest.TestCase):
+    """run()'s return value drives whether the scheduled CI workflow (and the
+    API's refresh endpoint logging) treats a run as healthy — see
+    _MAX_ACCEPTABLE_ERROR_RATE. These tests mock every I/O boundary (DB,
+    stock-list fetch, OHLCV fetch) to isolate just that decision logic.
+    """
+
+    def setUp(self) -> None:
+        patches = [
+            patch.object(sme_ema_pipeline, "get_engine", return_value=MagicMock()),
+            patch.object(sme_ema_pipeline, "_upsert_stocks"),
+            patch.object(sme_ema_pipeline, "_upsert_signals"),
+            patch.object(sme_ema_pipeline, "_prune_signals"),
+            patch.object(sme_ema_pipeline, "_print_summary"),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_empty_stock_list_returns_false(self) -> None:
+        with patch.object(sme_ema_pipeline, "get_all_sme_stocks", return_value=[]):
+            self.assertFalse(sme_ema_pipeline.run())
+
+    def test_high_ohlcv_error_rate_returns_false(self) -> None:
+        stocks = [_stock(f"SYM{i}") for i in range(10)]
+
+        def _fetch(stock):
+            # 6/10 fail — 60% error rate, above the 50% threshold.
+            idx = int(stock["symbol"].removeprefix("SYM"))
+            if idx < 6:
+                return {"error": "no data", "symbol": stock["symbol"]}
+            return {"symbol": stock["symbol"], "exchange": "NSE", "df": pd.DataFrame({"Close": [1.0, 2.0]})}
+
+        with patch.object(sme_ema_pipeline, "get_all_sme_stocks", return_value=stocks), \
+             patch.object(sme_ema_pipeline, "_fetch_ohlcv", side_effect=_fetch):
+            self.assertFalse(sme_ema_pipeline.run())
+
+    def test_low_ohlcv_error_rate_returns_true(self) -> None:
+        stocks = [_stock(f"SYM{i}") for i in range(10)]
+
+        def _fetch(stock):
+            # 1/10 fails — 10% error rate, well under the 50% threshold.
+            if stock["symbol"] == "SYM0":
+                return {"error": "no data", "symbol": stock["symbol"]}
+            return {"symbol": stock["symbol"], "exchange": "NSE", "df": pd.DataFrame({"Close": [1.0, 2.0]})}
+
+        with patch.object(sme_ema_pipeline, "get_all_sme_stocks", return_value=stocks), \
+             patch.object(sme_ema_pipeline, "_fetch_ohlcv", side_effect=_fetch):
+            self.assertTrue(sme_ema_pipeline.run())
 
 
 if __name__ == "__main__":

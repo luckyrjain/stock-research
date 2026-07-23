@@ -290,7 +290,12 @@ end-of-day data to settle. Requires a `DATABASE_URL` repository secret pointing 
 network-reachable Postgres instance (Settings > Secrets and variables > Actions); the
 workflow fails fast with a clear message if it's missing rather than a raw Python
 traceback. Trigger a one-off run manually via the Actions tab's "Run workflow" button
-(`workflow_dispatch`). For a local/self-hosted alternative, a crontab entry works too:
+(`workflow_dispatch`). `sme_ema_pipeline.run()` returns `False` (and the CLI exits non-zero)
+when the run was substantially unsuccessful — an empty stock list, or an OHLCV fetch error
+rate above `_MAX_ACCEPTABLE_ERROR_RATE` (50%, almost always NSE/yfinance rate-limiting rather
+than genuinely bad symbols) — so a bad run fails the GitHub Actions job instead of silently
+"succeeding" with mostly-empty data, and GitHub's built-in run-failure notification fires.
+For a local/self-hosted alternative, a crontab entry works too:
 
     30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
 

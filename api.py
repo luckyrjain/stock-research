@@ -992,7 +992,13 @@ async def refresh_sme_signals(request: Request):
         global _SME_REFRESHING
         try:
             from sme_ema_pipeline import run as run_sme_pipeline
-            run_sme_pipeline()
+            healthy = run_sme_pipeline()
+            if not healthy:
+                log_event(
+                    LOGGER, "sme_refresh_unhealthy", level="warning",
+                    detail="Pipeline ran but reported an unhealthy result (empty stock list or "
+                           "too high an OHLCV fetch error rate) — see sme_ema_pipeline logs above.",
+                )
         except Exception as exc:
             log_event(LOGGER, "sme_refresh_failed", level="error", error=str(exc))
         finally:

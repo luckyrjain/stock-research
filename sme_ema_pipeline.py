@@ -45,6 +45,14 @@ _MAX_WORKERS   = 8
 # produces spurious crosses right after listing. Require a healthy margin
 # above the 50-span before trusting a cross flag.
 _MIN_HISTORY_DAYS = 75
+# If more than this fraction of monitored stocks fail their OHLCV fetch,
+# treat the whole run as unhealthy (run() returns False) rather than a normal
+# handful of delisted/renamed symbols — almost always means NSE/yfinance is
+# rate-limiting or blocking this run rather than genuinely bad individual
+# symbols. Callers use this to fail loudly (e.g. the scheduled CI workflow
+# exits non-zero so GitHub's built-in run-failure notification fires)
+# instead of silently "succeeding" with mostly-empty data.
+_MAX_ACCEPTABLE_ERROR_RATE = 0.5
 
 
 # ── Phase 2: OHLCV fetch ──────────────────────────────────────────────────────
@@ -243,7 +251,11 @@ def setup_db(engine) -> None:
 
 # ── Pipeline entry point ──────────────────────────────────────────────────────
 
-def run(force: bool = False, lookback_days: int = _LOOKBACK_DAYS) -> None:
+def run(force: bool = False, lookback_days: int = _LOOKBACK_DAYS) -> bool:
+    """Run the pipeline. Returns True on a healthy run, False if it was
+    substantially unsuccessful (empty stock list, or too high an OHLCV fetch
+    error rate to trust the result) — see _MAX_ACCEPTABLE_ERROR_RATE.
+    """
     engine = get_engine()
 
     # Phase 1: fetch SME stock lists
@@ -251,7 +263,7 @@ def run(force: bool = False, lookback_days: int = _LOOKBACK_DAYS) -> None:
     stocks = get_all_sme_stocks(force=force)
     if not stocks:
         logger.error("No SME stocks fetched — aborting")
-        return
+        return False
     logger.info("Total SME stocks: %d", len(stocks))
 
     # Must upsert stocks before signals (FK constraint)
@@ -286,6 +298,17 @@ def run(force: bool = False, lookback_days: int = _LOOKBACK_DAYS) -> None:
     # Phase 5: print crossover summary
     _print_summary(engine, lookback_days)
 
+    error_rate = errors / len(stocks)
+    if error_rate > _MAX_ACCEPTABLE_ERROR_RATE:
+        logger.error(
+            "OHLCV fetch error rate %.0f%% exceeds the %.0f%% threshold — "
+            "NSE/yfinance may be rate-limiting or blocking this run rather "
+            "than these being genuinely bad individual symbols",
+            error_rate * 100, _MAX_ACCEPTABLE_ERROR_RATE * 100,
+        )
+        return False
+    return True
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="SME EMA Crossover Pipeline")
@@ -310,7 +333,9 @@ def main() -> None:
         logger.info("Database tables dropped and recreated")
         return
 
-    run(force=args.force, lookback_days=args.lookback)
+    healthy = run(force=args.force, lookback_days=args.lookback)
+    if not healthy:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
