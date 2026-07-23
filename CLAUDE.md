@@ -284,9 +284,15 @@ changes; data is fully regenerable), `--force` (bypass list cache), `--lookback 
 The DB column for the cross is named `cross_type` (`'golden'`/`'death'`/`NULL`) because
 `CROSS` is a reserved SQL keyword; the API/TS field is `cross`.
 
-Daily auto-run (crontab, assumes system TZ is IST; NSE closes 15:30):
+Daily auto-run: `.github/workflows/sme-cron.yml` runs the pipeline on GitHub Actions at
+13:00 UTC (18:30 IST) on weekdays — NSE closes 15:30 IST, so this leaves a ~3h buffer for
+end-of-day data to settle. Requires a `DATABASE_URL` repository secret pointing at a
+network-reachable Postgres instance (Settings > Secrets and variables > Actions); the
+workflow fails fast with a clear message if it's missing rather than a raw Python
+traceback. Trigger a one-off run manually via the Actions tab's "Run workflow" button
+(`workflow_dispatch`). For a local/self-hosted alternative, a crontab entry works too:
 
-    30 18 * * 1-5 cd /Users/luckyratanlaljain/project/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
+    30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
 
 ### Shared state and queues
 

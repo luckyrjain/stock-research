@@ -143,7 +143,10 @@ python sme_ema_pipeline.py              # fetch, compute crosses, store
 python sme_ema_pipeline.py --reset-db   # drop + recreate tables (after schema changes)
 ```
 
-Data can also be refreshed from the SME Signals page (Refresh Data button) or scheduled daily after NSE close:
+Data can also be refreshed from the SME Signals page (Refresh Data button), or it runs
+automatically on a schedule via `.github/workflows/sme-cron.yml` (weekdays, shortly after
+NSE close — add a `DATABASE_URL` repository secret for it to work). For a local/self-hosted
+alternative, a crontab entry works too:
 
 ```cron
 30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1

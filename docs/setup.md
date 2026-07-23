@@ -119,7 +119,14 @@ python sme_ema_pipeline.py --force      # bypass the 24 h stock-list cache
 python sme_ema_pipeline.py --lookback 10  # report window for the CLI summary
 ```
 
-The screener page's **Refresh Data** button triggers the same pipeline via `POST /api/sme-signals/refresh`. For daily automation after NSE close (assumes system TZ is IST):
+The screener page's **Refresh Data** button triggers the same pipeline via `POST /api/sme-signals/refresh`.
+
+Daily automation runs via `.github/workflows/sme-cron.yml` on GitHub Actions — weekdays at
+13:00 UTC (18:30 IST), shortly after NSE close. Add a `DATABASE_URL` repository secret
+(Settings > Secrets and variables > Actions) pointing at a network-reachable Postgres
+instance; the workflow fails with a clear message rather than a Python traceback if it's
+missing. Trigger a one-off run from the Actions tab ("Run workflow"). If you'd rather run
+this locally/self-hosted instead of on GitHub Actions, a crontab entry works too:
 
 ```cron
 30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
