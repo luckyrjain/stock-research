@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import type { PriceHistory, Report, StockInfo } from '@/types';
 import InfoTooltip from './info-tooltip';
 import Sparkline from './sparkline';
+import WatchlistButton from './watchlist-button';
 
 function PriceSparkline({ symbol }: { symbol: string }) {
   const [history, setHistory] = useState<PriceHistory | null>(null);
@@ -237,6 +238,11 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
           {/* Identity */}
           <div className="min-w-0">
             <div className="flex items-baseline gap-2.5 flex-wrap">
+              <WatchlistButton
+                symbol={report.symbol}
+                company={s?.company_name ?? report.symbol}
+                exchange={s?.exchange ?? 'NSE'}
+              />
               <h2 className="text-xl font-bold text-tx">{s?.company_name ?? report.symbol}</h2>
               {s?.company_name && (
                 <span className="font-mono text-sm font-semibold text-muted">{report.symbol}</span>

@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from observability import get_logger, log_event
+from pydantic import BaseModel, Field
 from signals.interpreter import interpret
 
 load_dotenv()
@@ -86,19 +87,19 @@ def _release_llm_slot() -> None:
 # running the API with multiple worker processes would let each worker start
 # its own refresh; the upserts are idempotent per (symbol, trade_date) so this
 # wastes NSE/yfinance quota rather than corrupting data.
-_SME_ENGINE = None
-_SME_ENGINE_LOCK = threading.Lock()
+_DB_ENGINE = None
+_DB_ENGINE_LOCK = threading.Lock()
 _SME_REFRESHING = False
 
 
-def _get_sme_engine():
-    global _SME_ENGINE
-    if _SME_ENGINE is None:
-        with _SME_ENGINE_LOCK:
-            if _SME_ENGINE is None:  # re-check: another thread may have won the race
+def _get_db_engine():
+    global _DB_ENGINE
+    if _DB_ENGINE is None:
+        with _DB_ENGINE_LOCK:
+            if _DB_ENGINE is None:  # re-check: another thread may have won the race
                 from db.models import get_engine
-                _SME_ENGINE = get_engine()
-    return _SME_ENGINE
+                _DB_ENGINE = get_engine()
+    return _DB_ENGINE
 
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────
@@ -974,7 +975,7 @@ async def get_sme_signals(
     def _query_sync() -> dict:
         from sqlalchemy import text as _text
 
-        engine = _get_sme_engine()
+        engine = _get_db_engine()
         with engine.connect() as conn:
             rows = conn.execute(_text("""
                 WITH latest AS (
@@ -1047,7 +1048,7 @@ async def get_sme_signal_history(symbol: str):
     def _query_sync() -> dict:
         from sqlalchemy import text as _text
 
-        engine = _get_sme_engine()
+        engine = _get_db_engine()
         with engine.connect() as conn:
             rows = conn.execute(_text("""
                 SELECT
@@ -1121,6 +1122,136 @@ async def refresh_sme_signals(request: Request):
     asyncio.create_task(_launch())
     log_event(LOGGER, "sme_refresh_started")
     return {"started": True}
+
+
+# ── Watchlist ─────────────────────────────────────────────────────────────────
+# No account system exists yet — client_id is a UUID the frontend generates on
+# first use and keeps in localStorage (see frontend/lib/watchlist.ts). This is
+# not real multi-device sync, but the rows themselves live in Postgres, not
+# only in one browser's localStorage.
+_CLIENT_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,36}$")  # matches watchlist_items.client_id VARCHAR(36)
+_MAX_WATCHLIST_ITEMS_PER_CLIENT = 200
+_VALID_EXCHANGES = {"NSE", "BSE"}
+
+
+def _require_client_id(client_id: str) -> str:
+    if not _CLIENT_ID_RE.match(client_id or ""):
+        raise HTTPException(status_code=422, detail="Invalid client_id.")
+    return client_id
+
+
+class WatchlistAddRequest(BaseModel):
+    client_id: str
+    symbol: str
+    company: str = Field(default="")
+    exchange: str = Field(default="NSE")
+
+
+def _watchlist_rows_sync(client_id: str) -> list[dict]:
+    from sqlalchemy import text as _text
+
+    engine = _get_db_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(_text("""
+            SELECT symbol, company, exchange, added_at::text AS "addedAt"
+            FROM watchlist_items
+            WHERE client_id = :client_id
+            ORDER BY added_at DESC
+        """), {"client_id": client_id}).mappings().fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/watchlist")
+async def get_watchlist(request: Request, client_id: str = Query(...)):
+    _rate_limit(request, "watchlist_read", max_calls=120, window_seconds=60)
+    _require_client_id(client_id)
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+
+    loop = asyncio.get_running_loop()
+    try:
+        items = await loop.run_in_executor(None, _watchlist_rows_sync, client_id)
+    except Exception as exc:
+        log_event(LOGGER, "watchlist_read_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    return {"items": items}
+
+
+@app.post("/api/watchlist")
+async def add_to_watchlist(request: Request, body: WatchlistAddRequest):
+    _rate_limit(request, "watchlist_write", max_calls=60, window_seconds=60)
+    _require_client_id(body.client_id)
+    symbol = body.symbol.upper().strip()
+    if not _TICKER_RE.match(symbol):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    exchange = body.exchange.upper().strip()
+    if exchange not in _VALID_EXCHANGES:
+        raise HTTPException(status_code=422, detail="Invalid exchange.")
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+
+    def _upsert_sync() -> list[dict]:
+        from sqlalchemy import text as _text
+
+        engine = _get_db_engine()
+        with engine.begin() as conn:
+            # Advisory lock scoped to this transaction (released automatically on
+            # commit/rollback) serializes concurrent adds for the same client_id, so
+            # the count-then-insert below can't race past _MAX_WATCHLIST_ITEMS_PER_CLIENT.
+            conn.execute(_text("SELECT pg_advisory_xact_lock(hashtext(:client_id))"), {"client_id": body.client_id})
+            count = conn.execute(_text(
+                "SELECT COUNT(*) FROM watchlist_items WHERE client_id = :client_id"
+            ), {"client_id": body.client_id}).scalar() or 0
+            if count >= _MAX_WATCHLIST_ITEMS_PER_CLIENT:
+                raise ValueError(f"Watchlist is capped at {_MAX_WATCHLIST_ITEMS_PER_CLIENT} stocks.")
+            conn.execute(_text("""
+                INSERT INTO watchlist_items (client_id, symbol, company, exchange)
+                VALUES (:client_id, :symbol, :company, :exchange)
+                ON CONFLICT (client_id, symbol) DO NOTHING
+            """), {
+                "client_id": body.client_id, "symbol": symbol,
+                "company": body.company[:200], "exchange": exchange,
+            })
+        return _watchlist_rows_sync(body.client_id)
+
+    loop = asyncio.get_running_loop()
+    try:
+        items = await loop.run_in_executor(None, _upsert_sync)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        log_event(LOGGER, "watchlist_write_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    return {"items": items}
+
+
+@app.delete("/api/watchlist/{symbol}")
+async def remove_from_watchlist(request: Request, symbol: str, client_id: str = Query(...)):
+    _rate_limit(request, "watchlist_write", max_calls=60, window_seconds=60)
+    _require_client_id(client_id)
+    sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+
+    def _delete_sync() -> list[dict]:
+        from sqlalchemy import text as _text
+
+        engine = _get_db_engine()
+        with engine.begin() as conn:
+            conn.execute(_text(
+                "DELETE FROM watchlist_items WHERE client_id = :client_id AND symbol = :symbol"
+            ), {"client_id": client_id, "symbol": sym})
+        return _watchlist_rows_sync(client_id)
+
+    loop = asyncio.get_running_loop()
+    try:
+        items = await loop.run_in_executor(None, _delete_sync)
+    except Exception as exc:
+        log_event(LOGGER, "watchlist_write_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    return {"items": items}
 
 
 if __name__ == "__main__":

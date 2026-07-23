@@ -25,3 +25,17 @@ CREATE TABLE IF NOT EXISTS ema_signals (
 
 CREATE INDEX IF NOT EXISTS idx_ema_signals_date  ON ema_signals(trade_date);
 CREATE INDEX IF NOT EXISTS idx_ema_signals_cross ON ema_signals(cross_type);
+
+-- Cross-mode watchlist. No account system yet — client_id is a UUID the
+-- frontend generates on first use and keeps in localStorage.
+CREATE TABLE IF NOT EXISTS watchlist_items (
+    id          SERIAL PRIMARY KEY,
+    client_id   VARCHAR(36)  NOT NULL,
+    symbol      VARCHAR(20)  NOT NULL,
+    company     VARCHAR(200),
+    exchange    VARCHAR(5),
+    added_at    TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(client_id, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_watchlist_client ON watchlist_items(client_id);

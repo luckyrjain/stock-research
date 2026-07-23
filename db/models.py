@@ -35,6 +35,27 @@ ema_signals = Table(
     Index("idx_ema_signals_cross", "cross_type"),
 )
 
+# Cross-mode watchlist (stock analysis / market picks / SME signals share this
+# one table). There is no account system yet — client_id is a UUID the
+# frontend generates on first use and keeps in localStorage (see
+# frontend/lib/watchlist.ts). This is not real multi-device sync (a cleared
+# browser loses its client_id and, with it, access to its rows), but it does
+# mean the data itself lives in Postgres rather than only in one browser's
+# localStorage, and a future account system can adopt a client_id's rows
+# wholesale once real auth exists.
+watchlist_items = Table(
+    "watchlist_items",
+    metadata,
+    Column("id",         Integer, primary_key=True, autoincrement=True),
+    Column("client_id",  String(36),  nullable=False),
+    Column("symbol",     String(20),  nullable=False),
+    Column("company",    String(200)),
+    Column("exchange",   String(5)),
+    Column("added_at",   DateTime(timezone=True), server_default=text("NOW()")),
+    UniqueConstraint("client_id", "symbol", name="uq_watchlist_client_symbol"),
+    Index("idx_watchlist_client", "client_id"),
+)
+
 
 def get_engine(database_url: str | None = None):
     url = database_url or os.environ["DATABASE_URL"]
