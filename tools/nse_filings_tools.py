@@ -27,23 +27,23 @@ def _get_session():
 
 
 def get_nse_filings(symbol: str, issuer: str = "", days: int = 30) -> dict:
-    session = _get_session()
-
-    to_date = datetime.today()
-    from_date = to_date - timedelta(days=days)
-    issuer_param = f"&issuer={issuer.replace(' ', '%20')}" if issuer else ""
-
-    url = (
-        f"{BASE_URL}?"
-        f"index=equities"
-        f"&symbol={symbol}"
-        f"{issuer_param}"
-        f"&from_date={from_date.strftime('%d-%m-%Y')}"
-        f"&to_date={to_date.strftime('%d-%m-%Y')}"
-        f"&reqXbrl=false"
-    )
-
     try:
+        session = _get_session()
+
+        to_date = datetime.today()
+        from_date = to_date - timedelta(days=days)
+        issuer_param = f"&issuer={issuer.replace(' ', '%20')}" if issuer else ""
+
+        url = (
+            f"{BASE_URL}?"
+            f"index=equities"
+            f"&symbol={symbol}"
+            f"{issuer_param}"
+            f"&from_date={from_date.strftime('%d-%m-%Y')}"
+            f"&to_date={to_date.strftime('%d-%m-%Y')}"
+            f"&reqXbrl=false"
+        )
+
         resp = session.get(url, timeout=10)
 
         if resp.status_code != 200:
