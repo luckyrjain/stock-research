@@ -35,3 +35,15 @@ body {
     border: 1px solid rgba(255, 255, 255, 0.06);
   }
 }
+
+/* Respect the OS-level motion preference for all animate-*/transition-*
+   utilities (fade-up, shimmer, spin-slow, pulse) without touching every
+   component — near-zero duration still applies the end state instantly. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  html { scroll-behavior: auto; }
+}

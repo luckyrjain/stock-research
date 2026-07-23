@@ -351,13 +351,15 @@ function SortableHeader({ label, sortK, currentKey, currentDir, onSort, tooltip 
   return (
     <th
       aria-sort={active ? (currentDir === 'desc' ? 'descending' : 'ascending') : 'none'}
-      className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider whitespace-nowrap"
+      className="p-0 text-left text-[10px] font-bold text-muted uppercase tracking-wider whitespace-nowrap"
     >
-      <span className="inline-flex items-center gap-1">
+      <div className="flex items-center gap-1">
+        {/* Button owns the original cell padding so the full header area stays
+            clickable/hoverable, not just the label+arrow's own tight bounding box. */}
         <button
           type="button"
           onClick={() => onSort(sortK)}
-          className="inline-flex items-center gap-1 uppercase tracking-wider
+          className="flex items-center gap-1 px-4 py-3 uppercase tracking-wider
                      cursor-pointer hover:text-tx transition-colors select-none group"
         >
           {label}
@@ -365,8 +367,8 @@ function SortableHeader({ label, sortK, currentKey, currentDir, onSort, tooltip 
             {active ? (currentDir === 'desc' ? '↓' : '↑') : '↕'}
           </span>
         </button>
-        {tooltip}
-      </span>
+        {tooltip && <span className="pr-4">{tooltip}</span>}
+      </div>
     </th>
   );
 }
