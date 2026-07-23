@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from db.models import ema_signals, get_engine, sme_stocks
+from db.models import ema_signals, get_engine, sme_stocks, watchlist_items
 
 
 class GetEngineTest(unittest.TestCase):
@@ -58,6 +58,22 @@ class TableSchemaTest(unittest.TestCase):
         index_columns = {tuple(c.name for c in idx.columns) for idx in ema_signals.indexes}
         self.assertIn(("trade_date",), index_columns)
         self.assertIn(("cross_type",), index_columns)
+
+    def test_watchlist_items_columns_and_constraints(self) -> None:
+        cols = set(watchlist_items.columns.keys())
+        self.assertEqual(cols, {"id", "client_id", "symbol", "company", "exchange", "added_at"})
+        self.assertFalse(watchlist_items.columns["client_id"].nullable)
+        self.assertFalse(watchlist_items.columns["symbol"].nullable)
+
+        unique_constraint_cols = [
+            tuple(c.name for c in constraint.columns)
+            for constraint in watchlist_items.constraints
+            if constraint.__class__.__name__ == "UniqueConstraint"
+        ]
+        self.assertIn(("client_id", "symbol"), unique_constraint_cols)
+
+        index_columns = {tuple(c.name for c in idx.columns) for idx in watchlist_items.indexes}
+        self.assertIn(("client_id",), index_columns)
 
 
 if __name__ == "__main__":

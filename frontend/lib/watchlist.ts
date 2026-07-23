@@ -6,58 +6,68 @@ export interface WatchlistItem {
   symbol: string;
   company: string;
   exchange: string;
-  addedAt: number;
+  addedAt: string;
 }
 
-const STORAGE_KEY = 'alphapulse_watchlist';
-const CHANGE_EVENT = 'alphapulse:watchlist-changed';
+const CLIENT_ID_KEY = 'alphapulse_client_id';
 
-function readAll(): WatchlistItem[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+/** Opaque per-browser identifier — NOT an account. There is no login; this is
+ * just how the backend groups one browser's watchlist rows in Postgres. See
+ * db/models.py's watchlist_items table for the server side of this. */
+export function getClientId(): string {
+  if (typeof window === 'undefined') return '';
+  let id = window.localStorage.getItem(CLIENT_ID_KEY);
+  if (!id) {
+    id = crypto.randomUUID();
+    try { window.localStorage.setItem(CLIENT_ID_KEY, id); } catch { /* private browsing, etc. */ }
   }
+  return id;
 }
 
-function writeAll(items: WatchlistItem[]): void {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-  } catch {
-    // localStorage unavailable (private browsing quota, etc.) — fail silently,
-    // the watchlist just won't persist for this session.
-  }
-  // The native `storage` event only fires in OTHER tabs/windows, not the tab
-  // that made the change — dispatch our own so every mounted useWatchlist()
-  // instance on THIS page updates immediately (e.g. star buttons in three
-  // different dashboards all reflecting the same toggle).
-  window.dispatchEvent(new Event(CHANGE_EVENT));
+// Module-level shared cache: every mounted useWatchlist() instance on a page
+// (one per star button, potentially dozens on the Market Picks table) reads
+// from and subscribes to this single cache instead of each independently
+// fetching /api/watchlist on mount.
+let cachedItems: WatchlistItem[] | null = null;
+let inFlight: Promise<WatchlistItem[]> | null = null;
+const listeners = new Set<() => void>();
+
+function notify(): void {
+  listeners.forEach(fn => fn());
 }
 
-/** Read-only snapshot, for one-off reads outside React (e.g. the /watchlist page's initial fetch). */
-export function getWatchlist(): WatchlistItem[] {
-  return readAll();
+async function fetchItems(): Promise<WatchlistItem[]> {
+  if (inFlight) return inFlight;
+  const clientId = getClientId();
+  inFlight = fetch(`/api/watchlist?client_id=${encodeURIComponent(clientId)}`)
+    .then(res => (res.ok ? res.json() : { items: [] }))
+    .then((data: { items?: WatchlistItem[] }) => data.items ?? [])
+    .catch(() => [])
+    .finally(() => { inFlight = null; });
+  const items = await inFlight;
+  cachedItems = items;
+  notify();
+  return items;
 }
 
-/** Shared cross-component watchlist state, backed by localStorage. No account or
- * backend involved — this is Phase 1 of the cross-mode watchlist; syncing across
- * devices would need real accounts, which is a separate, larger decision. */
+/** Shared cross-component watchlist state, backed by Postgres (watchlist_items,
+ * keyed by an anonymous per-browser client_id — see getClientId above). No
+ * account system yet, so this doesn't sync across devices/browsers, but the
+ * data itself lives in the database rather than only in one browser's
+ * localStorage. */
 export function useWatchlist() {
-  const [items, setItems] = useState<WatchlistItem[]>([]);
+  const [items, setItems] = useState<WatchlistItem[]>(cachedItems ?? []);
+  const [loading, setLoading] = useState(cachedItems === null);
 
   useEffect(() => {
-    setItems(readAll());
-    const onChange = () => setItems(readAll());
-    window.addEventListener(CHANGE_EVENT, onChange);
-    window.addEventListener('storage', onChange);
-    return () => {
-      window.removeEventListener(CHANGE_EVENT, onChange);
-      window.removeEventListener('storage', onChange);
-    };
+    const onChange = () => setItems(cachedItems ?? []);
+    listeners.add(onChange);
+    if (cachedItems === null) {
+      fetchItems().finally(() => setLoading(false));
+    } else {
+      setLoading(false);
+    }
+    return () => { listeners.delete(onChange); };
   }, []);
 
   const isWatched = useCallback(
@@ -65,18 +75,50 @@ export function useWatchlist() {
     [items],
   );
 
-  const toggle = useCallback((item: { symbol: string; company: string; exchange: string }) => {
+  const toggle = useCallback(async (item: { symbol: string; company: string; exchange: string }) => {
     const symbol = item.symbol.toUpperCase();
-    const current = readAll();
-    const next = current.some(i => i.symbol === symbol)
-      ? current.filter(i => i.symbol !== symbol)
-      : [...current, { symbol, company: item.company, exchange: item.exchange, addedAt: Date.now() }];
-    writeAll(next);
+    const clientId = getClientId();
+    const currentlyWatched = (cachedItems ?? []).some(i => i.symbol === symbol);
+
+    try {
+      if (currentlyWatched) {
+        const res = await fetch(`/api/watchlist/${encodeURIComponent(symbol)}?client_id=${encodeURIComponent(clientId)}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) return;
+        const data = await res.json() as { items: WatchlistItem[] };
+        cachedItems = data.items;
+      } else {
+        const res = await fetch('/api/watchlist', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ client_id: clientId, symbol, company: item.company, exchange: item.exchange }),
+        });
+        if (!res.ok) return;
+        const data = await res.json() as { items: WatchlistItem[] };
+        cachedItems = data.items;
+      }
+      notify();
+    } catch {
+      // Backend unreachable — leave state as-is rather than optimistically
+      // flipping the star to something that didn't actually save.
+    }
   }, []);
 
-  const remove = useCallback((symbol: string) => {
-    writeAll(readAll().filter(i => i.symbol !== symbol.toUpperCase()));
+  const remove = useCallback(async (symbol: string) => {
+    const clientId = getClientId();
+    try {
+      const res = await fetch(`/api/watchlist/${encodeURIComponent(symbol.toUpperCase())}?client_id=${encodeURIComponent(clientId)}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) return;
+      const data = await res.json() as { items: WatchlistItem[] };
+      cachedItems = data.items;
+      notify();
+    } catch {
+      // silently ignore — the row just won't disappear; user can retry
+    }
   }, []);
 
-  return { items, isWatched, toggle, remove };
+  return { items, loading, isWatched, toggle, remove };
 }

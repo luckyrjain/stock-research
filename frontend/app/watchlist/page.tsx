@@ -14,14 +14,9 @@ function Skeleton({ className }: { className: string }) {
 }
 
 export default function WatchlistPage() {
-  const { items, remove } = useWatchlist();
+  const { items, loading, remove } = useWatchlist();
   const [prices, setPrices] = useState<Record<string, LivePrice>>({});
   const [pricesLoading, setPricesLoading] = useState(true);
-  const [hydrated, setHydrated] = useState(false);
-
-  // Avoid a hydration flash: useWatchlist() reads localStorage, which is only
-  // available client-side, so `items` starts empty on the server render.
-  useEffect(() => { setHydrated(true); }, []);
 
   useEffect(() => {
     if (items.length === 0) { setPricesLoading(false); return; }
@@ -45,7 +40,9 @@ export default function WatchlistPage() {
     return () => clearInterval(id);
   }, [items.map(i => i.symbol).join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const sorted = [...items].sort((a, b) => b.addedAt - a.addedAt);
+  const sorted = [...items].sort(
+    (a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime(),
+  );
 
   return (
     <main className="min-h-screen bg-bg text-tx">
@@ -72,11 +69,11 @@ export default function WatchlistPage() {
           <h1 className="text-xl font-black tracking-tight text-tx mb-1.5">Watchlist</h1>
           <p className="text-muted text-sm max-w-xl leading-relaxed">
             Stocks you&apos;ve starred from stock analysis, Market Picks, or SME Signals, all in one
-            place. Saved to this browser only — it won&apos;t follow you to another device yet.
+            place. Tied to this browser only — it won&apos;t follow you to another device yet.
           </p>
         </div>
 
-        {!hydrated || (pricesLoading && items.length > 0) ? (
+        {loading || (pricesLoading && items.length > 0) ? (
           <div className="rounded-xl border border-border overflow-hidden">
             <div className="divide-y divide-border/60">
               {Array.from({ length: 3 }).map((_, i) => (

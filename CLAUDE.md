@@ -18,6 +18,8 @@ A second mode — **Market Picks** — runs a multi-agent pipeline that scrapes 
 
 A third mode — **SME Signals** — is a PostgreSQL-backed batch pipeline (`sme_ema_pipeline.py`) that screens all NSE Emerge + BSE SME stocks for EMA20/EMA50 **golden cross** and **death cross** events, served at `/sme-signals` via `GET /api/sme-signals`.
 
+A **Watchlist** ties the three modes together: a star button in each dashboard adds/removes a stock from a PostgreSQL-backed `watchlist_items` table, and `/watchlist` lists everything starred with live prices. There's no login yet — rows are keyed by an anonymous per-browser `client_id` (a UUID in `localStorage`), not a real account, so a watchlist doesn't follow you across devices.
+
 ---
 
 ## Repo Structure
@@ -50,8 +52,10 @@ stock-research/
 │   ├── app/page.tsx              Stock analysis page (supports ?symbol= deep links)
 │   ├── app/market-picks/page.tsx Weekly picks page
 │   ├── app/sme-signals/page.tsx  SME golden cross screener
+│   ├── app/watchlist/page.tsx    Cross-mode watchlist page
 │   ├── components/               Dashboard, search, progress tracker, market picks dashboard
 │   ├── app/api/                  Thin Next.js proxy routes → FastAPI backend
+│   ├── lib/watchlist.ts          useWatchlist() hook (DB-backed via /api/watchlist, anonymous client_id)
 │   └── types/index.ts            Canonical TS types for all SSE messages and reports
 └── output/                 Cache files (gitignored); also where CLI saves report JSON
     ├── <SYMBOL>/           Per-symbol task caches
@@ -225,7 +229,7 @@ Provider is auto-detected from whichever key is present (checked in the order ab
 | `ANALYST_MODEL` | provider default | Model for the analyst LLM call — the only model-selection env var that does anything; data fetching doesn't call an LLM (see "Agent architecture") |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Only needed when `LLM_PROVIDER=ollama` |
 | `LOG_LEVEL` | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`) |
-| `DATABASE_URL` | unset | PostgreSQL DSN — required only for the SME signals pipeline and `/api/sme-signals` endpoints |
+| `DATABASE_URL` | unset | PostgreSQL DSN — required for the SME signals pipeline (`/api/sme-signals`) and for the watchlist (`/api/watchlist`) |
 
 ### Frontend
 
@@ -295,6 +299,25 @@ than genuinely bad symbols) — so a bad run fails the GitHub Actions job instea
 For a local/self-hosted alternative, a crontab entry works too:
 
     30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
+
+### Watchlist flow
+
+The `watchlist_items` table (PostgreSQL, `DATABASE_URL`) is the one piece of shared state
+connecting the three otherwise-independent modes:
+
+1. `GET /api/watchlist?client_id=`, `POST /api/watchlist` (`{client_id, symbol, company, exchange}`),
+   `DELETE /api/watchlist/{symbol}?client_id=` — all in `api.py`, using the same cached
+   engine (`_get_db_engine()`) as the SME endpoints
+2. No accounts: `client_id` is a UUID generated client-side (`crypto.randomUUID()`) and
+   persisted in `localStorage` — it groups one browser's rows, nothing more
+3. `frontend/lib/watchlist.ts`'s `useWatchlist()` hook holds a module-level shared cache +
+   subscriber list so every mounted `WatchlistButton` (stock analysis, Market Picks rows,
+   SME Signals rows) reads/writes the same in-memory state without each firing its own
+   fetch or needing React Context
+4. `/watchlist` fans out to `GET /api/prices` for live quotes on whatever's starred
+5. Same defensive conventions as SME endpoints: 503 if `DATABASE_URL` unset/DB unreachable
+   (sanitized — no raw exception text in the response), 422 on invalid `client_id`/`symbol`,
+   rate-limited via `_rate_limit()`, capped at 200 items per `client_id`
 
 ### Shared state and queues
 

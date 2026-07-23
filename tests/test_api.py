@@ -502,12 +502,12 @@ class PriceHistoryEndpointTest(unittest.TestCase):
 class SmeSignalsEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._SME_ENGINE = None
+        api._DB_ENGINE = None
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._SME_ENGINE = None
+        api._DB_ENGINE = None
 
     def test_invalid_direction_returns_422_even_without_db(self) -> None:
         resp = client.get("/api/sme-signals?direction=sideways")
@@ -525,7 +525,7 @@ class SmeSignalsEndpointTest(unittest.TestCase):
             golden_now=42,
             last_run="2026-07-20T00:00:00",
         )
-        with patch("api._get_sme_engine", return_value=fake_engine):
+        with patch("api._get_db_engine", return_value=fake_engine):
             resp = client.get("/api/sme-signals?lookback=5&direction=golden")
 
         self.assertEqual(resp.status_code, 200)
@@ -537,7 +537,7 @@ class SmeSignalsEndpointTest(unittest.TestCase):
 
     def test_db_error_returns_sanitized_503(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        with patch("api._get_sme_engine", side_effect=RuntimeError("connection refused: password exposed")):
+        with patch("api._get_db_engine", side_effect=RuntimeError("connection refused: password exposed")):
             resp = client.get("/api/sme-signals")
 
         self.assertEqual(resp.status_code, 503)
@@ -549,12 +549,12 @@ class SmeSignalsEndpointTest(unittest.TestCase):
 class SmeSignalHistoryEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._SME_ENGINE = None
+        api._DB_ENGINE = None
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._SME_ENGINE = None
+        api._DB_ENGINE = None
 
     def _fake_history_engine(self, series_rows, stock_row):
         series_result = MagicMock()
@@ -578,7 +578,7 @@ class SmeSignalHistoryEndpointTest(unittest.TestCase):
             {"trade_date": "2026-05-02", "close_price": 10.5, "ema20": 9.8, "ema50": 9.1, "cross": "golden"},
         ]
         fake_engine = self._fake_history_engine(series, {"name": "ABC Corp", "exchange": "NSE"})
-        with patch("api._get_sme_engine", return_value=fake_engine):
+        with patch("api._get_db_engine", return_value=fake_engine):
             resp = client.get("/api/sme-signals/abc/history")
 
         self.assertEqual(resp.status_code, 200)
@@ -591,13 +591,13 @@ class SmeSignalHistoryEndpointTest(unittest.TestCase):
     def test_unknown_symbol_returns_404(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         fake_engine = self._fake_history_engine([], None)
-        with patch("api._get_sme_engine", return_value=fake_engine):
+        with patch("api._get_db_engine", return_value=fake_engine):
             resp = client.get("/api/sme-signals/NOSUCH/history")
         self.assertEqual(resp.status_code, 404)
 
     def test_db_error_returns_sanitized_503(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        with patch("api._get_sme_engine", side_effect=RuntimeError("connection refused: password exposed")):
+        with patch("api._get_db_engine", side_effect=RuntimeError("connection refused: password exposed")):
             resp = client.get("/api/sme-signals/ABC/history")
         self.assertEqual(resp.status_code, 503)
         self.assertNotIn("password", resp.text)
@@ -650,6 +650,126 @@ class SmeRefreshEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 202)
         self.assertTrue(api._SME_REFRESHING)
         mocked_create_task.assert_called_once()
+
+
+class WatchlistEndpointsTest(unittest.TestCase):
+    """No account system exists — client_id is an opaque frontend-generated
+    identifier, not a real user. These tests cover validation, the missing-DB
+    fail-safe (same pattern as the SME endpoints), and the read/write/delete
+    contract against a mocked engine.
+    """
+
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        api._DB_ENGINE = None
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._DB_ENGINE = None
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_get_missing_database_url_returns_503(self) -> None:
+        resp = client.get("/api/watchlist?client_id=client-abc")
+        self.assertEqual(resp.status_code, 503)
+
+    def test_get_invalid_client_id_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.get(f"/api/watchlist?client_id={'x' * 100}")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_get_returns_items_with_mocked_engine(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = [
+            {"symbol": "TCS", "company": "Tata Consultancy Services", "exchange": "NSE",
+             "addedAt": "2026-01-01T00:00:00"},
+        ]
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value = _FakeConn([rows_result])
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.get("/api/watchlist?client_id=client-abc")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(len(body["items"]), 1)
+        self.assertEqual(body["items"][0]["symbol"], "TCS")
+
+    def test_get_db_error_returns_sanitized_503(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("api._get_db_engine", side_effect=RuntimeError("connection refused: password exposed")):
+            resp = client.get("/api/watchlist?client_id=client-abc")
+        self.assertEqual(resp.status_code, 503)
+        self.assertNotIn("password", resp.json()["detail"])
+
+    def test_get_rate_limited_returns_429(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        api._RATE_LIMIT_CALLS["watchlist_read:testclient"] = [api.time.monotonic()] * 120
+        resp = client.get("/api/watchlist?client_id=client-abc")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_post_missing_database_url_returns_503(self) -> None:
+        resp = client.post("/api/watchlist", json={"client_id": "client-abc", "symbol": "TCS"})
+        self.assertEqual(resp.status_code, 503)
+
+    def test_post_invalid_symbol_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.post("/api/watchlist", json={"client_id": "client-abc", "symbol": "bad symbol!"})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_post_invalid_client_id_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.post("/api/watchlist", json={"client_id": "not valid!", "symbol": "TCS"})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_post_adds_item_with_mocked_engine(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        count_result = MagicMock()
+        count_result.scalar.return_value = 0
+        insert_result = MagicMock()
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = [
+            {"symbol": "TCS", "company": "Tata Consultancy Services", "exchange": "NSE",
+             "addedAt": "2026-01-01T00:00:00"},
+        ]
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = _FakeConn([count_result, insert_result])
+        fake_engine.connect.return_value = _FakeConn([rows_result])
+
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.post("/api/watchlist", json={
+                "client_id": "client-abc", "symbol": "tcs",
+                "company": "Tata Consultancy Services", "exchange": "NSE",
+            })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["items"][0]["symbol"], "TCS")
+
+    def test_post_over_cap_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        count_result = MagicMock()
+        count_result.scalar.return_value = api._MAX_WATCHLIST_ITEMS_PER_CLIENT
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = _FakeConn([count_result])
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.post("/api/watchlist", json={"client_id": "client-abc", "symbol": "TCS"})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_delete_removes_item_with_mocked_engine(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        delete_result = MagicMock()
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = []
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = _FakeConn([delete_result])
+        fake_engine.connect.return_value = _FakeConn([rows_result])
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.delete("/api/watchlist/TCS?client_id=client-abc")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["items"], [])
+
+    def test_delete_missing_database_url_returns_503(self) -> None:
+        resp = client.delete("/api/watchlist/TCS?client_id=client-abc")
+        self.assertEqual(resp.status_code, 503)
 
 
 if __name__ == "__main__":

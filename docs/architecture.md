@@ -9,6 +9,7 @@ The project has two user-facing entrypoints and three backend flows:
 | Stock analysis | `frontend/app/page.tsx` → `GET /api/analyse/{symbol}` | Validate → fetch → signal engine → LLM analyst → report |
 | Market picks | `frontend/app/market-picks/page.tsx` → `GET /api/market-picks` | Scrape → extract → consolidate → research → analyze → score |
 | SME signals | `frontend/app/sme-signals/page.tsx` → `GET /api/sme-signals` | Batch pipeline (PostgreSQL) → golden/death cross screener |
+| Watchlist | `frontend/app/watchlist/page.tsx` → `GET/POST/DELETE /api/watchlist` | Cross-mode "stocks I care about" list (PostgreSQL), keyed by an anonymous per-browser client ID |
 | CLI | `python main.py <SYMBOL>` | Same as stock analysis, no frontend |
 
 ---
@@ -139,6 +140,39 @@ The DB column is `cross_type` (`'golden'`/`'death'`/`NULL`) because `CROSS` is a
 
 ---
 
+## Watchlist flow
+
+The `watchlist_items` table (PostgreSQL, `DATABASE_URL` — shares the same optional engine as
+SME signals, renamed `_get_db_engine` in `api.py` since it now serves two features) is the
+cross-mode thread connecting stock analysis, Market Picks, and SME Signals: a star button in
+all three dashboards writes to the same table, and `/watchlist` fans out to `/api/prices` to
+show live quotes for whatever's starred.
+
+There is no login yet, so rows are grouped by an anonymous `client_id` — a UUID the browser
+generates once (`crypto.randomUUID()`) and stores in `localStorage`, sent as a query param /
+body field on every watchlist request. This is a deliberate middle ground: the data itself
+lives in Postgres (not just one browser's `localStorage`), but it still doesn't sync across
+devices or browsers the way a real account would — that's a separate, not-yet-made product
+decision.
+
+```text
+GET    /api/watchlist?client_id=…            → { items: [...] }
+POST   /api/watchlist   { client_id, symbol, company, exchange }  → { items: [...] }
+DELETE /api/watchlist/{symbol}?client_id=…   → { items: [...] }
+```
+
+`frontend/lib/watchlist.ts`'s `useWatchlist()` hook keeps a module-level shared cache + a
+`Set` of subscriber callbacks, so the many `WatchlistButton` instances mounted on one page
+(up to 35 rows on Market Picks) share a single fetch and stay in sync after any mutation —
+there's no React Context or state-management library in this codebase to lean on instead.
+
+Same defensive pattern as the SME endpoints: 503 if `DATABASE_URL` is unset or the DB is
+unreachable (with the real exception detail only in server logs, never in the response),
+422 on invalid `client_id`/`symbol`, and per-IP rate limiting via `_rate_limit()`. A single
+client is capped at 200 watchlist items.
+
+---
+
 ## Agent layers
 
 ### Data fetching
@@ -259,8 +293,10 @@ stock-research/
 │   │   ├── page.tsx                Stock analysis page (?symbol= deep links)
 │   │   ├── market-picks/page.tsx   Market picks page
 │   │   ├── sme-signals/page.tsx    SME golden cross screener
+│   │   ├── watchlist/page.tsx      Cross-mode watchlist page
 │   │   └── api/                    Proxy routes
 │   ├── components/
+│   ├── lib/watchlist.ts            useWatchlist() hook (DB-backed, anonymous client_id)
 │   ├── types/index.ts
 │   └── package.json
 ├── docs/
