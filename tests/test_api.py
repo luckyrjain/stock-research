@@ -58,6 +58,29 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
 
 
+class CorsTest(unittest.TestCase):
+    def test_allowed_origin_gets_cors_headers(self) -> None:
+        resp = client.options(
+            "/health",
+            headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "GET"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers.get("access-control-allow-origin"), "http://localhost:3000")
+
+    def test_disallowed_origin_is_rejected(self) -> None:
+        resp = client.options(
+            "/health",
+            headers={"Origin": "http://evil.example.com", "Access-Control-Request-Method": "GET"},
+        )
+        self.assertNotIn("access-control-allow-origin", {h.lower() for h in resp.headers})
+
+    def test_requests_without_an_origin_header_are_unaffected(self) -> None:
+        # The Next.js proxy routes talk to this backend server-to-server — no
+        # Origin header, so CORS never applies to that path.
+        resp = client.get("/health")
+        self.assertEqual(resp.status_code, 200)
+
+
 class RateLimitHelperTest(unittest.TestCase):
     def setUp(self) -> None:
         api._RATE_LIMIT_CALLS.clear()

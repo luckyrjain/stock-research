@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import threading
 import time
 import uuid
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from observability import get_logger, log_event
 from signals.interpreter import interpret
@@ -95,6 +97,25 @@ def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: f
 
 app = FastAPI(title="AlphaPulse")
 LOGGER = get_logger("api")
+
+# CORS: the browser only ever talks to this backend through the Next.js
+# proxy routes (server-to-server fetch, same-origin from the browser's
+# perspective) — this is defense in depth against a direct cross-origin
+# browser request, not something normal operation relies on. Configure via
+# ALLOWED_ORIGINS (comma-separated) for non-default deployments; defaults to
+# the local Next.js dev server.
+_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 _NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
