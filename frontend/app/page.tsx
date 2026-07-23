@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect, Suspense } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import type { TaskName, TaskStatus, Phase, SSEMessage, Report } from '@/types';
 import TickerSearch     from '@/components/ticker-search';
 import ProgressTracker  from '@/components/progress-tracker';
@@ -13,7 +14,7 @@ function initStatus(): Record<TaskName, TaskStatus> {
   return Object.fromEntries(ALL_TASKS.map(t => [t, 'idle'])) as Record<TaskName, TaskStatus>;
 }
 
-export default function HomePage() {
+function HomePageInner() {
   const [phase, setPhase]               = useState<Phase>('idle');
   const [taskStatus, setTaskStatus]     = useState<Record<TaskName, TaskStatus>>(initStatus());
   const [report, setReport]             = useState<Report | null>(null);
@@ -90,6 +91,18 @@ export default function HomePage() {
     if (currentSymbol) handleAnalyse(currentSymbol, true);
   }, [currentSymbol, handleAnalyse]);
 
+  const searchParams = useSearchParams();
+  const deepLinkDone = useRef(false);
+
+  // Deep link: /?symbol=TCS auto-starts analysis (used by SME signals page links)
+  useEffect(() => {
+    const sym = searchParams.get('symbol');
+    if (sym && !deepLinkDone.current) {
+      deepLinkDone.current = true;
+      handleAnalyse(sym.toUpperCase());
+    }
+  }, [searchParams, handleAnalyse]);
+
   const isRunning = phase === 'fetching' || phase === 'analysing';
   const isIdle    = phase === 'idle';
 
@@ -101,7 +114,7 @@ export default function HomePage() {
           <div className="max-w-2xl mx-auto">
             <div className="mb-12 text-center">
               <h1 className="text-4xl font-black tracking-tight text-tx mb-2">
-                Stock<span className="text-accent">Research</span> AI
+                Alpha<span className="text-accent">Pulse</span>
               </h1>
               <p className="text-muted text-sm">AI-powered equity research for Indian markets</p>
               <Link
@@ -119,13 +132,19 @@ export default function HomePage() {
           <>
             <div className="flex items-center gap-4 mb-5 pb-4 border-b border-border">
               <span className="text-base font-black tracking-tight text-tx">
-                Stock<span className="text-accent">Research</span> AI
+                Alpha<span className="text-accent">Pulse</span>
               </span>
               <Link
                 href="/market-picks"
                 className="text-xs font-semibold text-muted hover:text-accent transition-colors"
               >
                 Market Picks →
+              </Link>
+              <Link
+                href="/sme-signals"
+                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
+              >
+                SME Signals →
               </Link>
             </div>
 
@@ -159,5 +178,13 @@ export default function HomePage() {
 
       </div>
     </main>
+  );
+}
+
+export default function HomePage() {
+  return (
+    <Suspense fallback={null}>
+      <HomePageInner />
+    </Suspense>
   );
 }

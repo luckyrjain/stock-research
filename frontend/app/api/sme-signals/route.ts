@@ -1,0 +1,20 @@
+const API = process.env.API_URL ?? 'http://localhost:8000';
+
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const qs = searchParams.toString();
+  const url = `${API}/api/sme-signals${qs ? `?${qs}` : ''}`;
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(url, { cache: 'no-store' });
+  } catch {
+    return Response.json(
+      { error: 'Backend unavailable. Make sure the analysis service is running.' },
+      { status: 503 },
+    );
+  }
+
+  const data = await upstream.json();
+  return Response.json(data, { status: upstream.status });
+}

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback, useMemo } from 'react';
+import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import Link from 'next/link';
 import type {
   MarketPicksPhase,
@@ -38,6 +38,81 @@ const PIPELINE_STEPS: { id: MarketPicksPhase; label: string; desc: string }[] = 
 const PHASE_ORDER: MarketPicksPhase[] = [
   'scanning', 'extracting', 'consolidating', 'researching', 'scoring', 'done',
 ];
+
+
+function SamplePickCard() {
+  return (
+    <div className="glass rounded-xl overflow-hidden relative">
+      {/* Sample watermark */}
+      <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-[0.035]">
+        <span className="text-6xl font-black text-tx rotate-[-20deg] select-none">SAMPLE</span>
+      </div>
+
+      {/* Header */}
+      <div className="px-4 pt-4 pb-3 border-b border-border/50">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="font-semibold text-tx text-sm truncate">Tata Consultancy Services</span>
+              <span className="font-mono text-[10px] text-muted/60 bg-muted/10 px-1.5 py-0.5 rounded border border-muted/15 shrink-0">TCS</span>
+              <span className="text-[10px] text-buy font-bold shrink-0" title="Confidence rising">↑</span>
+            </div>
+            <div className="text-[10px] text-muted mt-0.5">IT Services · NSE · 7 sources this week</div>
+          </div>
+          <div className="w-6 h-6 rounded-full bg-accent flex items-center justify-center text-[10px] font-black text-white shrink-0 shadow-sm shadow-accent/30">
+            1
+          </div>
+        </div>
+      </div>
+
+      <div className="px-4 py-3 space-y-3">
+        {/* Confidence */}
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[10px] text-muted/70 uppercase tracking-wider">Confidence</span>
+            <span className="text-[11px] font-bold text-buy font-mono">82</span>
+          </div>
+          <div className="h-1.5 rounded-full bg-muted/15">
+            <div className="h-full w-[82%] rounded-full bg-buy" />
+          </div>
+        </div>
+
+        {/* Badges */}
+        <div className="flex items-center gap-1.5">
+          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border bg-buy/12 text-buy border-buy/25">BUY</span>
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold border text-accent/80 border-accent/20 bg-accent/8">Mid</span>
+          <span className="ml-auto text-[10px] text-muted font-mono tabular-nums">₹3,842 <span className="text-buy">↑1.24%</span></span>
+        </div>
+
+        {/* Trade levels */}
+        <div className="grid grid-cols-3 divide-x divide-border border border-border rounded-lg overflow-hidden">
+          <div className="px-3 py-2.5">
+            <div className="text-[9px] text-muted/70 uppercase tracking-wider mb-1">Entry</div>
+            <div className="text-xs font-black text-tx tabular-nums">₹3,820</div>
+          </div>
+          <div className="px-3 py-2.5">
+            <div className="text-[9px] text-muted/70 uppercase tracking-wider mb-1">Target</div>
+            <div className="text-xs font-black text-buy tabular-nums">₹4,350</div>
+            <div className="text-[9px] text-buy/60">+13.9%</div>
+          </div>
+          <div className="px-3 py-2.5">
+            <div className="text-[9px] text-muted/70 uppercase tracking-wider mb-1">Stop</div>
+            <div className="text-xs font-black text-sell tabular-nums">₹3,540</div>
+            <div className="text-[9px] text-sell/60">−7.3%</div>
+          </div>
+        </div>
+
+        {/* Why this pick */}
+        <div className="bg-surface/60 rounded-lg px-3 py-2.5">
+          <div className="text-[9px] text-muted/60 uppercase tracking-wider mb-1">Why this pick</div>
+          <p className="text-[11px] text-tx/70 leading-snug">
+            7 sources covering same week · Signal engine BUY · Strong Q3 beat with institutional buying
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function PipelineStepper({ phase }: { phase: MarketPicksPhase }) {
   const currentIdx = PHASE_ORDER.indexOf(phase);
@@ -101,10 +176,9 @@ function SourceCard({ s }: { s: SourceState }) {
 
 function ShimmerPill() {
   return (
-    <div className="h-8 w-24 rounded-lg bg-surface border border-border overflow-hidden relative">
-      <div className="absolute inset-0 -translate-x-full animate-[shimmer_1.5s_infinite]
-                      bg-gradient-to-r from-transparent via-accent/10 to-transparent" />
-    </div>
+    <div className="h-8 w-24 rounded-lg border border-border
+                    bg-gradient-to-r from-border via-border-hi to-border
+                    bg-[length:200%_auto] animate-shimmer" />
   );
 }
 
@@ -122,9 +196,35 @@ export default function MarketPicksPage() {
   const [generatedAt, setGeneratedAt] = useState('');
   const [fromCache, setFromCache] = useState(false);
   const [error, setError]         = useState<string | null>(null);
+  const [pricesLastUpdated, setPricesLastUpdated] = useState<Date | null>(null);
 
   const esRef   = useRef<EventSource | null>(null);
   const doneRef = useRef(false);
+
+  // Refresh LTP every 30 s once picks are loaded
+  useEffect(() => {
+    if (phase !== 'done' || picks.length === 0) return;
+    const symbols = picks.map(p => p.symbol).join(',');
+
+    const fetchPrices = async () => {
+      try {
+        const res = await fetch(`/api/prices?symbols=${encodeURIComponent(symbols)}`);
+        if (!res.ok) return;
+        const data = await res.json() as { prices: Record<string, { price: number; change_pct: number }> };
+        setPicks(prev => prev.map(p => {
+          const live = data.prices[p.symbol];
+          return live ? { ...p, current_price: live.price, change_pct: live.change_pct } : p;
+        }));
+        setPricesLastUpdated(new Date());
+      } catch {
+        // silently ignore — stale price is fine
+      }
+    };
+
+    fetchPrices();
+    const id = setInterval(fetchPrices, 30_000);
+    return () => clearInterval(id);
+  }, [phase, picks.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startScan = useCallback((force = false) => {
     esRef.current?.close();
@@ -232,23 +332,22 @@ export default function MarketPicksPage() {
 
   return (
     <main className="min-h-screen bg-bg text-tx">
-      {/* keyframes for shimmer — injected via style tag */}
-      <style>{`
-        @keyframes shimmer {
-          0%   { transform: translateX(-100%); }
-          100% { transform: translateX(200%); }
-        }
-      `}</style>
-
       <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
 
         {/* Nav */}
         <div className="flex items-center gap-4 mb-8 pb-4 border-b border-border">
           <Link href="/" className="text-base font-black tracking-tight text-tx">
-            Stock<span className="text-accent">Research</span> AI
+            Alpha<span className="text-accent">Pulse</span>
           </Link>
           <span className="text-border-hi">|</span>
           <span className="text-sm font-semibold text-accent">Market Picks</span>
+          <span className="text-border-hi">|</span>
+          <Link href="/sme-signals" className="text-sm text-muted hover:text-tx transition-colors">
+            SME Signals
+          </Link>
+          <Link href="/market-picks/history" className="text-sm text-muted hover:text-tx transition-colors">
+            Track Record
+          </Link>
           {isRunning && (
             <button
               onClick={() => { esRef.current?.close(); setPhase('idle'); }}
@@ -261,38 +360,63 @@ export default function MarketPicksPage() {
 
         {/* ── Idle ── */}
         {phase === 'idle' && (
-          <div className="max-w-2xl mx-auto text-center animate-fade-up">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full
-                            bg-accent/10 border border-accent/20 text-accent text-xs font-semibold mb-6">
-              Multi-agent · 10 sources · AI-ranked
-            </div>
-            <h1 className="text-4xl font-black tracking-tight mb-3">
-              Top Picks<span className="text-accent"> This Week</span>
-            </h1>
-            <p className="text-muted text-sm leading-relaxed mb-8 max-w-lg mx-auto">
-              Scans ET Markets, LiveMint, NDTV Profit, Hindu BusinessLine, broker research and more.
-              Runs due diligence on every stock and ranks by confidence score.
-            </p>
-            <div className="grid grid-cols-3 gap-4 mb-10 text-left">
-              {[
-                { icon: '🔍', title: 'Scan 10 sources', desc: 'News, brokerages, analyst picks' },
-                { icon: '🤖', title: 'AI due diligence', desc: 'Signals, fundamentals, momentum' },
-                { icon: '📈', title: 'Confidence ranked', desc: 'Sorted by score · firms count' },
-              ].map(({ icon, title, desc }) => (
-                <div key={title} className="bg-card border border-border rounded-xl p-4">
-                  <div className="text-2xl mb-2">{icon}</div>
-                  <div className="text-sm font-semibold text-tx">{title}</div>
-                  <div className="text-xs text-muted mt-0.5">{desc}</div>
+          <div className="animate-fade-up">
+            {/* Hero — 2-col layout: left = copy + CTA, right = sample pick */}
+            <div className="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-10 md:gap-16 items-start mb-16">
+
+              {/* Left: headline + how-it-works + CTA */}
+              <div>
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full
+                                bg-accent/10 border border-accent/20 text-accent text-xs font-semibold mb-5">
+                  Multi-agent · 16 sources · AI-ranked
                 </div>
-              ))}
+                <h1 className="text-4xl font-black tracking-tight mb-3 leading-tight">
+                  Top Indian Stocks<br />
+                  <span className="text-accent">This Week</span>
+                </h1>
+                <p className="text-muted text-sm leading-relaxed mb-8 max-w-md">
+                  Every week, our AI pipeline scrapes 16 financial sources, validates each stock on NSE,
+                  runs a quantitative signal engine, and returns a confidence-ranked watchlist with
+                  entry, target, and stop-loss levels.
+                </p>
+
+                {/* How it works — 3 steps */}
+                <div className="space-y-3.5 mb-9">
+                  {([
+                    { n: '01', title: 'Scrapes 16 sources', sub: 'ET Markets, HDFC Securities, NSE bulk deals + 13 more' },
+                    { n: '02', title: 'AI validates on NSE', sub: 'Extracts tickers, deduplicates, confirms live price' },
+                    { n: '03', title: 'Signal engine ranks', sub: 'Confidence score + entry · target · stop for each pick' },
+                  ] as const).map(({ n, title, sub }) => (
+                    <div key={n} className="flex items-start gap-3">
+                      <span className="text-[11px] font-black text-accent/40 font-mono w-5 shrink-0 pt-[1px]">{n}</span>
+                      <div>
+                        <div className="text-sm font-semibold text-tx leading-none">{title}</div>
+                        <div className="text-[11px] text-muted mt-0.5 leading-snug">{sub}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex items-center gap-4 flex-wrap">
+                  <button
+                    onClick={() => startScan()}
+                    className="px-7 py-3 rounded-xl bg-accent text-white font-bold text-sm
+                               hover:bg-accent/90 active:scale-95 transition-all shadow-lg shadow-accent/20"
+                  >
+                    See This Week&apos;s Picks →
+                  </button>
+                  <span className="text-xs text-muted">~2 min · 35 stocks max</span>
+                </div>
+              </div>
+
+              {/* Right: sample pick card */}
+              <div>
+                <div className="text-[10px] font-bold text-muted/40 uppercase tracking-[0.15em] mb-3">
+                  Sample output
+                </div>
+                <SamplePickCard />
+              </div>
             </div>
-            <button
-              onClick={() => startScan()}
-              className="px-8 py-3.5 rounded-xl bg-accent text-white font-bold text-sm
-                         hover:bg-accent/90 active:scale-95 transition-all shadow-lg shadow-accent/20"
-            >
-              Scan This Week's Picks
-            </button>
           </div>
         )}
 
@@ -528,6 +652,7 @@ export default function MarketPicksPage() {
             generatedAt={generatedAt}
             fromCache={fromCache}
             onRescan={() => startScan(true)}
+            pricesLastUpdated={pricesLastUpdated}
           />
         )}
 

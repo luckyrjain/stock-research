@@ -12,12 +12,13 @@ CACHE_DIR = Path("output")
 
 # How long each task's data stays fresh (hours)
 TTL_HOURS: dict[str, float] = {
-    "stock_info":   1,     # price data — refresh every hour
-    "research":     24,    # fundamentals — refresh daily
-    "news":         1,     # headlines — refresh every hour
-    "shareholding": 168,   # quarterly filings — 7 days
-    "mf_holdings":  168,   # quarterly filings — 7 days
-    "analysis":     24,    # re-analyse daily (or when any input changes)
+    "stock_info":     1,     # price data — refresh every hour
+    "research":       24,    # fundamentals — refresh daily
+    "news":           1,     # headlines — refresh every hour
+    "shareholding":   168,   # quarterly filings — 7 days
+    "mf_holdings":    168,   # quarterly filings — 7 days
+    "analysis":       24,    # re-analyse daily (or when any input changes)
+    "price_history":  6,     # daily-close series for sparklines — doesn't move fast
 }
 
 

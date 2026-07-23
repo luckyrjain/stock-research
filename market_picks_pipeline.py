@@ -50,16 +50,30 @@ _SOURCE_CREDIBILITY: dict[str, float] = {
     "HSBC / BofA / Bernstein / Investec":             0.95,
     "ShareKhan / Mirae Asset":                        0.80,
     "SMIFS / IDBI Capital / Geojit / Deven Choksey":  0.75,
+    "Motilal Oswal / ICICI Direct / Axis Securities": 0.80,
     "HDFC Securities Fundamental":                   0.85,
     "HDFC Securities Technical":                     0.75,
     "Zerodha Z-Connect":                             0.70,
     "GNews — Moneycontrol":                          0.65,
+    "GNews — Business Standard":                     0.60,
+    "GNews — Financial Express":                     0.55,
     "ET Markets":                                    0.60,
     "LiveMint":                                      0.60,
     "NDTV Profit":                                   0.55,
     "Hindu BusinessLine":                            0.55,
+    # ── Institutional activity & fundamental screens ──────────────────────────
+    "NSE Bulk/Block Deals":                          0.85,
+    "NSE Insider Trades":                            0.85,
+    "Screener.in Fundamental Screen":                0.70,
+    "Trendlyne / Analyst Consensus":                 0.75,
 }
 _DEFAULT_CREDIBILITY = 0.50
+# Fixed normalization reference for the consensus component.
+# Represents a well-covered stock with ~4 non-syndicated brokerage BUY calls at
+# credibility 0.80.  Capping here prevents the 3 new high-weight brokerage sources
+# (NSE Bulk 0.85, Trendlyne 0.75, Screener 0.70) from inflating max_effective_signal
+# and compressing every other stock's consensus score.
+_CONSENSUS_REF = 12.0
 
 # ── Company-name suffixes to strip before ticker lookup ──────────────────────
 _COMPANY_SUFFIXES = re.compile(
@@ -74,16 +88,18 @@ _COMPANY_SUFFIXES = re.compile(
 # ── LLM helpers ───────────────────────────────────────────────────────────────
 
 _PROVIDER_KEYS = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai":    "OPENAI_API_KEY",
-    "groq":      "GROQ_API_KEY",
-    "google":    "GOOGLE_API_KEY",
+    "anthropic":  "ANTHROPIC_API_KEY",
+    "openai":     "OPENAI_API_KEY",
+    "groq":       "GROQ_API_KEY",
+    "google":     "GOOGLE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
 _ANALYST_MODELS = {
-    "anthropic": "claude-sonnet-4-6",
-    "openai":    "gpt-4o",
-    "groq":      "groq/llama-3.3-70b-versatile",
-    "google":    "gemini/gemini-2.5-flash",
+    "anthropic":  "claude-sonnet-4-6",
+    "openai":     "gpt-4o",
+    "groq":       "groq/llama-3.3-70b-versatile",
+    "google":     "gemini/gemini-2.5-flash",
+    "openrouter": "openrouter/meta-llama/llama-3.3-70b-instruct",
 }
 
 
@@ -266,6 +282,8 @@ def _save_history(picks: list[dict]) -> None:
             "confidence":       p["confidence_score"],
             "effective_signal": round(_effective_signal(p.get("_sources_raw", [])), 3),
             "mention_count":    p["mention_count"],
+            "current_price":    p.get("current_price"),
+            "recommendation":   p.get("recommendation"),
         }
         for p in picks
     ]
@@ -503,10 +521,10 @@ def _compute_confidence(
     # 50 % — quant signal engine (-1..1 → 0..50)
     signal_comp = ((signal_score + 1) / 2) * 50
 
-    # 30 % — consensus (log-scaled effective signal, clipped at max)
-    eff   = max(_effective_signal(sources), 0.0)   # only positive signals for confidence
-    denom = math.log1p(max(max_effective_signal, 1.0))
-    mention_comp = (math.log1p(eff) / denom) * 30
+    # 30 % — consensus (log-scaled, normalized against a fixed reference ceiling)
+    eff   = max(_effective_signal(sources), 0.0)
+    denom = math.log1p(max(min(max_effective_signal, _CONSENSUS_REF), 1.0))
+    mention_comp = min(30.0, (math.log1p(eff) / denom) * 30)
 
     # 20 % — timing: credibility-weighted mean of recency scores
     # exp(-age/3): day-0→1.0, day-3→0.37, day-7→0.10
@@ -1047,6 +1065,10 @@ For EVERY stock return:
 - summary: 1–2 sentences capturing the core investment thesis
 - bull_factors: list of 2–3 concrete, specific positive catalysts (not generic)
 - bear_factors: list of 1–2 specific key risks
+- horizon: investment horizon — exactly one of:
+    "short"  (< 3 months: technical breakout, event-driven, momentum play)
+    "medium" (3–12 months: earnings growth, sector re-rating, margin expansion)
+    "long"   (1+ years: structural story, compounding, multi-year runway)
 
 Rules:
 - Be specific: name the product, segment, or metric driving the thesis.
@@ -1060,7 +1082,8 @@ Return ONLY this JSON (no markdown):
   "SYMBOL": {
     "summary": "...",
     "bull_factors": ["...", "..."],
-    "bear_factors": ["...", "..."]
+    "bear_factors": ["...", "..."],
+    "horizon": "medium"
   }
 }"""
 
@@ -1192,6 +1215,7 @@ Return ONLY this JSON (no markdown):
                 "summary":          analysis.get("summary") or rd.get("signal_insight", ""),
                 "bull_factors":     analysis.get("bull_factors", []),
                 "bear_factors":     analysis.get("bear_factors", []),
+                "horizon":          analysis.get("horizon", "medium"),
                 "entry_price":      entry,
                 "target_price":     target,
                 "stop_loss":        stop,

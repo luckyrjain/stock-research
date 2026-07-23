@@ -77,6 +77,15 @@ export interface Report {
   };
 }
 
+// Standalone daily-close series for sparklines — fetched separately from the
+// six-task pipeline above, so it's not part of TaskName/SSEMessage.
+export interface PriceHistory {
+  symbol:   string;
+  exchange: string | null;
+  dates:    string[];   // 'YYYY-MM-DD', oldest first
+  closes:   number[];   // aligned with dates
+}
+
 export type TaskName = 'stock_info' | 'research' | 'news' | 'shareholding' | 'mf_holdings';
 export type TaskStatus = 'idle' | 'running' | 'ok' | 'fail' | 'cached';
 export type Phase = 'idle' | 'fetching' | 'analysing' | 'done' | 'error';
@@ -125,10 +134,69 @@ export interface MarketPick {
   upside_pct: number | null;   // (target - price) / price * 100
   ranking_reasons: string[];   // why this stock ranked here
   is_recent_ipo: boolean;      // listed < 8 months ago (IPO momentum flag)
+  horizon?: 'short' | 'medium' | 'long';  // investment horizon from LLM analysis
 }
 
 export type MarketPicksPhase =
   | 'idle' | 'scanning' | 'extracting' | 'consolidating' | 'researching' | 'scoring' | 'done' | 'error';
+
+// ── Market Picks track record (output/_history/ aggregated) ──────────────────
+
+export interface MarketPickTrackRecord {
+  symbol:              string;
+  first_seen:          string;    // 'YYYY-MM-DD'
+  last_seen:           string;    // 'YYYY-MM-DD'
+  times_picked:        number;
+  recommendation_then: string | null;
+  recommendation_now:  string | null;
+  price_then:          number | null;
+  price_now:           number | null;
+  change_pct:          number | null;   // null if either price is missing (legacy snapshot)
+  confidence_then:     number | null;
+  confidence_now:      number | null;
+}
+
+export interface MarketPicksHistoryResponse {
+  symbols:        MarketPickTrackRecord[];
+  snapshot_count: number;
+}
+
+// ── SME EMA Signals ──────────────────────────────────────────────────────────
+
+export interface SmeSignal {
+  symbol:          string;
+  name:            string | null;
+  exchange:        string;
+  trade_date:      string;           // 'YYYY-MM-DD'
+  close_price:     number | null;
+  ema20:           number | null;
+  ema50:           number | null;
+  cross:           'golden' | 'death';
+  in_golden_cross: boolean;
+}
+
+export interface SmeSignalsResponse {
+  signals:          SmeSignal[];
+  total_monitored:  number;
+  golden_now:       number;          // stocks currently in golden-cross regime
+  last_run:         string | null;   // ISO timestamp or null
+  refreshing:       boolean;         // a pipeline refresh is running server-side
+}
+
+export interface SmeSignalHistoryRow {
+  trade_date:  string;               // 'YYYY-MM-DD'
+  close_price: number | null;
+  ema20:       number | null;
+  ema50:       number | null;
+  cross:       'golden' | 'death' | null;
+}
+
+export interface SmeSignalHistoryResponse {
+  symbol:   string;
+  name:     string | null;
+  exchange: string | null;
+  series:   SmeSignalHistoryRow[];   // up to ~63 trading days, oldest first
+}
 
 export type MarketPicksSSEMessage =
   | { event: 'picks_start';       sources: { name: string; type: string }[] }

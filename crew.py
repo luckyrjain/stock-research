@@ -23,25 +23,28 @@ from observability import get_logger, log_event
 LOGGER = get_logger("crew")
 
 _DEFAULTS = {
-    "anthropic": "claude-haiku-4-5-20251001",
-    "openai":    "gpt-4o-mini",
-    "groq":      "groq/llama-3.1-8b-instant",
-    "google":    "gemini/gemini-2.5-flash",
-    "ollama":    "ollama/llama3.2",
+    "anthropic":   "claude-haiku-4-5-20251001",
+    "openai":      "gpt-4o-mini",
+    "groq":        "groq/llama-3.1-8b-instant",
+    "google":      "gemini/gemini-2.5-flash",
+    "ollama":      "ollama/llama3.2",
+    "openrouter":  "openrouter/meta-llama/llama-3.1-8b-instruct",
 }
 _ANALYST_DEFAULTS = {
-    "anthropic": "claude-sonnet-4-6",
-    "openai":    "gpt-4o",
-    "groq":      "groq/llama-3.3-70b-versatile",
-    "google":    "gemini/gemini-2.5-flash",
-    "ollama":    "ollama/llama3.1:8b",
+    "anthropic":   "claude-sonnet-4-6",
+    "openai":      "gpt-4o",
+    "groq":        "groq/llama-3.3-70b-versatile",
+    "google":      "gemini/gemini-2.5-flash",
+    "ollama":      "ollama/llama3.1:8b",
+    "openrouter":  "openrouter/meta-llama/llama-3.3-70b-instruct",
 }
 
 _API_KEY_ENV = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai":    "OPENAI_API_KEY",
-    "groq":      "GROQ_API_KEY",
-    "google":    "GOOGLE_API_KEY",
+    "anthropic":  "ANTHROPIC_API_KEY",
+    "openai":     "OPENAI_API_KEY",
+    "groq":       "GROQ_API_KEY",
+    "google":     "GOOGLE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
 
 # Canonical order used for indexing task outputs
@@ -61,7 +64,7 @@ def _resolve_llm(analyst: bool = False) -> LLM:
         if not provider:
             raise EnvironmentError(
                 "No API key found. Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, "
-                "GROQ_API_KEY, GOOGLE_API_KEY — or set LLM_PROVIDER=ollama for local."
+                "GROQ_API_KEY, GOOGLE_API_KEY, OPENROUTER_API_KEY — or set LLM_PROVIDER=ollama for local."
             )
 
     defaults = _ANALYST_DEFAULTS if analyst else _DEFAULTS
@@ -71,7 +74,7 @@ def _resolve_llm(analyst: bool = False) -> LLM:
     if not model:
         raise ValueError(
             f"Unknown LLM_PROVIDER '{provider}'. "
-            "Supported: anthropic, openai, groq, google, ollama."
+            "Supported: anthropic, openai, groq, google, ollama, openrouter."
         )
 
     if provider == "ollama":
@@ -257,8 +260,7 @@ def _analysis_support_issues(data: dict | None, all_data: dict[str, dict] | None
     ).lower()
     for label, trigger_phrases, source_terms in grounded_checks:
         if any(phrase in analysis_text for phrase in trigger_phrases) and not any(term in source_text for term in source_terms):
-            # downgrade instead of fail
-            continue
+            issues.append(f"{label} claim is not supported by the provided source data")
 
     return issues
 
@@ -280,14 +282,15 @@ def _validate_analysis_payload(  # pylint: disable=too-many-return-statements
                   "key_risks", "news_highlights", "institutional_trend"):
         if not data.get(field):
             return False, f"Field '{field}' is required and cannot be empty."
-        if len(data.get("bull_factors", [])) < 3:
-            return False, "Field 'bull_factors' must contain at least 3 items."
 
-        if len(data.get("bear_factors", [])) < 2:
-            return False, "Field 'bear_factors' must contain at least 2 items."
+    if len(data.get("bull_factors", [])) < 3:
+        return False, "Field 'bull_factors' must contain at least 3 items."
 
-        if len(data.get("key_risks", [])) < 3:
-            return False, "Field 'key_risks' must contain at least 3 items."
+    if len(data.get("bear_factors", [])) < 2:
+        return False, "Field 'bear_factors' must contain at least 2 items."
+
+    if len(data.get("key_risks", [])) < 3:
+        return False, "Field 'key_risks' must contain at least 3 items."
     if signal_context:
         if signal_context["final_score"] > 0.5 and data["recommendation"] == "SELL":
             return False, "Recommendation contradicts strong positive signals"
@@ -399,27 +402,48 @@ def run_analysis_with_fallback(
             if os.getenv(env):
                 provider = p
                 break
-    model   = os.getenv("ANALYST_MODEL", _ANALYST_DEFAULTS.get(provider, ""))
+    model   = os.getenv("ANALYST_MODEL", _ANALYST_DEFAULTS.get(provider, "claude-sonnet-4-6"))
     api_key = os.getenv(_API_KEY_ENV.get(provider, ""), "") or None
 
     import litellm
 
-    for attempt in range(2):
+    messages: list[dict] = [{"role": "user", "content": prompt}]
+    rate_limit_retry_used = False
+    guardrail_retry_used = False
+
+    while True:
         try:
             started_at = time.perf_counter()
-            log_event(LOGGER, "analyst_llm_started", run_id=run_id, symbol=symbol, attempt=attempt + 1)
+            log_event(LOGGER, "analyst_llm_started", run_id=run_id, symbol=symbol,
+                      guardrail_retry=guardrail_retry_used)
             response = litellm.completion(
                 model=model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=messages,
                 api_key=api_key,
             )
             elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
             text = response.choices[0].message.content or ""
             parsed = parse_json_object(text)
-            ok, validated = _validate_analysis_payload(parsed, all_data)
+            ok, validated = _validate_analysis_payload(parsed, all_data, signal_context)
             if ok:
                 log_event(LOGGER, "analyst_llm_succeeded", run_id=run_id, symbol=symbol, latency_ms=elapsed_ms)
                 return parsed
+
+            if not guardrail_retry_used:
+                guardrail_retry_used = True
+                log_event(
+                    LOGGER, "analyst_guardrail_retry", level="warning",
+                    run_id=run_id, symbol=symbol, latency_ms=elapsed_ms, error=str(validated),
+                )
+                messages = [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": text},
+                    {"role": "user", "content": (
+                        f"Your previous response failed validation: {validated} "
+                        "Return only the corrected JSON object — no markdown, no prose."
+                    )},
+                ]
+                continue
 
             log_event(
                 LOGGER, "analyst_llm_failed", level="warning",
@@ -429,7 +453,8 @@ def run_analysis_with_fallback(
             return _safe_analysis_fallback(symbol, str(validated))
 
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            if _is_rate_limit(exc) and attempt == 0:
+            if _is_rate_limit(exc) and not rate_limit_retry_used:
+                rate_limit_retry_used = True
                 wait = _rate_limit_wait_secs(exc)
                 log_event(
                     LOGGER, "analyst_rate_limited", level="warning",
@@ -443,8 +468,6 @@ def run_analysis_with_fallback(
                 run_id=run_id, symbol=symbol, error=str(exc), failure_stage="exception",
             )
             return _safe_analysis_fallback(symbol, str(exc))
-
-    return _safe_analysis_fallback(symbol, "analyst failed after rate-limit retry")
 # pylint: enable=too-many-locals
 
 

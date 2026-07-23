@@ -1,6 +1,6 @@
 # Tools Reference
 
-The Python data layer is split into two groups: **stock analysis tools** (one per data task) and **market picks scrapers** (one per financial source).
+The Python data layer is split into three groups: **stock analysis tools** (one per data task), **market picks scrapers** (one per financial source), and **SME stock-list fetchers** (for the golden cross pipeline).
 
 ---
 
@@ -142,6 +142,9 @@ Scrapers live in `tools/market_picks_tools.py` and `tools/hdfc_sec_agent.py`. Al
 | `SMIFS / IDBI Capital / Geojit / Deven Choksey` | brokerage | GNews query | 0.75 |
 | `HDFC Securities Fundamental` | brokerage | GNews query | 0.85 |
 | `HDFC Securities Technical` | brokerage | GNews query | 0.75 |
+| `NSE Bulk/Block Deals` | brokerage | NSE API (`/api/bulk-deals`, `/api/block-deals`) | 0.85 |
+| `Screener.in Fundamental Screen` | brokerage | Screener `/screen/raw/` + GNews fallback | 0.70 |
+| `Trendlyne / Analyst Consensus` | brokerage | GNews queries (upgrades, initiations, target raises) | 0.75 |
 
 Credibility weights are defined in `_SOURCE_CREDIBILITY` in `market_picks_pipeline.py`. Sources not in the dict default to **0.50**.
 
@@ -151,6 +154,26 @@ Credibility weights are defined in `_SOURCE_CREDIBILITY` in `market_picks_pipeli
 2. Export `MY_SOURCES` (list of `(name, type, fn_name)` tuples) and `MY_SCRAPERS` (dict of `name → fn`)
 3. Import and merge into `SOURCES` and `SCRAPER_FNS` at the bottom of `tools/market_picks_tools.py`
 4. Add a credibility entry in `_SOURCE_CREDIBILITY` in `market_picks_pipeline.py`
+
+---
+
+## SME stock-list fetchers
+
+Used only by `sme_ema_pipeline.py`. Live in `tools/sme_tools.py`; lists are cached under `output/` for 24 h.
+
+| Function | Source | Returns |
+|---|---|---|
+| `fetch_nse_emerge_stocks(force=False)` | NSE `/api/live-analysis-emerge` | NSE Emerge (SME) stocks; names enriched via Screener.in |
+| `fetch_bse_sme_stocks(force=False)` | BSE `ListofScripData` API (Groups M + MS) | BSE SME stocks (symbol = numeric scrip code) |
+| `get_all_sme_stocks(force=False)` | both of the above | Merged list of `{symbol, name, isin, series, exchange}` dicts |
+
+> **Dedup note:** the NSE Emerge endpoint never returns an ISIN (`isin` is always `None`
+> on NSE records), so ISIN matching alone can't catch a company dual-listed on both
+> exchanges. `get_all_sme_stocks` falls back to a high-confidence fuzzy match on
+> normalized company name (rapidfuzz, score cutoff 90) using the Screener.in-enriched
+> NSE names. This is best-effort, not a guarantee — a company whose NSE and BSE names
+> diverge too much, or whose Screener.in name lookup failed, can still appear twice.
+> See the docstrings in `tools/sme_tools.py` for detail.
 
 ---
 

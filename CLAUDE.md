@@ -14,7 +14,9 @@ A full-stack Indian equity research platform. Given an NSE/BSE ticker (e.g. `TCS
 4. Calls an LLM analyst to produce a structured `BUY`/`HOLD`/`SELL` recommendation
 5. Streams progress and the final report to the browser via Server-Sent Events
 
-A second mode — **Market Picks** — runs a multi-agent pipeline that scrapes 13 Indian and global financial sources, extracts stock recommendations with an LLM, validates symbols against the NSE equity master, runs due diligence on each, and returns a confidence-ranked watchlist with BUY / WATCHLIST / HOLD / SELL ratings.
+A second mode — **Market Picks** — runs a multi-agent pipeline that scrapes 16 Indian and global financial sources, extracts stock recommendations with an LLM, validates symbols against the NSE equity master, runs due diligence on each, and returns a confidence-ranked watchlist with BUY / WATCHLIST / HOLD / SELL ratings.
+
+A third mode — **SME Signals** — is a PostgreSQL-backed batch pipeline (`sme_ema_pipeline.py`) that screens all NSE Emerge + BSE SME stocks for EMA20/EMA50 **golden cross** and **death cross** events, served at `/sme-signals` via `GET /api/sme-signals`.
 
 ---
 
@@ -28,6 +30,8 @@ stock-research/
 ├── cache.py                File-based TTL cache (output/<SYMBOL>/<task>.json)
 ├── schemas.py              Normalization contracts: raw tool output → canonical dicts
 ├── market_picks_pipeline.py  Multi-agent weekly picks pipeline (6 phases)
+├── sme_ema_pipeline.py     SME golden/death cross batch pipeline (PostgreSQL)
+├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
 ├── observability.py        Structured JSON logging via log_event()
 ├── requirements.txt
 ├── .env.example
@@ -39,20 +43,23 @@ stock-research/
 │   └── crew_tasks.py       Thin loader: builds task specs and analyst prompt string
 ├── tools/
 │   ├── market_picks_tools.py  RSS + GNews scrapers for 11 sources; exports SOURCES + SCRAPER_FNS
+│   ├── sme_tools.py           NSE Emerge + BSE SME stock-list fetchers
 │   ├── hdfc_sec_agent.py      HDFC Securities Fundamental + Technical scrapers (GNews-based)
 │   └── ...                    Other data-fetching functions (yfinance, Screener.in, gnews, NSE API)
 ├── signals/                Quantitative signal engine (features → signal scores → verdict)
 ├── tests/                  unittest-based tests (no pytest plugins needed)
 ├── frontend/               Next.js 15 app (TypeScript, Tailwind CSS)
-│   ├── app/page.tsx              Stock analysis page
+│   ├── app/page.tsx              Stock analysis page (supports ?symbol= deep links)
 │   ├── app/market-picks/page.tsx Weekly picks page
+│   ├── app/sme-signals/page.tsx  SME golden cross screener
 │   ├── components/               Dashboard, search, progress tracker, market picks dashboard
 │   ├── app/api/                  Thin Next.js proxy routes → FastAPI backend
 │   └── types/index.ts            Canonical TS types for all SSE messages and reports
 └── output/                 Cache files (gitignored); also where CLI saves report JSON
     ├── <SYMBOL>/           Per-symbol task caches
     ├── _extract_cache/     LLM extraction cache (6 h TTL) — avoids re-calling LLM on re-runs
-    ├── _history/           Daily pick snapshots for trend tracking (YYYY-MM-DD.json)
+    ├── _history/           Daily pick snapshots (YYYY-MM-DD.json) — powers both the in-pipeline
+    │                       trend/trend_delta fields and GET /api/market-picks/history (/market-picks/history page)
     ├── _market_picks/      Market picks result cache (6 h TTL) for the SSE endpoint
     └── _nse_master.txt     NSE equity symbol master, refreshed every 24 h
 ```
@@ -118,13 +125,13 @@ The system has **two distinct agent layers**:
 | `mf_holdings` | MF Holdings Analyst | `get_mf_holdings` | NSE API |
 | `filings` | — (direct call, no CrewAI agent) | `get_nse_filings` | NSE corporate announcements |
 
-**Layer 2 — Analyst (direct LLM call)**: `run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI involved. It receives all six data slices plus signal engine context, and must return a specific JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structural rules; failures return a safe HOLD fallback via `_safe_analysis_fallback()`.
+**Layer 2 — Analyst (direct LLM call)**: `run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI involved. It receives all six data slices plus signal engine context, and must return a specific JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structural rules and grounded-claims checks; a guardrail failure triggers one corrective LLM retry with the validation error appended, and only if that also fails does it return a safe HOLD fallback via `_safe_analysis_fallback()`.
 
 **Layer 3 — Market picks pipeline** (`market_picks_pipeline.py`): Six sequential phases, all blocking work offloaded to `ThreadPoolExecutor`. Communicates back to the SSE stream via `on_event` callbacks bridged through `asyncio.Queue` with `loop.call_soon_threadsafe`.
 
 | Phase | What it does |
 |---|---|
-| `_phase_scrape` | Parallel fetch from 13 sources (5 RSS + 8 GNews). 6 workers. |
+| `_phase_scrape` | Parallel fetch from 16 sources (5 RSS + 8 GNews + 3 structured). 6 workers. |
 | `_phase_extract` | One LLM call per source (parallel, up to 6 workers). Checks extraction cache first. Detects syndicated articles (Jaccard ≥ 0.60) across sources to down-weight them. |
 | `_phase_consolidate` | Groups picks by ticker, validates against NSE equity master, confirms live price via yfinance (guards pre-IPO / unlisted names). Uses rapidfuzz for fuzzy company-name matching. |
 | `_phase_research` | Fetches `stock_info` + `research` + signal engine per stock (4 workers, up to `_MAX_STOCKS` stocks). |
@@ -154,6 +161,10 @@ cd frontend && npx tsc --noEmit
 ```
 
 There is no ESLint config and no frontend test suite. TypeScript strict mode (`"strict": true`) is the primary code quality gate.
+
+### Design system
+
+All UI work must follow `design.md` (AlphaPulse Design System) — the single source of truth for colors, typography, spacing, component patterns (cards, badges, buttons, tables, animations), and responsive strategy. Do not hard-code hex values or invent new patterns; always use the existing design tokens from `tailwind.config.ts`.
 
 ### Key libraries and patterns
 
@@ -204,6 +215,7 @@ All configuration is via `.env` (copy from `.env.example`).
 | `OPENAI_API_KEY` | OpenAI provider |
 | `GROQ_API_KEY` | Groq provider |
 | `GOOGLE_API_KEY` | Google Gemini provider |
+| `OPENROUTER_API_KEY` | OpenRouter (access to 300+ models) |
 
 Provider is auto-detected from whichever key is present (checked in the order above). Set `LLM_PROVIDER` explicitly to override.
 
@@ -211,11 +223,12 @@ Provider is auto-detected from whichever key is present (checked in the order ab
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `LLM_PROVIDER` | auto | `anthropic` / `openai` / `groq` / `google` / `ollama` |
+| `LLM_PROVIDER` | auto | `anthropic` / `openai` / `groq` / `google` / `openrouter` / `ollama` |
 | `LLM_MODEL` | provider default | Model for data-fetching agents (fast/cheap tier) |
 | `ANALYST_MODEL` | provider default | Model for analyst LLM call (stronger tier) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Only needed when `LLM_PROVIDER=ollama` |
 | `LOG_LEVEL` | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`) |
+| `DATABASE_URL` | unset | PostgreSQL DSN — required only for the SME signals pipeline and `/api/sme-signals` endpoints |
 
 ### Frontend
 
@@ -253,11 +266,33 @@ Handles three input forms:
 4. Pipeline calls `on_event(payload)` → `loop.call_soon_threadsafe(q.put_nowait, payload)` → SSE stream
 5. The six pipeline phases run synchronously inside the executor thread; final result saved to cache
 
+### SME golden cross flow
+
+`sme_ema_pipeline.py` is a standalone batch job (PostgreSQL, `DATABASE_URL` env var):
+
+1. Fetches all NSE Emerge + BSE SME stocks (`tools/sme_tools.py`, 24 h list cache)
+2. Downloads 1 year of daily OHLCV per stock via yfinance
+3. Computes EMA 20/50 over the full year; flags **golden crosses** (EMA20 crosses above
+   EMA50) and **death crosses** (crosses below); stores only the last ~3 months of rows
+4. `GET /api/sme-signals` serves cross events + current regime (`ema20 > ema50` on the
+   latest row); `POST /api/sme-signals/refresh` runs the pipeline in the background
+   (409 if already running; `refreshing` flag in the GET response)
+
+CLI: `--setup-db` (create tables), `--reset-db` (drop + recreate — required after schema
+changes; data is fully regenerable), `--force` (bypass list cache), `--lookback N`.
+
+The DB column for the cross is named `cross_type` (`'golden'`/`'death'`/`NULL`) because
+`CROSS` is a reserved SQL keyword; the API/TS field is `cross`.
+
+Daily auto-run (crontab, assumes system TZ is IST; NSE closes 15:30):
+
+    30 18 * * 1-5 cd /Users/luckyratanlaljain/project/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
+
 ### Shared state and queues
 
 - **No shared in-memory state** between requests. Each request runs its own pipeline instance.
 - **Inter-phase communication** within the market picks pipeline uses direct function return values (not queues). The `asyncio.Queue` is only used to bridge the blocking thread back to the async SSE loop.
-- **Cache** (`output/`) is the only persistent shared state; concurrent writes to different symbols are safe (each symbol has its own subdirectory).
+- **Cache** (`output/`) is the persistent shared state for stock analysis and market picks; concurrent writes to different symbols are safe (each symbol has its own subdirectory). SME signals persist to PostgreSQL instead (idempotent upserts keyed on symbol + trade_date).
 
 ### SSE bridge pattern (critical)
 
@@ -286,3 +321,5 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
 - **Extraction cache** (`output/_extract_cache/`) avoids re-calling the LLM for the same source articles within 6 h. The cache key is content-aware (title + URL + summary hash), so edits or new articles get a fresh key automatically.
 - **Source credibility weights** in `_SOURCE_CREDIBILITY` determine how much each source contributes to confidence scoring. Adding a new source requires adding a credibility entry; missing sources default to 0.50.
 - **HDFC Securities sources** live in `tools/hdfc_sec_agent.py` and are merged into `SOURCES` / `SCRAPER_FNS` at import time in `tools/market_picks_tools.py`. Adding a new brokerage source follows the same pattern: define scrapers in a separate module, export `*_SOURCES` and `*_SCRAPERS`, merge in `market_picks_tools.py`.
+- **Rate limiting** is a single-process, in-memory sliding window (`api.py`'s `_rate_limit()`), applied only to expensive/abusable routes: `/api/analyse/{symbol}` (20 req / 5 min per IP), `/api/market-picks?force=true` (3 req / hour per IP), `/api/sme-signals/refresh` (3 req / hour per IP, on top of the existing single-run guard). It does not survive a multi-worker deployment — that would need a shared store (e.g. Redis) instead.
+- **`output/_history/<date>.json` snapshot schema** (`symbol`, `confidence`, `effective_signal`, `mention_count`, `current_price`, `recommendation`) is read by two independent consumers: the in-pipeline `_load_trend()` (confidence trend) and `GET /api/market-picks/history` (price track record, `/market-picks/history` page). Snapshots written before `current_price`/`recommendation` were added won't have them — the history endpoint handles this by returning `change_pct: null` rather than guessing. Keep both consumers in mind if the snapshot shape changes.

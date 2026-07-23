@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 import time
 import uuid
 import re
@@ -7,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from observability import get_logger, log_event
 from signals.interpreter import interpret
@@ -45,7 +46,54 @@ def _save_picks_cache(picks: list, generated_at: str) -> None:
     except Exception:
         pass
 
-app = FastAPI(title="StockResearch AI")
+
+# ── SME signals: shared engine + refresh state ───────────────────────────────
+# _SME_REFRESHING is a single-process guard (see refresh_sme_signals below) —
+# running the API with multiple worker processes would let each worker start
+# its own refresh; the upserts are idempotent per (symbol, trade_date) so this
+# wastes NSE/yfinance quota rather than corrupting data.
+_SME_ENGINE = None
+_SME_ENGINE_LOCK = threading.Lock()
+_SME_REFRESHING = False
+
+
+def _get_sme_engine():
+    global _SME_ENGINE
+    if _SME_ENGINE is None:
+        with _SME_ENGINE_LOCK:
+            if _SME_ENGINE is None:  # re-check: another thread may have won the race
+                from db.models import get_engine
+                _SME_ENGINE = get_engine()
+    return _SME_ENGINE
+
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+# Simple in-memory sliding-window limiter, keyed by (bucket, client IP). Only
+# guards the expensive/abusable routes (fresh LLM calls, forced full rescans,
+# forced SME pipeline runs) — single-process only, same assumption as
+# _SME_REFRESHING above; a multi-worker deployment would need a shared store
+# (e.g. Redis) instead.
+_RATE_LIMIT_CALLS: dict[str, list[float]] = {}
+_RATE_LIMIT_LOCK = threading.Lock()
+
+
+def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: float) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"{bucket}:{client_ip}"
+    now = time.monotonic()
+    with _RATE_LIMIT_LOCK:
+        calls = [t for t in _RATE_LIMIT_CALLS.get(key, []) if now - t < window_seconds]
+        if len(calls) >= max_calls:
+            _RATE_LIMIT_CALLS[key] = calls
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded: max {max_calls} requests per {int(window_seconds)}s on this endpoint. Try again later.",
+            )
+        calls.append(now)
+        _RATE_LIMIT_CALLS[key] = calls
+
+
+app = FastAPI(title="AlphaPulse")
 LOGGER = get_logger("api")
 
 _NSE_HEADERS = {
@@ -245,7 +293,7 @@ def _heartbeat() -> str:
 @app.get("/")
 async def index():
     return {
-        "service": "StockResearch AI API",
+        "service": "AlphaPulse API",
         "status": "ok",
         "message": "Use /health for a simple health check, /api/validate/{symbol} to validate a symbol, and /api/analyse/{symbol} to stream analysis events.",
     }
@@ -431,7 +479,8 @@ async def validate_symbol(symbol: str, exchange: str = ""):
     return {"found": False, "valid": False, "symbol": sym, "company": "", "suggestions": []}
 
 @app.get("/api/analyse/{symbol}")
-async def analyse(symbol: str, force: bool = False):
+async def analyse(symbol: str, request: Request, force: bool = False):
+    _rate_limit(request, "analyse", max_calls=20, window_seconds=300)
     sym = symbol.upper().strip()
     run_id = uuid.uuid4().hex[:12]
 
@@ -576,11 +625,14 @@ async def analyse(symbol: str, force: bool = False):
 
 
 @app.get("/api/market-picks")
-async def market_picks(force: bool = Query(default=False)):
+async def market_picks(request: Request, force: bool = Query(default=False)):
     """Stream market-picks pipeline events as SSE.
 
     ?force=true  — skip cache and run a fresh pipeline.
     """
+    if force:
+        # Only the cache-bypassing path is rate-limited — normal cached reads are cheap.
+        _rate_limit(request, "market_picks_force", max_calls=3, window_seconds=3600)
     run_id = uuid.uuid4().hex[:12]
 
     async def stream():
@@ -644,6 +696,293 @@ async def market_picks(force: bool = Query(default=False)):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+_PICKS_HISTORY_DIR = Path("output/_history")
+
+
+@app.get("/api/market-picks/history")
+async def get_market_picks_history():
+    """Aggregate output/_history/<date>.json daily snapshots into a per-symbol
+    track record: first/last seen, confidence trend, and price performance
+    since first seen. Price/recommendation were only added to the snapshot
+    schema recently — older snapshot files won't have them, so change_pct is
+    null wherever price_then or price_now is missing rather than guessed at.
+    """
+
+    def _load_sync() -> dict:
+        if not _PICKS_HISTORY_DIR.exists():
+            return {"symbols": [], "snapshot_count": 0}
+
+        by_symbol: dict[str, list[dict]] = {}
+        snapshot_count = 0
+        for path in sorted(_PICKS_HISTORY_DIR.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            date_str = data.get("date", path.stem)
+            snapshot_count += 1
+            for row in data.get("picks", []):
+                sym = row.get("symbol")
+                if not sym:
+                    continue
+                by_symbol.setdefault(sym, []).append({**row, "date": date_str})
+
+        symbols = []
+        for sym, rows in by_symbol.items():
+            rows.sort(key=lambda r: r["date"])
+            first, last = rows[0], rows[-1]
+            price_then = first.get("current_price")
+            price_now = last.get("current_price")
+            change_pct = (
+                round((price_now - price_then) / price_then * 100, 2)
+                if price_then and price_now
+                else None
+            )
+            symbols.append({
+                "symbol":              sym,
+                "first_seen":          first["date"],
+                "last_seen":           last["date"],
+                "times_picked":        len(rows),
+                "recommendation_then": first.get("recommendation"),
+                "recommendation_now":  last.get("recommendation"),
+                "price_then":          price_then,
+                "price_now":           price_now,
+                "change_pct":          change_pct,
+                "confidence_then":     first.get("confidence"),
+                "confidence_now":      last.get("confidence"),
+            })
+
+        # Symbols with a computed change_pct first (best performers first), then
+        # the rest (no price data yet) grouped at the end.
+        symbols.sort(key=lambda s: (s["change_pct"] is None, -(s["change_pct"] or 0)))
+        return {"symbols": symbols, "snapshot_count": snapshot_count}
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _load_sync)
+
+
+@app.get("/api/prices")
+async def get_prices(symbols: str = Query(...)):
+    """Return LTP + day change% for a comma-separated list of NSE/BSE symbols."""
+    sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()][:50]
+    loop = asyncio.get_running_loop()
+
+    def _fetch_one(sym: str) -> tuple[str, dict]:
+        try:
+            import yfinance as yf
+            for suffix in (".NS", ".BO"):
+                fi = yf.Ticker(sym + suffix).fast_info
+                price = getattr(fi, "last_price", None)
+                prev  = getattr(fi, "previous_close", None)
+                if price and price > 0:
+                    chg = round((price - prev) / prev * 100, 2) if prev else 0.0
+                    return sym, {"price": round(price, 2), "change_pct": chg}
+        except Exception:
+            pass
+        return sym, {}
+
+    results = await asyncio.gather(
+        *[loop.run_in_executor(None, _fetch_one, s) for s in sym_list]
+    )
+    return {"prices": dict(results)}
+
+
+@app.get("/api/prices/history/{symbol}")
+async def get_price_history(symbol: str, days: int = Query(180, ge=7, le=365)):
+    """Return a daily-close series for sparklines. Cached like the six data
+    slices (6 h TTL) but intentionally outside ALL_DATA_TASKS — this is a
+    standalone, on-demand series, not part of the six-task analysis pipeline.
+    """
+    sym = symbol.upper().strip()
+    loop = asyncio.get_running_loop()
+
+    def _fetch_sync() -> dict:
+        import cache
+
+        cached = cache.load(sym, "price_history")
+        if cached and len(cached.get("closes", [])) >= 5:
+            return {k: v for k, v in cached.items() if k != "_meta"}
+
+        import yfinance as yf
+        for suffix, exch in ((".NS", "NSE"), (".BO", "BSE")):
+            try:
+                df = yf.Ticker(sym + suffix).history(period=f"{days}d", interval="1d", auto_adjust=True)
+                if df.empty:
+                    continue
+                result = {
+                    "symbol":   sym,
+                    "exchange": exch,
+                    "dates":    [d.strftime("%Y-%m-%d") for d in df.index],
+                    "closes":   [round(float(c), 2) for c in df["Close"].tolist()],
+                }
+                cache.save(sym, "price_history", result)
+                return result
+            except Exception:
+                continue
+        return {"symbol": sym, "exchange": None, "dates": [], "closes": []}
+
+    return await loop.run_in_executor(None, _fetch_sync)
+
+
+@app.get("/api/sme-signals")
+async def get_sme_signals(
+    lookback:  int = Query(5, ge=1, le=30, description="Days back to check for crosses"),
+    direction: str = Query("all", description="all | golden | death"),
+):
+    """Return SME stocks with an EMA20/EMA50 golden or death cross in the last N days."""
+    import os
+
+    if direction not in ("all", "golden", "death"):
+        raise HTTPException(status_code=422, detail="direction must be one of: all, golden, death")
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the SME pipeline first.")
+
+    def _query_sync() -> dict:
+        from sqlalchemy import text as _text
+
+        engine = _get_sme_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(_text("""
+                WITH latest AS (
+                    SELECT DISTINCT ON (symbol) symbol, (ema20 > ema50) AS in_golden_cross
+                    FROM ema_signals
+                    ORDER BY symbol, trade_date DESC
+                )
+                SELECT
+                    s.symbol,
+                    s.name,
+                    s.exchange,
+                    e.trade_date::text   AS trade_date,
+                    e.close_price::float AS close_price,
+                    e.ema20::float       AS ema20,
+                    e.ema50::float       AS ema50,
+                    e.cross_type         AS "cross",
+                    COALESCE(l.in_golden_cross, FALSE) AS in_golden_cross
+                FROM ema_signals e
+                JOIN sme_stocks  s USING (symbol)
+                LEFT JOIN latest l USING (symbol)
+                WHERE e.cross_type IS NOT NULL
+                  AND (:direction = 'all' OR e.cross_type = :direction)
+                  AND e.trade_date >= CURRENT_DATE - (:lookback * INTERVAL '1 day')
+                ORDER BY e.trade_date DESC, s.symbol
+            """), {"lookback": lookback, "direction": direction}).mappings().fetchall()
+
+            total_monitored = conn.execute(
+                _text("SELECT COUNT(*) FROM sme_stocks")
+            ).scalar() or 0
+
+            golden_now = conn.execute(_text("""
+                SELECT COUNT(*) FROM (
+                    SELECT DISTINCT ON (symbol) (ema20 > ema50) AS ig
+                    FROM ema_signals
+                    ORDER BY symbol, trade_date DESC
+                ) t WHERE t.ig
+            """)).scalar() or 0
+
+            last_run = conn.execute(
+                _text("SELECT MAX(run_at)::text FROM ema_signals")
+            ).scalar()
+
+        return {
+            "signals":         [dict(r) for r in rows],
+            "total_monitored": int(total_monitored),
+            "golden_now":      int(golden_now),
+            "last_run":        last_run,
+            "refreshing":      _SME_REFRESHING,
+        }
+
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, _query_sync)
+    except Exception as exc:
+        log_event(LOGGER, "sme_signals_query_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+
+
+@app.get("/api/sme-signals/{symbol}/history")
+async def get_sme_signal_history(symbol: str):
+    """Return the stored EMA20/EMA50/close series for one SME stock, for charting
+    around a golden/death cross. Up to ~63 trading days (sme_ema_pipeline._STORE_DAYS).
+    """
+    import os
+
+    sym = symbol.upper().strip()
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the SME pipeline first.")
+
+    def _query_sync() -> dict:
+        from sqlalchemy import text as _text
+
+        engine = _get_sme_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(_text("""
+                SELECT
+                    e.trade_date::text   AS trade_date,
+                    e.close_price::float AS close_price,
+                    e.ema20::float       AS ema20,
+                    e.ema50::float       AS ema50,
+                    e.cross_type         AS "cross"
+                FROM ema_signals e
+                WHERE e.symbol = :symbol
+                ORDER BY e.trade_date ASC
+            """), {"symbol": sym}).mappings().fetchall()
+
+            stock = conn.execute(_text("""
+                SELECT name, exchange FROM sme_stocks WHERE symbol = :symbol
+            """), {"symbol": sym}).mappings().first()
+
+        return {
+            "symbol":   sym,
+            "name":     stock["name"] if stock else None,
+            "exchange": stock["exchange"] if stock else None,
+            "series":   [dict(r) for r in rows],
+        }
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, _query_sync)
+    except Exception as exc:
+        log_event(LOGGER, "sme_signal_history_failed", level="error", symbol=sym, error=str(exc))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+
+    if not result["series"]:
+        raise HTTPException(status_code=404, detail=f"No stored EMA history for {sym}.")
+    return result
+
+
+@app.post("/api/sme-signals/refresh", status_code=202)
+async def refresh_sme_signals(request: Request):
+    """Run the SME EMA pipeline in the background. 409 if a run is in progress."""
+    import os
+
+    global _SME_REFRESHING
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+    if _SME_REFRESHING:
+        raise HTTPException(status_code=409, detail="A refresh is already running.")
+    _rate_limit(request, "sme_refresh", max_calls=3, window_seconds=3600)
+
+    _SME_REFRESHING = True
+    loop = asyncio.get_running_loop()
+
+    def _run_pipeline():
+        global _SME_REFRESHING
+        try:
+            from sme_ema_pipeline import run as run_sme_pipeline
+            run_sme_pipeline()
+        except Exception as exc:
+            log_event(LOGGER, "sme_refresh_failed", level="error", error=str(exc))
+        finally:
+            _SME_REFRESHING = False
+
+    async def _launch():
+        await loop.run_in_executor(None, _run_pipeline)
+
+    asyncio.create_task(_launch())
+    log_event(LOGGER, "sme_refresh_started")
+    return {"started": True}
 
 
 if __name__ == "__main__":
