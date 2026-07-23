@@ -1129,7 +1129,7 @@ async def refresh_sme_signals(request: Request):
 # first use and keeps in localStorage (see frontend/lib/watchlist.ts). This is
 # not real multi-device sync, but the rows themselves live in Postgres, not
 # only in one browser's localStorage.
-_CLIENT_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,64}$")
+_CLIENT_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,36}$")  # matches watchlist_items.client_id VARCHAR(36)
 _MAX_WATCHLIST_ITEMS_PER_CLIENT = 200
 
 
@@ -1191,6 +1191,10 @@ async def add_to_watchlist(request: Request, body: WatchlistAddRequest):
 
         engine = _get_db_engine()
         with engine.begin() as conn:
+            # Advisory lock scoped to this transaction (released automatically on
+            # commit/rollback) serializes concurrent adds for the same client_id, so
+            # the count-then-insert below can't race past _MAX_WATCHLIST_ITEMS_PER_CLIENT.
+            conn.execute(_text("SELECT pg_advisory_xact_lock(hashtext(:client_id))"), {"client_id": body.client_id})
             count = conn.execute(_text(
                 "SELECT COUNT(*) FROM watchlist_items WHERE client_id = :client_id"
             ), {"client_id": body.client_id}).scalar() or 0
@@ -1222,6 +1226,8 @@ async def remove_from_watchlist(request: Request, symbol: str, client_id: str = 
     _rate_limit(request, "watchlist_write", max_calls=60, window_seconds=60)
     _require_client_id(client_id)
     sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
     if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
 

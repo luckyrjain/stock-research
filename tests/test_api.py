@@ -679,6 +679,13 @@ class WatchlistEndpointsTest(unittest.TestCase):
         resp = client.get(f"/api/watchlist?client_id={'x' * 100}")
         self.assertEqual(resp.status_code, 422)
 
+    def test_get_client_id_longer_than_db_column_returns_422(self) -> None:
+        # watchlist_items.client_id is VARCHAR(36); a longer id must be rejected
+        # at validation time rather than reaching the DB as an insert failure.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.get(f"/api/watchlist?client_id={'x' * 37}")
+        self.assertEqual(resp.status_code, 422)
+
     def test_get_returns_items_with_mocked_engine(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         rows_result = MagicMock()
@@ -724,6 +731,7 @@ class WatchlistEndpointsTest(unittest.TestCase):
 
     def test_post_adds_item_with_mocked_engine(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        lock_result = MagicMock()
         count_result = MagicMock()
         count_result.scalar.return_value = 0
         insert_result = MagicMock()
@@ -733,7 +741,7 @@ class WatchlistEndpointsTest(unittest.TestCase):
              "addedAt": "2026-01-01T00:00:00"},
         ]
         fake_engine = MagicMock()
-        fake_engine.begin.return_value = _FakeConn([count_result, insert_result])
+        fake_engine.begin.return_value = _FakeConn([lock_result, count_result, insert_result])
         fake_engine.connect.return_value = _FakeConn([rows_result])
 
         with patch("api._get_db_engine", return_value=fake_engine):
@@ -746,12 +754,18 @@ class WatchlistEndpointsTest(unittest.TestCase):
 
     def test_post_over_cap_returns_422(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        lock_result = MagicMock()
         count_result = MagicMock()
         count_result.scalar.return_value = api._MAX_WATCHLIST_ITEMS_PER_CLIENT
         fake_engine = MagicMock()
-        fake_engine.begin.return_value = _FakeConn([count_result])
+        fake_engine.begin.return_value = _FakeConn([lock_result, count_result])
         with patch("api._get_db_engine", return_value=fake_engine):
             resp = client.post("/api/watchlist", json={"client_id": "client-abc", "symbol": "TCS"})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_delete_invalid_symbol_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.delete("/api/watchlist/bad%20symbol?client_id=client-abc")
         self.assertEqual(resp.status_code, 422)
 
     def test_delete_removes_item_with_mocked_engine(self) -> None:
