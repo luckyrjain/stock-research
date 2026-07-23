@@ -14,8 +14,6 @@ Usage:
 """
 
 import argparse
-import logging
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -25,14 +23,11 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 
 from db.models import get_engine, metadata
+from observability import get_logger, log_event
 from tools.sme_tools import get_all_sme_stocks
 
 load_dotenv()
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(message)s",
-)
-logger = logging.getLogger(__name__)
+LOGGER = get_logger("sme_ema_pipeline")
 
 _LOOKBACK_DAYS = 5
 _OHLCV_PERIOD  = "1y"    # full year so EMA 50 is converged before the stored window
@@ -101,7 +96,10 @@ def _compute_ema_signals(result: dict) -> list[dict]:
     else:
         # EMA50 isn't converged yet — still store price/EMA for the current-regime
         # view, but never claim a golden/death cross event on unreliable data.
-        logger.debug("%s: only %d trading days (< %d) — suppressing cross flags", symbol, len(df), _MIN_HISTORY_DAYS)
+        log_event(
+            LOGGER, "sme_insufficient_history", level="debug",
+            symbol=symbol, trading_days=len(df), min_required=_MIN_HISTORY_DAYS,
+        )
         df["cross"] = None
 
     df = df.iloc[-_STORE_DAYS:]
@@ -153,7 +151,7 @@ def _upsert_stocks(engine, stocks: list[dict]) -> None:
                     "series":   s.get("series"),
                 },
             )
-    logger.info("Upserted %d stocks into sme_stocks", len(stocks))
+    log_event(LOGGER, "sme_stocks_upserted", count=len(stocks))
 
 
 def _upsert_signals(engine, rows: list[dict]) -> None:
@@ -180,7 +178,7 @@ def _upsert_signals(engine, rows: list[dict]) -> None:
                 batch,
             )
             total += len(batch)
-    logger.info("Upserted %d signal rows into ema_signals", total)
+    log_event(LOGGER, "sme_signals_upserted", count=total)
 
 
 def _prune_signals(engine) -> None:
@@ -192,7 +190,7 @@ def _prune_signals(engine) -> None:
             """),
             {"days": _RETENTION_DAYS},
         ).rowcount
-    logger.info("Pruned %d signal rows older than %d days", deleted, _RETENTION_DAYS)
+    log_event(LOGGER, "sme_signals_pruned", count=deleted, retention_days=_RETENTION_DAYS)
 
 
 # ── Phase 5: Summary output ───────────────────────────────────────────────────
@@ -246,7 +244,7 @@ def _print_summary(engine, lookback_days: int) -> None:
 def setup_db(engine) -> None:
     """Create tables and indexes (idempotent)."""
     metadata.create_all(engine)
-    logger.info("Database tables created/verified")
+    log_event(LOGGER, "sme_db_tables_created")
 
 
 # ── Pipeline entry point ──────────────────────────────────────────────────────
@@ -259,18 +257,18 @@ def run(force: bool = False, lookback_days: int = _LOOKBACK_DAYS) -> bool:
     engine = get_engine()
 
     # Phase 1: fetch SME stock lists
-    logger.info("Phase 1 — Fetching SME stock lists...")
+    log_event(LOGGER, "sme_phase_started", phase="fetch_stock_lists")
     stocks = get_all_sme_stocks(force=force)
     if not stocks:
-        logger.error("No SME stocks fetched — aborting")
+        log_event(LOGGER, "sme_no_stocks_fetched", level="error")
         return False
-    logger.info("Total SME stocks: %d", len(stocks))
+    log_event(LOGGER, "sme_stock_list_fetched", count=len(stocks))
 
     # Must upsert stocks before signals (FK constraint)
     _upsert_stocks(engine, stocks)
 
     # Phase 2: download OHLCV in parallel
-    logger.info("Phase 2 — Downloading OHLCV (%d stocks, %d workers)...", len(stocks), _MAX_WORKERS)
+    log_event(LOGGER, "sme_phase_started", phase="download_ohlcv", stocks=len(stocks), workers=_MAX_WORKERS)
     ohlcv_ok, errors = [], 0
     with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
         futures = {pool.submit(_fetch_ohlcv, s): s["symbol"] for s in stocks}
@@ -278,20 +276,23 @@ def run(force: bool = False, lookback_days: int = _LOOKBACK_DAYS) -> bool:
             res = future.result()
             if "error" in res:
                 errors += 1
-                logger.debug("OHLCV skip %s: %s", res["symbol"], res["error"])
+                log_event(
+                    LOGGER, "sme_ohlcv_fetch_skipped", level="debug",
+                    symbol=res["symbol"], error=res["error"],
+                )
             else:
                 ohlcv_ok.append(res)
-    logger.info("OHLCV: %d fetched, %d errors", len(ohlcv_ok), errors)
+    log_event(LOGGER, "sme_ohlcv_fetch_completed", fetched=len(ohlcv_ok), errors=errors)
 
     # Phase 3: compute EMAs + golden/death cross flags
-    logger.info("Phase 3 — Computing EMA20/EMA50 golden/death crosses...")
+    log_event(LOGGER, "sme_phase_started", phase="compute_ema_crosses")
     all_rows = []
     for res in ohlcv_ok:
         all_rows.extend(_compute_ema_signals(res))
-    logger.info("Signal rows: %d across %d stocks", len(all_rows), len(ohlcv_ok))
+    log_event(LOGGER, "sme_signal_rows_computed", rows=len(all_rows), stocks=len(ohlcv_ok))
 
     # Phase 4: write to PostgreSQL
-    logger.info("Phase 4 — Writing to PostgreSQL...")
+    log_event(LOGGER, "sme_phase_started", phase="write_postgres")
     _upsert_signals(engine, all_rows)
     _prune_signals(engine)
 
@@ -300,11 +301,11 @@ def run(force: bool = False, lookback_days: int = _LOOKBACK_DAYS) -> bool:
 
     error_rate = errors / len(stocks)
     if error_rate > _MAX_ACCEPTABLE_ERROR_RATE:
-        logger.error(
-            "OHLCV fetch error rate %.0f%% exceeds the %.0f%% threshold — "
-            "NSE/yfinance may be rate-limiting or blocking this run rather "
-            "than these being genuinely bad individual symbols",
-            error_rate * 100, _MAX_ACCEPTABLE_ERROR_RATE * 100,
+        log_event(
+            LOGGER, "sme_ohlcv_error_rate_exceeded", level="error",
+            error_rate=round(error_rate, 3), threshold=_MAX_ACCEPTABLE_ERROR_RATE,
+            note="NSE/yfinance may be rate-limiting or blocking this run rather than "
+                 "these being genuinely bad individual symbols",
         )
         return False
     return True
@@ -330,7 +331,7 @@ def main() -> None:
         engine = get_engine()
         metadata.drop_all(engine)
         metadata.create_all(engine)
-        logger.info("Database tables dropped and recreated")
+        log_event(LOGGER, "sme_db_tables_reset")
         return
 
     healthy = run(force=args.force, lookback_days=args.lookback)

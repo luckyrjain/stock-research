@@ -14,7 +14,7 @@ A full-stack Indian equity research platform. Given an NSE/BSE ticker (e.g. `TCS
 4. Calls an LLM analyst to produce a structured `BUY`/`HOLD`/`SELL` recommendation
 5. Streams progress and the final report to the browser via Server-Sent Events
 
-A second mode — **Market Picks** — runs a multi-agent pipeline that scrapes 16 Indian and global financial sources, extracts stock recommendations with an LLM, validates symbols against the NSE equity master, runs due diligence on each, and returns a confidence-ranked watchlist with BUY / WATCHLIST / HOLD / SELL ratings.
+A second mode — **Market Picks** — runs a multi-agent pipeline that scrapes 20 Indian and global financial sources, extracts stock recommendations with an LLM, validates symbols against the NSE equity master, runs due diligence on each, and returns a confidence-ranked watchlist with BUY / WATCHLIST / HOLD / SELL ratings.
 
 A third mode — **SME Signals** — is a PostgreSQL-backed batch pipeline (`sme_ema_pipeline.py`) that screens all NSE Emerge + BSE SME stocks for EMA20/EMA50 **golden cross** and **death cross** events, served at `/sme-signals` via `GET /api/sme-signals`.
 
@@ -26,7 +26,7 @@ A third mode — **SME Signals** — is a PostgreSQL-backed batch pipeline (`sme
 stock-research/
 ├── api.py                  FastAPI server — SSE endpoints and symbol validation
 ├── main.py                 CLI entry point; also contains _fetch_task, _build_report (shared with api.py)
-├── crew.py                 LLM resolution, analyst guardrails, run_analysis_with_fallback, build_crew
+├── crew.py                 Analyst guardrails, run_analysis_with_fallback (direct litellm call)
 ├── cache.py                File-based TTL cache (output/<SYMBOL>/<task>.json)
 ├── schemas.py              Normalization contracts: raw tool output → canonical dicts
 ├── market_picks_pipeline.py  Multi-agent weekly picks pipeline (6 phases)
@@ -36,13 +36,11 @@ stock-research/
 ├── requirements.txt
 ├── .env.example
 ├── config/
-│   ├── agents.json         Agent roles, tools, backstories (data-fetching agents only)
-│   ├── tasks.json          Task descriptions and expected outputs
-│   ├── analyst.json        Analyst prompt template, output schema, guardrail instructions
-│   ├── crew_agents.py      Thin loader: wires agents.json → CrewAI Agent objects
-│   └── crew_tasks.py       Thin loader: builds task specs and analyst prompt string
+│   ├── analyst.json        Analyst role/goal/backstory + section labels (config.crew_tasks.ANALYST_SECTIONS)
+│   └── crew_tasks.py       Builds the analyst prompt string from analyst.json
 ├── tools/
-│   ├── market_picks_tools.py  RSS + GNews scrapers for 11 sources; exports SOURCES + SCRAPER_FNS
+│   ├── market_picks_tools.py  RSS + GNews scrapers for 14 sources; exports SOURCES + SCRAPER_FNS
+│   │                          (merges in hdfc_sec_agent.py + 4 others below → 20 sources total)
 │   ├── sme_tools.py           NSE Emerge + BSE SME stock-list fetchers
 │   ├── hdfc_sec_agent.py      HDFC Securities Fundamental + Technical scrapers (GNews-based)
 │   └── ...                    Other data-fetching functions (yfinance, Screener.in, gnews, NSE API)
@@ -102,7 +100,7 @@ Tests use `unittest` and are collected by pytest. They mock heavy dependencies (
 | Library | Purpose |
 |---|---|
 | `fastapi` + `uvicorn` | HTTP server and SSE streaming |
-| `crewai` | Agent/Task/Crew abstractions for data-fetching agents |
+| `crewai` | Only its `@tool` decorator (`crewai.tools`) is used, for a stable `.run()` calling convention on the data-fetching functions in `tools/`. The Agent/Task/Crew orchestration layer was removed (see "Agent architecture" below) — it was never on the production path. |
 | `litellm` | Provider-agnostic LLM calls (analyst step) |
 | `yfinance` | NSE/BSE price quotes; also used for ISIN → symbol resolution |
 | `requests` + `beautifulsoup4` | Screener.in scraping, NSE API calls |
@@ -112,31 +110,31 @@ Tests use `unittest` and are collected by pytest. They mock heavy dependencies (
 
 ### Agent architecture
 
-The system has **two distinct agent layers**:
+**Data fetching**: the API and CLI call `_fetch_task()` directly using `ThreadPoolExecutor` for parallel fetching — no agent orchestration involved. Each task wraps exactly one tool function and returns its raw JSON output.
 
-**Layer 1 — Data agents (CrewAI)**: Used in `build_crew()` in `crew.py`. Five agents, each wraps exactly one tool and returns its raw JSON output. In production the API and CLI call `_fetch_task()` directly (bypasses CrewAI) using `ThreadPoolExecutor` for parallel fetching. CrewAI is only exercised if `build_crew()` is called directly.
+| Task name | Tool | Data source |
+|---|---|---|
+| `stock_info` | `get_stock_quote` | yfinance + NSE API |
+| `research` | `get_fundamentals` | Screener.in |
+| `news` | `get_latest_news` | gnews (Google News) |
+| `shareholding` | `get_holdings` | Screener.in |
+| `mf_holdings` | `get_mf_holdings` | NSE API |
+| `filings` | `get_nse_filings` | NSE corporate announcements |
 
-| Task name | Agent role | Tool | Data source |
-|---|---|---|---|
-| `stock_info` | Market Data Analyst | `get_stock_quote` | yfinance + NSE API |
-| `research` | Fundamental Research Analyst | `get_fundamentals` | Screener.in |
-| `news` | Financial News Aggregator | `get_latest_news` | gnews (Google News) |
-| `shareholding` | Shareholding Pattern Analyst | `get_holdings` | Screener.in |
-| `mf_holdings` | MF Holdings Analyst | `get_mf_holdings` | NSE API |
-| `filings` | — (direct call, no CrewAI agent) | `get_nse_filings` | NSE corporate announcements |
+These tool functions are decorated with `@tool` from `crewai.tools` purely for a consistent `.run(**kwargs)` calling convention (see `main._fetch_task`) — that's the only thing this codebase still uses CrewAI for. There used to be a second, parallel orchestration path (`build_crew()` in `crew.py`, wiring per-task `Agent`/`Task`/`Crew` objects from `config/agents.json` + `config/tasks.json`) but it had zero callers and zero test coverage — data collection has always gone through `_fetch_task()` in production — so it was removed rather than left as unverified dead code. If you're looking for `LLM_MODEL` / the "data-agent tier" model config from an older version of this doc: it only ever fed that removed path and has been dropped too — `ANALYST_MODEL` (below) is the only model-selection env var that does anything.
 
-**Layer 2 — Analyst (direct LLM call)**: `run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI involved. It receives all six data slices plus signal engine context, and must return a specific JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structural rules and grounded-claims checks; a guardrail failure triggers one corrective LLM retry with the validation error appended, and only if that also fails does it return a safe HOLD fallback via `_safe_analysis_fallback()`.
+**Analyst (direct LLM call)**: `run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI involved. It receives all six data slices plus signal engine context, and must return a specific JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structural rules and grounded-claims checks; a guardrail failure triggers one corrective LLM retry with the validation error appended, and only if that also fails does it return a safe HOLD fallback via `_safe_analysis_fallback()`.
 
-**Layer 3 — Market picks pipeline** (`market_picks_pipeline.py`): Six sequential phases, all blocking work offloaded to `ThreadPoolExecutor`. Communicates back to the SSE stream via `on_event` callbacks bridged through `asyncio.Queue` with `loop.call_soon_threadsafe`.
+**Market picks pipeline** (`market_picks_pipeline.py`): Six sequential phases, all blocking work offloaded to `ThreadPoolExecutor`. Communicates back to the SSE stream via `on_event` callbacks bridged through `asyncio.Queue` with `loop.call_soon_threadsafe`.
 
 | Phase | What it does |
 |---|---|
-| `_phase_scrape` | Parallel fetch from 16 sources (5 RSS + 8 GNews + 3 structured). 6 workers. |
+| `_phase_scrape` | Parallel fetch from 20 sources (5 RSS + 12 GNews + 3 structured). 6 workers. |
 | `_phase_extract` | One LLM call per source (parallel, up to 6 workers). Checks extraction cache first. Detects syndicated articles (Jaccard ≥ 0.60) across sources to down-weight them. |
 | `_phase_consolidate` | Groups picks by ticker, validates against NSE equity master, confirms live price via yfinance (guards pre-IPO / unlisted names). Uses rapidfuzz for fuzzy company-name matching. |
 | `_phase_research` | Fetches `stock_info` + `research` + signal engine per stock (4 workers, up to `_MAX_STOCKS` stocks). |
 | `_phase_analyze` | Batched LLM calls (8 stocks/batch, parallel) for qualitative summary + bull/bear factors. Does NOT ask the LLM for prices. |
-| `_phase_score` | Deterministic confidence scoring (50% signal engine + 30% consensus + 20% recency). 4-tier recs (BUY / WATCHLIST / HOLD / SELL). Entry/target/stop-loss computed from price and signal score — no LLM. Sector-balanced: max 2 stocks per sector in the primary list. Saves a daily snapshot to `output/_history/` for trend tracking. |
+| `_phase_score` | Deterministic confidence scoring (`_compute_confidence`: 50% signal engine + 30% consensus + 20% recency, 0–100). The 4-tier rec (BUY / WATCHLIST / HOLD / SELL) is a *separate* formula on top — `combined_dir = 0.55 × consensus + 0.45 × signal_score`, thresholded, with a quant-veto that demotes BUY → WATCHLIST on a strongly negative signal score. Entry/target/stop-loss computed from price and signal score — no LLM. Sector-balanced: max 2 stocks per sector in the primary list. Saves a daily snapshot to `output/_history/` for trend tracking. |
 
 ---
 
@@ -224,8 +222,7 @@ Provider is auto-detected from whichever key is present (checked in the order ab
 | Variable | Default | Purpose |
 |---|---|---|
 | `LLM_PROVIDER` | auto | `anthropic` / `openai` / `groq` / `google` / `openrouter` / `ollama` |
-| `LLM_MODEL` | provider default | Model for data-fetching agents (fast/cheap tier) |
-| `ANALYST_MODEL` | provider default | Model for analyst LLM call (stronger tier) |
+| `ANALYST_MODEL` | provider default | Model for the analyst LLM call — the only model-selection env var that does anything; data fetching doesn't call an LLM (see "Agent architecture") |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Only needed when `LLM_PROVIDER=ollama` |
 | `LOG_LEVEL` | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`) |
 | `DATABASE_URL` | unset | PostgreSQL DSN — required only for the SME signals pipeline and `/api/sme-signals` endpoints |
@@ -329,7 +326,8 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
 - **Market picks pipeline max stocks = 35** (`_MAX_STOCKS` in `market_picks_pipeline.py`). Raising this significantly increases wall-clock time and LLM costs.
 - **4-tier recommendation in market picks**: BUY / WATCHLIST / HOLD / SELL. Do not collapse these to 3-tier. `WATCHLIST` is a distinct lower-conviction tier between BUY and HOLD.
 - **Trade levels are deterministic in market picks** (entry/target/stop computed from signal score and 52w range). Do not add LLM-driven price generation — it produces null values when context overflows.
-- **Extraction cache** (`output/_extract_cache/`) avoids re-calling the LLM for the same source articles within 6 h. The cache key is content-aware (title + URL + summary hash), so edits or new articles get a fresh key automatically.
+- **Extraction cache** (`output/_extract_cache/`) avoids re-calling the LLM for the same source articles within 6 h. The cache key is content-aware (title + URL + summary hash), so edits or new articles get a fresh key automatically. Expired files aren't just ignored on read — `_prune_extract_cache()` deletes them once per pipeline run, or this directory grows by one file per (source, article-batch) forever.
+- **`signals_data/<SYMBOL>/<date>.json`** (written by `signals/store.save_signal`) is a write-only audit trail — nothing reads it back. Pruned to a 90-day retention window per symbol on every write (`signals/store._prune_old_signals`).
 - **Source credibility weights** in `_SOURCE_CREDIBILITY` determine how much each source contributes to confidence scoring. Adding a new source requires adding a credibility entry; missing sources default to 0.50.
 - **HDFC Securities sources** live in `tools/hdfc_sec_agent.py` and are merged into `SOURCES` / `SCRAPER_FNS` at import time in `tools/market_picks_tools.py`. Adding a new brokerage source follows the same pattern: define scrapers in a separate module, export `*_SOURCES` and `*_SCRAPERS`, merge in `market_picks_tools.py`.
 - **Rate limiting** is a single-process, in-memory sliding window (`api.py`'s `_rate_limit()`), applied only to expensive/abusable routes: `/api/analyse/{symbol}` (20 req / 5 min per IP), `/api/market-picks?force=true` (3 req / hour per IP), `/api/sme-signals/refresh` (3 req / hour per IP, on top of the existing single-run guard). It does not survive a multi-worker deployment — that would need a shared store (e.g. Redis) instead.

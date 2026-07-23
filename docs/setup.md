@@ -32,8 +32,7 @@ Then edit `.env` and set the provider you want to use.
 | `GOOGLE_API_KEY` | One key required | Google Gemini API key |
 | `OPENROUTER_API_KEY` | One key required | OpenRouter API key (access to 300+ models) |
 | `LLM_PROVIDER` | No | `anthropic` / `openai` / `groq` / `google` / `openrouter` / `ollama` — auto-detected if unset |
-| `LLM_MODEL` | No | Model for data/worker agents (fast/cheap tier) |
-| `ANALYST_MODEL` | No | Model for the final analyst step (stronger tier) |
+| `ANALYST_MODEL` | No | Model for the analyst step (stock analysis) and market picks' extraction/analysis LLM calls |
 | `OLLAMA_BASE_URL` | Ollama only | Default: `http://localhost:11434` |
 | `LOG_LEVEL` | No | `DEBUG` / `INFO` / `WARNING` — default: `INFO` |
 | `DATABASE_URL` | SME signals only | PostgreSQL DSN, e.g. `postgresql://user:pass@localhost:5432/sme_research` |
@@ -42,14 +41,14 @@ If `LLM_PROVIDER` is unset, the backend auto-detects the first key present in th
 
 ### Default models per provider
 
-| Provider | Data agents | Analyst / market picks |
-|---|---|---|
-| `anthropic` | `claude-haiku-4-5-20251001` | `claude-sonnet-4-6` |
-| `openai` | `gpt-4o-mini` | `gpt-4o` |
-| `groq` | `groq/llama-3.1-8b-instant` | `groq/llama-3.3-70b-versatile` |
-| `google` | `gemini/gemini-2.5-flash` | `gemini/gemini-2.5-flash` |
-| `openrouter` | `openrouter/meta-llama/llama-3.1-8b-instruct` | `openrouter/meta-llama/llama-3.3-70b-instruct` |
-| `ollama` | `ollama/llama3.2` | `ollama/llama3.1:8b` |
+| Provider | Analyst / market picks (`ANALYST_MODEL`) |
+|---|---|
+| `anthropic` | `claude-sonnet-4-6` |
+| `openai` | `gpt-4o` |
+| `groq` | `groq/llama-3.3-70b-versatile` |
+| `google` | `gemini/gemini-2.5-flash` |
+| `openrouter` | `openrouter/meta-llama/llama-3.3-70b-instruct` |
+| `ollama` | `ollama/llama3.1:8b` (stock analysis only — market picks doesn't support Ollama) |
 
 ## Frontend setup
 

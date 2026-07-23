@@ -34,10 +34,7 @@ stock-research/
 ├── requirements.txt
 ├── .env.example
 ├── config/
-│   ├── agents.json
-│   ├── tasks.json
 │   ├── analyst.json
-│   ├── crew_agents.py
 │   └── crew_tasks.py
 ├── tools/
 │   ├── market_picks_tools.py       RSS + GNews scrapers; source registry
@@ -225,15 +222,11 @@ Per-symbol task caches under `output/<SYMBOL>/`:
 
 Market picks result cache: `output/_market_picks/picks.json`, 6 h TTL.
 
-## Customising agent behaviour
-
-All agent and task configuration is in `config/` JSON files — no Python changes needed for prompt tuning:
+## Customising analyst behaviour
 
 | File | What to edit |
 |---|---|
-| `config/agents.json` | Agent roles, backstories, tool assignment per task |
-| `config/tasks.json` | Task descriptions, expected output shape, retry count |
-| `config/analyst.json` | Analyst persona, analysis rules, valuation guidance, output schema |
+| `config/analyst.json` | Analyst persona, analysis rules, valuation guidance, output schema, section labels |
 
 ## Notes
 
