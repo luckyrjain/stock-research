@@ -833,7 +833,10 @@ class SmeSignalsEndpointTest(unittest.TestCase):
     def test_returns_signals_shape_with_mocked_engine(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         fake_engine = _fake_sme_engine(
-            rows=[{"symbol": "ABC", "cross": "golden"}],
+            rows=[{
+                "symbol": "ABC", "cross": "golden",
+                "avg_volume_20d": 12000.0, "avg_turnover_20d": 240000.0,
+            }],
             total_monitored=120,
             golden_now=42,
             last_run="2026-07-20T00:00:00",
@@ -847,6 +850,8 @@ class SmeSignalsEndpointTest(unittest.TestCase):
         self.assertEqual(body["golden_now"], 42)
         self.assertEqual(len(body["signals"]), 1)
         self.assertEqual(body["signals"][0]["symbol"], "ABC")
+        self.assertEqual(body["signals"][0]["avg_volume_20d"], 12000.0)
+        self.assertEqual(body["signals"][0]["avg_turnover_20d"], 240000.0)
 
     def test_db_error_returns_sanitized_503(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
@@ -900,6 +905,8 @@ class SmeSignalHistoryEndpointTest(unittest.TestCase):
         self.assertEqual(body["name"], "ABC Corp")
         self.assertEqual(len(body["series"]), 2)
         self.assertEqual(body["series"][1]["cross"], "golden")
+        self.assertEqual(len(body["cross_events"]), 1)
+        self.assertEqual(body["cross_events"][0]["cross"], "golden")
 
     def test_unknown_symbol_returns_404(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
@@ -914,6 +921,50 @@ class SmeSignalHistoryEndpointTest(unittest.TestCase):
             resp = client.get("/api/sme-signals/ABC/history")
         self.assertEqual(resp.status_code, 503)
         self.assertNotIn("password", resp.text)
+
+
+def _row(date_str: str, close: float, cross: str | None = None) -> dict:
+    return {"trade_date": date_str, "close_price": close, "ema20": None, "ema50": None, "cross": cross}
+
+
+class ComputeCrossEventsTest(unittest.TestCase):
+    def test_no_crosses_returns_empty_list(self) -> None:
+        series = [_row("2026-01-01", 10.0), _row("2026-01-02", 10.5)]
+        self.assertEqual(api._compute_cross_events(series), [])
+
+    def test_full_window_computes_both_forward_returns(self) -> None:
+        # A golden cross at index 0, closing at 100; the +10d row (index 10)
+        # closes 110 (+10%), the +20d row (index 20) closes 120 (+20%).
+        series = [_row(f"2026-01-{i+1:02d}", 100.0 + i, cross="golden" if i == 0 else None) for i in range(25)]
+        events = api._compute_cross_events(series)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event["cross"], "golden")
+        self.assertEqual(event["close_at_cross"], 100.0)
+        self.assertAlmostEqual(event["ret_10d_pct"], 10.0, places=2)
+        self.assertAlmostEqual(event["ret_20d_pct"], 20.0, places=2)
+
+    def test_insufficient_elapsed_days_yields_null_returns(self) -> None:
+        # Cross is only 5 trading days from the end of the series — neither
+        # +10d nor +20d has happened yet within the stored window.
+        series = [_row(f"2026-01-{i+1:02d}", 100.0, cross="golden" if i == 0 else None) for i in range(6)]
+        event = api._compute_cross_events(series)[0]
+        self.assertIsNone(event["ret_10d_pct"])
+        self.assertIsNone(event["ret_20d_pct"])
+
+    def test_most_recent_cross_first(self) -> None:
+        series = [
+            _row("2026-01-01", 100.0, cross="golden"),
+            _row("2026-01-02", 101.0),
+            _row("2026-01-03", 102.0, cross="death"),
+        ]
+        events = api._compute_cross_events(series)
+        self.assertEqual([e["trade_date"] for e in events], ["2026-01-03", "2026-01-01"])
+
+    def test_zero_close_at_cross_does_not_divide_by_zero(self) -> None:
+        series = [_row("2026-01-01", 0.0, cross="golden")] + [_row(f"2026-01-{i+2:02d}", 5.0) for i in range(15)]
+        event = api._compute_cross_events(series)[0]
+        self.assertIsNone(event["ret_10d_pct"])
 
 
 class SmeRefreshEndpointTest(unittest.TestCase):

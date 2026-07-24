@@ -17,6 +17,14 @@ sme_stocks = Table(
     Column("isin",       String(12)),
     Column("series",     String(10)),
     Column("fetched_at", DateTime(timezone=True), server_default=text("NOW()")),
+    # Liquidity snapshot from the most recent pipeline run — average daily
+    # share volume / turnover (₹) over the last 20 trading days, from the same
+    # OHLCV fetch already done for EMA signals (no extra network calls). NULL
+    # until the first run that stores volume alongside close price. Flags
+    # illiquid SME stocks, where a golden cross isn't necessarily tradeable at
+    # the shown price.
+    Column("avg_volume_20d",   Numeric(16, 2)),
+    Column("avg_turnover_20d", Numeric(16, 2)),
 )
 
 ema_signals = Table(

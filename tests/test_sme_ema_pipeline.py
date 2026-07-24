@@ -5,13 +5,16 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 
 import sme_ema_pipeline
-from sme_ema_pipeline import _compute_ema_signals, _STORE_DAYS
+from sme_ema_pipeline import _compute_ema_signals, _compute_liquidity, _STORE_DAYS
 
 
-def _make_result(closes: list[float]) -> dict:
+def _make_result(closes: list[float], volumes: list[float] | None = None) -> dict:
     start = date(2026, 1, 1)
     idx = pd.to_datetime([start + timedelta(days=i) for i in range(len(closes))])
-    df = pd.DataFrame({"Close": closes}, index=idx)
+    data = {"Close": closes}
+    if volumes is not None:
+        data["Volume"] = volumes
+    df = pd.DataFrame(data, index=idx)
     return {"symbol": "TESTSME", "exchange": "NSE", "df": df}
 
 
@@ -54,6 +57,27 @@ class ComputeEmaSignalsTest(unittest.TestCase):
         self.assertEqual(_compute_ema_signals({"error": "no data", "symbol": "X"}), [])
 
 
+class ComputeLiquidityTest(unittest.TestCase):
+    def test_averages_last_20_trading_days(self) -> None:
+        # 30 days of history; only the last 20 (volume=200, close=50) should
+        # count — the first 10 days (volume=1000) fall outside the window.
+        closes  = [10.0] * 10 + [50.0] * 20
+        volumes = [1000.0] * 10 + [200.0] * 20
+        result = _compute_liquidity(_make_result(closes, volumes))
+        self.assertEqual(result["symbol"], "TESTSME")
+        self.assertAlmostEqual(result["avg_volume_20d"], 200.0, places=2)
+        self.assertAlmostEqual(result["avg_turnover_20d"], 50.0 * 200.0, places=2)
+
+    def test_error_result_returns_none(self) -> None:
+        self.assertIsNone(_compute_liquidity({"error": "no data", "symbol": "X"}))
+
+    def test_missing_volume_column_returns_none(self) -> None:
+        self.assertIsNone(_compute_liquidity(_make_result([10.0, 11.0])))
+
+    def test_empty_dataframe_returns_none(self) -> None:
+        self.assertIsNone(_compute_liquidity(_make_result([], [])))
+
+
 def _stock(symbol: str) -> dict:
     return {"symbol": symbol, "name": symbol, "isin": None, "series": "SM", "exchange": "NSE"}
 
@@ -70,6 +94,7 @@ class RunHealthSignalTest(unittest.TestCase):
             patch.object(sme_ema_pipeline, "get_engine", return_value=MagicMock()),
             patch.object(sme_ema_pipeline, "_upsert_stocks"),
             patch.object(sme_ema_pipeline, "_upsert_signals"),
+            patch.object(sme_ema_pipeline, "_upsert_liquidity"),
             patch.object(sme_ema_pipeline, "_prune_signals"),
             patch.object(sme_ema_pipeline, "_print_summary"),
         ]

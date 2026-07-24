@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'react';
 import Link from 'next/link';
-import type { SmeSignal, SmeSignalHistoryResponse, SmeSignalsResponse } from '@/types';
+import type { SmeSignal, SmeCrossEvent, SmeSignalHistoryResponse, SmeSignalsResponse } from '@/types';
 import EmaChart from '@/components/ema-chart';
 import HeaderSearch from '@/components/header-search';
 import WatchlistButton from '@/components/watchlist-button';
@@ -12,7 +12,13 @@ import WatchlistButton from '@/components/watchlist-button';
 type Lookback  = 1 | 3 | 5 | 10;
 type Direction = 'all' | 'golden' | 'death';
 type ExchangeFilter = 'all' | 'NSE' | 'BSE';
-type SortKey = 'symbol' | 'trade_date' | 'close_price' | 'ema20' | 'ema50';
+type SortKey = 'symbol' | 'trade_date' | 'close_price' | 'ema20' | 'ema50' | 'avg_turnover_20d';
+
+// Below this avg daily turnover (last 20 trading days), a cross isn't
+// necessarily tradeable at the shown price — SME names routinely trade a
+// few thousand rupees a day. ₹5L/day is a common discretionary cutoff for
+// "someone could actually build/exit a position here."
+const _ILLIQUID_TURNOVER_THRESHOLD = 500_000;
 
 // ── Helper components ─────────────────────────────────────────────────────────
 
@@ -49,6 +55,66 @@ function ExchangeBadge({ exchange }: { exchange: string }) {
     <span className="text-[9px] font-bold px-1.5 py-0.5 rounded border text-muted border-border bg-surface">
       {exchange}
     </span>
+  );
+}
+
+function IlliquidBadge() {
+  return (
+    <span
+      title={`Avg daily turnover below ₹${(_ILLIQUID_TURNOVER_THRESHOLD / 1_00_000).toFixed(0)}L — a cross here may not be tradeable at the shown price`}
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-bold border bg-hold/12 text-hold border-hold/25"
+    >
+      ⚠ Illiquid
+    </span>
+  );
+}
+
+function fmtTurnover(v: number | null): string {
+  if (v == null) return '—';
+  if (v >= 1_00_00_000) return `₹${(v / 1_00_00_000).toFixed(2)}Cr`;
+  if (v >= 1_00_000) return `₹${(v / 1_00_000).toFixed(1)}L`;
+  return `₹${v.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+}
+
+function fmtRet(v: number | null): string {
+  if (v == null) return 'pending';
+  return `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+}
+
+function retColor(v: number | null): string {
+  if (v == null) return 'text-muted';
+  return v >= 0 ? 'text-buy' : 'text-sell';
+}
+
+// "Last 3 golden crosses: +12%, -4%, +22% over 20d" — outcome context for a
+// bare "golden cross on date X," using the forward returns the history
+// endpoint already computed (api.py's _compute_cross_events).
+function CrossOutcomeSummary({ events }: { events: SmeCrossEvent[] }) {
+  const golden = events.filter(e => e.cross === 'golden').slice(0, 3);
+  const death  = events.filter(e => e.cross === 'death').slice(0, 3);
+  if (golden.length === 0 && death.length === 0) return null;
+
+  const renderTrail = (label: string, trail: SmeCrossEvent[], labelColor: string) => (
+    <div className="flex items-center gap-1.5 flex-wrap">
+      <span className={`text-[10px] font-bold uppercase tracking-wider ${labelColor}`}>
+        Last {trail.length} {label} cross{trail.length > 1 ? 'es' : ''} (20d)
+      </span>
+      {trail.map((e, i) => (
+        <span key={e.trade_date} className="inline-flex items-center">
+          <span className={`font-mono text-xs font-semibold ${retColor(e.ret_20d_pct)}`}>
+            {fmtRet(e.ret_20d_pct)}
+          </span>
+          {i < trail.length - 1 && <span className="text-muted/40 ml-1">,</span>}
+        </span>
+      ))}
+    </div>
+  );
+
+  return (
+    <div className="flex flex-wrap gap-x-6 gap-y-2 mb-4 px-1">
+      {golden.length > 0 && renderTrail('golden', golden, 'text-buy/80')}
+      {death.length > 0 && renderTrail('death', death, 'text-sell/80')}
+    </div>
   );
 }
 
@@ -111,6 +177,7 @@ function SkeletonRows() {
           <td className="px-4 py-4"><Skeleton className="h-3.5 w-12" /></td>
           <td className="px-4 py-4"><Skeleton className="h-5 w-20" /></td>
           <td className="px-4 py-4"><Skeleton className="h-5 w-16" /></td>
+          <td className="px-4 py-4"><Skeleton className="h-3.5 w-16 ml-auto" /></td>
           <td className="px-4 py-4"><Skeleton className="h-3.5 w-16 ml-auto" /></td>
           <td className="px-4 py-4"><Skeleton className="h-3.5 w-16 ml-auto" /></td>
           <td className="px-4 py-4"><Skeleton className="h-3.5 w-16 ml-auto" /></td>
@@ -403,6 +470,7 @@ export default function SmeSignalsPage() {
                     <SortableTh label="Close" sortK="close_price" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
                     <SortableTh label="EMA 20" sortK="ema20" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
                     <SortableTh label="EMA 50" sortK="ema50" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
+                    <SortableTh label="Turnover (20d)" sortK="avg_turnover_20d" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
                   </tr>
                 </thead>
                 <tbody>
@@ -410,7 +478,7 @@ export default function SmeSignalsPage() {
                     <SkeletonRows />
                   ) : displayedSignals.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="px-4 py-16 text-center text-muted text-sm">
+                      <td colSpan={9} className="px-4 py-16 text-center text-muted text-sm">
                         {signals.length === 0
                           ? 'No crossovers found for the selected filters.'
                           : `No ${exchangeFilter} crossovers in the current results.`}
@@ -511,16 +579,31 @@ export default function SmeSignalsPage() {
                             {s.ema50 != null ? s.ema50.toFixed(2) : '—'}
                           </span>
                         </td>
+
+                        {/* Turnover (20d) */}
+                        <td className="px-4 py-4 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            {s.avg_turnover_20d != null && s.avg_turnover_20d < _ILLIQUID_TURNOVER_THRESHOLD && (
+                              <IlliquidBadge />
+                            )}
+                            <span className="font-mono tabular-nums text-xs text-muted">
+                              {fmtTurnover(s.avg_turnover_20d)}
+                            </span>
+                          </div>
+                        </td>
                       </tr>
                       {isExpanded && (
                         <tr className="border-b border-border/60 bg-card/60">
-                          <td colSpan={8} className="px-6 py-5">
+                          <td colSpan={9} className="px-6 py-5">
                             {history === 'loading' || history === undefined ? (
                               <p className="text-xs text-muted py-8 text-center">Loading chart…</p>
                             ) : history === 'error' ? (
                               <p className="text-xs text-sell py-8 text-center">Could not load EMA history for {s.symbol}.</p>
                             ) : (
-                              <EmaChart series={history.series} />
+                              <>
+                                <CrossOutcomeSummary events={history.cross_events} />
+                                <EmaChart series={history.series} />
+                              </>
                             )}
                           </td>
                         </tr>

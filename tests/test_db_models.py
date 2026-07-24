@@ -27,7 +27,10 @@ class GetEngineTest(unittest.TestCase):
 class TableSchemaTest(unittest.TestCase):
     def test_sme_stocks_columns(self) -> None:
         cols = set(sme_stocks.columns.keys())
-        self.assertEqual(cols, {"symbol", "name", "exchange", "isin", "series", "fetched_at"})
+        self.assertEqual(cols, {
+            "symbol", "name", "exchange", "isin", "series", "fetched_at",
+            "avg_volume_20d", "avg_turnover_20d",
+        })
         self.assertTrue(sme_stocks.columns["symbol"].primary_key)
         self.assertFalse(sme_stocks.columns["exchange"].nullable)
 
