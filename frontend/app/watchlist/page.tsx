@@ -7,8 +7,12 @@ import HeaderSearch from '@/components/header-search';
 import AuthWidget from '@/components/auth-widget';
 
 interface LivePrice {
-  price: number;
-  change_pct: number;
+  // GET /api/prices returns an entry for every requested symbol, but it's
+  // `{}` (not omitted, not null) when the price lookup itself failed (e.g.
+  // yfinance had nothing for either the .NS or .BO suffix) — so `prices[sym]`
+  // being truthy does NOT imply these fields are actually present.
+  price?: number;
+  change_pct?: number;
 }
 
 function Skeleton({ className }: { className: string }) {
@@ -155,11 +159,11 @@ export default function WatchlistPage() {
                         </td>
                         <td className="px-4 py-4 text-right">
                           <span className="font-mono tabular-nums text-xs text-tx">
-                            {live ? `₹${live.price.toFixed(2)}` : '—'}
+                            {live?.price != null ? `₹${live.price.toFixed(2)}` : '—'}
                           </span>
                         </td>
                         <td className="px-4 py-4 text-right">
-                          {live ? (
+                          {live?.change_pct != null ? (
                             <span className={`font-mono tabular-nums text-xs font-semibold ${live.change_pct >= 0 ? 'text-buy' : 'text-sell'}`}>
                               {live.change_pct >= 0 ? '↑' : '↓'} {Math.abs(live.change_pct).toFixed(1)}%
                             </span>
