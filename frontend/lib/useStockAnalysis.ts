@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Phase, Report, SSEMessage, TaskName, TaskStatus } from '@/types';
 
 const ALL_TASKS: TaskName[] = ['stock_info', 'research', 'news', 'shareholding', 'mf_holdings'];
@@ -89,6 +89,10 @@ export function useStockAnalysis() {
   const handleHardRefresh = useCallback(() => {
     if (currentSymbol) handleAnalyse(currentSymbol, true);
   }, [currentSymbol, handleAnalyse]);
+
+  // Close the in-flight stream if the component using this hook unmounts
+  // mid-stream (e.g. /compare swapping symbols, or navigating away).
+  useEffect(() => () => { esRef.current?.close(); }, []);
 
   const isRunning = phase === 'fetching' || phase === 'analysing';
   const isIdle    = phase === 'idle';
