@@ -644,7 +644,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                   <span className="text-sm text-tx group-hover:text-accent transition-colors leading-snug">
                     {f.title ?? 'Untitled filing'}
                   </span>
-                  {meta && (
+                  {(meta || f.attachment) && (
                     <span className="text-[11px] text-muted">{meta}{f.attachment ? ' ↗' : ''}</span>
                   )}
                 </>
