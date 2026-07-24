@@ -335,14 +335,50 @@ class MarketPicksHistoryEndpointTest(unittest.TestCase):
         self._history_patch.start()
         self.addCleanup(self._history_patch.stop)
 
+        # _fetch_nifty_closes() reads/writes the real cache.py module (using
+        # "NSEI" as a pseudo-symbol) — isolate it the same way
+        # PriceHistoryEndpointTest isolates cache.CACHE_DIR, so a test that
+        # mocks yfinance to return real data can't leak into the repo's own
+        # output/ directory.
+        self._cache_tmpdir = tempfile.mkdtemp(prefix="stock-research-picks-history-cache-test-")
+        self.addCleanup(shutil.rmtree, self._cache_tmpdir, ignore_errors=True)
+        self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._cache_tmpdir))
+        self._cache_patch.start()
+        self.addCleanup(self._cache_patch.stop)
+
     def _write_snapshot(self, date: str, picks: list) -> None:
         (Path(self._tmpdir) / f"{date}.json").write_text(json.dumps({"date": date, "picks": picks}))
+
+    def _fake_nifty_ticker(self, closes: dict[str, float]) -> MagicMock:
+        idx = pd.to_datetime(list(closes.keys()))
+        df = pd.DataFrame({"Close": list(closes.values())}, index=idx)
+        fake_ticker = MagicMock()
+        fake_ticker.history.return_value = df
+        return fake_ticker
 
     def test_no_history_dir_returns_empty(self) -> None:
         shutil.rmtree(self._tmpdir)
         resp = client.get("/api/market-picks/history")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {"symbols": [], "snapshot_count": 0})
+        self.assertEqual(resp.json(), {
+            "symbols": [], "snapshot_count": 0,
+            "win_rate": None, "tier_stats": {}, "avg_alpha_pct": None,
+        })
+
+    def test_snapshot_count_preserved_when_no_symbols_have_picks(self) -> None:
+        # Regression: 3 valid daily runs happened, each finding zero picks (or
+        # picks missing a symbol) — snapshot_count must still reflect that 3
+        # runs occurred, not silently drop to 0 just because by_symbol ended
+        # up empty.
+        self._write_snapshot("2026-07-01", [])
+        self._write_snapshot("2026-07-02", [{"confidence": 50, "mention_count": 1}])  # no symbol
+        self._write_snapshot("2026-07-03", [])
+        resp = client.get("/api/market-picks/history")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["snapshot_count"], 3)
+        self.assertEqual(body["symbols"], [])
+        self.assertIsNone(body["win_rate"])
 
     def test_computes_change_pct_across_snapshots(self) -> None:
         self._write_snapshot("2026-07-01", [
@@ -351,7 +387,8 @@ class MarketPicksHistoryEndpointTest(unittest.TestCase):
         self._write_snapshot("2026-07-08", [
             {"symbol": "ABC", "confidence": 75, "mention_count": 4, "current_price": 110.0, "recommendation": "BUY"},
         ])
-        resp = client.get("/api/market-picks/history")
+        with patch("yfinance.Ticker", side_effect=ConnectionError("no network in test")):
+            resp = client.get("/api/market-picks/history")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body["snapshot_count"], 2)
@@ -368,7 +405,8 @@ class MarketPicksHistoryEndpointTest(unittest.TestCase):
         self._write_snapshot("2026-06-01", [
             {"symbol": "XYZ", "confidence": 50, "mention_count": 1},
         ])
-        resp = client.get("/api/market-picks/history")
+        with patch("yfinance.Ticker", side_effect=ConnectionError("no network in test")):
+            resp = client.get("/api/market-picks/history")
         body = resp.json()
         self.assertEqual(len(body["symbols"]), 1)
         self.assertIsNone(body["symbols"][0]["change_pct"])
@@ -378,11 +416,86 @@ class MarketPicksHistoryEndpointTest(unittest.TestCase):
         self._write_snapshot("2026-07-02", [
             {"symbol": "ABC", "confidence": 60, "mention_count": 2, "current_price": 100.0, "recommendation": "BUY"},
         ])
-        resp = client.get("/api/market-picks/history")
+        with patch("yfinance.Ticker", side_effect=ConnectionError("no network in test")):
+            resp = client.get("/api/market-picks/history")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body["snapshot_count"], 1)
         self.assertEqual(len(body["symbols"]), 1)
+
+    def test_win_rate_and_tier_stats_computed_across_symbols(self) -> None:
+        self._write_snapshot("2026-07-01", [
+            {"symbol": "WIN", "confidence": 60, "mention_count": 1, "current_price": 100.0, "recommendation": "BUY"},
+            {"symbol": "LOSE", "confidence": 60, "mention_count": 1, "current_price": 100.0, "recommendation": "BUY"},
+            {"symbol": "WATCH", "confidence": 50, "mention_count": 1, "current_price": 200.0, "recommendation": "WATCHLIST"},
+        ])
+        self._write_snapshot("2026-07-08", [
+            {"symbol": "WIN", "confidence": 70, "mention_count": 2, "current_price": 110.0, "recommendation": "BUY"},
+            {"symbol": "LOSE", "confidence": 55, "mention_count": 2, "current_price": 90.0, "recommendation": "HOLD"},
+            {"symbol": "WATCH", "confidence": 55, "mention_count": 2, "current_price": 210.0, "recommendation": "WATCHLIST"},
+        ])
+        with patch("yfinance.Ticker", side_effect=ConnectionError("no network in test")):
+            resp = client.get("/api/market-picks/history")
+        body = resp.json()
+
+        # 2 of 3 symbols (WIN, WATCH) are in profit.
+        self.assertAlmostEqual(body["win_rate"], 66.7, places=1)
+
+        self.assertEqual(body["tier_stats"]["BUY"]["count"], 2)
+        self.assertAlmostEqual(body["tier_stats"]["BUY"]["avg_change_pct"], 0.0, places=1)  # +10, -10
+        self.assertAlmostEqual(body["tier_stats"]["BUY"]["win_rate"], 50.0, places=1)
+
+        self.assertEqual(body["tier_stats"]["WATCHLIST"]["count"], 1)
+        self.assertAlmostEqual(body["tier_stats"]["WATCHLIST"]["win_rate"], 100.0, places=1)
+
+    def test_alpha_computed_against_mocked_nifty_history(self) -> None:
+        self._write_snapshot("2026-07-01", [
+            {"symbol": "ABC", "confidence": 60, "mention_count": 1, "current_price": 100.0, "recommendation": "BUY"},
+        ])
+        self._write_snapshot("2026-07-08", [
+            {"symbol": "ABC", "confidence": 70, "mention_count": 2, "current_price": 110.0, "recommendation": "BUY"},
+        ])
+        # ABC: +10%. Nifty: 20000 -> 20200 = +1%. Alpha should be +9%.
+        fake_ticker = self._fake_nifty_ticker({"2026-07-01": 20000.0, "2026-07-08": 20200.0})
+        with patch("yfinance.Ticker", return_value=fake_ticker) as mocked:
+            resp = client.get("/api/market-picks/history")
+        body = resp.json()
+        row = body["symbols"][0]
+        self.assertAlmostEqual(row["nifty_change_pct"], 1.0, places=2)
+        self.assertAlmostEqual(row["alpha_pct"], 9.0, places=2)
+        self.assertAlmostEqual(body["avg_alpha_pct"], 9.0, places=2)
+        mocked.assert_called_once_with("^NSEI")
+
+        # A second request within the TTL/range must reuse the cache — no second yfinance call.
+        with patch("yfinance.Ticker", side_effect=AssertionError("should not hit yfinance again")):
+            resp2 = client.get("/api/market-picks/history")
+        self.assertAlmostEqual(resp2.json()["symbols"][0]["alpha_pct"], 9.0, places=2)
+
+    def test_nifty_close_falls_back_to_nearest_prior_trading_day(self) -> None:
+        self._write_snapshot("2026-07-04", [  # a Saturday — market closed
+            {"symbol": "ABC", "confidence": 60, "mention_count": 1, "current_price": 100.0, "recommendation": "BUY"},
+        ])
+        self._write_snapshot("2026-07-11", [  # a Saturday — market closed
+            {"symbol": "ABC", "confidence": 70, "mention_count": 2, "current_price": 110.0, "recommendation": "BUY"},
+        ])
+        # Only Friday closes are on record; both Saturdays should fall back to them.
+        fake_ticker = self._fake_nifty_ticker({"2026-07-03": 20000.0, "2026-07-10": 20200.0})
+        with patch("yfinance.Ticker", return_value=fake_ticker):
+            resp = client.get("/api/market-picks/history")
+        row = resp.json()["symbols"][0]
+        self.assertAlmostEqual(row["nifty_change_pct"], 1.0, places=2)
+
+    def test_yfinance_failure_degrades_to_null_alpha_not_error(self) -> None:
+        self._write_snapshot("2026-07-01", [
+            {"symbol": "ABC", "confidence": 60, "mention_count": 1, "current_price": 100.0, "recommendation": "BUY"},
+        ])
+        with patch("yfinance.Ticker", side_effect=ConnectionError("boom")):
+            resp = client.get("/api/market-picks/history")
+        self.assertEqual(resp.status_code, 200)
+        row = resp.json()["symbols"][0]
+        self.assertIsNone(row["nifty_change_pct"])
+        self.assertIsNone(row["alpha_pct"])
+        self.assertIsNone(resp.json()["avg_alpha_pct"])
 
 
 class PricesEndpointTest(unittest.TestCase):

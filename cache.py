@@ -20,6 +20,7 @@ TTL_HOURS: dict[str, float] = {
     "analysis":       24,    # re-analyse daily (or when any input changes)
     "price_history":  6,     # daily-close series for sparklines — doesn't move fast
     "peers":          24,    # peer comparison table — fundamentals-like, doesn't move fast
+    "index_history":  24,    # ^NSEI daily closes for the picks-history alpha stat
 }
 
 

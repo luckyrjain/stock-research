@@ -190,11 +190,24 @@ export interface MarketPickTrackRecord {
   change_pct:          number | null;   // null if either price is missing (legacy snapshot)
   confidence_then:     number | null;
   confidence_now:      number | null;
+  nifty_change_pct:    number | null;   // ^NSEI change over the same first_seen -> last_seen window
+  alpha_pct:           number | null;   // change_pct - nifty_change_pct; null wherever either side is
+}
+
+// Per-recommendation-tier breakdown (keyed by recommendation_then, e.g. "BUY",
+// "WATCHLIST") — only over symbols with a computed change_pct.
+export interface MarketPicksTierStat {
+  count:          number;
+  avg_change_pct: number;
+  win_rate:       number;   // 0-100, share of this tier's picks with change_pct > 0
 }
 
 export interface MarketPicksHistoryResponse {
   symbols:        MarketPickTrackRecord[];
   snapshot_count: number;
+  win_rate:       number | null;   // 0-100, share of ALL picks with change_pct > 0
+  tier_stats:     Record<string, MarketPicksTierStat>;
+  avg_alpha_pct:  number | null;
 }
 
 // ── SME EMA Signals ──────────────────────────────────────────────────────────

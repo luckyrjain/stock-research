@@ -7,7 +7,7 @@ import uuid
 import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -837,22 +837,73 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
 _PICKS_HISTORY_DIR = Path("output/_history")
 
 
+def _fetch_nifty_closes(start_date: str, end_date: str) -> dict[str, float]:
+    """^NSEI daily closes covering [start_date, end_date], keyed by ISO date.
+    One yfinance request for the whole range rather than one per snapshot
+    date — cheaper and just as complete, since a ranged history() call already
+    returns every trading day's close in between. Cached via cache.py using
+    'NSEI' as a pseudo-symbol (there's no real per-symbol subject here, just
+    one shared index series) — 24h TTL, keyed to the exact range requested so
+    a newly-added snapshot date (which grows the range) forces a fresh fetch
+    rather than serving a stale range that doesn't cover it yet.
+    Best-effort: a yfinance outage degrades to {} so the endpoint still
+    returns — the alpha column/stat is simply omitted, same as any other
+    "a hiccup in one section must not fail the rest" section in this file.
+    """
+    import cache
+
+    range_key = f"{start_date}:{end_date}"
+    cached = cache.load("NSEI", "index_history")
+    if cached and cached.get("range") == range_key:
+        return cached.get("closes", {})
+
+    try:
+        import yfinance as yf
+        end_exclusive = (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = yf.Ticker("^NSEI").history(start=start_date, end=end_exclusive, interval="1d")
+        closes = {
+            idx.strftime("%Y-%m-%d"): round(float(close), 2)
+            for idx, close in hist["Close"].items()
+        }
+    except Exception:
+        return {}
+
+    if closes:
+        cache.save("NSEI", "index_history", {"range": range_key, "closes": closes})
+    return closes
+
+
+def _nifty_close_on_or_before(closes: dict[str, float], date_str: str) -> float | None:
+    """Nearest available Nifty close at or before `date_str` (a snapshot date
+    could fall on a weekend/market holiday) — never a later, look-ahead date."""
+    candidates = [d for d in closes if d <= date_str]
+    return closes[max(candidates)] if candidates else None
+
+
 @app.get("/api/market-picks/history")
 async def get_market_picks_history(request: Request):
     """Aggregate output/_history/<date>.json daily snapshots into a per-symbol
     track record: first/last seen, confidence trend, and price performance
-    since first seen. Price/recommendation were only added to the snapshot
-    schema recently — older snapshot files won't have them, so change_pct is
-    null wherever price_then or price_now is missing rather than guessed at.
+    since first seen, benchmarked against the Nifty50 over the same window.
+    Price/recommendation were only added to the snapshot schema recently —
+    older snapshot files won't have them, so change_pct (and anything derived
+    from it) is null wherever price_then or price_now is missing rather than
+    guessed at.
     """
     _rate_limit(request, "market_picks_history", max_calls=60, window_seconds=60)
 
     def _load_sync() -> dict:
+        empty = {
+            "symbols": [], "snapshot_count": 0,
+            "win_rate": None, "tier_stats": {}, "avg_alpha_pct": None,
+        }
         if not _PICKS_HISTORY_DIR.exists():
-            return {"symbols": [], "snapshot_count": 0}
+            return empty
 
         by_symbol: dict[str, list[dict]] = {}
         snapshot_count = 0
+        min_date: str | None = None
+        max_date: str | None = None
         for path in sorted(_PICKS_HISTORY_DIR.glob("*.json")):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
@@ -860,13 +911,22 @@ async def get_market_picks_history(request: Request):
                 continue
             date_str = data.get("date", path.stem)
             snapshot_count += 1
+            min_date = date_str if min_date is None else min(min_date, date_str)
+            max_date = date_str if max_date is None else max(max_date, date_str)
             for row in data.get("picks", []):
                 sym = row.get("symbol")
                 if not sym:
                     continue
                 by_symbol.setdefault(sym, []).append({**row, "date": date_str})
 
+        if not by_symbol:
+            return {**empty, "snapshot_count": snapshot_count}
+
+        nifty_closes = _fetch_nifty_closes(min_date, max_date)
+
         symbols = []
+        tier_buckets: dict[str, list[float]] = {}
+        alphas: list[float] = []
         for sym, rows in by_symbol.items():
             rows.sort(key=lambda r: r["date"])
             first, last = rows[0], rows[-1]
@@ -877,24 +937,68 @@ async def get_market_picks_history(request: Request):
                 if price_then and price_now
                 else None
             )
+
+            nifty_then = _nifty_close_on_or_before(nifty_closes, first["date"])
+            nifty_now = _nifty_close_on_or_before(nifty_closes, last["date"])
+            nifty_change_pct = (
+                round((nifty_now - nifty_then) / nifty_then * 100, 2)
+                if nifty_then and nifty_now
+                else None
+            )
+            alpha_pct = (
+                round(change_pct - nifty_change_pct, 2)
+                if change_pct is not None and nifty_change_pct is not None
+                else None
+            )
+            if alpha_pct is not None:
+                alphas.append(alpha_pct)
+
+            recommendation_then = first.get("recommendation")
+            if change_pct is not None and recommendation_then:
+                tier_buckets.setdefault(recommendation_then, []).append(change_pct)
+
             symbols.append({
                 "symbol":              sym,
                 "first_seen":          first["date"],
                 "last_seen":           last["date"],
                 "times_picked":        len(rows),
-                "recommendation_then": first.get("recommendation"),
+                "recommendation_then": recommendation_then,
                 "recommendation_now":  last.get("recommendation"),
                 "price_then":          price_then,
                 "price_now":           price_now,
                 "change_pct":          change_pct,
                 "confidence_then":     first.get("confidence"),
                 "confidence_now":      last.get("confidence"),
+                "nifty_change_pct":    nifty_change_pct,
+                "alpha_pct":           alpha_pct,
             })
 
         # Symbols with a computed change_pct first (best performers first), then
         # the rest (no price data yet) grouped at the end.
         symbols.sort(key=lambda s: (s["change_pct"] is None, -(s["change_pct"] or 0)))
-        return {"symbols": symbols, "snapshot_count": snapshot_count}
+
+        changes_with_data = [s["change_pct"] for s in symbols if s["change_pct"] is not None]
+        win_rate = (
+            round(sum(1 for c in changes_with_data if c > 0) / len(changes_with_data) * 100, 1)
+            if changes_with_data else None
+        )
+        tier_stats = {
+            tier: {
+                "count":          len(vals),
+                "avg_change_pct": round(sum(vals) / len(vals), 2),
+                "win_rate":       round(sum(1 for v in vals if v > 0) / len(vals) * 100, 1),
+            }
+            for tier, vals in tier_buckets.items()
+        }
+        avg_alpha_pct = round(sum(alphas) / len(alphas), 2) if alphas else None
+
+        return {
+            "symbols":        symbols,
+            "snapshot_count": snapshot_count,
+            "win_rate":       win_rate,
+            "tier_stats":     tier_stats,
+            "avg_alpha_pct":  avg_alpha_pct,
+        }
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _load_sync)
