@@ -356,16 +356,44 @@ level.
 1. Fetches all NSE Emerge + BSE SME stocks (`tools/sme_tools.py`, 24 h list cache)
 2. Downloads 1 year of daily OHLCV per stock via yfinance
 3. Computes EMA 20/50 over the full year; flags **golden crosses** (EMA20 crosses above
-   EMA50) and **death crosses** (crosses below); stores only the last ~3 months of rows
+   EMA50) and **death crosses** (crosses below); stores only the last ~3 months of rows.
+   Also computes avg daily volume/turnover over the last 20 trading days from the same
+   OHLCV fetch (`_compute_liquidity()` — no extra network calls) and stores it on
+   `sme_stocks` (a plain `UPDATE` via `_upsert_liquidity()`, run after `_upsert_signals()`
+   since liquidity isn't known until this phase, unlike the stock-list metadata `_upsert_stocks()`
+   writes before OHLCV is even fetched)
 4. `GET /api/sme-signals` serves cross events + current regime (`ema20 > ema50` on the
-   latest row); `POST /api/sme-signals/refresh` runs the pipeline in the background
-   (409 if already running; `refreshing` flag in the GET response)
+   latest row) + each stock's `avg_volume_20d`/`avg_turnover_20d`; `POST /api/sme-signals/refresh`
+   runs the pipeline in the background (409 if already running; `refreshing` flag in the
+   GET response)
 
 CLI: `--setup-db` (create tables), `--reset-db` (drop + recreate — required after schema
 changes; data is fully regenerable), `--force` (bypass list cache), `--lookback N`.
 
 The DB column for the cross is named `cross_type` (`'golden'`/`'death'`/`NULL`) because
 `CROSS` is a reserved SQL keyword; the API/TS field is `cross`.
+
+**Liquidity + illiquid badge**: `avg_volume_20d`/`avg_turnover_20d` on `sme_stocks` are NULL
+until the first pipeline run after this feature shipped (never invented for older data). The
+`_ILLIQUID_TURNOVER_THRESHOLD` (₹5L avg daily turnover) is a frontend-only constant in
+`frontend/app/sme-signals/page.tsx` — a stock below it gets an amber "⚠ Illiquid" badge next
+to its Turnover cell (reusing the `hold` design token; there's no separate `warning` token in
+this codebase). The threshold decision lives client-side rather than as a stored/computed
+backend field, matching how other purely-presentational thresholds (e.g. market-picks'
+large/mid/small cap buckets) are handled in this repo.
+
+**Cross outcome (forward returns)**: `GET /api/sme-signals/{symbol}/history` also returns
+`cross_events` — every cross in the stored ~3-month window, most recent first, with `ret_10d_pct`/
+`ret_20d_pct` (close price N trading days after the cross, as a % change from the close at the
+cross). Computed in Python post-fetch by `_compute_cross_events()` in `api.py`, not stored — the
+series it operates on is already small (≤ `_STORE_DAYS`) and already fetched for the EMA chart, so
+no new query or schema change was needed. A return is `null` (not a guess) if fewer than N trading
+days have elapsed since the cross within the stored window — this also means "last 3 golden
+crosses" can genuinely return fewer than 3 (or zero) for an infrequently-crossing stock, since
+`ema_signals` only retains ~100 calendar days (`_RETENTION_DAYS`) — forward-return history is
+bounded by the same retention window as everything else in this table, not a separate archive.
+`frontend/app/sme-signals/page.tsx`'s expanded row renders this as "Last N golden/death crosses
+(20d): +12%, −4%, +22%" above the EMA chart, using the same fetch the chart already makes.
 
 Daily auto-run: `.github/workflows/sme-cron.yml` runs the pipeline on GitHub Actions at
 13:00 UTC (18:30 IST) on weekdays — NSE closes 15:30 IST, so this leaves a ~3h buffer for

@@ -242,15 +242,17 @@ export interface MarketPicksDailySnapshot {
 // ── SME EMA Signals ──────────────────────────────────────────────────────────
 
 export interface SmeSignal {
-  symbol:          string;
-  name:            string | null;
-  exchange:        string;
-  trade_date:      string;           // 'YYYY-MM-DD'
-  close_price:     number | null;
-  ema20:           number | null;
-  ema50:           number | null;
-  cross:           'golden' | 'death';
-  in_golden_cross: boolean;
+  symbol:            string;
+  name:              string | null;
+  exchange:          string;
+  avg_volume_20d:    number | null;   // avg daily share volume, last 20 trading days
+  avg_turnover_20d:  number | null;   // avg daily turnover in ₹, last 20 trading days
+  trade_date:        string;           // 'YYYY-MM-DD'
+  close_price:       number | null;
+  ema20:             number | null;
+  ema50:             number | null;
+  cross:             'golden' | 'death';
+  in_golden_cross:   boolean;
 }
 
 export interface SmeSignalsResponse {
@@ -269,11 +271,24 @@ export interface SmeSignalHistoryRow {
   cross:       'golden' | 'death' | null;
 }
 
+// A past golden/death cross with forward returns — how far price moved N
+// trading days later. ret_Nd_pct is null if fewer than N trading days have
+// elapsed since the cross within the stored window (sme_ema_pipeline._STORE_DAYS,
+// ~3 months), never guessed at.
+export interface SmeCrossEvent {
+  trade_date:      string;           // 'YYYY-MM-DD'
+  cross:           'golden' | 'death';
+  close_at_cross:  number | null;
+  ret_10d_pct:     number | null;
+  ret_20d_pct:     number | null;
+}
+
 export interface SmeSignalHistoryResponse {
-  symbol:   string;
-  name:     string | null;
-  exchange: string | null;
-  series:   SmeSignalHistoryRow[];   // up to ~63 trading days, oldest first
+  symbol:        string;
+  name:          string | null;
+  exchange:      string | null;
+  series:        SmeSignalHistoryRow[];   // up to ~63 trading days, oldest first
+  cross_events:  SmeCrossEvent[];         // every cross in that window, most recent first
 }
 
 export type MarketPicksSSEMessage =

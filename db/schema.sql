@@ -3,12 +3,17 @@
 -- Or: python sme_ema_pipeline.py --setup-db
 
 CREATE TABLE IF NOT EXISTS sme_stocks (
-    symbol      VARCHAR(20) PRIMARY KEY,
-    name        TEXT,
-    exchange    VARCHAR(5)  NOT NULL,   -- 'NSE' | 'BSE'
-    isin        VARCHAR(12),
-    series      VARCHAR(10),
-    fetched_at  TIMESTAMPTZ DEFAULT NOW()
+    symbol            VARCHAR(20) PRIMARY KEY,
+    name              TEXT,
+    exchange          VARCHAR(5)  NOT NULL,   -- 'NSE' | 'BSE'
+    isin              VARCHAR(12),
+    series            VARCHAR(10),
+    fetched_at        TIMESTAMPTZ DEFAULT NOW(),
+    -- Avg daily share volume / turnover (₹) over the last 20 trading days,
+    -- from the same OHLCV fetch already done for EMA signals. NULL until the
+    -- first run that stores volume alongside close price.
+    avg_volume_20d    NUMERIC(16, 2),
+    avg_turnover_20d  NUMERIC(16, 2)
 );
 
 CREATE TABLE IF NOT EXISTS ema_signals (

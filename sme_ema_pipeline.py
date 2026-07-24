@@ -3,7 +3,9 @@ SME Stocks EMA Crossover Pipeline
 ==================================
 Fetches all Indian SME stocks (NSE Emerge + BSE SME), downloads 1 year of
 daily OHLCV, computes EMA 20 and EMA 50, detects golden/death crosses
-(EMA20 crossing EMA50) and stores the last ~3 months in PostgreSQL.
+(EMA20 crossing EMA50) and stores the last ~3 months in PostgreSQL. Also
+stores avg daily volume/turnover (last 20 trading days) per stock, from the
+same OHLCV fetch — no extra network calls — to flag illiquid names.
 
 Usage:
     python sme_ema_pipeline.py --setup-db   # create tables (idempotent)
@@ -62,7 +64,16 @@ def _fetch_ohlcv(stock: dict) -> dict:
         df = yf.Ticker(ticker).history(period=_OHLCV_PERIOD, interval="1d", auto_adjust=True)
         if df.empty:
             return {"error": f"no data returned by yfinance", "symbol": symbol}
-        df = df[["Close"]].dropna()
+        # Keep Volume alongside Close (used for liquidity, see _compute_liquidity)
+        # — only require Close to be present; a legitimately illiquid day can
+        # have zero volume, which dropna(subset=["Close"]) correctly keeps.
+        # Volume is normally always present for equities, but if yfinance ever
+        # omits it for some ticker, EMA/cross detection must still succeed —
+        # only the liquidity figure (already optional downstream) is lost.
+        cols = ["Close", "Volume"] if "Volume" in df.columns else ["Close"]
+        df = df[cols].dropna(subset=["Close"])
+        if "Volume" in df.columns:
+            df["Volume"] = df["Volume"].fillna(0)
         return {"symbol": symbol, "exchange": exchange, "df": df}
     except Exception as exc:
         return {"error": str(exc), "symbol": symbol}
@@ -127,6 +138,32 @@ def _safe_float(val) -> float | None:
         return None
 
 
+_LIQUIDITY_WINDOW_DAYS = 20
+
+
+def _compute_liquidity(result: dict) -> dict | None:
+    """Avg daily share volume / turnover (₹) over the last _LIQUIDITY_WINDOW_DAYS
+    trading days, from the same OHLCV fetch already done for EMA signals — no
+    extra network calls. None if the stock errored out or has no trading days
+    at all (never invents a liquidity figure from partial/missing data).
+    """
+    if "error" in result:
+        return None
+    symbol = result["symbol"]
+    df = result["df"]
+    if df.empty or "Volume" not in df.columns:
+        return None
+
+    window = df.tail(_LIQUIDITY_WINDOW_DAYS)
+    avg_volume = window["Volume"].mean()
+    avg_turnover = (window["Close"] * window["Volume"]).mean()
+    return {
+        "symbol":           symbol,
+        "avg_volume_20d":   _safe_float(avg_volume),
+        "avg_turnover_20d": _safe_float(avg_turnover),
+    }
+
+
 # ── Phase 4: PostgreSQL writes ────────────────────────────────────────────────
 
 def _upsert_stocks(engine, stocks: list[dict]) -> None:
@@ -179,6 +216,27 @@ def _upsert_signals(engine, rows: list[dict]) -> None:
             )
             total += len(batch)
     log_event(LOGGER, "sme_signals_upserted", count=total)
+
+
+def _upsert_liquidity(engine, rows: list[dict]) -> None:
+    """Update sme_stocks' avg_volume_20d/avg_turnover_20d. A separate pass
+    from _upsert_stocks (Phase 1, before OHLCV is fetched) since liquidity
+    isn't known until Phase 3 — an UPDATE, not an upsert, since the row
+    already exists by the time this runs."""
+    if not rows:
+        return
+    with engine.begin() as conn:
+        for r in rows:
+            conn.execute(
+                text("""
+                    UPDATE sme_stocks
+                    SET avg_volume_20d   = :avg_volume_20d,
+                        avg_turnover_20d = :avg_turnover_20d
+                    WHERE symbol = :symbol
+                """),
+                r,
+            )
+    log_event(LOGGER, "sme_liquidity_upserted", count=len(rows))
 
 
 def _prune_signals(engine) -> None:
@@ -284,16 +342,21 @@ def run(force: bool = False, lookback_days: int = _LOOKBACK_DAYS) -> bool:
                 ohlcv_ok.append(res)
     log_event(LOGGER, "sme_ohlcv_fetch_completed", fetched=len(ohlcv_ok), errors=errors)
 
-    # Phase 3: compute EMAs + golden/death cross flags
+    # Phase 3: compute EMAs + golden/death cross flags, and liquidity
     log_event(LOGGER, "sme_phase_started", phase="compute_ema_crosses")
     all_rows = []
+    liquidity_rows = []
     for res in ohlcv_ok:
         all_rows.extend(_compute_ema_signals(res))
+        liq = _compute_liquidity(res)
+        if liq:
+            liquidity_rows.append(liq)
     log_event(LOGGER, "sme_signal_rows_computed", rows=len(all_rows), stocks=len(ohlcv_ok))
 
     # Phase 4: write to PostgreSQL
     log_event(LOGGER, "sme_phase_started", phase="write_postgres")
     _upsert_signals(engine, all_rows)
+    _upsert_liquidity(engine, liquidity_rows)
     _prune_signals(engine)
 
     # Phase 5: print crossover summary

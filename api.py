@@ -1250,6 +1250,8 @@ async def get_sme_signals(
                     s.symbol,
                     s.name,
                     s.exchange,
+                    s.avg_volume_20d::float   AS avg_volume_20d,
+                    s.avg_turnover_20d::float AS avg_turnover_20d,
                     e.trade_date::text   AS trade_date,
                     e.close_price::float AS close_price,
                     e.ema20::float       AS ema20,
@@ -1297,10 +1299,50 @@ async def get_sme_signals(
         raise HTTPException(status_code=503, detail="Database error. See server logs.")
 
 
+_CROSS_OUTCOME_WINDOWS = (10, 20)
+
+
+def _compute_cross_events(series: list[dict]) -> list[dict]:
+    """For every cross-flagged row in an ascending (trade_date ASC) series,
+    compute close-price forward returns N trading days later. A bare "golden
+    cross on date X" says nothing about what past crosses on this stock
+    actually did; this gives it outcome context. Since `series` is already
+    the full stored window (sme_ema_pipeline._STORE_DAYS, ~3 months), a
+    forward return can only be computed if that many trading days have
+    actually elapsed since the cross within this same window — otherwise the
+    return field is None (never guessed at, same "never invent" convention as
+    everywhere else in this pipeline). Most-recent cross first.
+    """
+    events = []
+    for i, row in enumerate(series):
+        if not row.get("cross"):
+            continue
+        close_at_cross = row.get("close_price")
+        event = {
+            "trade_date":     row["trade_date"],
+            "cross":          row["cross"],
+            "close_at_cross": close_at_cross,
+        }
+        for window in _CROSS_OUTCOME_WINDOWS:
+            future_idx = i + window
+            ret = None
+            if close_at_cross and future_idx < len(series):
+                future_close = series[future_idx].get("close_price")
+                if future_close is not None:
+                    ret = round((future_close - close_at_cross) / close_at_cross * 100, 2)
+            event[f"ret_{window}d_pct"] = ret
+        events.append(event)
+    events.reverse()
+    return events
+
+
 @app.get("/api/sme-signals/{symbol}/history")
 async def get_sme_signal_history(symbol: str):
     """Return the stored EMA20/EMA50/close series for one SME stock, for charting
     around a golden/death cross. Up to ~63 trading days (sme_ema_pipeline._STORE_DAYS).
+    Also returns cross_events: every cross in that window with its forward
+    return (see _compute_cross_events) — e.g. "last 3 golden crosses: +12%,
+    -4%, +22% over 20d" instead of a bare "golden cross on date X."
     """
     import os
 
@@ -1329,11 +1371,13 @@ async def get_sme_signal_history(symbol: str):
                 SELECT name, exchange FROM sme_stocks WHERE symbol = :symbol
             """), {"symbol": sym}).mappings().first()
 
+        series = [dict(r) for r in rows]
         return {
-            "symbol":   sym,
-            "name":     stock["name"] if stock else None,
-            "exchange": stock["exchange"] if stock else None,
-            "series":   [dict(r) for r in rows],
+            "symbol":       sym,
+            "name":         stock["name"] if stock else None,
+            "exchange":     stock["exchange"] if stock else None,
+            "series":       series,
+            "cross_events": _compute_cross_events(series),
         }
 
     loop = asyncio.get_running_loop()
