@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useEffect, Suspense } from 'react';
+import { useRef, useEffect, useState, Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import TickerSearch     from '@/components/ticker-search';
@@ -9,6 +9,13 @@ import ResultsDashboard from '@/components/results-dashboard';
 import HeaderSearch     from '@/components/header-search';
 import AuthWidget       from '@/components/auth-widget';
 import { useStockAnalysis } from '@/lib/useStockAnalysis';
+
+// Matches api.py's _is_isin(). A deep-linked ISIN (used for BSE SME stocks,
+// whose own scrip code isn't a directly analyzable ticker — see
+// sme-signals/page.tsx) has to be resolved to a real ticker via
+// /api/validate first, the same resolution ticker-search.tsx already does
+// for user-typed ISINs — /api/analyse expects an actual ticker, not an ISIN.
+const ISIN_RE = /^[A-Z]{2}[A-Z0-9]{9}[0-9]$/;
 
 function HomePageInner() {
   const {
@@ -19,14 +26,32 @@ function HomePageInner() {
 
   const searchParams = useSearchParams();
   const deepLinkDone = useRef(false);
+  const [resolving, setResolving] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
 
   // Deep link: /?symbol=TCS auto-starts analysis (used by SME signals page links)
   useEffect(() => {
-    const sym = searchParams.get('symbol');
-    if (sym && !deepLinkDone.current) {
-      deepLinkDone.current = true;
-      handleAnalyse(sym.toUpperCase());
+    const sym = searchParams.get('symbol')?.toUpperCase();
+    if (!sym || deepLinkDone.current) return;
+    deepLinkDone.current = true;
+
+    if (!ISIN_RE.test(sym)) {
+      handleAnalyse(sym);
+      return;
     }
+
+    setResolving(true);
+    fetch(`/api/validate/${encodeURIComponent(sym)}`)
+      .then(res => res.json())
+      .then((data: { valid?: boolean; symbol?: string }) => {
+        if (data.valid && data.symbol) {
+          handleAnalyse(data.symbol);
+        } else {
+          setResolveError(`Couldn't resolve ${sym} to an analyzable ticker.`);
+        }
+      })
+      .catch(() => setResolveError(`Couldn't resolve ${sym} to an analyzable ticker.`))
+      .finally(() => setResolving(false));
   }, [searchParams, handleAnalyse]);
 
   return (
@@ -63,6 +88,16 @@ function HomePageInner() {
                 </Link>
               </div>
             </div>
+
+            {resolving && (
+              <p className="text-center text-muted text-xs mb-4">Resolving listing…</p>
+            )}
+            {resolveError && (
+              <div className="mb-6 px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm text-center">
+                {resolveError}
+              </div>
+            )}
+
             <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} />
           </div>
         ) : (

@@ -863,6 +863,32 @@ class SmeSignalsEndpointTest(unittest.TestCase):
         self.assertEqual(body["signals"][0]["avg_volume_20d"], 12000.0)
         self.assertEqual(body["signals"][0]["avg_turnover_20d"], 240000.0)
 
+    def test_bse_row_isin_flows_through_to_response(self) -> None:
+        # A BSE row's own scrip code isn't a directly analyzable ticker (see
+        # sme-signals/page.tsx) — the frontend deep-links via isin instead, so
+        # it must survive the SELECT -> response round trip untouched.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        fake_engine = _fake_sme_engine(
+            rows=[{"symbol": "543212", "exchange": "BSE", "cross": "golden", "isin": "INE123A01011"}],
+            total_monitored=1, golden_now=1, last_run=None,
+        )
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.get("/api/sme-signals")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["signals"][0]["isin"], "INE123A01011")
+
+    def test_nse_row_isin_is_null(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        fake_engine = _fake_sme_engine(
+            rows=[{"symbol": "ABC", "exchange": "NSE", "cross": "golden", "isin": None}],
+            total_monitored=1, golden_now=1, last_run=None,
+        )
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.get("/api/sme-signals")
+
+        self.assertIsNone(resp.json()["signals"][0]["isin"])
+
     def test_db_error_returns_sanitized_503(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         with patch("api._get_db_engine", side_effect=RuntimeError("connection refused: password exposed")):
@@ -936,6 +962,7 @@ class SmeSignalsEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("DISTINCT ON (s.symbol)", captured_sql[0])
         self.assertNotIn("cross_type IS NOT NULL", captured_sql[0])
+        self.assertIn("s.isin", captured_sql[0])
 
     def test_crosses_view_query_keeps_cross_type_filter(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
@@ -943,6 +970,38 @@ class SmeSignalsEndpointTest(unittest.TestCase):
         with patch("api._get_db_engine", return_value=fake_engine):
             resp = client.get("/api/sme-signals?view=crosses")
         self.assertEqual(resp.status_code, 200)
+
+    def test_crosses_view_query_selects_isin(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        captured_sql: list[str] = []
+
+        class _RecordingConn:
+            def __init__(self) -> None:
+                results = [MagicMock() for _ in range(5)]
+                results[0].mappings.return_value.fetchall.return_value = []
+                results[1].scalar.return_value = 0
+                results[2].scalar.return_value = 0
+                results[3].scalar.return_value = None
+                results[4].mappings.return_value.first.return_value = {"sample_size": 0, "wins": 0}
+                self._results = results
+
+            def execute(self, stmt, *args, **kwargs):
+                captured_sql.append(str(stmt))
+                return self._results.pop(0)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        engine = MagicMock()
+        engine.connect.return_value = _RecordingConn()
+        with patch("api._get_db_engine", return_value=engine):
+            resp = client.get("/api/sme-signals?view=crosses")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("s.isin", captured_sql[0])
 
 
 class SmeSignalHistoryEndpointTest(unittest.TestCase):

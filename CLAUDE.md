@@ -452,6 +452,23 @@ support this; in the default crosses view `cross` is never null (guaranteed by t
 `WHERE e.cross_type IS NOT NULL`). The frontend's Period/Direction filter chips are hidden in
 regime view since they don't apply.
 
+**BSE deep-link resolution**: an NSE row's `symbol` is already a directly analyzable ticker,
+so it deep-links straight to `/?symbol=<symbol>`. A BSE SME row's `symbol` is BSE's own numeric
+scrip code, which isn't — `/api/analyse/{symbol}` passes its input straight through to
+yfinance/Screener.in/NSE-API calls with no resolution step, so it needs the same ISIN-based
+resolution `/api/validate/{symbol}` already does for a user-typed ISIN (see "Symbol validation
+flow" above). `GET /api/sme-signals` now selects `s.isin` in both views (`null` for NSE rows —
+`tools/sme_tools.py`'s NSE fetch never populates it; present for BSE rows when BSE's own list
+API reported one). The frontend deep-links a BSE row via `/?symbol=<isin>` when `isin` is set
+(plain, unclickable text otherwise), and the home page's deep-link handler
+(`frontend/app/page.tsx`) detects an ISIN-shaped `?symbol=` value and resolves it through
+`GET /api/validate/{isin}` first — same resolution `ticker-search.tsx` already does for
+user-typed ISINs — before starting the actual analysis SSE stream, showing a brief "Resolving
+listing…" state and a dedicated error message if resolution fails (never silently retrying the
+raw ISIN as if it were a ticker). This only applies to genuinely ISIN-shaped deep links — every
+other existing deep link (NSE rows, market-picks, consolidated card) is already a resolved
+ticker and skips this extra round trip entirely, unchanged.
+
 Daily auto-run: `.github/workflows/sme-cron.yml` runs the pipeline on GitHub Actions at
 13:00 UTC (18:30 IST) on weekdays — NSE closes 15:30 IST, so this leaves a ~3h buffer for
 end-of-day data to settle. Requires a `DATABASE_URL` repository secret pointing at a

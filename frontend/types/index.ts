@@ -245,6 +245,12 @@ export interface SmeSignal {
   symbol:            string;
   name:              string | null;
   exchange:          string;
+  // Populated for BSE SME stocks (BSE's own list API reports it); always
+  // null for NSE rows, which already have a directly analyzable ticker in
+  // `symbol` and don't need it. Used to deep-link a BSE row to /?symbol=<isin>
+  // since the raw BSE scrip code in `symbol` isn't analyzable on its own —
+  // see the home page's deep-link handling.
+  isin:              string | null;
   avg_volume_20d:    number | null;   // avg daily share volume, last 20 trading days
   avg_turnover_20d:  number | null;   // avg daily turnover in ₹, last 20 trading days
   market_cap_cr:     number | null;   // ₹ Cr, via yfinance fast_info
