@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 
 import sme_ema_pipeline
-from sme_ema_pipeline import _compute_ema_signals, _compute_liquidity, _STORE_DAYS
+from sme_ema_pipeline import _compute_ema_signals, _compute_liquidity, _fetch_ohlcv, _STORE_DAYS
 
 
 def _make_result(closes: list[float], volumes: list[float] | None = None) -> dict:
@@ -16,6 +16,38 @@ def _make_result(closes: list[float], volumes: list[float] | None = None) -> dic
         data["Volume"] = volumes
     df = pd.DataFrame(data, index=idx)
     return {"symbol": "TESTSME", "exchange": "NSE", "df": df}
+
+
+def _fake_yf_history(**cols) -> pd.DataFrame:
+    idx = pd.to_datetime([date(2026, 1, 1) + timedelta(days=i) for i in range(len(next(iter(cols.values()))))])
+    return pd.DataFrame(cols, index=idx)
+
+
+class FetchOhlcvTest(unittest.TestCase):
+    """EMA/cross detection must keep working even if yfinance ever omits
+    Volume for some ticker — only the liquidity figure should be lost, not
+    the whole fetch (see _compute_liquidity, which already tolerates a
+    missing Volume column)."""
+
+    def test_keeps_close_and_volume_when_both_present(self) -> None:
+        hist = _fake_yf_history(Close=[10.0, 11.0], Volume=[100.0, 200.0], Open=[9.0, 10.0])
+        fake_ticker = MagicMock()
+        fake_ticker.history.return_value = hist
+        with patch.object(sme_ema_pipeline.yf, "Ticker", return_value=fake_ticker):
+            result = _fetch_ohlcv({"symbol": "ABC", "exchange": "NSE"})
+        self.assertNotIn("error", result)
+        self.assertIn("Volume", result["df"].columns)
+        self.assertEqual(list(result["df"]["Volume"]), [100.0, 200.0])
+
+    def test_succeeds_without_error_when_volume_column_missing(self) -> None:
+        hist = _fake_yf_history(Close=[10.0, 11.0], Open=[9.0, 10.0])
+        fake_ticker = MagicMock()
+        fake_ticker.history.return_value = hist
+        with patch.object(sme_ema_pipeline.yf, "Ticker", return_value=fake_ticker):
+            result = _fetch_ohlcv({"symbol": "ABC", "exchange": "NSE"})
+        self.assertNotIn("error", result)
+        self.assertNotIn("Volume", result["df"].columns)
+        self.assertEqual(list(result["df"]["Close"]), [10.0, 11.0])
 
 
 class ComputeEmaSignalsTest(unittest.TestCase):

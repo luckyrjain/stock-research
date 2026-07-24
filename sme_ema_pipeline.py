@@ -67,8 +67,13 @@ def _fetch_ohlcv(stock: dict) -> dict:
         # Keep Volume alongside Close (used for liquidity, see _compute_liquidity)
         # — only require Close to be present; a legitimately illiquid day can
         # have zero volume, which dropna(subset=["Close"]) correctly keeps.
-        df = df[["Close", "Volume"]].dropna(subset=["Close"])
-        df["Volume"] = df["Volume"].fillna(0)
+        # Volume is normally always present for equities, but if yfinance ever
+        # omits it for some ticker, EMA/cross detection must still succeed —
+        # only the liquidity figure (already optional downstream) is lost.
+        cols = ["Close", "Volume"] if "Volume" in df.columns else ["Close"]
+        df = df[cols].dropna(subset=["Close"])
+        if "Volume" in df.columns:
+            df["Volume"] = df["Volume"].fillna(0)
         return {"symbol": symbol, "exchange": exchange, "df": df}
     except Exception as exc:
         return {"error": str(exc), "symbol": symbol}
