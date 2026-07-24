@@ -90,9 +90,7 @@ _RATE_LIMIT_CALLS: dict[str, list[float]] = {}
 _RATE_LIMIT_LOCK = threading.Lock()
 
 
-def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: float) -> None:
-    client_ip = request.client.host if request.client else "unknown"
-    key = f"{bucket}:{client_ip}"
+def _check_rate_limit(key: str, max_calls: int, window_seconds: float) -> None:
     now = time.monotonic()
     with _RATE_LIMIT_LOCK:
         calls = [t for t in _RATE_LIMIT_CALLS.get(key, []) if now - t < window_seconds]
@@ -104,6 +102,11 @@ def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: f
             )
         calls.append(now)
         _RATE_LIMIT_CALLS[key] = calls
+
+
+def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: float) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(f"{bucket}:{client_ip}", max_calls, window_seconds)
 
 
 # A dedicated, explicitly-sized executor for this app's blocking work (LLM
@@ -1229,6 +1232,7 @@ _HIT_RATE_FORWARD_TRADING_DAYS = 20  # "follow-through" horizon, matching the
 
 @app.get("/api/sme-signals")
 async def get_sme_signals(
+    request: Request,
     lookback:  int = Query(5, ge=1, le=30, description="Days back to check for crosses"),
     direction: str = Query("all", description="all | golden | death"),
     view:      str = Query("crosses", description="crosses | regime"),
@@ -1241,6 +1245,8 @@ async def get_sme_signals(
     to filter by.
     """
     import os
+
+    _rate_limit(request, "sme_signals", max_calls=60, window_seconds=60)
 
     if direction not in ("all", "golden", "death"):
         raise HTTPException(status_code=422, detail="direction must be one of: all, golden, death")
@@ -1755,6 +1761,10 @@ async def request_magic_link(request: Request, body: AuthRequestLinkRequest):
     email = body.email.lower().strip()
     if len(email) > 320 or not _EMAIL_RE.match(email):
         raise HTTPException(status_code=422, detail="Invalid email address.")
+    # The IP-keyed limit above doesn't stop an attacker with rotating IPs from
+    # email-bombing one victim's inbox — each IP gets its own fresh budget.
+    # Also cap by the target address itself, independent of caller IP.
+    _check_rate_limit(f"auth_request_link_email:{email}", max_calls=5, window_seconds=3600)
     if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
 

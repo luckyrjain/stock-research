@@ -43,7 +43,7 @@ class CreateMagicLinkTest(unittest.TestCase):
         auth._ENGINE = None
 
     def test_inserts_hashed_token_and_returns_raw_token(self) -> None:
-        conn = _FakeConn([MagicMock()])
+        conn = _FakeConn([MagicMock(), MagicMock(), MagicMock()])
         fake_engine = MagicMock()
         fake_engine.begin.return_value = conn
 
@@ -52,11 +52,29 @@ class CreateMagicLinkTest(unittest.TestCase):
 
         self.assertIsInstance(token, str)
         self.assertGreater(len(token), 20)
-        args, _kwargs = conn.calls[0]
+        # The INSERT is the last of the three statements (two prune DELETEs
+        # run first — see test_prunes_expired_rows_before_inserting).
+        args, _kwargs = conn.calls[-1]
         _stmt, params = args
         self.assertEqual(params["email"], "user@example.com")
         self.assertEqual(params["token_hash"], auth._hash_token(token))
         self.assertNotEqual(params["token_hash"], token)
+
+    def test_prunes_expired_rows_before_inserting(self) -> None:
+        conn = _FakeConn([MagicMock(), MagicMock(), MagicMock()])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = conn
+
+        with patch("auth._get_engine", return_value=fake_engine):
+            auth.create_magic_link("user@example.com")
+
+        self.assertEqual(len(conn.calls), 3)
+        first_stmt = str(conn.calls[0][0][0])
+        second_stmt = str(conn.calls[1][0][0])
+        self.assertIn("DELETE FROM magic_links", first_stmt)
+        self.assertIn("expires_at < NOW()", first_stmt)
+        self.assertIn("DELETE FROM sessions", second_stmt)
+        self.assertIn("expires_at < NOW()", second_stmt)
 
     def test_raises_on_db_failure(self) -> None:
         with patch("auth._get_engine", side_effect=RuntimeError("connection refused")):

@@ -8,7 +8,14 @@ const THIRTY_DAYS_SECONDS = 60 * 60 * 24 * 30;
 export function getSessionTokenFromRequest(req: Request): string | null {
   const cookieHeader = req.headers.get('cookie') ?? '';
   const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${AUTH_COOKIE_NAME}=([^;]+)`));
-  return match ? decodeURIComponent(match[1]) : null;
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    // Malformed cookie (stray/truncated %-escape) — treat like no session
+    // rather than letting an unhandled throw surface as a 500.
+    return null;
+  }
 }
 
 export function setSessionCookieHeader(token: string): string {

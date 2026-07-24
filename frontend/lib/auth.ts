@@ -14,6 +14,10 @@ export interface AuthUser {
 // and signed out.
 let cachedUser: AuthUser | null | undefined;
 let inFlight: Promise<AuthUser | null> | null = null;
+// Bumped by refreshAuth() so a stale fetch already in flight (started before
+// a refresh was requested) can't clobber the fresher result if it happens to
+// resolve after it — the classic out-of-order-response race.
+let generation = 0;
 const listeners = new Set<() => void>();
 
 function notify(): void {
@@ -22,14 +26,17 @@ function notify(): void {
 
 async function fetchMe(): Promise<AuthUser | null> {
   if (inFlight) return inFlight;
+  const myGeneration = generation;
   inFlight = fetch('/api/auth/me', { cache: 'no-store' })
     .then(res => (res.ok ? res.json() : { user: null }))
     .then((data: { user?: AuthUser | null }) => data.user ?? null)
     .catch(() => null)
     .finally(() => { inFlight = null; });
   const user = await inFlight;
-  cachedUser = user;
-  notify();
+  if (myGeneration === generation) {
+    cachedUser = user;
+    notify();
+  }
   return user;
 }
 
@@ -37,6 +44,7 @@ async function fetchMe(): Promise<AuthUser | null> {
  * call after a successful /auth/verify so the nav bar picks up the new
  * session without a full page reload. */
 export function refreshAuth(): Promise<AuthUser | null> {
+  generation++;
   inFlight = null;
   return fetchMe();
 }

@@ -25,9 +25,15 @@ export async function GET(req: Request) {
   }
 
   const data = await upstream.json();
-  const res = Response.json(data, { status: upstream.status });
   if (upstream.ok && data.session_token) {
-    res.headers.append('Set-Cookie', setSessionCookieHeader(data.session_token));
+    // Never echo the raw token back to the browser — it goes into the
+    // httpOnly cookie only. Returning it in the JSON body too would let any
+    // page-level JS (or XSS) read the live session token straight out of the
+    // fetch response, defeating the point of the httpOnly cookie.
+    const { session_token, ...body } = data;
+    const res = Response.json(body, { status: upstream.status });
+    res.headers.append('Set-Cookie', setSessionCookieHeader(session_token));
+    return res;
   }
-  return res;
+  return Response.json(data, { status: upstream.status });
 }

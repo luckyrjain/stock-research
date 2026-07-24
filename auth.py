@@ -59,6 +59,12 @@ def create_magic_link(email: str) -> str:
     expires_at = datetime.now(timezone.utc) + MAGIC_LINK_TTL
     engine = _get_engine()
     with engine.begin() as conn:
+        # Opportunistic prune of expired rows on this write path — mirrors
+        # _prune_extract_cache()'s "delete stale entries on the next write"
+        # convention rather than a separate scheduled job. Both tables only
+        # grow from auth traffic, so a request-link call is a natural trigger.
+        conn.execute(text("DELETE FROM magic_links WHERE expires_at < NOW()"))
+        conn.execute(text("DELETE FROM sessions WHERE expires_at < NOW()"))
         conn.execute(text("""
             INSERT INTO magic_links (email, token_hash, expires_at)
             VALUES (:email, :token_hash, :expires_at)

@@ -818,11 +818,19 @@ class SmeSignalsEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
         api._DB_ENGINE = None
+        api._RATE_LIMIT_CALLS.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
         api._DB_ENGINE = None
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_rate_limited_returns_429(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        api._RATE_LIMIT_CALLS["sme_signals:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/sme-signals")
+        self.assertEqual(resp.status_code, 429)
 
     def test_invalid_direction_returns_422_even_without_db(self) -> None:
         resp = client.get("/api/sme-signals?direction=sideways")
@@ -1459,6 +1467,23 @@ class AuthRequestLinkEndpointTest(unittest.TestCase):
         api._RATE_LIMIT_CALLS["auth_request_link:testclient"] = [api.time.monotonic()] * 5
         resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
         self.assertEqual(resp.status_code, 429)
+
+    def test_email_rate_limited_returns_429_even_from_a_fresh_ip(self) -> None:
+        # Per-IP limiting alone doesn't stop an attacker with rotating IPs
+        # from email-bombing one victim's inbox — the target address itself
+        # must also be capped, independent of caller IP.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        api._RATE_LIMIT_CALLS["auth_request_link_email:victim@example.com"] = [api.time.monotonic()] * 5
+        resp = client.post("/api/auth/request-link", json={"email": "victim@example.com"})
+        self.assertEqual(resp.status_code, 429)
+
+    def test_email_rate_limit_is_scoped_per_address(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        api._RATE_LIMIT_CALLS["auth_request_link_email:someone-else@example.com"] = [api.time.monotonic()] * 5
+        with patch("auth.create_magic_link", return_value="raw-token"), \
+             patch("email_sender.send_magic_link_email", return_value=True):
+            resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
+        self.assertEqual(resp.status_code, 200)
 
 
 class AuthVerifyEndpointTest(unittest.TestCase):

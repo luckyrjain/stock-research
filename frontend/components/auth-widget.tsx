@@ -11,13 +11,24 @@ export default function AuthWidget() {
   const { user, loading, logout } = useAuth();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     function onClickOutside(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    }
     document.addEventListener('mousedown', onClickOutside);
-    return () => document.removeEventListener('mousedown', onClickOutside);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onClickOutside);
+      document.removeEventListener('keydown', onKeyDown);
+    };
   }, []);
 
   if (loading) return null;
@@ -36,15 +47,18 @@ export default function AuthWidget() {
   return (
     <div className="relative" ref={ref}>
       <button
+        ref={triggerRef}
         onClick={() => setOpen(o => !o)}
         aria-haspopup="true"
         aria-expanded={open}
+        aria-controls="auth-widget-menu"
         className="text-xs font-semibold text-muted hover:text-accent transition-colors max-w-[12rem] truncate"
       >
         {user.email}
       </button>
       {open && (
         <div
+          id="auth-widget-menu"
           role="menu"
           className="absolute right-0 mt-2 w-44 rounded-lg bg-card border border-border shadow-lg py-1 z-20"
         >

@@ -92,6 +92,35 @@ class ComputeEmaSignalsTest(unittest.TestCase):
     def test_error_result_returns_empty_list(self) -> None:
         self.assertEqual(_compute_ema_signals({"error": "no data", "symbol": "X"}), [])
 
+    def test_rsi14_and_volume_spike_flow_through_to_stored_rows(self) -> None:
+        # Exercises the real row-assembly path (df["rsi14"]/df["volume_spike"]
+        # -> _safe_float / pd.notna -> the returned dict), not just the pure
+        # _compute_rsi/_compute_volume_spike helpers in isolation — a wiring
+        # bug here (wrong column read, inverted bool cast) wouldn't be caught
+        # by the isolated ComputeRsiTest/ComputeVolumeSpikeTest suites alone.
+        closes = [100.0 + i for i in range(40)]
+        volumes = [1_000.0] * 39 + [10_000.0]  # spike only on the final day
+        rows = _compute_ema_signals(_make_result(closes, volumes))
+
+        # First _RSI_PERIOD rows have no RSI yet (not enough history).
+        self.assertIsNone(rows[0]["rsi14"])
+        self.assertIsNotNone(rows[-1]["rsi14"])
+        self.assertGreater(rows[-1]["rsi14"], 0)
+        self.assertLessEqual(rows[-1]["rsi14"], 100)
+
+        # First _VOLUME_SPIKE_WINDOW_DAYS rows have no average yet -> None,
+        # never silently False.
+        self.assertIsNone(rows[0]["volume_spike"])
+        self.assertTrue(rows[-1]["volume_spike"])
+        # A day with volume in line with its trailing average is not a spike.
+        steady_day = rows[-2]
+        self.assertFalse(steady_day["volume_spike"])
+
+    def test_volume_spike_is_none_without_volume_column(self) -> None:
+        closes = [100.0 + i for i in range(40)]
+        rows = _compute_ema_signals(_make_result(closes))  # no volumes passed
+        self.assertTrue(all(r["volume_spike"] is None for r in rows))
+
 
 class ComputeLiquidityTest(unittest.TestCase):
     def test_averages_last_20_trading_days(self) -> None:

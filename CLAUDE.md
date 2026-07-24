@@ -494,23 +494,34 @@ and still keyed by `client_id`; signing in doesn't currently claim or merge it o
 account (a deliberate scope call — see the Tier 2 product-queue discussion this shipped
 from).
 
-1. **Request a link** — `POST /api/auth/request-link` (`{email}`), rate-limited (5/15 min
-   per IP). `auth.create_magic_link(email)` stores a single-use token (only its SHA-256 hash
-   is persisted — the raw token exists only in the outbound email and the process memory
-   that generated it) with a 15-minute expiry in the `magic_links` table, then
-   `email_sender.send_magic_link_email()` emails a link pointing at `{FRONTEND_URL}/auth/verify?token=...`.
-   The response is always `{"sent": true}` regardless of whether SMTP delivery actually
-   succeeded (logged server-side as a warning) — this avoids leaking SMTP configuration
-   state, and a link that failed to send once still works if the caller re-requests after
-   SMTP is fixed.
+1. **Request a link** — `POST /api/auth/request-link` (`{email}`), rate-limited both per-IP
+   (5/15 min) and per-target-address (5/hour) — the address-keyed limit exists because an
+   attacker with rotating IPs would otherwise get a fresh 5/15min budget per IP and could
+   email-bomb one victim's inbox indefinitely. `auth.create_magic_link(email)` opportunistically
+   prunes expired `magic_links`/`sessions` rows (same "delete stale entries on the next write"
+   convention as `_prune_extract_cache()` — these tables only grow from auth traffic, so a
+   request-link call is a natural trigger) before storing a single-use token (only its SHA-256
+   hash is persisted — the raw token exists only in the outbound email and the process memory
+   that generated it) with a 15-minute expiry, then `email_sender.send_magic_link_email()` emails
+   a link pointing at `{FRONTEND_URL}/auth/verify?token=...`. The response is always
+   `{"sent": true}` regardless of whether SMTP delivery actually succeeded (logged server-side
+   as a warning) — this avoids leaking SMTP configuration state, and a link that failed to send
+   once still works if the caller re-requests after SMTP is fixed.
 2. **Verify** — the browser opens `/auth/verify?token=...` (a Next.js page, not the FastAPI
-   endpoint directly — the cookie has to be set on the frontend's own origin), which calls
+   endpoint directly — the cookie has to be set on the frontend's own origin), which shows a
+   "Complete sign-in" button rather than firing the verify call automatically on page load —
+   corporate email "safe link" pre-fetchers (Outlook Safe Links, Proofpoint, etc.) crawl links
+   in emails before a human opens them, and an auto-firing `GET` would let the scanner consume
+   the single-use token first and lock the real user out. Clicking the button calls
    `GET /api/auth/verify?token=`. `auth.verify_magic_link()` atomically consumes the token
    (`UPDATE ... WHERE used_at IS NULL AND expires_at > NOW() ... RETURNING`, so two
    concurrent clicks of the same link can't both win) and get-or-creates the `users` row for
    its email — there's no separate signup; the first successful link click *is* account
    creation. `auth.create_session()` then issues a session token (30-day expiry, same
-   hash-only-storage convention as magic links) tied to that user.
+   hash-only-storage convention as magic links) tied to that user. The response body never
+   echoes the raw session token back to the caller past the one proxy hop that sets the
+   cookie (see step 3) — only `{user}` reaches page-level JS, so an XSS on this origin can't
+   read a live session token out of a fetch response.
 3. **Cookie handoff** — `frontend/app/api/auth/verify/route.ts` is the one proxy route that
    isn't a pure passthrough: on a successful backend response it also sets the raw session
    token as an httpOnly, `SameSite=Lax` cookie (`alphapulse_session`) on the Next.js origin,

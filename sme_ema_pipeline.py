@@ -170,13 +170,20 @@ _RSI_PERIOD = 14
 
 
 def _compute_rsi(close: pd.Series) -> pd.Series:
-    """Wilder's RSI(14) — standard momentum-screener confirmation alongside
-    the EMA cross. NaN for the first _RSI_PERIOD rows (not enough history to
-    smooth over yet); a completely flat price (no gains or losses at all,
-    vanishingly rare for a real stock) is treated as neutral (50), not
-    undefined, since a straight-up (avg_loss == 0, avg_gain > 0) or
-    straight-down (avg_gain == 0, avg_loss > 0) move already resolves
-    correctly to 100/0 through plain float division.
+    """RSI(14), Wilder-style exponential smoothing via pandas ewm — standard
+    momentum-screener confirmation alongside the EMA cross. Note this isn't a
+    bit-exact match to textbook Wilder's method (which seeds avg_gain/avg_loss
+    with a plain mean of the first 14 deltas before switching to smoothing;
+    ewm(adjust=False) instead seeds recursively from the very first delta) —
+    the difference only affects the first handful of post-warmup values and
+    has fully decayed away by the time anything here gets stored (only the
+    last _STORE_DAYS rows of a full year's fetch are ever persisted).
+    NaN for the first _RSI_PERIOD rows (not enough history to smooth over
+    yet); a completely flat price (no gains or losses at all, vanishingly
+    rare for a real stock) is treated as neutral (50), not undefined, since a
+    straight-up (avg_loss == 0, avg_gain > 0) or straight-down (avg_gain ==
+    0, avg_loss > 0) move already resolves correctly to 100/0 through plain
+    float division.
     """
     delta = close.diff()
     gain = delta.clip(lower=0)
