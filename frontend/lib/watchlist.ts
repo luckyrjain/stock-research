@@ -39,7 +39,11 @@ function notify(): void {
 async function fetchItems(): Promise<WatchlistItem[]> {
   if (inFlight) return inFlight;
   const clientId = getClientId();
-  inFlight = fetch(`/api/watchlist?client_id=${encodeURIComponent(clientId)}`)
+  // client_id is always sent, but the backend transparently prefers a valid
+  // account session over it when one is present (see api.py's
+  // _resolve_watchlist_owner) — this fetch doesn't need to know which
+  // identity actually served the request.
+  inFlight = fetch(`/api/watchlist?client_id=${encodeURIComponent(clientId)}`, { cache: 'no-store' })
     .then(res => (res.ok ? res.json() : { items: [] }))
     .then((data: { items?: WatchlistItem[] }) => data.items ?? [])
     .catch(() => [])
@@ -48,6 +52,17 @@ async function fetchItems(): Promise<WatchlistItem[]> {
   cachedItems = items;
   notify();
   return items;
+}
+
+/** Re-fetches /api/watchlist and updates every subscribed useWatchlist()
+ * instance — call after sign-in/sign-out so the watchlist switches between
+ * the account's rows and the anonymous client_id's rows without a full page
+ * reload (the module-level cache above otherwise has no way to know the
+ * caller's identity changed). */
+export function refreshWatchlist(): Promise<WatchlistItem[]> {
+  cachedItems = null;
+  inFlight = null;
+  return fetchItems();
 }
 
 /** Shared cross-component watchlist state, backed by Postgres (watchlist_items,

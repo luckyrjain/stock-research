@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { refreshWatchlist } from '@/lib/watchlist';
 
 export interface AuthUser {
   id: number;
@@ -85,6 +86,10 @@ export function useAuth() {
     } finally {
       cachedUser = null;
       notify();
+      // The watchlist's own module-level cache has no way to know the
+      // caller's identity just changed back to the anonymous client_id —
+      // without this it would keep showing the account's rows post-logout.
+      refreshWatchlist();
     }
   }, []);
 

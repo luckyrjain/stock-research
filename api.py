@@ -1516,52 +1516,85 @@ async def refresh_sme_signals(request: Request):
 
 
 # ── Watchlist ─────────────────────────────────────────────────────────────────
-# No account system exists yet — client_id is a UUID the frontend generates on
-# first use and keeps in localStorage (see frontend/lib/watchlist.ts). This is
-# not real multi-device sync, but the rows themselves live in Postgres, not
-# only in one browser's localStorage.
+# Every row is owned by exactly one identity: either the anonymous per-browser
+# client_id (a UUID the frontend generates on first use and keeps in
+# localStorage — see frontend/lib/watchlist.ts) or, once signed in, the
+# account's user_id (see auth.py). A valid session always wins over client_id
+# when both are present in a request — that's the whole point of an account:
+# it doesn't depend on which browser sent the request. Signing in does NOT
+# claim/merge an existing client_id's rows onto the account (see
+# db/models.py's watchlist_items comment) — a freshly-signed-in user simply
+# starts seeing whatever their account already owns.
 _CLIENT_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,36}$")  # matches watchlist_items.client_id VARCHAR(36)
 _MAX_WATCHLIST_ITEMS_PER_CLIENT = 200
 _VALID_EXCHANGES = {"NSE", "BSE"}
 
+# (owner_type, owner_value) — owner_type is "user" (owner_value: int user id)
+# or "client" (owner_value: str client_id). Never constructed directly outside
+# _resolve_watchlist_owner, so owner_type is always one of exactly these two
+# literals wherever it's used to pick a column name below.
+WatchlistOwner = tuple
 
-def _require_client_id(client_id: str) -> str:
-    if not _CLIENT_ID_RE.match(client_id or ""):
-        raise HTTPException(status_code=422, detail="Invalid client_id.")
-    return client_id
+
+def _resolve_watchlist_owner(token: str | None, client_id: str | None) -> WatchlistOwner:
+    """A valid session always takes priority over client_id. Runs inside the
+    same executor thread as the caller's other DB work, since checking the
+    session also hits the DB. Raises ValueError (-> 422) if neither a valid
+    session nor a well-formed client_id is available — this endpoint doesn't
+    otherwise require being signed in, so an expired/invalid token just falls
+    through to the client_id path rather than surfacing as a 401."""
+    if token:
+        import auth as _auth
+        user = _auth.get_user_for_session(token)
+        if user:
+            return ("user", user["id"])
+    if not client_id or not _CLIENT_ID_RE.match(client_id):
+        raise ValueError("Invalid client_id.")
+    return ("client", client_id)
+
+
+def _owner_column(owner: WatchlistOwner) -> str:
+    return "user_id" if owner[0] == "user" else "client_id"
 
 
 class WatchlistAddRequest(BaseModel):
-    client_id: str
+    client_id: str | None = None
     symbol: str
     company: str = Field(default="")
     exchange: str = Field(default="NSE")
 
 
-def _watchlist_rows_sync(client_id: str) -> list[dict]:
+def _watchlist_rows_sync(owner: WatchlistOwner) -> list[dict]:
     from sqlalchemy import text as _text
 
+    column = _owner_column(owner)
     engine = _get_db_engine()
     with engine.connect() as conn:
-        rows = conn.execute(_text("""
+        rows = conn.execute(_text(f"""
             SELECT symbol, company, exchange, added_at::text AS "addedAt"
             FROM watchlist_items
-            WHERE client_id = :client_id
+            WHERE {column} = :owner_value
             ORDER BY added_at DESC
-        """), {"client_id": client_id}).mappings().fetchall()
+        """), {"owner_value": owner[1]}).mappings().fetchall()
     return [dict(r) for r in rows]
 
 
 @app.get("/api/watchlist")
-async def get_watchlist(request: Request, client_id: str = Query(...)):
+async def get_watchlist(request: Request, client_id: str | None = Query(None)):
     _rate_limit(request, "watchlist_read", max_calls=120, window_seconds=60)
-    _require_client_id(client_id)
     if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+    token = _bearer_token_from_request(request)
+
+    def _sync() -> list[dict]:
+        owner = _resolve_watchlist_owner(token, client_id)
+        return _watchlist_rows_sync(owner)
 
     loop = asyncio.get_running_loop()
     try:
-        items = await loop.run_in_executor(None, _watchlist_rows_sync, client_id)
+        items = await loop.run_in_executor(None, _sync)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
         log_event(LOGGER, "watchlist_read_failed", level="error", error=str(exc))
         raise HTTPException(status_code=503, detail="Database error. See server logs.")
@@ -1571,7 +1604,6 @@ async def get_watchlist(request: Request, client_id: str = Query(...)):
 @app.post("/api/watchlist")
 async def add_to_watchlist(request: Request, body: WatchlistAddRequest):
     _rate_limit(request, "watchlist_write", max_calls=60, window_seconds=60)
-    _require_client_id(body.client_id)
     symbol = body.symbol.upper().strip()
     if not _TICKER_RE.match(symbol):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
@@ -1580,30 +1612,37 @@ async def add_to_watchlist(request: Request, body: WatchlistAddRequest):
         raise HTTPException(status_code=422, detail="Invalid exchange.")
     if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+    token = _bearer_token_from_request(request)
 
     def _upsert_sync() -> list[dict]:
         from sqlalchemy import text as _text
 
+        owner = _resolve_watchlist_owner(token, body.client_id)
+        column = _owner_column(owner)
+        # Distinct lock-key namespace per owner type so a client_id string and
+        # a user_id integer can never collide on the same advisory lock.
+        lock_key = f"watchlist:{owner[0]}:{owner[1]}"
+
         engine = _get_db_engine()
         with engine.begin() as conn:
             # Advisory lock scoped to this transaction (released automatically on
-            # commit/rollback) serializes concurrent adds for the same client_id, so
+            # commit/rollback) serializes concurrent adds for the same owner, so
             # the count-then-insert below can't race past _MAX_WATCHLIST_ITEMS_PER_CLIENT.
-            conn.execute(_text("SELECT pg_advisory_xact_lock(hashtext(:client_id))"), {"client_id": body.client_id})
+            conn.execute(_text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"), {"lock_key": lock_key})
             count = conn.execute(_text(
-                "SELECT COUNT(*) FROM watchlist_items WHERE client_id = :client_id"
-            ), {"client_id": body.client_id}).scalar() or 0
+                f"SELECT COUNT(*) FROM watchlist_items WHERE {column} = :owner_value"
+            ), {"owner_value": owner[1]}).scalar() or 0
             if count >= _MAX_WATCHLIST_ITEMS_PER_CLIENT:
                 raise ValueError(f"Watchlist is capped at {_MAX_WATCHLIST_ITEMS_PER_CLIENT} stocks.")
-            conn.execute(_text("""
-                INSERT INTO watchlist_items (client_id, symbol, company, exchange)
-                VALUES (:client_id, :symbol, :company, :exchange)
-                ON CONFLICT (client_id, symbol) DO NOTHING
+            conn.execute(_text(f"""
+                INSERT INTO watchlist_items ({column}, symbol, company, exchange)
+                VALUES (:owner_value, :symbol, :company, :exchange)
+                ON CONFLICT ({column}, symbol) DO NOTHING
             """), {
-                "client_id": body.client_id, "symbol": symbol,
+                "owner_value": owner[1], "symbol": symbol,
                 "company": body.company[:200], "exchange": exchange,
             })
-        return _watchlist_rows_sync(body.client_id)
+        return _watchlist_rows_sync(owner)
 
     loop = asyncio.get_running_loop()
     try:
@@ -1617,28 +1656,33 @@ async def add_to_watchlist(request: Request, body: WatchlistAddRequest):
 
 
 @app.delete("/api/watchlist/{symbol}")
-async def remove_from_watchlist(request: Request, symbol: str, client_id: str = Query(...)):
+async def remove_from_watchlist(request: Request, symbol: str, client_id: str | None = Query(None)):
     _rate_limit(request, "watchlist_write", max_calls=60, window_seconds=60)
-    _require_client_id(client_id)
     sym = symbol.upper().strip()
     if not _TICKER_RE.match(sym):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
     if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+    token = _bearer_token_from_request(request)
 
     def _delete_sync() -> list[dict]:
         from sqlalchemy import text as _text
 
+        owner = _resolve_watchlist_owner(token, client_id)
+        column = _owner_column(owner)
+
         engine = _get_db_engine()
         with engine.begin() as conn:
             conn.execute(_text(
-                "DELETE FROM watchlist_items WHERE client_id = :client_id AND symbol = :symbol"
-            ), {"client_id": client_id, "symbol": sym})
-        return _watchlist_rows_sync(client_id)
+                f"DELETE FROM watchlist_items WHERE {column} = :owner_value AND symbol = :symbol"
+            ), {"owner_value": owner[1], "symbol": sym})
+        return _watchlist_rows_sync(owner)
 
     loop = asyncio.get_running_loop()
     try:
         items = await loop.run_in_executor(None, _delete_sync)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
         log_event(LOGGER, "watchlist_write_failed", level="error", error=str(exc))
         raise HTTPException(status_code=503, detail="Database error. See server logs.")

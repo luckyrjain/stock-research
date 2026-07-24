@@ -38,11 +38,14 @@ CREATE TABLE IF NOT EXISTS ema_signals (
 CREATE INDEX IF NOT EXISTS idx_ema_signals_date  ON ema_signals(trade_date);
 CREATE INDEX IF NOT EXISTS idx_ema_signals_cross ON ema_signals(cross_type);
 
--- Cross-mode watchlist. No account system yet — client_id is a UUID the
--- frontend generates on first use and keeps in localStorage.
+-- Cross-mode watchlist. Each row is owned by exactly one identity: the
+-- anonymous per-browser client_id (a UUID the frontend keeps in
+-- localStorage) or, once accounts exist below, user_id — never both, never
+-- neither. user_id/its FK/CHECK/UNIQUE are added via ALTER TABLE further
+-- down, after the users table exists (this file runs top-to-bottom).
 CREATE TABLE IF NOT EXISTS watchlist_items (
     id          SERIAL PRIMARY KEY,
-    client_id   VARCHAR(36)  NOT NULL,
+    client_id   VARCHAR(36),
     symbol      VARCHAR(20)  NOT NULL,
     company     VARCHAR(200),
     exchange    VARCHAR(5),
@@ -71,13 +74,23 @@ CREATE INDEX IF NOT EXISTS idx_verdict_history_symbol ON verdict_history(symbol)
 
 -- Minimal magic-link auth (see auth.py). No passwords. A user row is created
 -- on first successful link click, not via a separate signup step. Existing
--- watchlist_items/positions stay keyed by the anonymous client_id — accounts
--- are additive, not a migration.
+-- anonymous client_id data is never migrated onto an account — accounts are
+-- additive, not a migration.
 CREATE TABLE IF NOT EXISTS users (
     id          SERIAL PRIMARY KEY,
     email       VARCHAR(320) NOT NULL UNIQUE,
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Links watchlist_items to an account, now that users exists. Exactly one of
+-- client_id/user_id must be set per row (see the comment on watchlist_items'
+-- own CREATE TABLE above) — enforced by ck_watchlist_exactly_one_owner.
+ALTER TABLE watchlist_items
+    ADD COLUMN user_id INTEGER REFERENCES users(id),
+    ADD CONSTRAINT ck_watchlist_exactly_one_owner CHECK ((client_id IS NULL) <> (user_id IS NULL)),
+    ADD CONSTRAINT uq_watchlist_user_symbol UNIQUE (user_id, symbol);
+
+CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist_items(user_id);
 
 -- Single-use, short-lived sign-in tokens. Only a SHA-256 hash of the token is
 -- stored — the raw token exists only in the email itself and the process
