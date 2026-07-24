@@ -117,11 +117,61 @@ def _extract_latest_metric_from_tables(soup: BeautifulSoup, labels: tuple[str, .
     return ""
 
 
+def _extract_quarterly_trend(soup: BeautifulSoup, max_periods: int = 8) -> dict:
+    """Sales/EPS mini-trend from Screener's Quarterly Results table
+    (section#quarters) — the same company page `get_fundamentals` already
+    fetches, so this is free (no extra network round trip). Oldest-first,
+    capped to the most recent `max_periods` quarters, matching PriceHistory's
+    convention. Returns {} rather than a partial/misaligned series if either
+    row is missing or any of the last `max_periods` cells doesn't parse as a
+    number (e.g. "-" for a pre-IPO period) — never guess at a gap."""
+    section = soup.find("section", {"id": "quarters"})
+    if not section:
+        return {}
+    table = section.find("table")
+    if not table:
+        return {}
+
+    header_cells = table.select("thead tr th")
+    periods = [_clean(th.get_text(" ", strip=True)) for th in header_cells[1:]]
+
+    def _row_values(row_labels: tuple[str, ...]) -> list[float | None] | None:
+        normalized = tuple(label.lower().replace(" ", "") for label in row_labels)
+        for row in table.select("tbody tr"):
+            cells = row.find_all(["th", "td"])
+            if len(cells) < 2:
+                continue
+            row_label = _clean(cells[0].get_text(" ", strip=True)).lower().replace(" ", "")
+            if not any(lbl in row_label for lbl in normalized):
+                continue
+            values: list[float | None] = []
+            for cell in cells[1:]:
+                raw = _clean(cell.get_text(" ", strip=True))
+                try:
+                    values.append(float(raw))
+                except ValueError:
+                    values.append(None)
+            return values
+        return None
+
+    revenue = _row_values(("Sales", "Revenue"))
+    eps = _row_values(("EPS in Rs", "EPS"))
+    if not periods or revenue is None or eps is None:
+        return {}
+
+    n = min(len(periods), len(revenue), len(eps), max_periods)
+    periods_n, revenue_n, eps_n = periods[-n:], revenue[-n:], eps[-n:]
+    if n < 2 or any(v is None for v in revenue_n) or any(v is None for v in eps_n):
+        return {}
+
+    return {"quarters": periods_n, "revenue": revenue_n, "eps": eps_n}
+
+
 @tool("Get Screener.in Fundamentals")
 def get_fundamentals(symbol: str) -> str:
     """Scrape key financial ratios and fundamentals from Screener.in for an Indian stock.
     Returns Market Cap, Current Price, P/E, Book Value, Dividend Yield, ROCE, ROE,
-    Sales, Net Profit, and company description.
+    Sales, Net Profit, company description, and a quarterly Sales/EPS mini-trend.
     Input: NSE stock symbol, e.g. RELIANCE, TCS, INFY."""
     try:
         soup = _fetch_soup(symbol)
@@ -152,7 +202,12 @@ def get_fundamentals(symbol: str) -> str:
         )
         about = about_el.get_text(strip=True)[:600] if about_el else ""
 
-        return json.dumps({"symbol": symbol.upper(), "ratios": ratios, "about": about})
+        payload = {"symbol": symbol.upper(), "ratios": ratios, "about": about}
+        quarterly_trend = _extract_quarterly_trend(soup)
+        if quarterly_trend:
+            payload["quarterly_trend"] = quarterly_trend
+
+        return json.dumps(payload)
     except Exception as e:
         return json.dumps({"error": str(e), "symbol": symbol})
 
@@ -238,8 +293,9 @@ def get_peer_comparison(symbol: str) -> str:
 
 @tool("Get Shareholding Pattern and Mutual Fund Holdings")
 def get_holdings(symbol: str) -> str:
-    """Scrape shareholding pattern (Promoters %, FIIs %, DIIs %, Public %) and top mutual fund
-    holdings from Screener.in for an Indian stock. Returns latest quarter data.
+    """Scrape shareholding pattern (Promoters %, FIIs %, DIIs %, Public %), promoter
+    pledge %, and top mutual fund holdings from Screener.in for an Indian stock.
+    Returns latest quarter data.
     Input: NSE stock symbol, e.g. RELIANCE, TCS, INFY."""
     try:
         soup = _fetch_soup(symbol)
@@ -261,9 +317,17 @@ def get_holdings(symbol: str) -> str:
                         latest = cells[-1].get_text(strip=True).replace("%", "").strip()
                         if category and latest and category != "No. of Shareholders":
                             try:
-                                result["shareholding_pattern"][category] = float(latest)
+                                value = float(latest)
                             except ValueError:
-                                pass
+                                continue
+                            # Screener surfaces promoter pledge as its own row
+                            # (e.g. "Pledged percentage") within this same
+                            # table rather than as a shareholder category —
+                            # pull it into its own field, not the category dict.
+                            if "pledge" in category.lower():
+                                result["pledge_pct"] = value
+                            else:
+                                result["shareholding_pattern"][category] = value
 
         return json.dumps(result)
     except Exception as e:

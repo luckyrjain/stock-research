@@ -71,6 +71,7 @@ def _norm_research(d: dict) -> dict:
         "symbol": d.get("symbol", ""),
         "ratios": d.get("ratios", {}),
         "about":  d.get("about", ""),
+        "quarterly_trend": d.get("quarterly_trend", {}),
     }
 
 
@@ -94,6 +95,7 @@ def _norm_shareholding(d: dict) -> dict:
     return {
         "symbol":               d.get("symbol", ""),
         "shareholding_pattern": d.get("shareholding_pattern", {}),
+        "pledge_pct":           d.get("pledge_pct"),
     }
 
 
@@ -136,7 +138,10 @@ CONTRACTS: dict[str, dict] = {
         "required":  ["symbol", "mutual_funds"],
         "normalize": _norm_mf_holdings,
     },
-    "filings": _norm_filings
+    "filings": {
+        "required":  [],
+        "normalize": _norm_filings,
+    },
 }
 
 

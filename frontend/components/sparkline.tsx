@@ -3,10 +3,11 @@ interface Props {
   width?: number;
   height?: number;
   className?: string;
+  ariaLabel?: string;
 }
 
 // Vector SVG sparkline per design.md §7 — stroke color tracks buy/sell (rising/falling).
-export default function Sparkline({ closes, width = 96, height = 28, className = '' }: Props) {
+export default function Sparkline({ closes, width = 96, height = 28, className = '', ariaLabel }: Props) {
   if (closes.length < 2) return null;
 
   const min = Math.min(...closes);
@@ -30,7 +31,7 @@ export default function Sparkline({ closes, width = 96, height = 28, className =
       preserveAspectRatio="none"
       className={`${rising ? 'text-buy' : 'text-sell'} ${className}`}
       role="img"
-      aria-label={`Price trend, ${rising ? 'up' : 'down'} over the shown period`}
+      aria-label={ariaLabel ?? `Price trend, ${rising ? 'up' : 'down'} over the shown period`}
     >
       <polyline
         points={points}

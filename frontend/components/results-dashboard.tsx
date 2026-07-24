@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import type { PeerComparison, PriceHistory, Report, StockInfo, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
+import type { PeerComparison, PriceHistory, QuarterlyTrend, Report, StockInfo, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
 import InfoTooltip from './info-tooltip';
 import Sparkline from './sparkline';
 import WatchlistButton from './watchlist-button';
@@ -190,6 +190,50 @@ function VerdictTimeline({ symbol }: { symbol: string }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// Two mini-sparklines (Revenue, EPS) over the last few quarters — reuses the
+// Sparkline component built for the price-history strip in the hero, just
+// fed a different numeric series each time.
+function QuarterlyTrendCard({ trend }: { trend: QuarterlyTrend | undefined }) {
+  if (!trend || trend.quarters.length < 2) return null;
+  const latest = trend.quarters[trend.quarters.length - 1];
+
+  return (
+    <Card title="Quarterly Trend">
+      <p className="text-[11px] text-muted mb-3">Last {trend.quarters.length} quarters, through {latest}</p>
+      <div className="space-y-4">
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-sm text-muted">Revenue</span>
+            <span className="font-mono font-semibold text-tx text-sm">
+              ₹{fmt(trend.revenue[trend.revenue.length - 1], 0)} Cr
+            </span>
+          </div>
+          <Sparkline
+            closes={trend.revenue}
+            width={220}
+            height={32}
+            ariaLabel={`Quarterly revenue trend over the last ${trend.quarters.length} quarters`}
+          />
+        </div>
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-sm text-muted">EPS</span>
+            <span className="font-mono font-semibold text-tx text-sm">
+              ₹{fmt(trend.eps[trend.eps.length - 1], 2)}
+            </span>
+          </div>
+          <Sparkline
+            closes={trend.eps}
+            width={220}
+            height={32}
+            ariaLabel={`Quarterly EPS trend over the last ${trend.quarters.length} quarters`}
+          />
+        </div>
+      </div>
+    </Card>
   );
 }
 
@@ -569,6 +613,8 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
             </Card>
           )}
 
+          <QuarterlyTrendCard trend={r?.quarterly_trend} />
+
           <PeerTable peers={peers} />
 
           {a?.valuation && (
@@ -656,6 +702,17 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {h?.shareholding_pattern && Object.keys(h.shareholding_pattern).length > 0 && (
           <Card title="Shareholding Pattern">
+            {h.pledge_pct != null && (
+              <div className={`flex items-center justify-between text-sm mb-3 pb-3 border-b border-border ${
+                h.pledge_pct > 0 ? 'text-sell' : 'text-muted'
+              }`}>
+                <span className="flex items-center gap-1.5">
+                  {h.pledge_pct > 0 && <span aria-hidden="true">⚠</span>}
+                  Promoter Pledge
+                </span>
+                <span className="font-mono font-semibold">{fmt(h.pledge_pct, 1)}%</span>
+              </div>
+            )}
             {Object.entries(h.shareholding_pattern).map(([k, v]) => (
               <div key={k} className="mb-2 last:mb-0">
                 <div className="flex justify-between text-sm mb-1">

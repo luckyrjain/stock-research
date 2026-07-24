@@ -71,17 +71,28 @@ export interface Filing {
   attachment: string | null;   // URL to the NSE PDF, when NSE provides one
 }
 
+// Quarterly Sales/EPS mini-trend scraped from Screener's Quarterly Results
+// table — same page fundamentals already fetches, so it's free. Oldest first,
+// same convention as PriceHistory. Absent/empty when Screener doesn't expose
+// a clean, fully-numeric window for both rows (e.g. a recent IPO).
+export interface QuarterlyTrend {
+  quarters: string[];   // e.g. "Mar 2024", oldest first
+  revenue:  number[];   // aligned with quarters
+  eps:      number[];   // aligned with quarters
+}
+
 export interface Report {
   symbol: string;
   generated_at: string;
   analysis: Partial<Analysis>;
   signals?: Partial<SignalSummary>;
   stock_info: Partial<StockInfo>;
-  research: { ratios?: Record<string, string>; about?: string };
+  research: { ratios?: Record<string, string>; about?: string; quarterly_trend?: QuarterlyTrend };
   news: { title: string; source: string; published_at: string; url: string }[];
   holdings: {
     shareholding_pattern?: Record<string, number>;
     mutual_funds?: { fund: string; holding_pct: number }[];
+    pledge_pct?: number | null;   // promoter pledge %, from the same shareholding fetch
   };
   filings: Filing[];   // corporate announcements — also what signals.filings feeds on
 }

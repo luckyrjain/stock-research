@@ -9,6 +9,7 @@ from tools.screener_tools import (
     _extract_compounded_growth,
     _extract_growth_metrics,
     _extract_latest_metric_from_tables,
+    _extract_quarterly_trend,
     _parse_peer_table,
     _resolve_screener_slug,
     get_fundamentals,
@@ -126,6 +127,34 @@ class GetFundamentalsTest(unittest.TestCase):
         self.assertIn("error", result)
         self.assertEqual(result["symbol"], "TCS")
 
+    def test_includes_quarterly_trend_when_present(self) -> None:
+        html = """
+        <html><body>
+          <ul id="top-ratios"></ul>
+          <section id="quarters">
+            <table>
+              <thead><tr><th></th><th>Mar 2024</th><th>Jun 2024</th></tr></thead>
+              <tbody>
+                <tr><td>Sales</td><td>1000</td><td>1100</td></tr>
+                <tr><td>EPS in Rs</td><td>10</td><td>11</td></tr>
+              </tbody>
+            </table>
+          </section>
+        </body></html>
+        """
+        with patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup(html, "lxml")):
+            result_str = get_fundamentals.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertEqual(result["quarterly_trend"]["quarters"], ["Mar 2024", "Jun 2024"])
+        self.assertEqual(result["quarterly_trend"]["revenue"], [1000.0, 1100.0])
+
+    def test_omits_quarterly_trend_when_absent(self) -> None:
+        html = "<html><body><ul id='top-ratios'></ul></body></html>"
+        with patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup(html, "lxml")):
+            result_str = get_fundamentals.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertNotIn("quarterly_trend", result)
+
 
 class GetHoldingsTest(unittest.TestCase):
     def test_parses_latest_quarter_shareholding(self) -> None:
@@ -158,6 +187,103 @@ class GetHoldingsTest(unittest.TestCase):
             result_str = get_holdings.run(symbol="TCS")
         result = json.loads(result_str)
         self.assertIn("error", result)
+
+    def test_extracts_pledge_percentage_into_own_field(self) -> None:
+        html = """
+        <html><body>
+          <section id="shareholding">
+            <table><tbody>
+              <tr><td>Promoters+</td><td>50%</td><td>52.5%</td></tr>
+              <tr><td>Pledged percentage</td><td>0%</td><td>3.2%</td></tr>
+              <tr><td>FIIs</td><td>10%</td><td>12%</td></tr>
+            </tbody></table>
+          </section>
+        </body></html>
+        """
+        with patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup(html, "lxml")):
+            result_str = get_holdings.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertEqual(result["pledge_pct"], 3.2)
+        self.assertNotIn("Pledged percentage", result["shareholding_pattern"])
+        self.assertEqual(result["shareholding_pattern"]["Promoters"], 52.5)
+
+    def test_no_pledge_row_omits_pledge_field(self) -> None:
+        html = """
+        <html><body>
+          <section id="shareholding">
+            <table><tbody>
+              <tr><td>Promoters+</td><td>50%</td></tr>
+            </tbody></table>
+          </section>
+        </body></html>
+        """
+        with patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup(html, "lxml")):
+            result_str = get_holdings.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertNotIn("pledge_pct", result)
+
+
+class ExtractQuarterlyTrendTest(unittest.TestCase):
+    def _table_html(self, sales_row: str = None, eps_row: str = None) -> str:
+        rows = []
+        if sales_row is not None:
+            rows.append(f"<tr><td>Sales</td>{sales_row}</tr>")
+        if eps_row is not None:
+            rows.append(f"<tr><td>EPS in Rs</td>{eps_row}</tr>")
+        return f"""
+        <section id="quarters">
+          <table>
+            <thead><tr><th></th><th>Mar 2024</th><th>Jun 2024</th><th>Sep 2024</th></tr></thead>
+            <tbody>{''.join(rows)}</tbody>
+          </table>
+        </section>
+        """
+
+    def test_extracts_aligned_revenue_and_eps_series(self) -> None:
+        html = self._table_html(
+            sales_row="<td>1000</td><td>1100</td><td>1200</td>",
+            eps_row="<td>10.5</td><td>11.0</td><td>11.8</td>",
+        )
+        soup = BeautifulSoup(html, "lxml")
+        trend = _extract_quarterly_trend(soup)
+        self.assertEqual(trend["quarters"], ["Mar 2024", "Jun 2024", "Sep 2024"])
+        self.assertEqual(trend["revenue"], [1000.0, 1100.0, 1200.0])
+        self.assertEqual(trend["eps"], [10.5, 11.0, 11.8])
+
+    def test_caps_to_max_periods(self) -> None:
+        html = """
+        <section id="quarters">
+          <table>
+            <thead><tr><th></th><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th></tr></thead>
+            <tbody>
+              <tr><td>Sales</td><td>100</td><td>200</td><td>300</td><td>400</td></tr>
+              <tr><td>EPS in Rs</td><td>1</td><td>2</td><td>3</td><td>4</td></tr>
+            </tbody>
+          </table>
+        </section>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        trend = _extract_quarterly_trend(soup, max_periods=2)
+        self.assertEqual(trend["quarters"], ["Q3", "Q4"])
+        self.assertEqual(trend["revenue"], [300.0, 400.0])
+        self.assertEqual(trend["eps"], [3.0, 4.0])
+
+    def test_missing_section_returns_empty_dict(self) -> None:
+        soup = BeautifulSoup("<html></html>", "lxml")
+        self.assertEqual(_extract_quarterly_trend(soup), {})
+
+    def test_missing_eps_row_returns_empty_dict(self) -> None:
+        html = self._table_html(sales_row="<td>1000</td><td>1100</td><td>1200</td>")
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(_extract_quarterly_trend(soup), {})
+
+    def test_unparseable_cell_in_window_returns_empty_dict(self) -> None:
+        html = self._table_html(
+            sales_row="<td>-</td><td>1100</td><td>1200</td>",
+            eps_row="<td>10.5</td><td>11.0</td><td>11.8</td>",
+        )
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(_extract_quarterly_trend(soup), {})
 
 
 class ParsePeerTableTest(unittest.TestCase):
