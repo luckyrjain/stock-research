@@ -256,6 +256,32 @@ Provider is auto-detected from whichever key is present (checked in the order ab
 7. `crew.run_analysis_with_fallback()` calls `litellm.completion` in a thread; the SSE loop sends heartbeats (`: heartbeat`) every 15s while waiting
 8. Final `done` event carries the merged report dict
 
+### Peer comparison flow (`GET /api/peers/{symbol}`)
+
+Answers "is this ratio actually cheap/expensive for its sector" — something the
+analyst prompt explicitly won't do (`config/analyst.json`: "Never invent
+benchmarks or sector averages that are not in the data"). Real peer data closes
+that gap without touching the analyst step at all:
+
+1. `tools/screener_tools.py::get_peer_comparison()` scrapes Screener.in's own
+   Peer comparison table (`section#peers`) — the company's row, up to 5 sector
+   peers, and Screener's own sector-median row when present. Column parsing is
+   driven entirely by the table's own headers (`_parse_peer_table()`), not a
+   hardcoded schema, since the ratio set varies by sector (a bank's peer table
+   looks nothing like an IT company's).
+2. `api.py`'s `_compute_peer_percentiles()` ranks the company against its peers
+   for every column both sides report (mean-rank percentile, 0-100). A ratio
+   Screener doesn't expose for that sector (or that no peer reports) is simply
+   absent from `percentiles` — never guessed or backfilled.
+3. Cached like the six data slices (24 h TTL) but intentionally outside
+   `ALL_DATA_TASKS` — a standalone, on-demand comparison fetched by the frontend
+   after the main report loads, same pattern as `price_history` for sparklines.
+4. `results-dashboard.tsx`'s `usePeerComparison()` hook fetches once and feeds
+   both the dedicated "Peer Comparison" table and small percentile badges next
+   to matching rows in the existing "Fundamentals" card — `normalizeRatioKey()`
+   bridges the two independent label sets (the research task's own ratio names
+   vs. Screener's peer-table column headers, e.g. "ROCE" vs "ROCE %").
+
 ### Symbol validation flow (`GET /api/validate/{symbol}`)
 
 Handles three input forms:

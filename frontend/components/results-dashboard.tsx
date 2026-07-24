@@ -1,10 +1,107 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import type { PriceHistory, Report, StockInfo } from '@/types';
+import { useEffect, useMemo, useState } from 'react';
+import type { PeerComparison, PriceHistory, Report, StockInfo } from '@/types';
 import InfoTooltip from './info-tooltip';
 import Sparkline from './sparkline';
 import WatchlistButton from './watchlist-button';
+
+// Bridges ratio labels between two independent sources — the analyst-facing
+// "research" task's own ratio names (e.g. "P/E", "ROCE") and Screener's peer
+// table's column headers (e.g. "P/E", "ROCE %") — so a percentile computed
+// against one set of labels can still be looked up against the other.
+function normalizeRatioKey(key: string): string {
+  return key.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function usePeerComparison(symbol: string): PeerComparison | null {
+  const [peers, setPeers] = useState<PeerComparison | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPeers(null);
+    fetch(`/api/peers/${encodeURIComponent(symbol)}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then((data: PeerComparison | null) => { if (!cancelled) setPeers(data); })
+      .catch(() => { if (!cancelled) setPeers(null); });
+    return () => { cancelled = true; };
+  }, [symbol]);
+
+  return peers;
+}
+
+function PercentileBadge({ value }: { value: number }) {
+  return (
+    <span
+      title={`${Math.round(value)}th percentile among sector peers`}
+      className="ml-1.5 text-[9px] font-semibold px-1.5 py-0.5 rounded-full
+                 bg-accent/10 text-accent border border-accent/20 whitespace-nowrap"
+    >
+      {Math.round(value)}th pct
+    </span>
+  );
+}
+
+function PeerTable({ peers }: { peers: PeerComparison | null }) {
+  if (!peers || (!peers.self && peers.peers.length === 0)) return null;
+
+  const rows = [
+    ...(peers.self ? [{ ...peers.self, kind: 'self' as const }] : []),
+    ...peers.peers.map(p => ({ ...p, kind: 'peer' as const })),
+    ...(peers.sector_median ? [{ ...peers.sector_median, kind: 'median' as const }] : []),
+  ];
+  if (rows.length === 0) return null;
+
+  // Column set is sector-dependent (Screener's own table drives it) — derive it
+  // from whichever rows actually have values, in first-seen order, skipping the
+  // row-label column ("Name") and any blank header (Screener's leading S.No. column).
+  const columns: string[] = [];
+  for (const row of rows) {
+    for (const key of Object.keys(row.values)) {
+      if (key && key !== 'Name' && !columns.includes(key)) columns.push(key);
+    }
+  }
+  if (columns.length === 0) return null;
+
+  return (
+    <Card title="Peer Comparison">
+      <div className="overflow-x-auto -mx-1">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-border">
+              <th className="text-left font-semibold text-muted px-1 py-1.5 whitespace-nowrap">Name</th>
+              {columns.map(col => (
+                <th key={col} className="text-right font-semibold text-muted px-1 py-1.5 whitespace-nowrap">{col}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr
+                key={`${row.kind}-${row.name}-${i}`}
+                className={`border-b border-border/60 last:border-0 ${row.kind === 'self' ? 'bg-accent/5' : ''}`}
+              >
+                <td className={`px-1 py-1.5 whitespace-nowrap ${row.kind === 'self' ? 'font-semibold text-accent' : row.kind === 'median' ? 'text-muted italic' : 'text-tx'}`}>
+                  {row.name}
+                </td>
+                {columns.map(col => (
+                  <td key={col} className="text-right px-1 py-1.5 font-mono text-tx whitespace-nowrap">
+                    {row.values[col] ?? '—'}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {peers.peers.length === 0 && (
+        <p className="text-xs text-muted mt-2">
+          Screener doesn&apos;t list sector peers for this stock, or the peer comparison table wasn&apos;t available.
+        </p>
+      )}
+    </Card>
+  );
+}
 
 function PriceSparkline({ symbol }: { symbol: string }) {
   const [history, setHistory] = useState<PriceHistory | null>(null);
@@ -71,11 +168,16 @@ function Card({ title, children, className = '' }: { title: React.ReactNode; chi
   );
 }
 
-function MetricRow({ label, value, colorClass = 'text-tx' }: { label: string; value: string; colorClass?: string }) {
+function MetricRow({ label, value, colorClass = 'text-tx', percentile }: {
+  label: string; value: string; colorClass?: string; percentile?: number;
+}) {
   return (
     <div className="flex items-center justify-between py-1.5 border-b border-border last:border-0">
       <span className="text-sm text-muted">{label}</span>
-      <span className={`text-sm font-semibold font-mono ${colorClass}`}>{value}</span>
+      <span className="flex items-center">
+        <span className={`text-sm font-semibold font-mono ${colorClass}`}>{value}</span>
+        {percentile != null && <PercentileBadge value={percentile} />}
+      </span>
     </div>
   );
 }
@@ -218,6 +320,15 @@ function summaryBullets(text: string): string[] {
 
 export default function ResultsDashboard({ report, onHardRefresh }: Props) {
   const { analysis: a, signals: sig, stock_info: s, research: r, news, holdings: h } = report;
+
+  const peers = usePeerComparison(report.symbol);
+  const percentileByNormalizedKey = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const [key, value] of Object.entries(peers?.percentiles ?? {})) {
+      map[normalizeRatioKey(key)] = value;
+    }
+    return map;
+  }, [peers]);
 
   const rec = (a?.recommendation ?? 'HOLD') as 'BUY' | 'SELL' | 'HOLD';
   const cfg = REC_CONFIG[rec];
@@ -379,10 +490,17 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
           {r?.ratios && Object.keys(r.ratios).length > 0 && (
             <Card title="Fundamentals">
               {Object.entries(r.ratios).map(([k, v]) => (
-                <MetricRow key={k} label={k} value={fmtRatio(String(v))} />
+                <MetricRow
+                  key={k}
+                  label={k}
+                  value={fmtRatio(String(v))}
+                  percentile={percentileByNormalizedKey[normalizeRatioKey(k)]}
+                />
               ))}
             </Card>
           )}
+
+          <PeerTable peers={peers} />
 
           {a?.valuation && (
             <Card title="Valuation">

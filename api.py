@@ -959,6 +959,83 @@ async def get_price_history(request: Request, symbol: str, days: int = Query(180
     return await loop.run_in_executor(None, _fetch_sync)
 
 
+def _parse_peer_numeric(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(str(value).replace("%", "").replace(",", "").replace("₹", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_peer_percentiles(self_row: dict | None, peer_rows: list[dict]) -> dict[str, float]:
+    """For every ratio column present in self_row's values AND at least one peer's
+    values, return self's percentile rank (0-100) among [self] + peers for that
+    column — a plain rank-based percentile, not a distribution fit. Columns
+    Screener doesn't expose for this sector (or that no peer reports) are simply
+    absent from the result, never guessed or backfilled."""
+    if not self_row or not peer_rows:
+        return {}
+
+    percentiles: dict[str, float] = {}
+    for col, raw_self in self_row.get("values", {}).items():
+        self_num = _parse_peer_numeric(raw_self)
+        if self_num is None:
+            continue
+        peer_nums = [
+            n for n in (_parse_peer_numeric(p.get("values", {}).get(col)) for p in peer_rows)
+            if n is not None
+        ]
+        if not peer_nums:
+            continue
+        all_values = peer_nums + [self_num]
+        below = sum(1 for v in all_values if v < self_num)
+        equal = sum(1 for v in all_values if v == self_num)
+        percentiles[col] = round((below + 0.5 * equal) / len(all_values) * 100, 1)
+    return percentiles
+
+
+@app.get("/api/peers/{symbol}")
+async def get_peers(request: Request, symbol: str):
+    """Peer comparison table scraped from Screener.in (the company plus 3-5 sector
+    peers, and Screener's own sector-median row where present), with percentile
+    badges for whichever ratio columns are present for both the company and its
+    peers. Cached like the six data slices (24 h TTL) but intentionally outside
+    ALL_DATA_TASKS — this is a standalone, on-demand comparison, not part of the
+    six-task analysis pipeline.
+    """
+    _rate_limit(request, "peers", max_calls=30, window_seconds=60)
+    sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+
+    def _fetch_sync() -> dict:
+        import cache
+
+        cached = cache.load(sym, "peers")
+        if cached is not None:
+            return {k: v for k, v in cached.items() if k != "_meta"}
+
+        from tools.screener_tools import get_peer_comparison
+
+        raw = json.loads(get_peer_comparison.run(symbol=sym))
+        if raw.get("error"):
+            return {"symbol": sym, "self": None, "peers": [], "sector_median": None, "percentiles": {}}
+
+        result = {
+            "symbol":        raw.get("symbol", sym),
+            "self":          raw.get("self"),
+            "peers":         raw.get("peers", []),
+            "sector_median": raw.get("sector_median"),
+            "percentiles":   _compute_peer_percentiles(raw.get("self"), raw.get("peers", [])),
+        }
+        cache.save(sym, "peers", result)
+        return result
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _fetch_sync)
+
+
 @app.get("/api/sme-signals")
 async def get_sme_signals(
     lookback:  int = Query(5, ge=1, le=30, description="Days back to check for crosses"),

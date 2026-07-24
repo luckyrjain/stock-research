@@ -9,9 +9,11 @@ from tools.screener_tools import (
     _extract_compounded_growth,
     _extract_growth_metrics,
     _extract_latest_metric_from_tables,
+    _parse_peer_table,
     _resolve_screener_slug,
     get_fundamentals,
     get_holdings,
+    get_peer_comparison,
 )
 
 
@@ -156,6 +158,110 @@ class GetHoldingsTest(unittest.TestCase):
             result_str = get_holdings.run(symbol="TCS")
         result = json.loads(result_str)
         self.assertIn("error", result)
+
+
+class ParsePeerTableTest(unittest.TestCase):
+    def test_parses_headers_and_rows_generically(self) -> None:
+        html = """
+        <section id="peers">
+          <table>
+            <thead><tr><th></th><th>Name</th><th>P/E</th><th>ROCE %</th></tr></thead>
+            <tbody>
+              <tr><td>1.</td><td><a href="/company/TCS/">TCS</a></td><td>28</td><td>52</td></tr>
+              <tr><td>2.</td><td><a href="/company/INFY/">Infosys</a></td><td>25</td><td>32</td></tr>
+            </tbody>
+          </table>
+        </section>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        result = _parse_peer_table(soup)
+        self.assertEqual(result["columns"], ["", "Name", "P/E", "ROCE %"])
+        self.assertEqual(len(result["rows"]), 2)
+        self.assertEqual(result["rows"][0]["name"], "TCS")
+        self.assertEqual(result["rows"][0]["slug"], "TCS")
+        self.assertEqual(result["rows"][0]["values"]["P/E"], "28")
+
+    def test_row_with_mismatched_cell_count_is_skipped(self) -> None:
+        html = """
+        <section id="peers">
+          <table>
+            <thead><tr><th>Name</th><th>P/E</th></tr></thead>
+            <tbody><tr><td>Only one cell</td></tr></tbody>
+          </table>
+        </section>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        result = _parse_peer_table(soup)
+        self.assertEqual(result["rows"], [])
+
+    def test_no_peers_section_returns_empty(self) -> None:
+        soup = BeautifulSoup("<html></html>", "lxml")
+        self.assertEqual(_parse_peer_table(soup), {"columns": [], "rows": []})
+
+    def test_no_table_in_section_returns_empty(self) -> None:
+        soup = BeautifulSoup("<section id='peers'></section>", "lxml")
+        self.assertEqual(_parse_peer_table(soup), {"columns": [], "rows": []})
+
+
+class GetPeerComparisonTest(unittest.TestCase):
+    def test_splits_self_median_and_peers(self) -> None:
+        html = """
+        <section id="peers">
+          <table>
+            <thead><tr><th>Name</th><th>P/E</th><th>ROCE %</th></tr></thead>
+            <tbody>
+              <tr><td><a href="/company/TCS/">TCS</a></td><td>28</td><td>52</td></tr>
+              <tr><td><a href="/company/INFY/">Infosys</a></td><td>25</td><td>32</td></tr>
+              <tr><td><a href="/company/WIPRO/">Wipro</a></td><td>20</td><td>18</td></tr>
+              <tr><td>Median</td><td>22</td><td>28</td></tr>
+            </tbody>
+          </table>
+        </section>
+        """
+        with patch("tools.screener_tools._resolve_screener_slug", return_value="TCS"), \
+             patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup(html, "lxml")):
+            result_str = get_peer_comparison.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertEqual(result["symbol"], "TCS")
+        self.assertEqual(result["self"]["name"], "TCS")
+        self.assertEqual(result["sector_median"]["values"]["P/E"], "22")
+        self.assertEqual(len(result["peers"]), 2)
+        self.assertNotIn("TCS", [p["name"] for p in result["peers"]])
+
+    def test_caps_peers_at_five(self) -> None:
+        rows_html = "".join(
+            f'<tr><td><a href="/company/PEER{i}/">Peer {i}</a></td><td>{20 + i}</td></tr>'
+            for i in range(7)
+        )
+        html = f"""
+        <section id="peers">
+          <table>
+            <thead><tr><th>Name</th><th>P/E</th></tr></thead>
+            <tbody>{rows_html}</tbody>
+          </table>
+        </section>
+        """
+        with patch("tools.screener_tools._resolve_screener_slug", return_value="TCS"), \
+             patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup(html, "lxml")):
+            result_str = get_peer_comparison.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertEqual(len(result["peers"]), 5)
+
+    def test_no_peers_section_returns_empty_lists(self) -> None:
+        with patch("tools.screener_tools._resolve_screener_slug", return_value="TCS"), \
+             patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup("<html></html>", "lxml")):
+            result_str = get_peer_comparison.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertIsNone(result["self"])
+        self.assertIsNone(result["sector_median"])
+        self.assertEqual(result["peers"], [])
+
+    def test_fetch_failure_returns_error_payload_not_raise(self) -> None:
+        with patch("tools.screener_tools._fetch_soup", side_effect=ConnectionError("boom")):
+            result_str = get_peer_comparison.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertIn("error", result)
+        self.assertEqual(result["symbol"], "TCS")
 
 
 if __name__ == "__main__":

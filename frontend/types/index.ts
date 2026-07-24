@@ -245,3 +245,20 @@ export interface ConsolidatedView {
   market_pick: ConsolidatedMarketPick | null;
   sme:         ConsolidatedSme | null;
 }
+
+// Peer comparison, scraped from Screener.in's own Peer comparison table. The
+// column set (`values`' keys) varies by sector — whatever Screener renders for
+// that company's peers is what's returned, not a fixed schema.
+export interface PeerRow {
+  name:   string;
+  slug:   string;
+  values: Record<string, string>;
+}
+
+export interface PeerComparison {
+  symbol:         string;
+  self:           PeerRow | null;
+  peers:          PeerRow[];          // up to 5, ordered as Screener presents them
+  sector_median:  PeerRow | null;
+  percentiles:    Record<string, number>;  // 0–100, keyed by the same column labels as `values`
+}
