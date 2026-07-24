@@ -24,6 +24,27 @@ class BuildReportTest(unittest.TestCase):
         self.assertNotIn("_degraded", report["analysis"])
         self.assertEqual(report["analysis"]["recommendation"], "HOLD")
 
+    def test_filings_flow_through_to_the_report(self) -> None:
+        # filings is fetched and feeds signals.filings_signal, but used to be
+        # dropped when the report dict was assembled — never reaching the
+        # frontend despite being fully fetched and scored.
+        all_data = {
+            "filings": {
+                "filings": [
+                    {"title": "Board Meeting Intimation", "desc": "", "date": "2026-07-20",
+                     "category": "Board Meeting", "attachment": "https://nse.example/x.pdf"},
+                ],
+                "_meta": {"fetched_at": "2026-07-20T00:00:00"},
+            },
+        }
+        report = _build_report("TCS", all_data, {}, {})
+        self.assertEqual(len(report["filings"]), 1)
+        self.assertEqual(report["filings"][0]["title"], "Board Meeting Intimation")
+
+    def test_missing_filings_task_defaults_to_empty_list(self) -> None:
+        report = _build_report("TCS", {}, {}, {})
+        self.assertEqual(report["filings"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
