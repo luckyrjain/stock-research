@@ -55,11 +55,13 @@ stock-research/
 │   ├── app/market-picks/page.tsx Weekly picks page
 │   ├── app/sme-signals/page.tsx  SME golden cross screener
 │   ├── app/watchlist/page.tsx    Cross-mode watchlist page
+│   ├── app/compare/page.tsx      Two stock analysis reports side by side (?symbols=TCS,INFY)
 │   ├── components/               Dashboard, search, progress tracker, market picks dashboard
 │   │   ├── header-search.tsx     Shared "what does AlphaPulse think about X" search box (every nav bar)
 │   │   └── consolidated-card.tsx Modal rendering GET /api/consolidated/{symbol}'s three sections
 │   ├── app/api/                  Thin Next.js proxy routes → FastAPI backend
 │   ├── lib/watchlist.ts          useWatchlist() hook (DB-backed via /api/watchlist, anonymous client_id)
+│   ├── lib/useStockAnalysis.ts   Per-symbol SSE analysis hook, shared by the home page and /compare
 │   └── types/index.ts            Canonical TS types for all SSE messages and reports
 └── output/                 Cache files (gitignored); also where CLI saves report JSON
     ├── <SYMBOL>/           Per-symbol task caches
@@ -371,6 +373,22 @@ frontend's `HeaderSearch` component (embedded in every page's nav bar) opens
 `ConsolidatedCard` on submit, which fetches this endpoint and renders each section
 independently — a `null` section shows "not yet analyzed" / "not on the picks list" /
 "no SME data" rather than an error, since that's the expected common case.
+
+### Compare flow (`/compare?symbols=TCS,INFY`)
+
+Two full stock analysis reports side by side. No new backend — each column runs the exact
+same `GET /api/analyse/{symbol}` SSE pipeline the home page uses, via a shared
+`useStockAnalysis()` hook (`frontend/lib/useStockAnalysis.ts`, extracted from the home page
+so both call sites stay in sync) — one independent `EventSource` per symbol, so the two
+columns fetch/progress/error independently of each other.
+
+Capped at 2 symbols: `ResultsDashboard`'s internal grid breakpoints (`lg:`, `md:`, `sm:`)
+are viewport-relative, not container-relative (no container-query plugin installed), so a
+column narrower than the component's own breakpoint would render its internal two-block
+layout compressed rather than actually reflowing. `/compare`'s own column layout only
+switches from stacked to side-by-side at `2xl:` (1536px) specifically so that by the time
+two columns sit side by side, each is wide enough for `ResultsDashboard`'s own layout to
+still look right — below that, the two reports stack full-width instead of squeezing.
 
 ### Shared state and queues
 
