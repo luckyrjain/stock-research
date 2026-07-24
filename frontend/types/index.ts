@@ -171,10 +171,19 @@ export interface MarketPick {
   ranking_reasons: string[];   // why this stock ranked here
   is_recent_ipo: boolean;      // listed < 8 months ago (IPO momentum flag)
   horizon?: 'short' | 'medium' | 'long';  // investment horizon from LLM analysis
+  sector: string;               // from stock_info; "Unknown" when NSE/yfinance doesn't report one
 }
 
 export type MarketPicksPhase =
   | 'idle' | 'scanning' | 'extracting' | 'consolidating' | 'researching' | 'scoring' | 'done' | 'error';
+
+// Cache metadata only (no pipeline run) — powers the idle hero's true
+// last-run / next-scheduled-scan display on /market-picks.
+export interface MarketPicksStatus {
+  last_run_at:       string | null;   // ISO timestamp of the last completed run, if any
+  cache_fresh:       boolean;         // whether that run is still within the cache TTL
+  next_scheduled_at: string;          // ISO timestamp of the next cron-triggered refresh
+}
 
 // ── Market Picks track record (output/_history/ aggregated) ──────────────────
 

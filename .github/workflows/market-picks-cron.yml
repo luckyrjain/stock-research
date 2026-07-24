@@ -1,0 +1,44 @@
+name: Market Picks Pipeline
+
+on:
+  schedule:
+    # 07:00 IST (UTC+5:30) on Mondays = 01:30 UTC. NSE opens 9:15 IST, so this
+    # leaves a comfortable buffer before market open. Weekly — not daily like
+    # sme-cron.yml — to match the product's own "Top Indian Stocks This Week"
+    # framing. Keep in sync with the schedule referenced in CLAUDE.md and the
+    # /market-picks hero copy.
+    - cron: '30 1 * * 1'
+  workflow_dispatch:
+
+jobs:
+  trigger-refresh:
+    name: Trigger a fresh market picks scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check MARKET_PICKS_API_URL is configured
+        env:
+          MARKET_PICKS_API_URL: ${{ secrets.MARKET_PICKS_API_URL }}
+        run: |
+          if [ -z "$MARKET_PICKS_API_URL" ]; then
+            echo "::error::MARKET_PICKS_API_URL secret is not set. Add your deployed backend's public URL (e.g. https://api.yourapp.com, no trailing slash needed) in repo Settings > Secrets and variables > Actions > New repository secret (name: MARKET_PICKS_API_URL) before this workflow can run."
+            echo "::error::Unlike sme-cron.yml, the market-picks cache is a local file (output/_market_picks/picks.json) on the backend host, not Postgres — this job can't compute picks inside GitHub's ephemeral runner and expect them to reach the live site. Instead it asks the already-running backend to run its own force-refresh, exactly like a user clicking 'Fresh scan'."
+            exit 1
+          fi
+
+      - name: Trigger /api/market-picks?force=true on the live backend
+        env:
+          MARKET_PICKS_API_URL: ${{ secrets.MARKET_PICKS_API_URL }}
+        run: |
+          # This is a Server-Sent Events stream — the pipeline takes roughly
+          # 2 minutes (scraping, LLM extraction, NSE validation, research,
+          # scoring) and the backend keeps the connection open with periodic
+          # heartbeats the whole time. curl blocks and prints every event
+          # until the backend closes the connection, so a successful run's
+          # captured output ends with a "done" event.
+          response=$(curl --fail-with-body --max-time 300 --no-buffer \
+            "${MARKET_PICKS_API_URL%/}/api/market-picks?force=true")
+          echo "$response"
+          if ! echo "$response" | grep -q '"event": *"done"'; then
+            echo "::error::No 'done' event in the response — the backend did not report a completed run."
+            exit 1
+          fi

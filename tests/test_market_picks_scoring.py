@@ -15,6 +15,7 @@ from unittest.mock import patch
 import market_picks_pipeline
 from market_picks_pipeline import (
     MarketPicksPipeline,
+    _apply_sector_balance,
     _build_ranking_reasons,
     _compute_confidence,
     _effective_signal,
@@ -23,6 +24,8 @@ from market_picks_pipeline import (
     _reason_strength,
     _title_words,
     _trade_levels,
+    picks_cache_status,
+    save_picks_cache,
 )
 
 
@@ -285,6 +288,85 @@ class PruneExtractCacheTest(unittest.TestCase):
 
     def test_missing_directory_returns_zero_not_raise(self) -> None:
         self.assertEqual(_prune_extract_cache(), 0)
+
+
+class ApplySectorBalanceTest(unittest.TestCase):
+    def test_promotes_up_to_max_per_sector_and_defers_excess(self) -> None:
+        picks = [
+            {"symbol": "A", "sector": "IT"},
+            {"symbol": "B", "sector": "IT"},
+            {"symbol": "C", "sector": "IT"},
+            {"symbol": "D", "sector": "Banking"},
+        ]
+        out = _apply_sector_balance(picks, max_per_sector=2)
+        self.assertEqual([p["symbol"] for p in out], ["A", "B", "D", "C"])
+
+    def test_sector_field_is_kept_not_removed(self) -> None:
+        # Regression: this field used to be popped off before the response
+        # reached the frontend (as "_sector"), so no filtering by sector was
+        # ever possible client-side.
+        picks = [{"symbol": "A", "sector": "IT"}]
+        out = _apply_sector_balance(picks, max_per_sector=2)
+        self.assertEqual(out[0]["sector"], "IT")
+
+    def test_missing_sector_key_defaults_to_unknown_bucket(self) -> None:
+        picks = [{"symbol": "A"}, {"symbol": "B"}, {"symbol": "C"}]
+        out = _apply_sector_balance(picks, max_per_sector=2)
+        # All three share the implicit "Unknown" bucket, so the third is deferred.
+        self.assertEqual([p["symbol"] for p in out], ["A", "B", "C"])
+        self.assertEqual(out[-1]["symbol"], "C")
+
+    def test_empty_list_returns_empty_list(self) -> None:
+        self.assertEqual(_apply_sector_balance([]), [])
+
+
+class PicksCacheStatusTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-picks-cache-status-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        patch.object(market_picks_pipeline, "_PICKS_CACHE_PATH", Path(self._tmpdir) / "picks.json").start()
+        self.addCleanup(patch.stopall)
+
+    def test_no_cache_file_returns_not_fresh_and_no_last_run(self) -> None:
+        status = picks_cache_status()
+        self.assertIsNone(status["last_run_at"])
+        self.assertFalse(status["is_fresh"])
+
+    def test_fresh_cache_reports_last_run_and_is_fresh(self) -> None:
+        save_picks_cache([{"symbol": "TCS"}], "2026-07-20T00:00:00+00:00")
+        status = picks_cache_status()
+        self.assertEqual(status["last_run_at"], "2026-07-20T00:00:00+00:00")
+        self.assertTrue(status["is_fresh"])
+
+    def test_stale_cache_still_reports_last_run_but_not_fresh(self) -> None:
+        # Unlike load_picks_cache() (which returns None outright once stale,
+        # since it's used on the picks-serving path), picks_cache_status()
+        # must keep reporting the true last-run time even past the TTL, or
+        # the hero's "Last scan" display would silently blank out instead of
+        # showing an honest (stale) timestamp.
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        cache_path = market_picks_pipeline._PICKS_CACHE_PATH
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        ancient = (datetime.now(timezone.utc) - timedelta(hours=market_picks_pipeline._PICKS_CACHE_TTL_HOURS + 1))
+        cache_path.write_text(json.dumps({
+            "picks": [], "generated_at": "2026-01-01T00:00:00+00:00",
+            "_meta": {"fetched_at": ancient.isoformat()},
+        }))
+
+        status = picks_cache_status()
+        self.assertEqual(status["last_run_at"], "2026-01-01T00:00:00+00:00")
+        self.assertFalse(status["is_fresh"])
+
+    def test_malformed_cache_file_degrades_gracefully(self) -> None:
+        cache_path = market_picks_pipeline._PICKS_CACHE_PATH
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text("{not valid json")
+
+        status = picks_cache_status()
+        self.assertIsNone(status["last_run_at"])
+        self.assertFalse(status["is_fresh"])
 
 
 if __name__ == "__main__":

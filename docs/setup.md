@@ -134,6 +134,29 @@ instance; the workflow fails with a clear message rather than a Python traceback
 missing. Trigger a one-off run from the Actions tab ("Run workflow"). If you'd rather run
 this locally/self-hosted instead of on GitHub Actions, a crontab entry works too:
 
+## Market picks pipeline
+
+No separate setup — it runs against whichever LLM provider key is already configured. Trigger a
+run from the CLI, or via the **Fresh scan** / **See This Week's Picks** buttons on `/market-picks`:
+
+```bash
+source .venv/bin/activate
+python market_picks_pipeline.py
+```
+
+This saves straight to `output/_market_picks/picks.json`, bypassing `api.py`'s SSE endpoint —
+only useful when run on the same host/disk as the backend (e.g. a self-hosted crontab, same
+caveat as the SME crontab alternative above).
+
+Weekly automation runs via `.github/workflows/market-picks-cron.yml` on GitHub Actions — every
+Monday at 01:30 UTC (07:00 IST), ahead of NSE's 9:15 IST open. Unlike the SME workflow, this one
+doesn't run the pipeline itself on GitHub's runners — the picks cache is a local file on the
+backend host, not Postgres, so a GitHub-hosted run would compute picks nobody's live site would
+ever see. Instead it calls `GET /api/market-picks?force=true` on your *already-deployed* backend,
+exactly like a user clicking "Fresh scan." Add a `MARKET_PICKS_API_URL` repository secret
+(Settings > Secrets and variables > Actions) set to your backend's public URL (e.g.
+`https://api.yourapp.com`) before this workflow can run.
+
 ## Watchlist
 
 Requires `DATABASE_URL` in `.env` and a running PostgreSQL — the same database used for SME

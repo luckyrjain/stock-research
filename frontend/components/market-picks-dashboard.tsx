@@ -7,6 +7,18 @@ import WatchlistButton from './watchlist-button';
 
 type SortKey    = 'confidence_score' | 'change_pct' | 'pe_ratio';
 type ConfFilter = 'all' | 'high' | 'medium' | 'low';
+type HorizonFilter = 'all' | 'short' | 'medium' | 'long';
+type CapFilter  = 'all' | 'large' | 'mid' | 'small';
+
+// Standard Indian market-cap conventions, in ₹ Cr.
+const CAP_THRESHOLDS = { large: 20_000, mid: 5_000 } as const;
+
+function capBucket(marketCapCr: number | null): 'large' | 'mid' | 'small' | null {
+  if (marketCapCr == null) return null;
+  if (marketCapCr >= CAP_THRESHOLDS.large) return 'large';
+  if (marketCapCr >= CAP_THRESHOLDS.mid)   return 'mid';
+  return 'small';
+}
 
 interface Props {
   picks: MarketPick[];
@@ -315,6 +327,7 @@ function ExpandedRow({ pick }: { pick: MarketPick }) {
                     ['Market cap',   pick.market_cap_cr != null ? `₹${pick.market_cap_cr.toLocaleString('en-IN', { maximumFractionDigits: 0 })} Cr` : '—'],
                     ['P/E ratio',    pick.pe_ratio != null ? pick.pe_ratio.toFixed(1) : '—'],
                     ['Exchange',     pick.exchange],
+                    ['Sector',       pick.sector],
                     ['Signal score', pick.signal_score.toFixed(2)],
                   ].map(([label, value]) => (
                     <div key={label} className="bg-surface rounded-lg px-2.5 py-2 border border-border/40">
@@ -381,7 +394,15 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
   const [sortKey,    setSortKey]    = useState<SortKey | null>(null);
   const [sortDir,    setSortDir]    = useState<'desc' | 'asc'>('desc');
   const [search,     setSearch]     = useState('');
-  const [confFilter, setConfFilter] = useState<ConfFilter>('all');
+  const [confFilter,    setConfFilter]    = useState<ConfFilter>('all');
+  const [sectorFilter,  setSectorFilter]  = useState<string>('all');
+  const [horizonFilter, setHorizonFilter] = useState<HorizonFilter>('all');
+  const [capFilter,     setCapFilter]     = useState<CapFilter>('all');
+
+  const sectors = useMemo(
+    () => Array.from(new Set(picks.map(p => p.sector).filter(Boolean))).sort(),
+    [picks],
+  );
 
   function toggleSort(k: SortKey) {
     if (sortKey === k) setSortDir(d => d === 'desc' ? 'asc' : 'desc');
@@ -397,6 +418,9 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
     if (confFilter === 'high')   out = out.filter(p => p.confidence_score >= 70);
     if (confFilter === 'medium') out = out.filter(p => p.confidence_score >= 45 && p.confidence_score < 70);
     if (confFilter === 'low')    out = out.filter(p => p.confidence_score < 45);
+    if (sectorFilter !== 'all')  out = out.filter(p => p.sector === sectorFilter);
+    if (horizonFilter !== 'all') out = out.filter(p => p.horizon === horizonFilter);
+    if (capFilter !== 'all')     out = out.filter(p => capBucket(p.market_cap_cr) === capFilter);
     if (sortKey) {
       out = [...out].sort((a, b) => {
         const av = (a[sortKey] ?? -Infinity) as number;
@@ -405,7 +429,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
       });
     }
     return out;
-  }, [picks, search, confFilter, sortKey, sortDir]);
+  }, [picks, search, confFilter, sectorFilter, horizonFilter, capFilter, sortKey, sortDir]);
 
   function toggle(sym: string) {
     setExpanded(prev => {
@@ -419,7 +443,16 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
   });
 
-  const isFiltered = search.trim() !== '' || confFilter !== 'all';
+  const isFiltered = search.trim() !== '' || confFilter !== 'all'
+    || sectorFilter !== 'all' || horizonFilter !== 'all' || capFilter !== 'all';
+
+  function clearFilters() {
+    setSearch('');
+    setConfFilter('all');
+    setSectorFilter('all');
+    setHorizonFilter('all');
+    setCapFilter('all');
+  }
 
   return (
     <div className="animate-fade-up">
@@ -514,6 +547,64 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
             </button>
           ))}
         </div>
+
+        {/* Horizon filter chips */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {([
+            { id: 'all',    label: 'Any horizon' },
+            { id: 'short',  label: 'Short' },
+            { id: 'medium', label: 'Medium' },
+            { id: 'long',   label: 'Long' },
+          ] as const).map(({ id, label }) => (
+            <button
+              key={id}
+              onClick={() => setHorizonFilter(id)}
+              aria-pressed={horizonFilter === id}
+              className={`px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-colors
+                ${horizonFilter === id
+                  ? 'bg-accent/10 border-accent/30 text-accent'
+                  : 'bg-transparent border-border text-muted hover:text-tx hover:border-border-hi'}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Market-cap filter chips */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {([
+            { id: 'all',   label: 'Any cap' },
+            { id: 'large', label: 'Large' },
+            { id: 'mid',   label: 'Mid' },
+            { id: 'small', label: 'Small' },
+          ] as const).map(({ id, label }) => (
+            <button
+              key={id}
+              onClick={() => setCapFilter(id)}
+              aria-pressed={capFilter === id}
+              className={`px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-colors
+                ${capFilter === id
+                  ? 'bg-accent/10 border-accent/30 text-accent'
+                  : 'bg-transparent border-border text-muted hover:text-tx hover:border-border-hi'}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Sector filter — dropdown rather than chips since the sector set is
+            dynamic and can run to a dozen+ distinct values in a given scan */}
+        {sectors.length > 0 && (
+          <select
+            value={sectorFilter}
+            onChange={e => setSectorFilter(e.target.value)}
+            className="bg-card border border-border rounded-xl px-3 py-2 text-xs text-tx
+                       focus:outline-none focus:border-accent/40 transition-colors"
+          >
+            <option value="all">All sectors</option>
+            {sectors.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        )}
       </div>
 
       {/* ── Table ── */}
@@ -556,7 +647,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                 <tr>
                   <td colSpan={9} className="px-4 py-12 text-center">
                     <p className="text-sm text-muted">No stocks match your filter.</p>
-                    <button onClick={() => { setSearch(''); setConfFilter('all'); }}
+                    <button onClick={clearFilters}
                             className="mt-2 text-xs text-accent hover:underline">
                       Clear filters
                     </button>
