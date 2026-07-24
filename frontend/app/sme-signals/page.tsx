@@ -272,6 +272,10 @@ export default function SmeSignalsPage() {
           <Link href="/watchlist" className="text-sm text-muted hover:text-tx transition-colors">
             Watchlist
           </Link>
+          <span className="text-border-hi">|</span>
+          <Link href="/compare" className="text-sm text-muted hover:text-tx transition-colors">
+            Compare
+          </Link>
           <div className="ml-auto flex items-center gap-3">
             <HeaderSearch />
             <button

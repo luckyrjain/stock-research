@@ -1,96 +1,20 @@
 'use client';
 
-import { useState, useRef, useCallback, useEffect, Suspense } from 'react';
+import { useRef, useEffect, Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import type { TaskName, TaskStatus, Phase, SSEMessage, Report } from '@/types';
 import TickerSearch     from '@/components/ticker-search';
 import ProgressTracker  from '@/components/progress-tracker';
 import ResultsDashboard from '@/components/results-dashboard';
 import HeaderSearch     from '@/components/header-search';
-
-const ALL_TASKS: TaskName[] = ['stock_info', 'research', 'news', 'shareholding', 'mf_holdings'];
-
-function initStatus(): Record<TaskName, TaskStatus> {
-  return Object.fromEntries(ALL_TASKS.map(t => [t, 'idle'])) as Record<TaskName, TaskStatus>;
-}
+import { useStockAnalysis } from '@/lib/useStockAnalysis';
 
 function HomePageInner() {
-  const [phase, setPhase]               = useState<Phase>('idle');
-  const [taskStatus, setTaskStatus]     = useState<Record<TaskName, TaskStatus>>(initStatus());
-  const [report, setReport]             = useState<Report | null>(null);
-  const [error, setError]               = useState<string | null>(null);
-  const [currentSymbol, setCurrentSymbol] = useState<string | null>(null);
-  const esRef   = useRef<EventSource | null>(null);
-  const doneRef = useRef(false);
-
-  const handleAnalyse = useCallback((symbol: string, force = false) => {
-    // Close any previous stream
-    esRef.current?.close();
-
-    setCurrentSymbol(symbol);
-    setPhase('fetching');
-    setTaskStatus(initStatus());
-    setReport(null);
-    setError(null);
-    doneRef.current = false;
-
-    const es = new EventSource(`/api/analyse/${symbol}?force=${force}`);
-    esRef.current = es;
-
-    es.onmessage = (e) => {
-      let msg: SSEMessage;
-      try { msg = JSON.parse(e.data); } catch { return; }
-
-      switch (msg.event) {
-        case 'start': {
-          const next = initStatus();
-          // cached tasks stay marked cached; everything else (stale + fresh) is running
-          ALL_TASKS.forEach(t => {
-            next[t] = msg.cached.includes(t) ? 'cached' : 'running';
-          });
-          setTaskStatus(next);
-          break;
-        }
-        case 'task_done': {
-          setTaskStatus(prev => ({
-            ...prev,
-            [msg.task as TaskName]: msg.ok ? 'ok' : 'fail',
-          }));
-          break;
-        }
-        case 'analysing': {
-          setPhase('analysing');
-          break;
-        }
-        case 'done': {
-          doneRef.current = true;
-          setReport(msg.report);
-          setPhase('done');
-          es.close();
-          break;
-        }
-        case 'error': {
-          setError(msg.message);
-          setPhase('error');
-          es.close();
-          break;
-        }
-      }
-    };
-
-    es.onerror = () => {
-      if (!doneRef.current) {
-        setError('Connection to server lost. Please try again.');
-        setPhase('error');
-      }
-      es.close();
-    };
-  }, []);
-
-  const handleHardRefresh = useCallback(() => {
-    if (currentSymbol) handleAnalyse(currentSymbol, true);
-  }, [currentSymbol, handleAnalyse]);
+  const {
+    phase, taskStatus, report, error, currentSymbol,
+    isRunning, isIdle,
+    handleAnalyse, handleHardRefresh,
+  } = useStockAnalysis();
 
   const searchParams = useSearchParams();
   const deepLinkDone = useRef(false);
@@ -103,9 +27,6 @@ function HomePageInner() {
       handleAnalyse(sym.toUpperCase());
     }
   }, [searchParams, handleAnalyse]);
-
-  const isRunning = phase === 'fetching' || phase === 'analysing';
-  const isIdle    = phase === 'idle';
 
   return (
     <main className="min-h-screen bg-bg text-tx">
@@ -166,6 +87,12 @@ function HomePageInner() {
                 className="text-xs font-semibold text-muted hover:text-accent transition-colors"
               >
                 Watchlist →
+              </Link>
+              <Link
+                href="/compare"
+                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
+              >
+                Compare →
               </Link>
               <div className="ml-auto flex items-center gap-3">
                 <HeaderSearch />
