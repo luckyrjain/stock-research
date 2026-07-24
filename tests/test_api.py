@@ -1400,5 +1400,171 @@ class ConsolidatedEndpointTest(unittest.TestCase):
         self.assertIsNone(resp.json()["sme"])
 
 
+class AuthRequestLinkEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_missing_database_url_returns_503(self) -> None:
+        resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
+        self.assertEqual(resp.status_code, 503)
+
+    def test_invalid_email_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.post("/api/auth/request-link", json={"email": "not-an-email"})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_overlong_email_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.post("/api/auth/request-link", json={"email": f"{'a' * 320}@example.com"})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_valid_email_creates_link_and_sends_email(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.create_magic_link", return_value="raw-token") as create_link, \
+             patch("email_sender.send_magic_link_email", return_value=True) as send_email:
+            resp = client.post("/api/auth/request-link", json={"email": "User@Example.com"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"sent": True})
+        create_link.assert_called_once_with("user@example.com")
+        send_email.assert_called_once()
+        sent_args = send_email.call_args[0]
+        self.assertEqual(sent_args[0], "user@example.com")
+        self.assertIn("raw-token", sent_args[1])
+
+    def test_returns_sent_true_even_when_smtp_delivery_fails(self) -> None:
+        # Doesn't leak SMTP configuration state to the caller — the link was
+        # still created either way.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.create_magic_link", return_value="raw-token"), \
+             patch("email_sender.send_magic_link_email", return_value=False):
+            resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"sent": True})
+
+    def test_db_error_returns_sanitized_503(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.create_magic_link", side_effect=RuntimeError("connection refused: password exposed")):
+            resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
+        self.assertEqual(resp.status_code, 503)
+        self.assertNotIn("password", resp.json()["detail"])
+
+    def test_rate_limited_returns_429(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        api._RATE_LIMIT_CALLS["auth_request_link:testclient"] = [api.time.monotonic()] * 5
+        resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
+        self.assertEqual(resp.status_code, 429)
+
+
+class AuthVerifyEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_missing_database_url_returns_503(self) -> None:
+        resp = client.get("/api/auth/verify?token=abc")
+        self.assertEqual(resp.status_code, 503)
+
+    def test_invalid_token_returns_401(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.verify_magic_link", return_value=None):
+            resp = client.get("/api/auth/verify?token=bad")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_valid_token_returns_user_and_session(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.verify_magic_link", return_value={"id": 1, "email": "user@example.com"}), \
+             patch("auth.create_session", return_value="session-token"):
+            resp = client.get("/api/auth/verify?token=good")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["user"], {"id": 1, "email": "user@example.com"})
+        self.assertEqual(body["session_token"], "session-token")
+
+    def test_db_error_returns_sanitized_503(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.verify_magic_link", side_effect=RuntimeError("connection refused: password exposed")):
+            resp = client.get("/api/auth/verify?token=good")
+        self.assertEqual(resp.status_code, 503)
+        self.assertNotIn("password", resp.json()["detail"])
+
+    def test_rate_limited_returns_429(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        api._RATE_LIMIT_CALLS["auth_verify:testclient"] = [api.time.monotonic()] * 20
+        resp = client.get("/api/auth/verify?token=x")
+        self.assertEqual(resp.status_code, 429)
+
+
+class AuthMeEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+
+    def test_missing_authorization_header_returns_401(self) -> None:
+        resp = client.get("/api/auth/me")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_missing_database_url_returns_401(self) -> None:
+        resp = client.get("/api/auth/me", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_invalid_session_returns_401(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.get_user_for_session", return_value=None):
+            resp = client.get("/api/auth/me", headers={"Authorization": "Bearer badtoken"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_valid_session_returns_user(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.get_user_for_session", return_value={"id": 1, "email": "user@example.com"}):
+            resp = client.get("/api/auth/me", headers={"Authorization": "Bearer goodtoken"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"user": {"id": 1, "email": "user@example.com"}})
+
+    def test_malformed_authorization_header_returns_401(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.get("/api/auth/me", headers={"Authorization": "Basic sometoken"})
+        self.assertEqual(resp.status_code, 401)
+
+
+class AuthLogoutEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+
+    def test_returns_ok_without_authorization_header(self) -> None:
+        resp = client.post("/api/auth/logout")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"ok": True})
+
+    def test_deletes_session_when_authorized(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.delete_session") as delete_session:
+            resp = client.post("/api/auth/logout", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 200)
+        delete_session.assert_called_once_with("sometoken")
+
+    def test_returns_ok_even_without_database_url(self) -> None:
+        resp = client.post("/api/auth/logout", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"ok": True})
+
+
 if __name__ == "__main__":
     unittest.main()

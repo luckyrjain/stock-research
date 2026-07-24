@@ -11,6 +11,7 @@ import type {
 import MarketPicksDashboard from '@/components/market-picks-dashboard';
 import PositionsStrip from '@/components/positions-strip';
 import HeaderSearch from '@/components/header-search';
+import AuthWidget from '@/components/auth-widget';
 
 interface SourceState {
   name: string;
@@ -388,6 +389,7 @@ export default function MarketPicksPage() {
               </button>
             )}
             <HeaderSearch />
+            <AuthWidget />
           </div>
         </div>
 

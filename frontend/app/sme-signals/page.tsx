@@ -5,6 +5,7 @@ import Link from 'next/link';
 import type { SmeSignal, SmeCrossEvent, SmeSignalHistoryResponse, SmeSignalsResponse } from '@/types';
 import EmaChart from '@/components/ema-chart';
 import HeaderSearch from '@/components/header-search';
+import AuthWidget from '@/components/auth-widget';
 import WatchlistButton from '@/components/watchlist-button';
 
 // ── Filter types ──────────────────────────────────────────────────────────────
@@ -390,6 +391,7 @@ export default function SmeSignalsPage() {
           </Link>
           <div className="ml-auto flex items-center gap-3">
             <HeaderSearch />
+            <AuthWidget />
             <button
               onClick={startRefresh}
               disabled={refreshing}

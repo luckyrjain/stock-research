@@ -93,6 +93,51 @@ verdict_history = Table(
 )
 
 
+# Minimal magic-link auth (see auth.py): no passwords. A user is created on
+# first successful link click, never via a separate signup step. Existing
+# watchlist_items/positions stay keyed by the anonymous client_id — accounts
+# are additive, not a migration (see CLAUDE.md's "Account & magic-link auth
+# flow" for the reasoning).
+users = Table(
+    "users",
+    metadata,
+    Column("id",         Integer, primary_key=True, autoincrement=True),
+    Column("email",      String(320), nullable=False, unique=True),
+    Column("created_at", DateTime(timezone=True), server_default=text("NOW()")),
+)
+
+# Single-use, short-lived tokens emailed to a user to sign in. Only a SHA-256
+# hash of the token is ever stored — the raw token exists only in the email
+# itself and the process memory that generated it, so a DB leak alone can't
+# be used to sign in as anyone.
+magic_links = Table(
+    "magic_links",
+    metadata,
+    Column("id",         Integer, primary_key=True, autoincrement=True),
+    Column("email",      String(320), nullable=False),
+    Column("token_hash", String(64),  nullable=False, unique=True),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("used_at",    DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), server_default=text("NOW()")),
+    Index("idx_magic_links_email", "email"),
+)
+
+# Opaque bearer session tokens (same hash-only-storage convention as
+# magic_links above). The frontend's Next.js proxy routes hold the raw token
+# in an httpOnly cookie and forward it as `Authorization: Bearer <token>` —
+# this table (and auth.py) never sees a cookie, only the token.
+sessions = Table(
+    "sessions",
+    metadata,
+    Column("id",         Integer, primary_key=True, autoincrement=True),
+    Column("user_id",    Integer, ForeignKey("users.id"), nullable=False),
+    Column("token_hash", String(64), nullable=False, unique=True),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), server_default=text("NOW()")),
+    Index("idx_sessions_user", "user_id"),
+)
+
+
 def get_engine(database_url: str | None = None):
     url = database_url or os.environ["DATABASE_URL"]
     return _create_engine(url)

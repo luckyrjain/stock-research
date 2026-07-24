@@ -1721,6 +1721,118 @@ async def get_consolidated(request: Request, symbol: str):
     return {"symbol": sym, "analysis": analysis, "market_pick": market_pick, "sme": sme}
 
 
+# ── Account & magic-link auth ────────────────────────────────────────────────
+# Minimal, passwordless auth (see auth.py + email_sender.py). A session token
+# is a bearer credential the frontend's Next.js proxy routes hold in an
+# httpOnly cookie and send here as `Authorization: Bearer <token>` — this
+# file never sees a cookie. Existing watchlist_items/positions stay keyed by
+# the anonymous client_id; nothing here reads or migrates that data — an
+# account is additive today, not a replacement for it.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Where the magic link should point — the Next.js app, not this API directly,
+# since /auth/verify needs to run in the browser to receive the session cookie
+# on the frontend's own origin. Distinct from ALLOWED_ORIGINS (a CORS
+# allowlist that may hold several origins) — this is the one canonical URL to
+# embed in an outbound email.
+_FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
+
+class AuthRequestLinkRequest(BaseModel):
+    email: str
+
+
+def _bearer_token_from_request(request: Request) -> str | None:
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        token = header[7:].strip()
+        return token or None
+    return None
+
+
+@app.post("/api/auth/request-link")
+async def request_magic_link(request: Request, body: AuthRequestLinkRequest):
+    _rate_limit(request, "auth_request_link", max_calls=5, window_seconds=900)
+    email = body.email.lower().strip()
+    if len(email) > 320 or not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=422, detail="Invalid email address.")
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+
+    def _sync() -> bool:
+        import auth as _auth
+        from email_sender import send_magic_link_email
+
+        token = _auth.create_magic_link(email)
+        login_url = f"{_FRONTEND_URL}/auth/verify?token={token}"
+        return send_magic_link_email(email, login_url)
+
+    loop = asyncio.get_running_loop()
+    try:
+        delivered = await loop.run_in_executor(None, _sync)
+    except Exception as exc:
+        log_event(LOGGER, "auth_request_link_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Could not send sign-in link. See server logs.")
+    if not delivered:
+        # Logged server-side in send_magic_link_email; the link itself was still
+        # created, so a fixed SMTP config lets the same link start working without
+        # the user needing to re-request it. The response deliberately doesn't say
+        # "failed" here to avoid leaking SMTP configuration state to the caller.
+        log_event(LOGGER, "auth_link_email_not_delivered", level="warning", email=email)
+    return {"sent": True}
+
+
+@app.get("/api/auth/verify")
+async def verify_magic_link(request: Request, token: str = Query(...)):
+    _rate_limit(request, "auth_verify", max_calls=20, window_seconds=300)
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+
+    def _sync() -> dict | None:
+        import auth as _auth
+
+        user = _auth.verify_magic_link(token)
+        if user is None:
+            return None
+        session_token = _auth.create_session(user["id"])
+        return {"user": user, "session_token": session_token}
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, _sync)
+    except Exception as exc:
+        log_event(LOGGER, "auth_verify_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    if result is None:
+        raise HTTPException(status_code=401, detail="This sign-in link is invalid, expired, or already used.")
+    return result
+
+
+@app.get("/api/auth/me")
+async def get_current_user(request: Request):
+    token = _bearer_token_from_request(request)
+    if not token or not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=401, detail="Not signed in.")
+
+    import auth as _auth
+
+    loop = asyncio.get_running_loop()
+    user = await loop.run_in_executor(None, _auth.get_user_for_session, token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not signed in.")
+    return {"user": user}
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    token = _bearer_token_from_request(request)
+    if token and os.environ.get("DATABASE_URL"):
+        import auth as _auth
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _auth.delete_session, token)
+    return {"ok": True}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)

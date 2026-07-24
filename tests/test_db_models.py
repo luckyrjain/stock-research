@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from db.models import ema_signals, get_engine, sme_stocks, watchlist_items
+from db.models import ema_signals, get_engine, magic_links, sessions, sme_stocks, users, watchlist_items
 
 
 class GetEngineTest(unittest.TestCase):
@@ -80,6 +80,41 @@ class TableSchemaTest(unittest.TestCase):
 
         index_columns = {tuple(c.name for c in idx.columns) for idx in watchlist_items.indexes}
         self.assertIn(("client_id",), index_columns)
+
+    def test_users_columns(self) -> None:
+        cols = set(users.columns.keys())
+        self.assertEqual(cols, {"id", "email", "created_at"})
+        self.assertTrue(users.columns["id"].primary_key)
+        self.assertFalse(users.columns["email"].nullable)
+        self.assertTrue(users.columns["email"].unique)
+
+    def test_magic_links_columns_and_constraints(self) -> None:
+        cols = set(magic_links.columns.keys())
+        self.assertEqual(cols, {"id", "email", "token_hash", "expires_at", "used_at", "created_at"})
+        self.assertFalse(magic_links.columns["email"].nullable)
+        self.assertFalse(magic_links.columns["token_hash"].nullable)
+        self.assertTrue(magic_links.columns["token_hash"].unique)
+        self.assertFalse(magic_links.columns["expires_at"].nullable)
+
+        index_columns = {tuple(c.name for c in idx.columns) for idx in magic_links.indexes}
+        self.assertIn(("email",), index_columns)
+
+    def test_sessions_columns_and_constraints(self) -> None:
+        cols = set(sessions.columns.keys())
+        self.assertEqual(cols, {"id", "user_id", "token_hash", "expires_at", "created_at"})
+        self.assertFalse(sessions.columns["user_id"].nullable)
+        self.assertFalse(sessions.columns["token_hash"].nullable)
+        self.assertTrue(sessions.columns["token_hash"].unique)
+
+        fk_targets = {
+            f"{fk.column.table.name}.{fk.column.name}"
+            for col in sessions.columns
+            for fk in col.foreign_keys
+        }
+        self.assertIn("users.id", fk_targets)
+
+        index_columns = {tuple(c.name for c in idx.columns) for idx in sessions.indexes}
+        self.assertIn(("user_id",), index_columns)
 
 
 if __name__ == "__main__":

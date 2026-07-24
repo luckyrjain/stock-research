@@ -18,7 +18,9 @@ A second mode — **Market Picks** — runs a multi-agent pipeline that scrapes 
 
 A third mode — **SME Signals** — is a PostgreSQL-backed batch pipeline (`sme_ema_pipeline.py`) that screens all NSE Emerge + BSE SME stocks for EMA20/EMA50 **golden cross** and **death cross** events, served at `/sme-signals` via `GET /api/sme-signals`.
 
-A **Watchlist** ties the three modes together: a star button in each dashboard adds/removes a stock from a PostgreSQL-backed `watchlist_items` table, and `/watchlist` lists everything starred with live prices. There's no login yet — rows are keyed by an anonymous per-browser `client_id` (a UUID in `localStorage`), not a real account, so a watchlist doesn't follow you across devices.
+A **Watchlist** ties the three modes together: a star button in each dashboard adds/removes a stock from a PostgreSQL-backed `watchlist_items` table, and `/watchlist` lists everything starred with live prices. Rows are still keyed by an anonymous per-browser `client_id` (a UUID in `localStorage`), not an account — see "Account & magic-link auth flow" below for the (separate, additive) account system.
+
+A minimal **account system** (magic-link email, no passwords) exists via `POST /api/auth/request-link` + `GET /api/auth/verify` — a `Sign in` link appears in every page's nav bar (`AuthWidget`). It does not yet replace or migrate the anonymous `client_id` watchlist/positions data above; the two identities coexist.
 
 A shared **search box** (`HeaderSearch`, in every page's nav bar) answers "what does AlphaPulse think about X" in one query: `GET /api/consolidated/{symbol}` is pure aggregation of what the three modes above have already cached/computed for that symbol — no new fetching, no LLM calls. Any section is `null` when that pipeline hasn't run for the symbol yet (the common case), not an error.
 
@@ -36,6 +38,8 @@ stock-research/
 ├── market_picks_pipeline.py  Multi-agent weekly picks pipeline (6 phases)
 ├── sme_ema_pipeline.py     SME golden/death cross batch pipeline (PostgreSQL)
 ├── verdict_history.py      Daily verdict/price snapshots (PostgreSQL) — powers the hero's timeline strip
+├── auth.py                 Magic-link auth: token/session issuance + validation (PostgreSQL)
+├── email_sender.py         Sends the magic-link sign-in email over generic SMTP
 ├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
 ├── observability.py        Structured JSON logging via log_event()
 ├── requirements.txt
@@ -60,10 +64,17 @@ stock-research/
 │   ├── components/               Dashboard, search, progress tracker, market picks dashboard
 │   │   ├── header-search.tsx     Shared "what does AlphaPulse think about X" search box (every nav bar)
 │   │   └── consolidated-card.tsx Modal rendering GET /api/consolidated/{symbol}'s three sections
+│   ├── app/login/page.tsx        Magic-link sign-in form (email → "check your inbox")
+│   ├── app/auth/verify/page.tsx  Consumes ?token=, calls /api/auth/verify, redirects home
 │   ├── app/api/                  Thin Next.js proxy routes → FastAPI backend
+│   │   └── app/api/auth/         request-link / verify / me / logout — verify + logout also
+│   │                             set/clear the httpOnly session cookie (see auth-cookie.ts)
 │   ├── lib/watchlist.ts          useWatchlist() hook (DB-backed via /api/watchlist, anonymous client_id)
 │   ├── lib/positions.ts          usePositions() hook ("I bought this" — localStorage only, no backend)
+│   ├── lib/auth.ts               useAuth() hook (session-cookie-backed; same shared-cache pattern as useWatchlist)
+│   ├── lib/auth-cookie.ts        Server-only cookie helpers used by app/api/auth/* route handlers
 │   ├── lib/useStockAnalysis.ts   Per-symbol SSE analysis hook, shared by the home page and /compare
+│   ├── components/auth-widget.tsx "Sign in" link or email+logout dropdown, in every page's nav bar
 │   └── types/index.ts            Canonical TS types for all SSE messages and reports
 └── output/                 Cache files (gitignored); also where CLI saves report JSON
     ├── <SYMBOL>/           Per-symbol task caches
@@ -239,7 +250,13 @@ Provider is auto-detected from whichever key is present (checked in the order ab
 | `ANALYST_MODEL` | provider default | Model for the analyst LLM call — the only model-selection env var that does anything; data fetching doesn't call an LLM (see "Agent architecture") |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Only needed when `LLM_PROVIDER=ollama` |
 | `LOG_LEVEL` | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`) |
-| `DATABASE_URL` | unset | PostgreSQL DSN — required for the SME signals pipeline (`/api/sme-signals`), the watchlist (`/api/watchlist`), and the verdict timeline (`/api/verdict-history/{symbol}`) |
+| `DATABASE_URL` | unset | PostgreSQL DSN — required for the SME signals pipeline (`/api/sme-signals`), the watchlist (`/api/watchlist`), the verdict timeline (`/api/verdict-history/{symbol}`), and account/magic-link auth (`/api/auth/*`) |
+| `FRONTEND_URL` | `http://localhost:3000` | Canonical frontend origin embedded in magic-link sign-in emails (`/auth/verify?token=...` must run in the browser to receive the session cookie, so it can't point at the FastAPI backend directly) |
+| `SMTP_HOST` | unset | SMTP server for magic-link emails. Without it, sign-in links are created and stored but never emailed (logged as a warning; the request still returns success) |
+| `SMTP_PORT` | `587` | SMTP port |
+| `SMTP_USER` / `SMTP_PASSWORD` | unset | SMTP auth — skipped if either is unset |
+| `SMTP_FROM` | `SMTP_USER` or `noreply@alphapulse.local` | From address on the sign-in email |
+| `SMTP_USE_TLS` | `true` | Set to `false` only for a local/dev relay that doesn't speak STARTTLS |
 
 ### Frontend
 
@@ -468,6 +485,54 @@ connecting the three otherwise-independent modes:
 5. Same defensive conventions as SME endpoints: 503 if `DATABASE_URL` unset/DB unreachable
    (sanitized — no raw exception text in the response), 422 on invalid `client_id`/`symbol`,
    rate-limited via `_rate_limit()`, capped at 200 items per `client_id`
+
+### Account & magic-link auth flow
+
+Minimal, passwordless auth — no OAuth, no separate signup step. Additive on top of the
+anonymous `client_id` identity above: existing `watchlist_items`/positions data is untouched
+and still keyed by `client_id`; signing in doesn't currently claim or merge it onto an
+account (a deliberate scope call — see the Tier 2 product-queue discussion this shipped
+from).
+
+1. **Request a link** — `POST /api/auth/request-link` (`{email}`), rate-limited (5/15 min
+   per IP). `auth.create_magic_link(email)` stores a single-use token (only its SHA-256 hash
+   is persisted — the raw token exists only in the outbound email and the process memory
+   that generated it) with a 15-minute expiry in the `magic_links` table, then
+   `email_sender.send_magic_link_email()` emails a link pointing at `{FRONTEND_URL}/auth/verify?token=...`.
+   The response is always `{"sent": true}` regardless of whether SMTP delivery actually
+   succeeded (logged server-side as a warning) — this avoids leaking SMTP configuration
+   state, and a link that failed to send once still works if the caller re-requests after
+   SMTP is fixed.
+2. **Verify** — the browser opens `/auth/verify?token=...` (a Next.js page, not the FastAPI
+   endpoint directly — the cookie has to be set on the frontend's own origin), which calls
+   `GET /api/auth/verify?token=`. `auth.verify_magic_link()` atomically consumes the token
+   (`UPDATE ... WHERE used_at IS NULL AND expires_at > NOW() ... RETURNING`, so two
+   concurrent clicks of the same link can't both win) and get-or-creates the `users` row for
+   its email — there's no separate signup; the first successful link click *is* account
+   creation. `auth.create_session()` then issues a session token (30-day expiry, same
+   hash-only-storage convention as magic links) tied to that user.
+3. **Cookie handoff** — `frontend/app/api/auth/verify/route.ts` is the one proxy route that
+   isn't a pure passthrough: on a successful backend response it also sets the raw session
+   token as an httpOnly, `SameSite=Lax` cookie (`alphapulse_session`) on the Next.js origin,
+   since the browser only ever talks to that origin, never to FastAPI directly. Every other
+   authenticated proxy route (`/api/auth/me`, `/api/auth/logout`, and any future
+   account-gated endpoint) reads that cookie server-side (`lib/auth-cookie.ts`) and forwards
+   it to the backend as `Authorization: Bearer <token>` — `api.py` never sees a cookie, only
+   that header.
+4. **Session state in the UI** — `frontend/lib/auth.ts`'s `useAuth()` hook holds a
+   module-level shared cache + subscriber list (same pattern as `useWatchlist()`): every
+   mounted `AuthWidget` (dropped into every page's nav bar next to `HeaderSearch`) reads/
+   subscribes to one in-memory fetch of `GET /api/auth/me` instead of each firing its own.
+   Shows a "Sign in" link when logged out, or the user's email with a sign-out dropdown when
+   logged in. `refreshAuth()` re-fetches after `/auth/verify` succeeds so the nav updates
+   without a full page reload.
+5. **Logout** — `POST /api/auth/logout` best-effort deletes the session row
+   (`auth.delete_session()`, swallow-and-log like `verdict_history.py`'s read path); the
+   Next.js route clears the cookie regardless of whether that delete succeeded, so the
+   browser is signed out either way.
+6. `GET /api/auth/me` is the one endpoint every authenticated page implicitly depends on —
+   401 (not 200 with a null user) when there's no session, so `useAuth()`'s `loading` state
+   distinguishes "still checking" from "confirmed signed out."
 
 ### Consolidated view flow
 

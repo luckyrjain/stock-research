@@ -68,3 +68,40 @@ CREATE TABLE IF NOT EXISTS verdict_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_verdict_history_symbol ON verdict_history(symbol);
+
+-- Minimal magic-link auth (see auth.py). No passwords. A user row is created
+-- on first successful link click, not via a separate signup step. Existing
+-- watchlist_items/positions stay keyed by the anonymous client_id — accounts
+-- are additive, not a migration.
+CREATE TABLE IF NOT EXISTS users (
+    id          SERIAL PRIMARY KEY,
+    email       VARCHAR(320) NOT NULL UNIQUE,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Single-use, short-lived sign-in tokens. Only a SHA-256 hash of the token is
+-- stored — the raw token exists only in the email itself and the process
+-- memory that generated it.
+CREATE TABLE IF NOT EXISTS magic_links (
+    id          SERIAL PRIMARY KEY,
+    email       VARCHAR(320) NOT NULL,
+    token_hash  VARCHAR(64)  NOT NULL UNIQUE,
+    expires_at  TIMESTAMPTZ  NOT NULL,
+    used_at     TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_magic_links_email ON magic_links(email);
+
+-- Opaque bearer session tokens (same hash-only-storage convention as
+-- magic_links). The frontend's Next.js proxy routes hold the raw token in an
+-- httpOnly cookie and forward it as `Authorization: Bearer <token>`.
+CREATE TABLE IF NOT EXISTS sessions (
+    id          SERIAL PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    token_hash  VARCHAR(64) NOT NULL UNIQUE,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);

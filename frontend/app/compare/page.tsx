@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import ProgressTracker  from '@/components/progress-tracker';
 import ResultsDashboard from '@/components/results-dashboard';
 import HeaderSearch     from '@/components/header-search';
+import AuthWidget       from '@/components/auth-widget';
 import { useStockAnalysis } from '@/lib/useStockAnalysis';
 
 const MAX_SYMBOLS = 2;
@@ -115,6 +116,7 @@ function ComparePageInner() {
           <span className="text-sm font-semibold text-accent">Compare</span>
           <div className="ml-auto flex items-center gap-3">
             <HeaderSearch />
+            <AuthWidget />
           </div>
         </div>
 
