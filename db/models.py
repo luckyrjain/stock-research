@@ -1,7 +1,7 @@
 import os
 
 from sqlalchemy import (
-    Column, Date, DateTime, ForeignKey, Index, Integer,
+    Boolean, Column, Date, DateTime, ForeignKey, Index, Integer,
     MetaData, Numeric, String, Table, UniqueConstraint, text,
 )
 from sqlalchemy import create_engine as _create_engine
@@ -25,6 +25,10 @@ sme_stocks = Table(
     # the shown price.
     Column("avg_volume_20d",   Numeric(16, 2)),
     Column("avg_turnover_20d", Numeric(16, 2)),
+    # Market cap in ₹ Cr, via yfinance fast_info (one extra lightweight
+    # request per stock beyond the OHLCV history() fetch). NULL until the
+    # first run after this column was added, or if fast_info didn't have it.
+    Column("market_cap_cr", Numeric(16, 2)),
 )
 
 ema_signals = Table(
@@ -36,6 +40,10 @@ ema_signals = Table(
     Column("close_price", Numeric(12, 4)),
     Column("ema20",       Numeric(12, 4)),
     Column("ema50",       Numeric(12, 4)),
+    # Standard momentum-screener confirmation signals alongside the EMA
+    # cross — see sme_ema_pipeline._compute_rsi / _compute_volume_spike.
+    Column("rsi14",        Numeric(6, 2)),
+    Column("volume_spike", Boolean),
     Column("cross_type",  String(10)),   # 'golden' | 'death' | NULL ('cross' is reserved in SQL)
     Column("run_at",      DateTime(timezone=True), server_default=text("NOW()")),
     UniqueConstraint("symbol", "trade_date", name="uq_ema_signals_symbol_date"),

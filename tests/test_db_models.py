@@ -29,7 +29,7 @@ class TableSchemaTest(unittest.TestCase):
         cols = set(sme_stocks.columns.keys())
         self.assertEqual(cols, {
             "symbol", "name", "exchange", "isin", "series", "fetched_at",
-            "avg_volume_20d", "avg_turnover_20d",
+            "avg_volume_20d", "avg_turnover_20d", "market_cap_cr",
         })
         self.assertTrue(sme_stocks.columns["symbol"].primary_key)
         self.assertFalse(sme_stocks.columns["exchange"].nullable)
@@ -38,7 +38,10 @@ class TableSchemaTest(unittest.TestCase):
         cols = set(ema_signals.columns.keys())
         self.assertEqual(
             cols,
-            {"id", "symbol", "trade_date", "close_price", "ema20", "ema50", "cross_type", "run_at"},
+            {
+                "id", "symbol", "trade_date", "close_price", "ema20", "ema50",
+                "rsi14", "volume_spike", "cross_type", "run_at",
+            },
         )
         self.assertFalse(ema_signals.columns["symbol"].nullable)
         self.assertFalse(ema_signals.columns["trade_date"].nullable)

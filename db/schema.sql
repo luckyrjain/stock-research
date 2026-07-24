@@ -13,7 +13,11 @@ CREATE TABLE IF NOT EXISTS sme_stocks (
     -- from the same OHLCV fetch already done for EMA signals. NULL until the
     -- first run that stores volume alongside close price.
     avg_volume_20d    NUMERIC(16, 2),
-    avg_turnover_20d  NUMERIC(16, 2)
+    avg_turnover_20d  NUMERIC(16, 2),
+    -- Market cap in ₹ Cr, via yfinance fast_info (one extra lightweight
+    -- request per stock beyond the OHLCV history() fetch). NULL until the
+    -- first run after this column was added, or if fast_info didn't have it.
+    market_cap_cr     NUMERIC(16, 2)
 );
 
 CREATE TABLE IF NOT EXISTS ema_signals (
@@ -23,6 +27,9 @@ CREATE TABLE IF NOT EXISTS ema_signals (
     close_price     NUMERIC(12, 4),
     ema20           NUMERIC(12, 4),
     ema50           NUMERIC(12, 4),
+    -- Standard momentum-screener confirmation signals alongside the EMA cross.
+    rsi14           NUMERIC(6, 2),
+    volume_spike    BOOLEAN,
     cross_type      VARCHAR(10),          -- 'golden' | 'death' | NULL
     run_at          TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(symbol, trade_date)

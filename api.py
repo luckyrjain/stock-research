@@ -1222,16 +1222,30 @@ async def get_verdict_history(request: Request, symbol: str):
     return {"symbol": sym, "history": history}
 
 
+_HIT_RATE_LOOKBACK_DAYS       = 90   # window of golden crosses considered
+_HIT_RATE_FORWARD_TRADING_DAYS = 20  # "follow-through" horizon, matching the
+                                      # +20d window used elsewhere (cross_events)
+
+
 @app.get("/api/sme-signals")
 async def get_sme_signals(
     lookback:  int = Query(5, ge=1, le=30, description="Days back to check for crosses"),
     direction: str = Query("all", description="all | golden | death"),
+    view:      str = Query("crosses", description="crosses | regime"),
 ):
-    """Return SME stocks with an EMA20/EMA50 golden or death cross in the last N days."""
+    """Return SME stocks with an EMA20/EMA50 golden or death cross in the last N days
+    (view=crosses, the default), or the latest row for every monitored stock regardless
+    of whether it has crossed recently (view=regime) — the "golden-now" stat in the
+    default view has no way to say which specific stocks make it up without this;
+    lookback/direction are ignored in regime view since there's no cross-event window
+    to filter by.
+    """
     import os
 
     if direction not in ("all", "golden", "death"):
         raise HTTPException(status_code=422, detail="direction must be one of: all, golden, death")
+    if view not in ("crosses", "regime"):
+        raise HTTPException(status_code=422, detail="view must be one of: crosses, regime")
     if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the SME pipeline first.")
 
@@ -1240,32 +1254,57 @@ async def get_sme_signals(
 
         engine = _get_db_engine()
         with engine.connect() as conn:
-            rows = conn.execute(_text("""
-                WITH latest AS (
-                    SELECT DISTINCT ON (symbol) symbol, (ema20 > ema50) AS in_golden_cross
-                    FROM ema_signals
-                    ORDER BY symbol, trade_date DESC
-                )
-                SELECT
-                    s.symbol,
-                    s.name,
-                    s.exchange,
-                    s.avg_volume_20d::float   AS avg_volume_20d,
-                    s.avg_turnover_20d::float AS avg_turnover_20d,
-                    e.trade_date::text   AS trade_date,
-                    e.close_price::float AS close_price,
-                    e.ema20::float       AS ema20,
-                    e.ema50::float       AS ema50,
-                    e.cross_type         AS "cross",
-                    COALESCE(l.in_golden_cross, FALSE) AS in_golden_cross
-                FROM ema_signals e
-                JOIN sme_stocks  s USING (symbol)
-                LEFT JOIN latest l USING (symbol)
-                WHERE e.cross_type IS NOT NULL
-                  AND (:direction = 'all' OR e.cross_type = :direction)
-                  AND e.trade_date >= CURRENT_DATE - (:lookback * INTERVAL '1 day')
-                ORDER BY e.trade_date DESC, s.symbol
-            """), {"lookback": lookback, "direction": direction}).mappings().fetchall()
+            if view == "regime":
+                rows = conn.execute(_text("""
+                    SELECT DISTINCT ON (s.symbol)
+                        s.symbol,
+                        s.name,
+                        s.exchange,
+                        s.avg_volume_20d::float   AS avg_volume_20d,
+                        s.avg_turnover_20d::float AS avg_turnover_20d,
+                        s.market_cap_cr::float    AS market_cap_cr,
+                        e.trade_date::text   AS trade_date,
+                        e.close_price::float AS close_price,
+                        e.ema20::float       AS ema20,
+                        e.ema50::float       AS ema50,
+                        e.rsi14::float       AS rsi14,
+                        e.volume_spike       AS volume_spike,
+                        e.cross_type         AS "cross",
+                        (e.ema20 > e.ema50)  AS in_golden_cross
+                    FROM ema_signals e
+                    JOIN sme_stocks s USING (symbol)
+                    ORDER BY s.symbol, e.trade_date DESC
+                """)).mappings().fetchall()
+            else:
+                rows = conn.execute(_text("""
+                    WITH latest AS (
+                        SELECT DISTINCT ON (symbol) symbol, (ema20 > ema50) AS in_golden_cross
+                        FROM ema_signals
+                        ORDER BY symbol, trade_date DESC
+                    )
+                    SELECT
+                        s.symbol,
+                        s.name,
+                        s.exchange,
+                        s.avg_volume_20d::float   AS avg_volume_20d,
+                        s.avg_turnover_20d::float AS avg_turnover_20d,
+                        s.market_cap_cr::float    AS market_cap_cr,
+                        e.trade_date::text   AS trade_date,
+                        e.close_price::float AS close_price,
+                        e.ema20::float       AS ema20,
+                        e.ema50::float       AS ema50,
+                        e.rsi14::float       AS rsi14,
+                        e.volume_spike       AS volume_spike,
+                        e.cross_type         AS "cross",
+                        COALESCE(l.in_golden_cross, FALSE) AS in_golden_cross
+                    FROM ema_signals e
+                    JOIN sme_stocks  s USING (symbol)
+                    LEFT JOIN latest l USING (symbol)
+                    WHERE e.cross_type IS NOT NULL
+                      AND (:direction = 'all' OR e.cross_type = :direction)
+                      AND e.trade_date >= CURRENT_DATE - (:lookback * INTERVAL '1 day')
+                    ORDER BY e.trade_date DESC, s.symbol
+                """), {"lookback": lookback, "direction": direction}).mappings().fetchall()
 
             total_monitored = conn.execute(
                 _text("SELECT COUNT(*) FROM sme_stocks")
@@ -1283,12 +1322,51 @@ async def get_sme_signals(
                 _text("SELECT MAX(run_at)::text FROM ema_signals")
             ).scalar()
 
+            # Aggregate hit-rate: of golden crosses in the last 90 days that have
+            # had _HIT_RATE_FORWARD_TRADING_DAYS trading days to play out, what
+            # share closed higher N trading days later? One SQL pass — LEAD()
+            # over each symbol's own trade_date-ordered series finds the close
+            # N trading-day rows later, exactly like _compute_cross_events's
+            # index-based forward return, just aggregated across every stock at
+            # once instead of one symbol's stored series. A cross too recent to
+            # have resolved yet (LEAD returns NULL) is excluded from the sample,
+            # not counted as a loss.
+            hit_rate_row = conn.execute(_text("""
+                WITH ordered AS (
+                    SELECT
+                        trade_date, close_price, cross_type,
+                        LEAD(close_price, :forward_days) OVER (
+                            PARTITION BY symbol ORDER BY trade_date
+                        ) AS close_later
+                    FROM ema_signals
+                )
+                SELECT
+                    COUNT(*) FILTER (WHERE close_later IS NOT NULL) AS sample_size,
+                    COUNT(*) FILTER (WHERE close_later > close_price) AS wins
+                FROM ordered
+                WHERE cross_type = 'golden'
+                  AND trade_date >= CURRENT_DATE - (:lookback_days * INTERVAL '1 day')
+            """), {
+                "forward_days": _HIT_RATE_FORWARD_TRADING_DAYS,
+                "lookback_days": _HIT_RATE_LOOKBACK_DAYS,
+            }).mappings().first()
+
+        sample_size = int(hit_rate_row["sample_size"] or 0)
+        wins = int(hit_rate_row["wins"] or 0)
+        win_rate = round(wins / sample_size * 100, 1) if sample_size else None
+
         return {
-            "signals":         [dict(r) for r in rows],
-            "total_monitored": int(total_monitored),
-            "golden_now":      int(golden_now),
-            "last_run":        last_run,
-            "refreshing":      _SME_REFRESHING,
+            "signals":          [dict(r) for r in rows],
+            "total_monitored":  int(total_monitored),
+            "golden_now":       int(golden_now),
+            "last_run":         last_run,
+            "refreshing":       _SME_REFRESHING,
+            "golden_hit_rate_90d": {
+                "sample_size": sample_size,
+                "win_rate":    win_rate,
+                "lookback_days": _HIT_RATE_LOOKBACK_DAYS,
+                "forward_days":  _HIT_RATE_FORWARD_TRADING_DAYS,
+            },
         }
 
     loop = asyncio.get_running_loop()

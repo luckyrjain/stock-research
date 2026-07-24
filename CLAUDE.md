@@ -357,13 +357,22 @@ level.
 2. Downloads 1 year of daily OHLCV per stock via yfinance
 3. Computes EMA 20/50 over the full year; flags **golden crosses** (EMA20 crosses above
    EMA50) and **death crosses** (crosses below); stores only the last ~3 months of rows.
-   Also computes avg daily volume/turnover over the last 20 trading days from the same
-   OHLCV fetch (`_compute_liquidity()` — no extra network calls) and stores it on
-   `sme_stocks` (a plain `UPDATE` via `_upsert_liquidity()`, run after `_upsert_signals()`
-   since liquidity isn't known until this phase, unlike the stock-list metadata `_upsert_stocks()`
-   writes before OHLCV is even fetched)
+   Also computes **RSI(14)** (`_compute_rsi()`, Wilder's smoothing) and a **volume-spike**
+   flag (`_compute_volume_spike()`: today's volume > 2x its trailing 20-day average) per
+   day, stored alongside `ema20`/`ema50` on `ema_signals` — momentum-screener confirmation
+   signals a bare EMA cross doesn't provide on its own. Also computes avg daily
+   volume/turnover over the last 20 trading days (`_compute_liquidity()`) and market cap
+   via yfinance `fast_info` (`_safe_market_cap_cr()`, one extra lightweight request per
+   stock — trailing P/E deliberately isn't fetched, since it needs the much heavier full
+   `.info` scrape, which across potentially hundreds of SME stocks per run would meaningfully
+   add to this pipeline's already rate-limit-sensitive runtime for one inline column) — no
+   OHLCV network calls beyond that. Both stored on `sme_stocks` (plain `UPDATE`s via
+   `_upsert_liquidity()`/`_upsert_market_cap()`, run after `_upsert_signals()` since neither
+   is known until this phase, unlike the stock-list metadata `_upsert_stocks()` writes
+   before OHLCV is even fetched)
 4. `GET /api/sme-signals` serves cross events + current regime (`ema20 > ema50` on the
-   latest row) + each stock's `avg_volume_20d`/`avg_turnover_20d`; `POST /api/sme-signals/refresh`
+   latest row) + each stock's `avg_volume_20d`/`avg_turnover_20d`/`market_cap_cr`/`rsi14`/
+   `volume_spike` + a 90-day golden-cross follow-through hit rate; `POST /api/sme-signals/refresh`
    runs the pipeline in the background (409 if already running; `refreshing` flag in the
    GET response)
 
@@ -394,6 +403,37 @@ crosses" can genuinely return fewer than 3 (or zero) for an infrequently-crossin
 bounded by the same retention window as everything else in this table, not a separate archive.
 `frontend/app/sme-signals/page.tsx`'s expanded row renders this as "Last N golden/death crosses
 (20d): +12%, −4%, +22%" above the EMA chart, using the same fetch the chart already makes.
+
+**Aggregate golden hit-rate**: the single strongest trust-building number a raw technical
+screener can show — "golden crosses in the last 90d: X% follow-through" — is computed as
+part of `GET /api/sme-signals` in one SQL pass: a `LEAD(close_price, 20) OVER (PARTITION BY
+symbol ORDER BY trade_date)` window function finds each golden cross's close price 20 trading
+days later, aggregated across every stock at once (the same trading-day-offset approach
+`_compute_cross_events` uses per-symbol, just as one query instead of N). Returned as
+`golden_hit_rate_90d: {sample_size, win_rate, lookback_days, forward_days}` — `win_rate` is
+`null` when `sample_size` is 0 (never guessed at); a cross too recent to have resolved yet
+(`LEAD` returns `NULL`) is excluded from the sample rather than counted as a loss. Surfaced as
+a 5th stat tile on `/sme-signals`.
+
+**RSI(14) + volume spike**: standard momentum-screener confirmation signals alongside the EMA
+cross — a cross with no volume confirmation behind it is a weak signal on its own. Both are
+per-day columns on `ema_signals` (`rsi14`, `volume_spike`), computed once per pipeline run
+from the same OHLCV fetch (see step 3 above), and filtered **client-side** in
+`frontend/app/sme-signals/page.tsx` (RSI oversold ≤30 / overbought ≥70 chips, a
+"Volume-confirmed only" toggle) — the API already returns every row for the selected
+period/direction/view, so no new query params were needed for this, matching how the
+existing Exchange filter already works.
+
+**Regime view**: `GET /api/sme-signals?view=regime` (default `view=crosses`) drops the
+`cross_type IS NOT NULL` filter and returns the latest stored row for **every** monitored
+stock via `DISTINCT ON (s.symbol) ... ORDER BY s.symbol, e.trade_date DESC` — the "golden-now"
+stat in the default view has no way to say which specific stocks make up that number without
+this. `lookback`/`direction` are accepted but ignored in this view (no cross-event window to
+filter by). Since most stocks' latest row isn't a cross day, `cross` is `null` for most rows
+in this view — `SmeSignal.cross` and `CrossBadge` both accept `null` (rendered as "—") to
+support this; in the default crosses view `cross` is never null (guaranteed by the SQL's own
+`WHERE e.cross_type IS NOT NULL`). The frontend's Period/Direction filter chips are hidden in
+regime view since they don't apply.
 
 Daily auto-run: `.github/workflows/sme-cron.yml` runs the pipeline on GitHub Actions at
 13:00 UTC (18:30 IST) on weekdays — NSE closes 15:30 IST, so this leaves a ~3h buffer for

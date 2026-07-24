@@ -31,7 +31,7 @@ class _FakeConn:
         return False
 
 
-def _fake_sme_engine(rows, total_monitored, golden_now, last_run):
+def _fake_sme_engine(rows, total_monitored, golden_now, last_run, hit_rate=None):
     rows_result = MagicMock()
     rows_result.mappings.return_value.fetchall.return_value = rows
     total_result = MagicMock()
@@ -40,8 +40,10 @@ def _fake_sme_engine(rows, total_monitored, golden_now, last_run):
     golden_result.scalar.return_value = golden_now
     last_run_result = MagicMock()
     last_run_result.scalar.return_value = last_run
+    hit_rate_result = MagicMock()
+    hit_rate_result.mappings.return_value.first.return_value = hit_rate or {"sample_size": 0, "wins": 0}
 
-    conn = _FakeConn([rows_result, total_result, golden_result, last_run_result])
+    conn = _FakeConn([rows_result, total_result, golden_result, last_run_result, hit_rate_result])
     engine = MagicMock()
     engine.connect.return_value = conn
     return engine
@@ -862,6 +864,77 @@ class SmeSignalsEndpointTest(unittest.TestCase):
         # The raw exception (which could leak DSN/credentials) must not reach the client.
         self.assertNotIn("password", resp.text)
         self.assertNotIn("exposed", resp.text)
+
+    def test_invalid_view_returns_422_even_without_db(self) -> None:
+        resp = client.get("/api/sme-signals?view=nonsense")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_golden_hit_rate_computed_from_sample_and_wins(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        fake_engine = _fake_sme_engine(
+            rows=[], total_monitored=10, golden_now=2, last_run=None,
+            hit_rate={"sample_size": 8, "wins": 5},
+        )
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.get("/api/sme-signals")
+
+        self.assertEqual(resp.status_code, 200)
+        hit_rate = resp.json()["golden_hit_rate_90d"]
+        self.assertEqual(hit_rate["sample_size"], 8)
+        self.assertAlmostEqual(hit_rate["win_rate"], 62.5, places=1)
+
+    def test_golden_hit_rate_is_null_when_no_resolved_sample(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        fake_engine = _fake_sme_engine(
+            rows=[], total_monitored=10, golden_now=2, last_run=None,
+            hit_rate={"sample_size": 0, "wins": 0},
+        )
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.get("/api/sme-signals")
+
+        hit_rate = resp.json()["golden_hit_rate_90d"]
+        self.assertEqual(hit_rate["sample_size"], 0)
+        self.assertIsNone(hit_rate["win_rate"])
+
+    def test_regime_view_query_omits_cross_type_filter(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        captured_sql: list[str] = []
+
+        class _RecordingConn:
+            def __init__(self) -> None:
+                results = [MagicMock() for _ in range(5)]
+                results[0].mappings.return_value.fetchall.return_value = []
+                results[1].scalar.return_value = 0
+                results[2].scalar.return_value = 0
+                results[3].scalar.return_value = None
+                results[4].mappings.return_value.first.return_value = {"sample_size": 0, "wins": 0}
+                self._results = results
+
+            def execute(self, stmt, *args, **kwargs):
+                captured_sql.append(str(stmt))
+                return self._results.pop(0)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        engine = MagicMock()
+        engine.connect.return_value = _RecordingConn()
+        with patch("api._get_db_engine", return_value=engine):
+            resp = client.get("/api/sme-signals?view=regime")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("DISTINCT ON (s.symbol)", captured_sql[0])
+        self.assertNotIn("cross_type IS NOT NULL", captured_sql[0])
+
+    def test_crosses_view_query_keeps_cross_type_filter(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        fake_engine = _fake_sme_engine(rows=[], total_monitored=0, golden_now=0, last_run=None)
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.get("/api/sme-signals?view=crosses")
+        self.assertEqual(resp.status_code, 200)
 
 
 class SmeSignalHistoryEndpointTest(unittest.TestCase):
