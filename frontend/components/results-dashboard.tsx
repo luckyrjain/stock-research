@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import type { PeerComparison, PriceHistory, Report, StockInfo } from '@/types';
+import type { PeerComparison, PriceHistory, Report, StockInfo, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
 import InfoTooltip from './info-tooltip';
 import Sparkline from './sparkline';
 import WatchlistButton from './watchlist-button';
@@ -121,6 +121,74 @@ function PriceSparkline({ symbol }: { symbol: string }) {
     <div className="flex flex-col items-end gap-1 shrink-0">
       <span className="text-[9px] font-semibold text-muted uppercase tracking-wider">6M trend</span>
       <Sparkline closes={history.closes} width={110} height={30} />
+    </div>
+  );
+}
+
+function useVerdictHistory(symbol: string): VerdictHistoryEntry[] {
+  const [history, setHistory] = useState<VerdictHistoryEntry[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setHistory([]);
+    fetch(`/api/verdict-history/${encodeURIComponent(symbol)}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then((data: VerdictHistoryResponse | null) => { if (!cancelled) setHistory(data?.history ?? []); })
+      .catch(() => { if (!cancelled) setHistory([]); });
+    return () => { cancelled = true; };
+  }, [symbol]);
+
+  return history;
+}
+
+const TIMELINE_REC_CLS: Record<string, string> = {
+  BUY:  'bg-buy/12 text-buy border-buy/25',
+  HOLD: 'bg-hold/12 text-hold border-hold/25',
+  SELL: 'bg-sell/12 text-sell border-sell/25',
+};
+
+// How today's call compares to past ones for the same stock — a strip of the
+// daily verdict snapshots verdict_history.save_snapshot() writes after every
+// analysis run. Needs at least two points to be a "timeline" at all, so a
+// symbol analysed for the first time today renders nothing here.
+function VerdictTimeline({ symbol }: { symbol: string }) {
+  const history = useVerdictHistory(symbol);
+  if (history.length < 2) return null;
+
+  return (
+    <div className="px-6 py-2.5 border-t border-border/60">
+      <div className="flex items-center gap-3 overflow-x-auto">
+        <span className="text-[10px] font-semibold text-muted uppercase tracking-wider shrink-0">
+          Verdict Timeline
+        </span>
+        <div className="flex items-center gap-1.5 min-w-0">
+          {history.map((h, i) => {
+            const isLast = i === history.length - 1;
+            const cls = (h.recommendation && TIMELINE_REC_CLS[h.recommendation]) || 'bg-card-hi text-muted border-border';
+            const tooltip = [
+              h.date,
+              h.current_price != null ? `₹${fmt(h.current_price)}` : null,
+              h.confidence ? `${h.confidence} confidence` : null,
+            ].filter(Boolean).join(' · ');
+            return (
+              <div key={h.date} className="flex items-center gap-1.5 shrink-0">
+                {i > 0 && <span className="text-muted/30 text-xs">→</span>}
+                <span
+                  title={tooltip}
+                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold border whitespace-nowrap ${cls} ${
+                    isLast ? 'ring-1 ring-accent/40' : ''
+                  }`}
+                >
+                  {h.recommendation ?? '—'}
+                  <span className="font-normal opacity-70">
+                    {new Date(h.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+                  </span>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }
@@ -407,6 +475,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
             <PriceSparkline symbol={report.symbol} />
           </div>
         </div>
+        <VerdictTimeline symbol={report.symbol} />
       </div>
 
       {/* ── 2. Main grid: thesis (60%) + metrics (40%) ── */}

@@ -574,6 +574,7 @@ async def analyse(symbol: str, request: Request, force: bool = False):
             from schemas import normalize as schema_normalize, validate as schema_validate
             from signals.engine import run_signal_engine
             from signals.store import save_signal
+            from verdict_history import save_snapshot as save_verdict_snapshot
 
             # ── Determine what needs fetching ─────────────────────────────
             stale = [n for n in ALL_DATA_TASKS if force or not cache.is_fresh(sym, n)]
@@ -711,6 +712,13 @@ async def analyse(symbol: str, request: Request, force: bool = False):
                 analysis = cache.load(sym, "analysis") or {}
 
             report = _build_report(sym, all_data, analysis, signal_context)
+            # Fire-and-forget: verdict_history is a best-effort side effect (it
+            # already logs and swallows its own failures) that the client isn't
+            # waiting on, so it must not add a DB round-trip to the response's
+            # critical path — not awaited here.
+            loop.run_in_executor(
+                None, save_verdict_snapshot, sym, analysis, signal_context, all_data.get("stock_info") or {}
+            )
             log_event(LOGGER, "api_analysis_completed", run_id=run_id, symbol=sym)
             yield _sse({"event": "done", "report": report})
 
@@ -1034,6 +1042,29 @@ async def get_peers(request: Request, symbol: str):
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _fetch_sync)
+
+
+@app.get("/api/verdict-history/{symbol}")
+async def get_verdict_history(request: Request, symbol: str):
+    """The per-day verdict/price snapshots verdict_history.save_snapshot() writes
+    after every analysis run (CLI or web), letting the frontend show a "how has
+    our call on this stock changed over time" strip without any new LLM or
+    scraping work. Read-only aggregation, same spirit as /api/consolidated: an
+    empty history (DATABASE_URL unset, no prior runs for this symbol, or a DB
+    hiccup) degrades to an empty list rather than a 500/503 — the hero's
+    timeline strip just doesn't render, the same as peers/price-history when
+    their own data isn't available yet.
+    """
+    _rate_limit(request, "verdict_history", max_calls=60, window_seconds=60)
+    sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+
+    from verdict_history import load_history
+
+    loop = asyncio.get_running_loop()
+    history = await loop.run_in_executor(None, load_history, sym)
+    return {"symbol": sym, "history": history}
 
 
 @app.get("/api/sme-signals")

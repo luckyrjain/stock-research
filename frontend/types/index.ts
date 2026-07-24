@@ -95,6 +95,22 @@ export interface PriceHistory {
   closes:   number[];   // aligned with dates
 }
 
+// One row per (symbol, day) the analysis pipeline ran, powering the hero's
+// "verdict timeline" strip — fetched separately from the main report, same
+// pattern as PriceHistory.
+export interface VerdictHistoryEntry {
+  date:            string;   // 'YYYY-MM-DD'
+  recommendation:  string | null;
+  confidence:      string | null;
+  current_price:   number | null;
+  signal_score:    number | null;
+}
+
+export interface VerdictHistoryResponse {
+  symbol:  string;
+  history: VerdictHistoryEntry[];   // oldest first
+}
+
 export type TaskName = 'stock_info' | 'research' | 'news' | 'shareholding' | 'mf_holdings';
 export type TaskStatus = 'idle' | 'running' | 'ok' | 'fail' | 'cached';
 export type Phase = 'idle' | 'fetching' | 'analysing' | 'done' | 'error';
