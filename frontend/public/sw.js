@@ -26,14 +26,34 @@ self.addEventListener('fetch', (event) => {
   if (url.pathname.startsWith('/api/')) return;
 
   if (request.mode === 'navigate') {
+    // Never cache a URL that carries a query string: this app has at least one
+    // route (/auth/verify?token=...) where the query string IS a sensitive,
+    // single-use credential, and the Cache API keys entries by full URL —
+    // caching it would persist that secret in Cache Storage indefinitely.
+    // Skipping all query strings (not just that one route) is the safe
+    // default for a general-purpose SW that shouldn't need route-specific
+    // knowledge of which params are sensitive.
+    const cacheable = url.search === '';
     event.respondWith(
       fetch(request)
         .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+          if (cacheable && response.ok) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+          }
           return response;
         })
-        .catch(() => caches.match(request).then((cached) => cached || caches.match('/'))),
+        .catch(
+          () =>
+            caches.match(request).then((cached) => cached || caches.match('/'))
+              // Nothing cached at all yet (e.g. first-ever visit went straight
+              // to a deep link, offline, before "/" was cached) — a graceful
+              // message beats letting the browser's own network-error page show.
+              .then((res) => res || new Response('You are offline.', {
+                status: 503,
+                headers: { 'Content-Type': 'text/plain' },
+              })),
+        ),
     );
     return;
   }
