@@ -134,6 +134,10 @@ instance; the workflow fails with a clear message rather than a Python traceback
 missing. Trigger a one-off run from the Actions tab ("Run workflow"). If you'd rather run
 this locally/self-hosted instead of on GitHub Actions, a crontab entry works too:
 
+```cron
+30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
+```
+
 ## Market picks pipeline
 
 No separate setup — it runs against whichever LLM provider key is already configured. Trigger a
@@ -172,10 +176,6 @@ Watchlist rows are keyed by an anonymous `client_id` (a UUID generated in the br
 stored in `localStorage`) rather than a real user account — there's no login yet, so a
 watchlist doesn't follow you across browsers or devices. `GET /api/watchlist` returns 503 if
 `DATABASE_URL` is unset, matching the SME signals endpoints' behavior.
-
-```cron
-30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
-```
 
 ## Cache and output
 
