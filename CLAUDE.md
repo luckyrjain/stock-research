@@ -662,6 +662,43 @@ file never left disk, and `api.py`'s SSE endpoint didn't write anything comparab
    at least 2 stored days to render at all — a symbol analysed for the first time today has
    nothing to compare against yet.
 
+### PWA installability
+
+The frontend is installable (Chrome "Add to Home Screen" / desktop install prompt) and previously-
+visited pages/static assets keep working offline. No new npm dependency — everything is built on
+Next.js App Router's own metadata file conventions plus `next/og`'s `ImageResponse` (already bundled
+with `next`, normally used for Open Graph images):
+
+1. `frontend/app/manifest.ts` — the App Router manifest file convention; Next.js serves it at
+   `/manifest.webmanifest` and auto-injects the `<link rel="manifest">` tag, no manual wiring needed.
+2. Icons are generated at request time via `ImageResponse` (JSX → PNG), not static files, so there
+   was no need to hand-produce or check in binary image assets:
+   - `frontend/app/icon.tsx` (32×32) and `frontend/app/apple-icon.tsx` (180×180) are Next's own
+     favicon/apple-touch-icon file conventions — Next auto-generates the `<link>` tags for both.
+   - `frontend/app/manifest-icons/[size]/route.tsx` is a plain Route Handler (not a Next metadata
+     convention file — those only support one fixed size each) serving the 192×192 and 512×512 PNGs
+     `manifest.ts`'s `icons` array points at; any other `size` param 404s.
+   - All three render the same navy-background/blue-"AP" mark inline via `ImageResponse`'s
+     satori-backed CSS subset (flexbox required explicitly) — no external image tooling.
+3. `frontend/public/sw.js` is a minimal hand-written service worker (no Workbox/next-pwa) registered
+   from `frontend/components/service-worker-registration.tsx` (mounted once in `app/layout.tsx`,
+   renders nothing, and **only in production** — registering in `next dev` would install a real,
+   persisted service worker in every engineer's dev browser profile that then keeps intercepting
+   static assets across future dev sessions): cache-first for same-origin static assets,
+   network-first-with-cache-fallback for navigations (so a previously-visited page still loads
+   offline, falling back to a plain "You are offline." response if nothing at all is cached yet), and
+   **`/api/*` is never intercepted** — this is a live stock-data tool, and serving a cached quote/
+   verdict while offline would be actively misleading rather than a helpful fallback, unlike a typical
+   content-site PWA. Navigations are also never cached when the URL carries a query string — the app
+   has at least one route (`/auth/verify?token=...`) where the query string IS a sensitive, single-use
+   credential, and the Cache API keys entries by full URL, so caching it would persist that secret in
+   Cache Storage indefinitely; skipping *every* query string (not just that one route) is the safe
+   default for a general-purpose service worker that shouldn't need route-specific knowledge of which
+   params are sensitive. Only successful (`response.ok`) responses are ever cached, on both the
+   navigation and static-asset paths, so a transient 5xx never gets served as the offline fallback.
+4. `app/layout.tsx` also exports `viewport.themeColor` (`#0b1120`, matching `bg` in
+   `tailwind.config.ts`) and `metadata.appleWebApp` for the iOS status-bar/home-screen title.
+
 ### Shared state and queues
 
 - **No shared in-memory state** between requests. Each request runs its own pipeline instance.
