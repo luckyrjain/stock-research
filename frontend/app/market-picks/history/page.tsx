@@ -24,6 +24,18 @@ function Skeleton({ className }: { className: string }) {
   return <div className={`bg-border/60 rounded animate-pulse ${className}`} />;
 }
 
+function pctColor(v: number | null): string {
+  if (v == null) return 'text-tx';
+  return v >= 0 ? 'text-buy' : 'text-sell';
+}
+
+function fmtPct(v: number | null): string {
+  if (v == null) return '—';
+  return `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+}
+
+const TIER_ORDER = ['BUY', 'WATCHLIST', 'HOLD', 'SELL'];
+
 export default function MarketPicksHistoryPage() {
   const [data,    setData]    = useState<MarketPicksHistoryResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -91,7 +103,7 @@ export default function MarketPicksHistoryPage() {
         </div>
 
         {/* Stats strip */}
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-6">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
           <div className="rounded-xl border border-border bg-card px-4 py-3">
             <div className="text-2xl font-black font-mono tabular-nums text-tx">
               {loading ? <Skeleton className="h-6 w-10" /> : (data?.snapshot_count ?? 0)}
@@ -112,7 +124,39 @@ export default function MarketPicksHistoryPage() {
             </div>
             <div className="text-[11px] font-semibold text-tx mt-0.5">Avg. Change Since Pick</div>
           </div>
+          <div className="rounded-xl border border-border bg-card px-4 py-3">
+            <div className="text-2xl font-black font-mono tabular-nums text-tx">
+              {loading ? <Skeleton className="h-6 w-14" /> : data?.win_rate == null ? '—' : `${data.win_rate.toFixed(1)}%`}
+            </div>
+            <div className="text-[11px] font-semibold text-tx mt-0.5">Win Rate</div>
+          </div>
+          <div className="rounded-xl border border-border bg-card px-4 py-3">
+            <div className={`text-2xl font-black font-mono tabular-nums ${loading ? 'text-tx' : pctColor(data?.avg_alpha_pct ?? null)}`}>
+              {loading ? <Skeleton className="h-6 w-14" /> : fmtPct(data?.avg_alpha_pct ?? null)}
+            </div>
+            <div className="text-[11px] font-semibold text-tx mt-0.5">Avg. Alpha vs Nifty</div>
+          </div>
         </div>
+
+        {/* Per-tier breakdown */}
+        {!loading && data && Object.keys(data.tier_stats).length > 0 && (
+          <div className="flex flex-wrap gap-3 mb-6">
+            {TIER_ORDER.filter(tier => data.tier_stats[tier]).map(tier => {
+              const stat = data.tier_stats[tier];
+              return (
+                <div key={tier} className="rounded-xl border border-border bg-card px-4 py-2.5 flex items-center gap-3">
+                  <RecBadge rec={tier} />
+                  <span className="text-xs text-muted">{stat.count} pick{stat.count === 1 ? '' : 's'}</span>
+                  <span className={`text-sm font-mono font-semibold ${pctColor(stat.avg_change_pct)}`}>
+                    {fmtPct(stat.avg_change_pct)} avg
+                  </span>
+                  <span className="text-xs text-muted">·</span>
+                  <span className="text-sm font-mono font-semibold text-tx">{stat.win_rate.toFixed(0)}% win rate</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {error && (
           <div className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-6">
@@ -134,6 +178,7 @@ export default function MarketPicksHistoryPage() {
                       { label: 'Price Then',   cls: 'text-right' },
                       { label: 'Price Now',    cls: 'text-right' },
                       { label: 'Change',       cls: 'text-right' },
+                      { label: 'vs Nifty',     cls: 'text-right' },
                     ].map(({ label, cls }) => (
                       <th key={label} className={`px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider ${cls}`}>
                         {label}
@@ -152,11 +197,12 @@ export default function MarketPicksHistoryPage() {
                         <td className="px-4 py-4"><Skeleton className="h-3.5 w-14 ml-auto" /></td>
                         <td className="px-4 py-4"><Skeleton className="h-3.5 w-14 ml-auto" /></td>
                         <td className="px-4 py-4"><Skeleton className="h-3.5 w-12 ml-auto" /></td>
+                        <td className="px-4 py-4"><Skeleton className="h-3.5 w-12 ml-auto" /></td>
                       </tr>
                     ))
                   ) : symbols.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="px-4 py-16 text-center text-muted text-sm">
+                      <td colSpan={8} className="px-4 py-16 text-center text-muted text-sm">
                         No track record yet — this fills in as daily Market Picks snapshots accumulate.
                       </td>
                     </tr>
@@ -199,6 +245,14 @@ export default function MarketPicksHistoryPage() {
                           ) : (
                             <span className="text-muted text-xs">—</span>
                           )}
+                        </td>
+                        <td className="px-4 py-4 text-right">
+                          <span
+                            className={`font-mono tabular-nums text-xs font-semibold ${pctColor(s.alpha_pct)}`}
+                            title={s.nifty_change_pct != null ? `Nifty over the same window: ${fmtPct(s.nifty_change_pct)}` : undefined}
+                          >
+                            {fmtPct(s.alpha_pct)}
+                          </span>
                         </td>
                       </tr>
                     ))
