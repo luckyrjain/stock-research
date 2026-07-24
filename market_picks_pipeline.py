@@ -296,6 +296,72 @@ def _reason_strength(reason: str) -> float:
     return min(1.0, score / 5)   # normalise to 0–1 range
 
 
+# ── Picks result cache ────────────────────────────────────────────────────────
+# Shared by api.py's on-demand SSE endpoint and this module's own CLI
+# entrypoint (main(), below) — one source of truth regardless of whether a
+# result came from a scheduled run or a user-triggered rescan. The TTL is
+# sized to the weekly refresh cadence (see .github/workflows/market-picks-cron.yml)
+# plus a day of slack for a delayed run, not to the old "no scheduled job"
+# world where 6h was the only staleness bound available.
+#
+# Note main() is only useful when it runs on the same host/disk as the API
+# server (e.g. a self-hosted crontab, same pattern CLAUDE.md documents for
+# sme_ema_pipeline.py) — market-picks-cron.yml runs on GitHub's own ephemeral
+# runners, which don't share a filesystem with wherever the backend is
+# actually deployed, so it can't call this script directly and expect the
+# result to reach the live site. It instead asks the live backend to run its
+# own force-refresh over HTTP; see that workflow file for the full reasoning.
+_PICKS_CACHE_PATH = Path("output/_market_picks/picks.json")
+_PICKS_CACHE_TTL_HOURS = 192  # 7-day refresh cadence + 24h buffer
+
+
+def load_picks_cache() -> dict | None:
+    if not _PICKS_CACHE_PATH.exists():
+        return None
+    try:
+        data = json.loads(_PICKS_CACHE_PATH.read_text(encoding="utf-8"))
+        fetched_at = datetime.fromisoformat(data["_meta"]["fetched_at"])
+        age_h = (datetime.now(timezone.utc) - fetched_at).total_seconds() / 3600
+        return data if age_h <= _PICKS_CACHE_TTL_HOURS else None
+    except Exception:
+        return None
+
+
+def picks_cache_status() -> dict:
+    """Cache metadata regardless of freshness — last_run_at (the pipeline's own
+    generated_at, present whenever the cache file exists at all) and is_fresh
+    (per _PICKS_CACHE_TTL_HOURS). Powers api.py's lightweight
+    /api/market-picks/status endpoint so the frontend can show a true last-run
+    time even once the cache has gone stale — unlike load_picks_cache(), which
+    returns None outright once stale since it's used on the actual picks-
+    serving path, where "stale" and "absent" should be handled identically.
+    """
+    if not _PICKS_CACHE_PATH.exists():
+        return {"last_run_at": None, "is_fresh": False}
+    try:
+        data = json.loads(_PICKS_CACHE_PATH.read_text(encoding="utf-8"))
+        fetched_at = datetime.fromisoformat(data["_meta"]["fetched_at"])
+        age_h = (datetime.now(timezone.utc) - fetched_at).total_seconds() / 3600
+        return {"last_run_at": data.get("generated_at"), "is_fresh": age_h <= _PICKS_CACHE_TTL_HOURS}
+    except Exception:
+        return {"last_run_at": None, "is_fresh": False}
+
+
+def save_picks_cache(picks: list, generated_at: str) -> None:
+    try:
+        _PICKS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _PICKS_CACHE_PATH.write_text(
+            json.dumps({
+                "picks":        picks,
+                "generated_at": generated_at,
+                "_meta":        {"fetched_at": datetime.now(timezone.utc).isoformat()},
+            }, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
 # ── Historical tracking ───────────────────────────────────────────────────────
 _HISTORY_DIR = Path("output/_history")
 
@@ -582,6 +648,26 @@ _MAX_ACCEPTABLE_EMPTY_SOURCE_RATE = 0.7  # mirrors sme_ema_pipeline's health-che
 # legitimately go quiet some days, so only a clearly-broken scrape (most sources
 # returning nothing — usually every source getting blocked/rate-limited at once)
 # should be flagged, not ordinary day-to-day source variance.
+
+_MAX_PICKS_PER_SECTOR = 2
+
+
+def _apply_sector_balance(picks: list[dict], max_per_sector: int = _MAX_PICKS_PER_SECTOR) -> list[dict]:
+    """Promote up to `max_per_sector` picks per sector (in existing rank order)
+    to the front of the list, deferring the rest to the end — keeps the
+    primary list from being dominated by one hot sector. Each pick must
+    already carry a `sector` key; this only reorders, it never removes it."""
+    sector_counts: dict[str, int] = {}
+    primary:  list[dict] = []
+    deferred: list[dict] = []
+    for pick in picks:
+        sector = pick.get("sector", "Unknown")
+        if sector_counts.get(sector, 0) < max_per_sector:
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
+            primary.append(pick)
+        else:
+            deferred.append(pick)
+    return primary + deferred
 
 
 class MarketPicksPipeline:
@@ -1335,7 +1421,7 @@ Return ONLY this JSON (no markdown):
                 "ranking_reasons":  ranking_reasons,
                 "is_recent_ipo":    rd.get("is_recent_ipo", False),
                 "_sources_raw":     sources,
-                "_sector":          (si.get("sector") or "Unknown"),
+                "sector":           (si.get("sector") or "Unknown"),
             })
 
         # Sort: BUYs first, then WATCHLIST, HOLD, SELL; within tier by action_score DESC
@@ -1349,19 +1435,10 @@ Return ONLY this JSON (no markdown):
         for i, p in enumerate(picks, 1):
             p["rank"] = i
 
-        # Sector balancing: top 2 per sector promoted; excess deferred to end
-        _MAX_PER_SECTOR = 2
-        sector_counts: dict[str, int] = {}
-        primary:  list[dict] = []
-        deferred: list[dict] = []
-        for pick in picks:
-            sector = pick.pop("_sector", "Unknown")
-            if sector_counts.get(sector, 0) < _MAX_PER_SECTOR:
-                sector_counts[sector] = sector_counts.get(sector, 0) + 1
-                primary.append(pick)
-            else:
-                deferred.append(pick)
-        picks = primary + deferred
+        # Sector balancing: top 2 per sector promoted; excess deferred to end.
+        # `sector` stays on each pick afterwards — it's real output data (the
+        # frontend filters by it), not an internal-only field to strip.
+        picks = _apply_sector_balance(picks, max_per_sector=_MAX_PICKS_PER_SECTOR)
         for i, p in enumerate(picks, 1):
             p["rank"] = i
 
@@ -1382,3 +1459,40 @@ Return ONLY this JSON (no markdown):
             except Exception:
                 pass
         return self._nse_session
+
+
+# ── CLI entrypoint ────────────────────────────────────────────────────────────
+
+def main() -> None:
+    """Run the pipeline headlessly and save straight to the picks cache,
+    bypassing api.py's SSE endpoint entirely. Only useful when run on the
+    same host/disk as the API server — e.g. a self-hosted crontab entry
+    (the same local-alternative pattern CLAUDE.md documents for
+    sme_ema_pipeline.py). GitHub's own market-picks-cron.yml workflow does
+    NOT call this script — its runners don't share a filesystem with wherever
+    the backend is actually deployed, so it triggers a refresh over HTTP
+    against the live backend instead; see that workflow file for why.
+
+    Exits non-zero on an empty or degraded run — mirroring
+    sme_ema_pipeline.py's run() contract — so a bad scrape fails loudly
+    instead of silently caching a result nobody should trust for the next
+    7 days.
+    """
+    pipeline = MarketPicksPipeline()
+    picks = pipeline.run()
+    generated_at = datetime.now(timezone.utc).isoformat()
+
+    if picks and pipeline.healthy:
+        save_picks_cache(picks, generated_at)
+        log_event(LOGGER, "market_picks_cli_run_completed", picks=len(picks), generated_at=generated_at)
+        print(f"Saved {len(picks)} picks to {_PICKS_CACHE_PATH} (generated_at={generated_at})")
+    else:
+        log_event(
+            LOGGER, "market_picks_cli_run_degraded_not_saved", level="error",
+            picks=len(picks), healthy=pipeline.healthy,
+        )
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

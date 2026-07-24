@@ -21,35 +21,13 @@ from signals.interpreter import interpret
 load_dotenv()
 
 # ── Market picks cache ────────────────────────────────────────────────────────
-_PICKS_CACHE_PATH = Path("output/_market_picks/picks.json")
-_PICKS_CACHE_TTL_HOURS = 6
-
-
-def _load_picks_cache() -> dict | None:
-    if not _PICKS_CACHE_PATH.exists():
-        return None
-    try:
-        data = json.loads(_PICKS_CACHE_PATH.read_text(encoding="utf-8"))
-        fetched_at = datetime.fromisoformat(data["_meta"]["fetched_at"])
-        age_h = (datetime.now(timezone.utc) - fetched_at).total_seconds() / 3600
-        return data if age_h <= _PICKS_CACHE_TTL_HOURS else None
-    except Exception:
-        return None
-
-
-def _save_picks_cache(picks: list, generated_at: str) -> None:
-    try:
-        _PICKS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _PICKS_CACHE_PATH.write_text(
-            json.dumps({
-                "picks":        picks,
-                "generated_at": generated_at,
-                "_meta":        {"fetched_at": datetime.now(timezone.utc).isoformat()},
-            }, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
+# Defined in market_picks_pipeline.py (the module that owns this pipeline's
+# output) so its own cron entrypoint and this file's on-demand SSE endpoint
+# read/write the exact same cache — re-exported here under the historical
+# names so existing call sites (and test patches targeting api._load_picks_cache
+# / api._save_picks_cache) keep working unchanged.
+from market_picks_pipeline import load_picks_cache as _load_picks_cache
+from market_picks_pipeline import save_picks_cache as _save_picks_cache
 
 
 # ── Global LLM concurrency ceiling ───────────────────────────────────────────
@@ -832,6 +810,48 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# Mirrors the schedule in .github/workflows/market-picks-cron.yml
+# ('30 1 * * 1' — Monday 01:30 UTC). Kept in sync by hand; there's no way to
+# share one source of truth between a GitHub Actions cron expression and this
+# Python computation.
+_MARKET_PICKS_CRON_WEEKDAY     = 0   # Monday, per datetime.weekday()'s convention (Mon=0..Sun=6)
+_MARKET_PICKS_CRON_HOUR_UTC    = 1
+_MARKET_PICKS_CRON_MINUTE_UTC  = 30
+
+
+def _next_scheduled_market_picks_run(now: datetime | None = None) -> datetime:
+    now = now or datetime.now(timezone.utc)
+    candidate = now.replace(
+        hour=_MARKET_PICKS_CRON_HOUR_UTC, minute=_MARKET_PICKS_CRON_MINUTE_UTC,
+        second=0, microsecond=0,
+    )
+    days_ahead = (_MARKET_PICKS_CRON_WEEKDAY - now.weekday()) % 7
+    candidate += timedelta(days=days_ahead)
+    if candidate <= now:
+        candidate += timedelta(days=7)
+    return candidate
+
+
+@app.get("/api/market-picks/status")
+async def get_market_picks_status(request: Request):
+    """Cache metadata only — no pipeline run. Lets the idle /market-picks hero
+    show a true last-run time and the next scheduled refresh instead of an
+    unverifiable "every week" claim with no way to know whether anything
+    actually ran on schedule versus just being served from cache.
+    """
+    _rate_limit(request, "market_picks_status", max_calls=60, window_seconds=60)
+
+    from market_picks_pipeline import picks_cache_status
+
+    loop = asyncio.get_running_loop()
+    status = await loop.run_in_executor(None, picks_cache_status)
+    return {
+        "last_run_at":       status["last_run_at"],
+        "cache_fresh":       status["is_fresh"],
+        "next_scheduled_at": _next_scheduled_market_picks_run().isoformat(),
+    }
 
 
 _PICKS_HISTORY_DIR = Path("output/_history")

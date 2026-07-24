@@ -6,6 +6,7 @@ import type {
   MarketPicksPhase,
   MarketPicksSSEMessage,
   MarketPick,
+  MarketPicksStatus,
 } from '@/types';
 import MarketPicksDashboard from '@/components/market-picks-dashboard';
 import HeaderSearch from '@/components/header-search';
@@ -39,6 +40,12 @@ const PIPELINE_STEPS: { id: MarketPicksPhase; label: string; desc: string }[] = 
 const PHASE_ORDER: MarketPicksPhase[] = [
   'scanning', 'extracting', 'consolidating', 'researching', 'scoring', 'done',
 ];
+
+function formatStatusTime(iso: string): string {
+  return new Date(iso).toLocaleString('en-IN', {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
+  });
+}
 
 
 function SamplePickCard() {
@@ -198,9 +205,22 @@ export default function MarketPicksPage() {
   const [fromCache, setFromCache] = useState(false);
   const [error, setError]         = useState<string | null>(null);
   const [pricesLastUpdated, setPricesLastUpdated] = useState<Date | null>(null);
+  const [status, setStatus] = useState<MarketPicksStatus | null>(null);
 
   const esRef   = useRef<EventSource | null>(null);
   const doneRef = useRef(false);
+
+  // Cache metadata only — no pipeline run — so the idle hero can show a true
+  // last-run time and the next scheduled cron refresh instead of an
+  // unverifiable "every week" claim.
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/market-picks/status')
+      .then(res => (res.ok ? res.json() : null))
+      .then((data: MarketPicksStatus | null) => { if (!cancelled) setStatus(data); })
+      .catch(() => { if (!cancelled) setStatus(null); });
+    return () => { cancelled = true; };
+  }, []);
 
   // Refresh LTP every 30 s once picks are loaded
   useEffect(() => {
@@ -380,22 +400,22 @@ export default function MarketPicksPage() {
               <div>
                 <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full
                                 bg-accent/10 border border-accent/20 text-accent text-xs font-semibold mb-5">
-                  Multi-agent · 16 sources · AI-ranked
+                  Multi-agent · 20 sources · AI-ranked
                 </div>
                 <h1 className="text-4xl font-black tracking-tight mb-3 leading-tight">
                   Top Indian Stocks<br />
                   <span className="text-accent">This Week</span>
                 </h1>
                 <p className="text-muted text-sm leading-relaxed mb-8 max-w-md">
-                  Every week, our AI pipeline scrapes 16 financial sources, validates each stock on NSE,
-                  runs a quantitative signal engine, and returns a confidence-ranked watchlist with
-                  entry, target, and stop-loss levels.
+                  Every Monday morning, our AI pipeline scrapes 20 financial sources, validates each
+                  stock on NSE, runs a quantitative signal engine, and returns a confidence-ranked
+                  watchlist with entry, target, and stop-loss levels.
                 </p>
 
                 {/* How it works — 3 steps */}
                 <div className="space-y-3.5 mb-9">
                   {([
-                    { n: '01', title: 'Scrapes 16 sources', sub: 'ET Markets, HDFC Securities, NSE bulk deals + 13 more' },
+                    { n: '01', title: 'Scrapes 20 sources', sub: 'ET Markets, HDFC Securities, NSE bulk deals + 17 more' },
                     { n: '02', title: 'AI validates on NSE', sub: 'Extracts tickers, deduplicates, confirms live price' },
                     { n: '03', title: 'Signal engine ranks', sub: 'Confidence score + entry · target · stop for each pick' },
                   ] as const).map(({ n, title, sub }) => (
@@ -409,7 +429,7 @@ export default function MarketPicksPage() {
                   ))}
                 </div>
 
-                <div className="flex items-center gap-4 flex-wrap">
+                <div className="flex items-center gap-4 flex-wrap mb-3">
                   <button
                     onClick={() => startScan()}
                     className="px-7 py-3 rounded-xl bg-accent text-white font-bold text-sm
@@ -419,6 +439,16 @@ export default function MarketPicksPage() {
                   </button>
                   <span className="text-xs text-muted">~2 min · 35 stocks max</span>
                 </div>
+
+                {status && (
+                  <p className="text-[11px] text-muted/70">
+                    {status.last_run_at
+                      ? `Last scan: ${formatStatusTime(status.last_run_at)}${status.cache_fresh ? '' : ' (stale)'}`
+                      : 'No scan has run yet'}
+                    {' · '}
+                    Next scheduled scan: {formatStatusTime(status.next_scheduled_at)}
+                  </p>
+                )}
               </div>
 
               {/* Right: sample pick card */}

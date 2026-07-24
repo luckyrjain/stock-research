@@ -327,6 +327,57 @@ class RemainingEndpointsRateLimitTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 429)
 
 
+class NextScheduledMarketPicksRunTest(unittest.TestCase):
+    def test_before_this_weeks_run_returns_this_monday(self) -> None:
+        from datetime import datetime, timezone
+        friday = datetime(2026, 7, 24, 10, 0, tzinfo=timezone.utc)
+        next_run = api._next_scheduled_market_picks_run(friday)
+        self.assertEqual(next_run.isoformat(), "2026-07-27T01:30:00+00:00")
+
+    def test_on_run_day_before_run_time_returns_today(self) -> None:
+        from datetime import datetime, timezone
+        monday_early = datetime(2026, 7, 27, 0, 0, tzinfo=timezone.utc)
+        next_run = api._next_scheduled_market_picks_run(monday_early)
+        self.assertEqual(next_run.isoformat(), "2026-07-27T01:30:00+00:00")
+
+    def test_on_run_day_after_run_time_returns_next_week(self) -> None:
+        from datetime import datetime, timezone
+        monday_late = datetime(2026, 7, 27, 2, 0, tzinfo=timezone.utc)
+        next_run = api._next_scheduled_market_picks_run(monday_late)
+        self.assertEqual(next_run.isoformat(), "2026-08-03T01:30:00+00:00")
+
+
+class MarketPicksStatusEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_returns_cache_metadata_and_next_scheduled_run(self) -> None:
+        fake_status = {"last_run_at": "2026-07-20T00:00:00+00:00", "is_fresh": True}
+        with patch("market_picks_pipeline.picks_cache_status", return_value=fake_status):
+            resp = client.get("/api/market-picks/status")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["last_run_at"], "2026-07-20T00:00:00+00:00")
+        self.assertTrue(body["cache_fresh"])
+        self.assertIn("next_scheduled_at", body)
+
+    def test_no_cache_returns_null_last_run(self) -> None:
+        fake_status = {"last_run_at": None, "is_fresh": False}
+        with patch("market_picks_pipeline.picks_cache_status", return_value=fake_status):
+            resp = client.get("/api/market-picks/status")
+        body = resp.json()
+        self.assertIsNone(body["last_run_at"])
+        self.assertFalse(body["cache_fresh"])
+
+    def test_rate_limited_returns_429(self) -> None:
+        api._RATE_LIMIT_CALLS["market_picks_status:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/market-picks/status")
+        self.assertEqual(resp.status_code, 429)
+
+
 class MarketPicksHistoryEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-picks-history-test-")

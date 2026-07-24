@@ -74,3 +74,7 @@ Beyond an LLM provider key (see [Setup](setup.md)), production deployments shoul
   calls to the backend get CORS-rejected; defaults to `http://localhost:3000` (see `api.py`)
 - `API_URL` (frontend) — point at your backend's real address if not using Docker Compose's automatic wiring
 - `LOG_LEVEL=INFO` (default) — bump to `DEBUG` temporarily when diagnosing an issue, not left on in steady state
+
+This one isn't an app env var, but a **GitHub Actions repository secret** — `MARKET_PICKS_API_URL`,
+your backend's public URL, required for `.github/workflows/market-picks-cron.yml`'s weekly refresh
+to have anywhere to send its `?force=true` request (see [Setup](setup.md#market-picks-pipeline)).

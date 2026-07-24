@@ -147,7 +147,7 @@ These tool functions are decorated with `@tool` from `crewai.tools` purely for a
 | `_phase_consolidate` | Groups picks by ticker, validates against NSE equity master, confirms live price via yfinance (guards pre-IPO / unlisted names). Uses rapidfuzz for fuzzy company-name matching. |
 | `_phase_research` | Fetches `stock_info` + `research` + signal engine per stock (4 workers, up to `_MAX_STOCKS` stocks). |
 | `_phase_analyze` | Batched LLM calls (8 stocks/batch, parallel) for qualitative summary + bull/bear factors. Does NOT ask the LLM for prices. |
-| `_phase_score` | Deterministic confidence scoring (`_compute_confidence`: 50% signal engine + 30% consensus + 20% recency, 0–100). The 4-tier rec (BUY / WATCHLIST / HOLD / SELL) is a *separate* formula on top — `combined_dir = 0.55 × consensus + 0.45 × signal_score`, thresholded, with a quant-veto that demotes BUY → WATCHLIST on a strongly negative signal score. Entry/target/stop-loss computed from price and signal score — no LLM. Sector-balanced: max 2 stocks per sector in the primary list. Saves a daily snapshot to `output/_history/` for trend tracking. |
+| `_phase_score` | Deterministic confidence scoring (`_compute_confidence`: 50% signal engine + 30% consensus + 20% recency, 0–100). The 4-tier rec (BUY / WATCHLIST / HOLD / SELL) is a *separate* formula on top — `combined_dir = 0.55 × consensus + 0.45 × signal_score`, thresholded, with a quant-veto that demotes BUY → WATCHLIST on a strongly negative signal score. Entry/target/stop-loss computed from price and signal score — no LLM. Sector-balanced (`_apply_sector_balance()`): max 2 stocks per sector promoted to the primary list, excess deferred to the end — `sector` stays on every pick in the response (real, filterable data, not popped like the old internal-only `_sector`). Saves a daily snapshot to `output/_history/` for trend tracking. |
 
 ---
 
@@ -297,10 +297,32 @@ Handles three input forms:
 ### Market picks flow
 
 1. Browser opens `EventSource` → `GET /api/market-picks` (optional `?force=true` bypasses cache)
-2. `api.py` checks `output/_market_picks/picks.json` (6 h TTL); serves cached `done` event immediately if fresh
+2. `api.py` checks `output/_market_picks/picks.json` (192 h / 7-day TTL — sized to the weekly cron
+   cadence below plus a day of slack, not the old "no scheduled job" 6 h bound); serves cached `done`
+   event immediately if fresh
 3. On cache miss: wraps `MarketPicksPipeline.run()` in `run_in_executor`; bridges events via `asyncio.Queue`
 4. Pipeline calls `on_event(payload)` → `loop.call_soon_threadsafe(q.put_nowait, payload)` → SSE stream
 5. The six pipeline phases run synchronously inside the executor thread; final result saved to cache
+   via `market_picks_pipeline.save_picks_cache()` (also re-exported into `api.py` as `_save_picks_cache`
+   for the existing call sites/test patches)
+
+**Weekly auto-refresh**: `.github/workflows/market-picks-cron.yml` fires every Monday at 01:30 UTC
+(07:00 IST, ahead of NSE's 9:15 IST open) — weekly, not daily like `sme-cron.yml`, to match the
+product's own "Top Indian Stocks This Week" framing. Unlike SME (which persists to Postgres, reachable
+from anywhere), the picks cache is a local file on whatever host runs the backend — a GitHub Actions
+runner can't compute picks and expect them to reach the live site. So this workflow instead calls
+`GET {MARKET_PICKS_API_URL}/api/market-picks?force=true` on the already-deployed backend (same effect
+as a user clicking "Fresh scan," just on a timer) and requires a `MARKET_PICKS_API_URL` repository
+secret pointing at that backend's public address. `market_picks_pipeline.py` also has a `main()` CLI
+entrypoint for a self-hosted crontab that runs on the *same* host as the backend (mirrors the
+crontab alternative documented for `sme_ema_pipeline.py` below) — GitHub's own workflow does not call it.
+
+**`GET /api/market-picks/status`** is cache metadata only (no pipeline run): `last_run_at` (present even
+once the cache has gone stale — unlike the picks-serving path, "stale" and "absent" must be
+distinguishable here), `cache_fresh`, and `next_scheduled_at` (computed in `api.py` from constants that
+mirror the cron schedule above — kept in sync by hand, there's no way to share one source of truth
+between a GitHub Actions cron expression and this Python computation). Powers the idle `/market-picks`
+hero's true "Last scan" / "Next scheduled scan" line, replacing an unverifiable "every week" claim.
 
 ### SME golden cross flow
 
