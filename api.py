@@ -712,7 +712,11 @@ async def analyse(symbol: str, request: Request, force: bool = False):
                 analysis = cache.load(sym, "analysis") or {}
 
             report = _build_report(sym, all_data, analysis, signal_context)
-            await loop.run_in_executor(
+            # Fire-and-forget: verdict_history is a best-effort side effect (it
+            # already logs and swallows its own failures) that the client isn't
+            # waiting on, so it must not add a DB round-trip to the response's
+            # critical path — not awaited here.
+            loop.run_in_executor(
                 None, save_verdict_snapshot, sym, analysis, signal_context, all_data.get("stock_info") or {}
             )
             log_event(LOGGER, "api_analysis_completed", run_id=run_id, symbol=sym)

@@ -9,19 +9,24 @@ break the analysis pipeline itself — failures are logged and swallowed, the
 same convention signals/store.py uses for its own write-only audit trail.
 """
 import os
+import threading
+from datetime import datetime, timezone
 
 from observability import get_logger, log_event
 
 LOGGER = get_logger("verdict_history")
 
 _ENGINE = None
+_ENGINE_LOCK = threading.Lock()
 
 
 def _get_engine():
     global _ENGINE
     if _ENGINE is None:
-        from db.models import get_engine
-        _ENGINE = get_engine()
+        with _ENGINE_LOCK:
+            if _ENGINE is None:  # re-check: another thread may have won the race
+                from db.models import get_engine
+                _ENGINE = get_engine()
     return _ENGINE
 
 
@@ -34,6 +39,12 @@ def save_snapshot(symbol: str, analysis: dict, signal_context: dict | None, stoc
     if not recommendation:
         return
 
+    # Computed here (not SQL's CURRENT_DATE) so "today" is always the app's own
+    # UTC clock — the same explicit-UTC convention cache.py's freshness checks
+    # use — rather than whatever timezone the connected Postgres server happens
+    # to be configured with.
+    verdict_date = datetime.now(timezone.utc).date().isoformat()
+
     try:
         from sqlalchemy import text
 
@@ -43,7 +54,7 @@ def save_snapshot(symbol: str, analysis: dict, signal_context: dict | None, stoc
                 INSERT INTO verdict_history
                     (symbol, verdict_date, recommendation, confidence, current_price, signal_score)
                 VALUES
-                    (:symbol, CURRENT_DATE, :recommendation, :confidence, :current_price, :signal_score)
+                    (:symbol, :verdict_date, :recommendation, :confidence, :current_price, :signal_score)
                 ON CONFLICT (symbol, verdict_date) DO UPDATE SET
                     recommendation = EXCLUDED.recommendation,
                     confidence     = EXCLUDED.confidence,
@@ -51,6 +62,7 @@ def save_snapshot(symbol: str, analysis: dict, signal_context: dict | None, stoc
                     signal_score   = EXCLUDED.signal_score
             """), {
                 "symbol":         symbol.upper().strip(),
+                "verdict_date":   verdict_date,
                 "recommendation": recommendation,
                 "confidence":     analysis.get("confidence"),
                 "current_price":  stock_info.get("current_price"),

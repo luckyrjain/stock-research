@@ -62,6 +62,8 @@ class SaveSnapshotTest(unittest.TestCase):
         self.assertEqual(len(conn.calls), 1)
         args, _kwargs = conn.calls[0]
         _stmt, params = args
+        verdict_date = params.pop("verdict_date", None)
+        self.assertRegex(verdict_date or "", r"^\d{4}-\d{2}-\d{2}$")
         self.assertEqual(params, {
             "symbol": "TCS",
             "recommendation": "BUY",
