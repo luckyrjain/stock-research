@@ -365,6 +365,21 @@ class MarketPicksHistoryEndpointTest(unittest.TestCase):
             "win_rate": None, "tier_stats": {}, "avg_alpha_pct": None,
         })
 
+    def test_snapshot_count_preserved_when_no_symbols_have_picks(self) -> None:
+        # Regression: 3 valid daily runs happened, each finding zero picks (or
+        # picks missing a symbol) — snapshot_count must still reflect that 3
+        # runs occurred, not silently drop to 0 just because by_symbol ended
+        # up empty.
+        self._write_snapshot("2026-07-01", [])
+        self._write_snapshot("2026-07-02", [{"confidence": 50, "mention_count": 1}])  # no symbol
+        self._write_snapshot("2026-07-03", [])
+        resp = client.get("/api/market-picks/history")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["snapshot_count"], 3)
+        self.assertEqual(body["symbols"], [])
+        self.assertIsNone(body["win_rate"])
+
     def test_computes_change_pct_across_snapshots(self) -> None:
         self._write_snapshot("2026-07-01", [
             {"symbol": "ABC", "confidence": 60, "mention_count": 2, "current_price": 100.0, "recommendation": "BUY"},

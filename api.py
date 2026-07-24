@@ -920,7 +920,7 @@ async def get_market_picks_history(request: Request):
                 by_symbol.setdefault(sym, []).append({**row, "date": date_str})
 
         if not by_symbol:
-            return empty
+            return {**empty, "snapshot_count": snapshot_count}
 
         nifty_closes = _fetch_nifty_closes(min_date, max_date)
 
