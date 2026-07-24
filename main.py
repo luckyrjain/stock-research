@@ -325,6 +325,7 @@ def _build_report(symbol: str, all_data: dict, analysis: dict, signals: dict | N
     news_raw    = _strip_meta(all_data.get("news", {}))
     shareholding = _strip_meta(all_data.get("shareholding", {}))
     mf          = _strip_meta(all_data.get("mf_holdings", {}))
+    filings_raw = _strip_meta(all_data.get("filings", {}))
 
     holdings = {**shareholding, "mutual_funds": mf.get("mutual_funds", [])}
 
@@ -337,6 +338,7 @@ def _build_report(symbol: str, all_data: dict, analysis: dict, signals: dict | N
         "research": research,
         "news": news_raw.get("articles", []) if isinstance(news_raw, dict) else [],
         "holdings": holdings,
+        "filings": filings_raw.get("filings", []) if isinstance(filings_raw, dict) else [],
     }
 
 

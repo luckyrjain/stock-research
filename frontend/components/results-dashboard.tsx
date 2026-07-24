@@ -319,7 +319,7 @@ function summaryBullets(text: string): string[] {
 }
 
 export default function ResultsDashboard({ report, onHardRefresh }: Props) {
-  const { analysis: a, signals: sig, stock_info: s, research: r, news, holdings: h } = report;
+  const { analysis: a, signals: sig, stock_info: s, research: r, news, holdings: h, filings } = report;
 
   const peers = usePeerComparison(report.symbol);
   const percentileByNormalizedKey = useMemo(() => {
@@ -629,6 +629,38 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                 <span className="text-[11px] text-muted">{n.source} · {n.published_at} ↗</span>
               </a>
             ))}
+          </div>
+        </Card>
+      )}
+
+      {/* ── 6b. Filings ── */}
+      {filings && filings.length > 0 && (
+        <Card title="Corporate Filings">
+          <div className="divide-y divide-border">
+            {filings.slice(0, 5).map((f, i) => {
+              const meta = [f.category, f.date].filter(Boolean).join(' · ');
+              const body = (
+                <>
+                  <span className="text-sm text-tx group-hover:text-accent transition-colors leading-snug">
+                    {f.title ?? 'Untitled filing'}
+                  </span>
+                  {(meta || f.attachment) && (
+                    <span className="text-[11px] text-muted">{meta}{f.attachment ? ' ↗' : ''}</span>
+                  )}
+                </>
+              );
+              return f.attachment ? (
+                <a key={i} href={f.attachment} target="_blank" rel="noopener noreferrer"
+                  className="flex flex-col gap-1 py-3 first:pt-0 last:pb-0 group"
+                >
+                  {body}
+                </a>
+              ) : (
+                <div key={i} className="flex flex-col gap-1 py-3 first:pt-0 last:pb-0">
+                  {body}
+                </div>
+              );
+            })}
           </div>
         </Card>
       )}

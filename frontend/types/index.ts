@@ -63,6 +63,14 @@ export interface SignalSummary {
   signals: Record<string, SignalItem>;
 }
 
+export interface Filing {
+  title:      string | null;
+  desc:       string | null;
+  date:       string | null;
+  category:   string | null;
+  attachment: string | null;   // URL to the NSE PDF, when NSE provides one
+}
+
 export interface Report {
   symbol: string;
   generated_at: string;
@@ -75,6 +83,7 @@ export interface Report {
     shareholding_pattern?: Record<string, number>;
     mutual_funds?: { fund: string; holding_pct: number }[];
   };
+  filings: Filing[];   // corporate announcements — also what signals.filings feeds on
 }
 
 // Standalone daily-close series for sparklines — fetched separately from the
