@@ -82,6 +82,7 @@ Backend endpoints:
 |---|---|
 | `GET /api/validate/{symbol}` | Ticker / ISIN / company name lookup |
 | `GET /api/analyse/{symbol}` | Stock analysis SSE stream |
+| `GET /api/peers/{symbol}` | Sector peer comparison table + percentile badges, scraped from Screener.in (24 h cache) |
 | `GET /api/market-picks` | Market picks SSE stream (`?force=true` bypasses cache) |
 | `GET /api/sme-signals` | SME golden/death cross events (`?lookback=1..30`, `?direction=all\|golden\|death`) |
 | `POST /api/sme-signals/refresh` | Run the SME pipeline in the background (202; 409 if already running) |

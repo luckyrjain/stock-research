@@ -37,8 +37,8 @@ def _resolve_screener_slug(symbol: str) -> str:
     return upper  # best effort
 
 
-def _fetch_soup(symbol: str) -> BeautifulSoup:
-    slug = _resolve_screener_slug(symbol)
+def _fetch_soup(symbol: str, slug: str | None = None) -> BeautifulSoup:
+    slug = slug or _resolve_screener_slug(symbol)
     url = f"https://www.screener.in/company/{slug}/"
     resp = requests.get(url, headers=_HEADERS, timeout=20)
     resp.raise_for_status()
@@ -153,6 +153,85 @@ def get_fundamentals(symbol: str) -> str:
         about = about_el.get_text(strip=True)[:600] if about_el else ""
 
         return json.dumps({"symbol": symbol.upper(), "ratios": ratios, "about": about})
+    except Exception as e:
+        return json.dumps({"error": str(e), "symbol": symbol})
+
+
+def _parse_peer_table(soup: BeautifulSoup) -> dict:
+    """Parse Screener's Peer comparison table (section#peers). The column set
+    varies by sector (a bank's peer table looks nothing like an IT company's),
+    so this is driven entirely by the table's own headers rather than a
+    hardcoded schema — whatever Screener renders is what gets returned."""
+    section = soup.find("section", {"id": "peers"})
+    if not section:
+        return {"columns": [], "rows": []}
+    table = section.find("table")
+    if not table:
+        return {"columns": [], "rows": []}
+
+    header_cells = table.select("thead th")
+    columns = [_clean(th.get_text(" ", strip=True)) for th in header_cells]
+    if not columns:
+        return {"columns": [], "rows": []}
+
+    rows = []
+    for tr in table.select("tbody tr"):
+        cells = tr.find_all(["td", "th"])
+        if len(cells) != len(columns):
+            continue  # malformed/summary row we can't align to headers — skip rather than guess
+
+        link = tr.find("a", href=True)
+        slug = ""
+        if link and link.get("href"):
+            parts = link["href"].strip("/").split("/")
+            if len(parts) >= 2 and parts[0] == "company":
+                slug = parts[1]
+
+        values: dict[str, str] = {}
+        for col, cell in zip(columns, cells):
+            text = _clean(cell.get_text(" ", strip=True))
+            if text and text != "-":
+                values[col] = text
+
+        name = values.get("Name") or (link.get_text(" ", strip=True) if link else "")
+        if name:
+            rows.append({"name": name, "slug": slug, "values": values})
+
+    return {"columns": columns, "rows": rows}
+
+
+@tool("Get Screener.in Peer Comparison")
+def get_peer_comparison(symbol: str) -> str:
+    """Scrape the Peer comparison table from Screener.in for an Indian stock: the
+    company's own row, its sector peers, and Screener's own sector-median row
+    when present, with whatever ratio columns Screener renders for that sector
+    (typically P/E, Market Cap, Div Yield, ROCE %, and quarterly growth %).
+    Input: NSE stock symbol, e.g. RELIANCE, TCS, INFY."""
+    try:
+        slug = _resolve_screener_slug(symbol)
+        soup = _fetch_soup(symbol, slug=slug)
+        table = _parse_peer_table(soup)
+
+        self_row = None
+        median_row = None
+        peer_rows = []
+        for row in table["rows"]:
+            if row["name"].strip().lower() == "median":
+                median_row = row
+            elif row["slug"] and row["slug"].upper() == slug.upper():
+                self_row = row
+            else:
+                peer_rows.append(row)
+
+        # Screener orders peers by market cap; cap at 5 per the product spec (3-5 peers).
+        peer_rows = peer_rows[:5]
+
+        return json.dumps({
+            "symbol": symbol.upper(),
+            "self": self_row,
+            "peers": peer_rows,
+            "sector_median": median_row,
+        })
     except Exception as e:
         return json.dumps({"error": str(e), "symbol": symbol})
 

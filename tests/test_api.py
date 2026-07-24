@@ -499,6 +499,106 @@ class PriceHistoryEndpointTest(unittest.TestCase):
         self.assertEqual(resp2.status_code, 422)
 
 
+class PeersEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-peers-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
+        self._cache_patch.start()
+        self.addCleanup(self._cache_patch.stop)
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_invalid_symbol_returns_422(self) -> None:
+        resp = client.get("/api/peers/bad symbol")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_rate_limited_returns_429(self) -> None:
+        api._RATE_LIMIT_CALLS["peers:testclient"] = [api.time.monotonic()] * 30
+        resp = client.get("/api/peers/TCS")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_returns_peers_with_percentiles_and_caches(self) -> None:
+        raw = json.dumps({
+            "symbol": "TCS",
+            "self": {"name": "TCS", "slug": "TCS", "values": {"P/E": "28", "ROCE %": "52"}},
+            "peers": [
+                {"name": "Infosys", "slug": "INFY", "values": {"P/E": "25", "ROCE %": "32"}},
+                {"name": "Wipro",   "slug": "WIPRO", "values": {"P/E": "20", "ROCE %": "18"}},
+            ],
+            "sector_median": {"name": "Median", "slug": "", "values": {"P/E": "22", "ROCE %": "28"}},
+        })
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = raw
+        with patch("tools.screener_tools.get_peer_comparison", fake_tool):
+            resp = client.get("/api/peers/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["symbol"], "TCS")
+        self.assertEqual(len(body["peers"]), 2)
+        # Mean-rank percentile over [28, 25, 20]: TCS beats both peers (below=2)
+        # and ties only with itself (equal=1) -> (2 + 0.5) / 3 * 100 = 83.3
+        self.assertEqual(body["percentiles"]["P/E"], 83.3)
+        self.assertEqual(body["percentiles"]["ROCE %"], 83.3)
+        fake_tool.run.assert_called_once()
+
+        # second call must be served from cache — the scraper must not run again.
+        with patch("tools.screener_tools.get_peer_comparison") as should_not_run:
+            resp2 = client.get("/api/peers/TCS")
+        self.assertEqual(resp2.status_code, 200)
+        should_not_run.run.assert_not_called()
+
+    def test_tool_error_returns_empty_payload_not_500(self) -> None:
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
+        with patch("tools.screener_tools.get_peer_comparison", fake_tool):
+            resp = client.get("/api/peers/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertIsNone(body["self"])
+        self.assertEqual(body["peers"], [])
+        self.assertEqual(body["percentiles"], {})
+
+    def test_no_peers_yields_no_percentiles(self) -> None:
+        raw = json.dumps({
+            "symbol": "TCS",
+            "self": {"name": "TCS", "slug": "TCS", "values": {"P/E": "28"}},
+            "peers": [],
+            "sector_median": None,
+        })
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = raw
+        with patch("tools.screener_tools.get_peer_comparison", fake_tool):
+            resp = client.get("/api/peers/TCS")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["percentiles"], {})
+
+
+class PeerPercentileHelperTest(unittest.TestCase):
+    def test_tie_is_split_evenly(self) -> None:
+        self_row = {"values": {"P/E": "25"}}
+        peers = [{"values": {"P/E": "25"}}, {"values": {"P/E": "20"}}]
+        result = api._compute_peer_percentiles(self_row, peers)
+        # 3 values total [25, 20, 25]; self beats the 20 (below=1) and ties with
+        # both its own value and the peer's 25 (equal=2) -> (1 + 1.0) / 3 * 100 = 66.7
+        self.assertEqual(result["P/E"], 66.7)
+
+    def test_column_missing_from_all_peers_is_skipped(self) -> None:
+        self_row = {"values": {"P/E": "25", "Debt/Eq": "0.1"}}
+        peers = [{"values": {"P/E": "20"}}]
+        result = api._compute_peer_percentiles(self_row, peers)
+        self.assertIn("P/E", result)
+        self.assertNotIn("Debt/Eq", result)
+
+    def test_no_self_row_returns_empty(self) -> None:
+        self.assertEqual(api._compute_peer_percentiles(None, [{"values": {"P/E": "20"}}]), {})
+
+    def test_no_peers_returns_empty(self) -> None:
+        self.assertEqual(api._compute_peer_percentiles({"values": {"P/E": "20"}}, []), {})
+
+
 class SmeSignalsEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)

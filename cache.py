@@ -19,6 +19,7 @@ TTL_HOURS: dict[str, float] = {
     "mf_holdings":    168,   # quarterly filings — 7 days
     "analysis":       24,    # re-analyse daily (or when any input changes)
     "price_history":  6,     # daily-close series for sparklines — doesn't move fast
+    "peers":          24,    # peer comparison table — fundamentals-like, doesn't move fast
 }
 
 
