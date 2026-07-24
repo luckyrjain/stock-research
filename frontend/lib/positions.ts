@@ -69,8 +69,14 @@ export function usePositions() {
     listeners.add(onChange);
     if (cachedPositions === null) {
       cachedPositions = loadFromStorage();
-      onChange();
     }
+    // Always sync on mount, not just when this instance was the one that
+    // loaded the cache — another usePositions() instance may have populated
+    // cachedPositions moments earlier (e.g. on an instant cache-hit, this
+    // instance and PositionsStrip's can mount in the same commit), in which
+    // case this instance would otherwise never learn about it: notify() only
+    // reaches listeners already registered at the time it fired.
+    onChange();
     return () => { listeners.delete(onChange); };
   }, []);
 
