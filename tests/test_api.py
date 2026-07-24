@@ -889,6 +889,22 @@ class SmeSignalsEndpointTest(unittest.TestCase):
 
         self.assertIsNone(resp.json()["signals"][0]["isin"])
 
+    def test_bse_row_isin_flows_through_to_regime_view_response(self) -> None:
+        # test_regime_view_query_omits_cross_type_filter only checks the SQL
+        # text contains "s.isin" — that alone wouldn't catch a wrong alias
+        # (e.g. "s.isin AS isin_code") changing the actual response key.
+        # Assert the real end-to-end shape for the regime path specifically.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        fake_engine = _fake_sme_engine(
+            rows=[{"symbol": "543212", "exchange": "BSE", "cross": None, "isin": "INE123A01011"}],
+            total_monitored=1, golden_now=1, last_run=None,
+        )
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.get("/api/sme-signals?view=regime")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["signals"][0]["isin"], "INE123A01011")
+
     def test_db_error_returns_sanitized_503(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         with patch("api._get_db_engine", side_effect=RuntimeError("connection refused: password exposed")):

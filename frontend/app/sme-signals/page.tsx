@@ -655,7 +655,7 @@ export default function SmeSignalsPage() {
                               // (same resolution ticker-search.tsx already does for
                               // user-typed ISINs).
                               <Link
-                                href={`/?symbol=${s.isin}`}
+                                href={`/?symbol=${encodeURIComponent(s.isin)}`}
                                 onClick={e => e.stopPropagation()}
                                 title={`Resolve via ISIN ${s.isin}`}
                                 className="font-semibold text-tx hover:text-accent transition-colors text-sm"
