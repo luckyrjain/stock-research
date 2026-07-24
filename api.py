@@ -166,6 +166,7 @@ def _is_isin(s: str) -> bool:
 
 
 _TICKER_RE = re.compile(r"^[A-Z0-9&\-]{1,20}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _load_isin_map() -> dict:
@@ -901,7 +902,7 @@ def _nifty_close_on_or_before(closes: dict[str, float], date_str: str) -> float 
 
 
 @app.get("/api/market-picks/history")
-async def get_market_picks_history(request: Request):
+async def get_market_picks_history(request: Request, date: str | None = Query(None)):
     """Aggregate output/_history/<date>.json daily snapshots into a per-symbol
     track record: first/last seen, confidence trend, and price performance
     since first seen, benchmarked against the Nifty50 over the same window.
@@ -909,13 +910,40 @@ async def get_market_picks_history(request: Request):
     older snapshot files won't have them, so change_pct (and anything derived
     from it) is null wherever price_then or price_now is missing rather than
     guessed at.
+
+    With ?date=YYYY-MM-DD: skips aggregation entirely and returns that single
+    day's full pick list verbatim (same shape market_picks_pipeline._save_history
+    wrote it in) — the aggregated view above only ever surfaces a first/last-seen
+    roll-up per symbol, never a specific day's complete list. 404 if no snapshot
+    was taken that day (weekend, holiday, or before this feature existed).
     """
     _rate_limit(request, "market_picks_history", max_calls=60, window_seconds=60)
+
+    if date is not None:
+        if not _DATE_RE.match(date):
+            raise HTTPException(status_code=422, detail="date must be in YYYY-MM-DD format")
+
+        def _load_day_sync() -> dict | None:
+            path = _PICKS_HISTORY_DIR / f"{date}.json"
+            if not path.exists():
+                return None
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+            return {"date": data.get("date", date), "picks": data.get("picks", [])}
+
+        loop = asyncio.get_running_loop()
+        day_result = await loop.run_in_executor(None, _load_day_sync)
+        if day_result is None:
+            raise HTTPException(status_code=404, detail=f"No market-picks snapshot found for {date}")
+        return day_result
 
     def _load_sync() -> dict:
         empty = {
             "symbols": [], "snapshot_count": 0,
             "win_rate": None, "tier_stats": {}, "avg_alpha_pct": None,
+            "available_dates": [],
         }
         if not _PICKS_HISTORY_DIR.exists():
             return empty
@@ -924,6 +952,7 @@ async def get_market_picks_history(request: Request):
         snapshot_count = 0
         min_date: str | None = None
         max_date: str | None = None
+        available_dates: list[str] = []
         for path in sorted(_PICKS_HISTORY_DIR.glob("*.json")):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
@@ -931,6 +960,7 @@ async def get_market_picks_history(request: Request):
                 continue
             date_str = data.get("date", path.stem)
             snapshot_count += 1
+            available_dates.append(date_str)
             min_date = date_str if min_date is None else min(min_date, date_str)
             max_date = date_str if max_date is None else max(max_date, date_str)
             for row in data.get("picks", []):
@@ -940,7 +970,7 @@ async def get_market_picks_history(request: Request):
                 by_symbol.setdefault(sym, []).append({**row, "date": date_str})
 
         if not by_symbol:
-            return {**empty, "snapshot_count": snapshot_count}
+            return {**empty, "snapshot_count": snapshot_count, "available_dates": available_dates}
 
         nifty_closes = _fetch_nifty_closes(min_date, max_date)
 
@@ -1013,11 +1043,12 @@ async def get_market_picks_history(request: Request):
         avg_alpha_pct = round(sum(alphas) / len(alphas), 2) if alphas else None
 
         return {
-            "symbols":        symbols,
-            "snapshot_count": snapshot_count,
-            "win_rate":       win_rate,
-            "tier_stats":     tier_stats,
-            "avg_alpha_pct":  avg_alpha_pct,
+            "symbols":         symbols,
+            "snapshot_count":  snapshot_count,
+            "win_rate":        win_rate,
+            "tier_stats":      tier_stats,
+            "avg_alpha_pct":   avg_alpha_pct,
+            "available_dates": available_dates,
         }
 
     loop = asyncio.get_running_loop()

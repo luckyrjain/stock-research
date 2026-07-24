@@ -9,6 +9,7 @@ import type {
   MarketPicksStatus,
 } from '@/types';
 import MarketPicksDashboard from '@/components/market-picks-dashboard';
+import PositionsStrip from '@/components/positions-strip';
 import HeaderSearch from '@/components/header-search';
 
 interface SourceState {
@@ -389,6 +390,8 @@ export default function MarketPicksPage() {
             <HeaderSearch />
           </div>
         </div>
+
+        <PositionsStrip />
 
         {/* ── Idle ── */}
         {phase === 'idle' && (
