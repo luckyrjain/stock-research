@@ -92,6 +92,10 @@ class TableSchemaTest(unittest.TestCase):
             c for c in watchlist_items.constraints if c.__class__.__name__ == "CheckConstraint"
         ]
         self.assertEqual(len(check_constraints), 1)
+        # Exercise the actual expression, not just its presence — a flipped
+        # operator (= instead of <>) would still pass a bare count check but
+        # would let rows with both or neither identity set through.
+        self.assertEqual(str(check_constraints[0].sqltext), "(client_id IS NULL) <> (user_id IS NULL)")
 
         index_columns = {tuple(c.name for c in idx.columns) for idx in watchlist_items.indexes}
         self.assertIn(("client_id",), index_columns)

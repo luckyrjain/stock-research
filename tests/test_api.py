@@ -1395,6 +1395,29 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
         resp = client.post("/api/watchlist", json={"symbol": "TCS"})
         self.assertEqual(resp.status_code, 422)
 
+    def test_post_over_cap_for_account_returns_422(self) -> None:
+        # Mirrors WatchlistEndpointsTest.test_post_over_cap_returns_422 for the
+        # account-owned path — the cap must bind per-owner, not just per-client_id.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        lock_result = MagicMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = api._MAX_WATCHLIST_ITEMS_PER_CLIENT
+        begin_conn = _SqlRecordingConn([lock_result, count_result])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = begin_conn
+
+        with patch("api._get_db_engine", return_value=fake_engine), \
+             patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
+            resp = client.post(
+                "/api/watchlist", json={"symbol": "TCS"},
+                headers={"Authorization": "Bearer sometoken"},
+            )
+
+        self.assertEqual(resp.status_code, 422)
+        count_query, count_params = begin_conn.queries[1]
+        self.assertIn("user_id = :owner_value", count_query)
+        self.assertEqual(count_params["owner_value"], 42)
+
     def test_delete_with_valid_session_deletes_by_user_id(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         delete_result = MagicMock()

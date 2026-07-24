@@ -1,6 +1,16 @@
 -- SME Stocks EMA Crossover Schema
 -- Usage: psql $DATABASE_URL -f db/schema.sql
--- Or: python sme_ema_pipeline.py --setup-db
+-- Or (fresh installs only): python sme_ema_pipeline.py --setup-db
+--
+-- `--setup-db` calls SQLAlchemy's metadata.create_all(), which only creates
+-- tables that don't exist yet — it never ALTERs an existing table to pick up
+-- a schema change (e.g. a new column). This file is written to be safe to
+-- re-run against a database that already has some/all tables (every
+-- CREATE TABLE is IF NOT EXISTS, and later ALTER TABLE statements against
+-- pre-existing tables are themselves idempotent/guarded — see the
+-- watchlist_items migration below for the pattern), so on an existing
+-- deployment this script — not `--setup-db` — is the safe way to pick up a
+-- schema change without losing data.
 
 CREATE TABLE IF NOT EXISTS sme_stocks (
     symbol            VARCHAR(20) PRIMARY KEY,
@@ -85,10 +95,33 @@ CREATE TABLE IF NOT EXISTS users (
 -- Links watchlist_items to an account, now that users exists. Exactly one of
 -- client_id/user_id must be set per row (see the comment on watchlist_items'
 -- own CREATE TABLE above) — enforced by ck_watchlist_exactly_one_owner.
-ALTER TABLE watchlist_items
-    ADD COLUMN user_id INTEGER REFERENCES users(id),
-    ADD CONSTRAINT ck_watchlist_exactly_one_owner CHECK ((client_id IS NULL) <> (user_id IS NULL)),
-    ADD CONSTRAINT uq_watchlist_user_symbol UNIQUE (user_id, symbol);
+--
+-- Written to be safely re-runnable both against a fresh database (this
+-- file's own CREATE TABLE above already declares client_id nullable, so
+-- these statements are no-ops there) AND against a live database from
+-- before this migration existed, where client_id was NOT NULL and the
+-- CREATE TABLE IF NOT EXISTS above is itself a no-op against the existing
+-- table — this ALTER TABLE is the only thing that actually relaxes it there.
+-- Every existing row already satisfies the new CHECK/UNIQUE once that NOT
+-- NULL is dropped (client_id set, user_id NULL). This file has no separate
+-- migration-runner (psql -f db/schema.sql is meant to be idempotent
+-- end-to-end — see its own header), so the constraint additions are guarded
+-- by an existence check rather than plain ADD CONSTRAINT, which errors if
+-- already present (Postgres has no ADD CONSTRAINT IF NOT EXISTS).
+ALTER TABLE watchlist_items ALTER COLUMN client_id DROP NOT NULL;
+ALTER TABLE watchlist_items ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_watchlist_exactly_one_owner') THEN
+        ALTER TABLE watchlist_items
+            ADD CONSTRAINT ck_watchlist_exactly_one_owner CHECK ((client_id IS NULL) <> (user_id IS NULL));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_watchlist_user_symbol') THEN
+        ALTER TABLE watchlist_items
+            ADD CONSTRAINT uq_watchlist_user_symbol UNIQUE (user_id, symbol);
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist_items(user_id);
 
