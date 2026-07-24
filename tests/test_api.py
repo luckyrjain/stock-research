@@ -31,7 +31,7 @@ class _FakeConn:
         return False
 
 
-def _fake_sme_engine(rows, total_monitored, golden_now, last_run):
+def _fake_sme_engine(rows, total_monitored, golden_now, last_run, hit_rate=None):
     rows_result = MagicMock()
     rows_result.mappings.return_value.fetchall.return_value = rows
     total_result = MagicMock()
@@ -40,8 +40,10 @@ def _fake_sme_engine(rows, total_monitored, golden_now, last_run):
     golden_result.scalar.return_value = golden_now
     last_run_result = MagicMock()
     last_run_result.scalar.return_value = last_run
+    hit_rate_result = MagicMock()
+    hit_rate_result.mappings.return_value.first.return_value = hit_rate or {"sample_size": 0, "wins": 0}
 
-    conn = _FakeConn([rows_result, total_result, golden_result, last_run_result])
+    conn = _FakeConn([rows_result, total_result, golden_result, last_run_result, hit_rate_result])
     engine = MagicMock()
     engine.connect.return_value = conn
     return engine
@@ -816,11 +818,19 @@ class SmeSignalsEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
         api._DB_ENGINE = None
+        api._RATE_LIMIT_CALLS.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
         api._DB_ENGINE = None
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_rate_limited_returns_429(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        api._RATE_LIMIT_CALLS["sme_signals:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/sme-signals")
+        self.assertEqual(resp.status_code, 429)
 
     def test_invalid_direction_returns_422_even_without_db(self) -> None:
         resp = client.get("/api/sme-signals?direction=sideways")
@@ -862,6 +872,77 @@ class SmeSignalsEndpointTest(unittest.TestCase):
         # The raw exception (which could leak DSN/credentials) must not reach the client.
         self.assertNotIn("password", resp.text)
         self.assertNotIn("exposed", resp.text)
+
+    def test_invalid_view_returns_422_even_without_db(self) -> None:
+        resp = client.get("/api/sme-signals?view=nonsense")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_golden_hit_rate_computed_from_sample_and_wins(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        fake_engine = _fake_sme_engine(
+            rows=[], total_monitored=10, golden_now=2, last_run=None,
+            hit_rate={"sample_size": 8, "wins": 5},
+        )
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.get("/api/sme-signals")
+
+        self.assertEqual(resp.status_code, 200)
+        hit_rate = resp.json()["golden_hit_rate_90d"]
+        self.assertEqual(hit_rate["sample_size"], 8)
+        self.assertAlmostEqual(hit_rate["win_rate"], 62.5, places=1)
+
+    def test_golden_hit_rate_is_null_when_no_resolved_sample(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        fake_engine = _fake_sme_engine(
+            rows=[], total_monitored=10, golden_now=2, last_run=None,
+            hit_rate={"sample_size": 0, "wins": 0},
+        )
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.get("/api/sme-signals")
+
+        hit_rate = resp.json()["golden_hit_rate_90d"]
+        self.assertEqual(hit_rate["sample_size"], 0)
+        self.assertIsNone(hit_rate["win_rate"])
+
+    def test_regime_view_query_omits_cross_type_filter(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        captured_sql: list[str] = []
+
+        class _RecordingConn:
+            def __init__(self) -> None:
+                results = [MagicMock() for _ in range(5)]
+                results[0].mappings.return_value.fetchall.return_value = []
+                results[1].scalar.return_value = 0
+                results[2].scalar.return_value = 0
+                results[3].scalar.return_value = None
+                results[4].mappings.return_value.first.return_value = {"sample_size": 0, "wins": 0}
+                self._results = results
+
+            def execute(self, stmt, *args, **kwargs):
+                captured_sql.append(str(stmt))
+                return self._results.pop(0)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        engine = MagicMock()
+        engine.connect.return_value = _RecordingConn()
+        with patch("api._get_db_engine", return_value=engine):
+            resp = client.get("/api/sme-signals?view=regime")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("DISTINCT ON (s.symbol)", captured_sql[0])
+        self.assertNotIn("cross_type IS NOT NULL", captured_sql[0])
+
+    def test_crosses_view_query_keeps_cross_type_filter(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        fake_engine = _fake_sme_engine(rows=[], total_monitored=0, golden_now=0, last_run=None)
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.get("/api/sme-signals?view=crosses")
+        self.assertEqual(resp.status_code, 200)
 
 
 class SmeSignalHistoryEndpointTest(unittest.TestCase):
@@ -1325,6 +1406,189 @@ class ConsolidatedEndpointTest(unittest.TestCase):
             resp = client.get("/api/consolidated/TCS")
         self.assertEqual(resp.status_code, 200)
         self.assertIsNone(resp.json()["sme"])
+
+
+class AuthRequestLinkEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_missing_database_url_returns_503(self) -> None:
+        resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
+        self.assertEqual(resp.status_code, 503)
+
+    def test_invalid_email_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.post("/api/auth/request-link", json={"email": "not-an-email"})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_overlong_email_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.post("/api/auth/request-link", json={"email": f"{'a' * 320}@example.com"})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_valid_email_creates_link_and_sends_email(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.create_magic_link", return_value="raw-token") as create_link, \
+             patch("email_sender.send_magic_link_email", return_value=True) as send_email:
+            resp = client.post("/api/auth/request-link", json={"email": "User@Example.com"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"sent": True})
+        create_link.assert_called_once_with("user@example.com")
+        send_email.assert_called_once()
+        sent_args = send_email.call_args[0]
+        self.assertEqual(sent_args[0], "user@example.com")
+        self.assertIn("raw-token", sent_args[1])
+
+    def test_returns_sent_true_even_when_smtp_delivery_fails(self) -> None:
+        # Doesn't leak SMTP configuration state to the caller — the link was
+        # still created either way.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.create_magic_link", return_value="raw-token"), \
+             patch("email_sender.send_magic_link_email", return_value=False):
+            resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"sent": True})
+
+    def test_db_error_returns_sanitized_503(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.create_magic_link", side_effect=RuntimeError("connection refused: password exposed")):
+            resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
+        self.assertEqual(resp.status_code, 503)
+        self.assertNotIn("password", resp.json()["detail"])
+
+    def test_rate_limited_returns_429(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        api._RATE_LIMIT_CALLS["auth_request_link:testclient"] = [api.time.monotonic()] * 5
+        resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
+        self.assertEqual(resp.status_code, 429)
+
+    def test_email_rate_limited_returns_429_even_from_a_fresh_ip(self) -> None:
+        # Per-IP limiting alone doesn't stop an attacker with rotating IPs
+        # from email-bombing one victim's inbox — the target address itself
+        # must also be capped, independent of caller IP.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        api._RATE_LIMIT_CALLS["auth_request_link_email:victim@example.com"] = [api.time.monotonic()] * 5
+        resp = client.post("/api/auth/request-link", json={"email": "victim@example.com"})
+        self.assertEqual(resp.status_code, 429)
+
+    def test_email_rate_limit_is_scoped_per_address(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        api._RATE_LIMIT_CALLS["auth_request_link_email:someone-else@example.com"] = [api.time.monotonic()] * 5
+        with patch("auth.create_magic_link", return_value="raw-token"), \
+             patch("email_sender.send_magic_link_email", return_value=True):
+            resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
+        self.assertEqual(resp.status_code, 200)
+
+
+class AuthVerifyEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_missing_database_url_returns_503(self) -> None:
+        resp = client.get("/api/auth/verify?token=abc")
+        self.assertEqual(resp.status_code, 503)
+
+    def test_invalid_token_returns_401(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.verify_magic_link", return_value=None):
+            resp = client.get("/api/auth/verify?token=bad")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_valid_token_returns_user_and_session(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.verify_magic_link", return_value={"id": 1, "email": "user@example.com"}), \
+             patch("auth.create_session", return_value="session-token"):
+            resp = client.get("/api/auth/verify?token=good")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["user"], {"id": 1, "email": "user@example.com"})
+        self.assertEqual(body["session_token"], "session-token")
+
+    def test_db_error_returns_sanitized_503(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.verify_magic_link", side_effect=RuntimeError("connection refused: password exposed")):
+            resp = client.get("/api/auth/verify?token=good")
+        self.assertEqual(resp.status_code, 503)
+        self.assertNotIn("password", resp.json()["detail"])
+
+    def test_rate_limited_returns_429(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        api._RATE_LIMIT_CALLS["auth_verify:testclient"] = [api.time.monotonic()] * 20
+        resp = client.get("/api/auth/verify?token=x")
+        self.assertEqual(resp.status_code, 429)
+
+
+class AuthMeEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+
+    def test_missing_authorization_header_returns_401(self) -> None:
+        resp = client.get("/api/auth/me")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_missing_database_url_returns_401(self) -> None:
+        resp = client.get("/api/auth/me", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_invalid_session_returns_401(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.get_user_for_session", return_value=None):
+            resp = client.get("/api/auth/me", headers={"Authorization": "Bearer badtoken"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_valid_session_returns_user(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.get_user_for_session", return_value={"id": 1, "email": "user@example.com"}):
+            resp = client.get("/api/auth/me", headers={"Authorization": "Bearer goodtoken"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"user": {"id": 1, "email": "user@example.com"}})
+
+    def test_malformed_authorization_header_returns_401(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.get("/api/auth/me", headers={"Authorization": "Basic sometoken"})
+        self.assertEqual(resp.status_code, 401)
+
+
+class AuthLogoutEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+
+    def test_returns_ok_without_authorization_header(self) -> None:
+        resp = client.post("/api/auth/logout")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"ok": True})
+
+    def test_deletes_session_when_authorized(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.delete_session") as delete_session:
+            resp = client.post("/api/auth/logout", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 200)
+        delete_session.assert_called_once_with("sometoken")
+
+    def test_returns_ok_even_without_database_url(self) -> None:
+        resp = client.post("/api/auth/logout", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"ok": True})
 
 
 if __name__ == "__main__":

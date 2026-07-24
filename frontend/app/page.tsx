@@ -7,6 +7,7 @@ import TickerSearch     from '@/components/ticker-search';
 import ProgressTracker  from '@/components/progress-tracker';
 import ResultsDashboard from '@/components/results-dashboard';
 import HeaderSearch     from '@/components/header-search';
+import AuthWidget       from '@/components/auth-widget';
 import { useStockAnalysis } from '@/lib/useStockAnalysis';
 
 function HomePageInner() {
@@ -96,6 +97,7 @@ function HomePageInner() {
               </Link>
               <div className="ml-auto flex items-center gap-3">
                 <HeaderSearch />
+                <AuthWidget />
               </div>
             </div>
 

@@ -5,7 +5,11 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 
 import sme_ema_pipeline
-from sme_ema_pipeline import _compute_ema_signals, _compute_liquidity, _fetch_ohlcv, _STORE_DAYS
+from sme_ema_pipeline import (
+    _compute_ema_signals, _compute_liquidity, _compute_rsi, _compute_volume_spike,
+    _extract_market_cap, _fetch_ohlcv, _safe_market_cap_cr, _RSI_PERIOD,
+    _VOLUME_SPIKE_WINDOW_DAYS, _STORE_DAYS,
+)
 
 
 def _make_result(closes: list[float], volumes: list[float] | None = None) -> dict:
@@ -88,6 +92,35 @@ class ComputeEmaSignalsTest(unittest.TestCase):
     def test_error_result_returns_empty_list(self) -> None:
         self.assertEqual(_compute_ema_signals({"error": "no data", "symbol": "X"}), [])
 
+    def test_rsi14_and_volume_spike_flow_through_to_stored_rows(self) -> None:
+        # Exercises the real row-assembly path (df["rsi14"]/df["volume_spike"]
+        # -> _safe_float / pd.notna -> the returned dict), not just the pure
+        # _compute_rsi/_compute_volume_spike helpers in isolation — a wiring
+        # bug here (wrong column read, inverted bool cast) wouldn't be caught
+        # by the isolated ComputeRsiTest/ComputeVolumeSpikeTest suites alone.
+        closes = [100.0 + i for i in range(40)]
+        volumes = [1_000.0] * 39 + [10_000.0]  # spike only on the final day
+        rows = _compute_ema_signals(_make_result(closes, volumes))
+
+        # First _RSI_PERIOD rows have no RSI yet (not enough history).
+        self.assertIsNone(rows[0]["rsi14"])
+        self.assertIsNotNone(rows[-1]["rsi14"])
+        self.assertGreater(rows[-1]["rsi14"], 0)
+        self.assertLessEqual(rows[-1]["rsi14"], 100)
+
+        # First _VOLUME_SPIKE_WINDOW_DAYS rows have no average yet -> None,
+        # never silently False.
+        self.assertIsNone(rows[0]["volume_spike"])
+        self.assertTrue(rows[-1]["volume_spike"])
+        # A day with volume in line with its trailing average is not a spike.
+        steady_day = rows[-2]
+        self.assertFalse(steady_day["volume_spike"])
+
+    def test_volume_spike_is_none_without_volume_column(self) -> None:
+        closes = [100.0 + i for i in range(40)]
+        rows = _compute_ema_signals(_make_result(closes))  # no volumes passed
+        self.assertTrue(all(r["volume_spike"] is None for r in rows))
+
 
 class ComputeLiquidityTest(unittest.TestCase):
     def test_averages_last_20_trading_days(self) -> None:
@@ -110,6 +143,88 @@ class ComputeLiquidityTest(unittest.TestCase):
         self.assertIsNone(_compute_liquidity(_make_result([], [])))
 
 
+class ComputeRsiTest(unittest.TestCase):
+    def test_first_period_rows_are_nan(self) -> None:
+        close = pd.Series([100.0 + i for i in range(30)])
+        rsi = _compute_rsi(close)
+        self.assertTrue(rsi.iloc[:_RSI_PERIOD].isna().all())
+
+    def test_steadily_rising_series_approaches_100(self) -> None:
+        close = pd.Series([100.0 + i for i in range(40)])
+        rsi = _compute_rsi(close)
+        self.assertAlmostEqual(rsi.iloc[-1], 100.0, places=1)
+
+    def test_steadily_falling_series_approaches_0(self) -> None:
+        close = pd.Series([200.0 - i for i in range(40)])
+        rsi = _compute_rsi(close)
+        self.assertAlmostEqual(rsi.iloc[-1], 0.0, places=1)
+
+    def test_values_bounded_0_to_100(self) -> None:
+        close = pd.Series([100.0 + 5 * ((-1) ** i) * (i % 7) for i in range(60)])
+        rsi = _compute_rsi(close)
+        valid = rsi.dropna()
+        self.assertTrue((valid >= 0).all())
+        self.assertTrue((valid <= 100).all())
+
+    def test_flat_price_is_neutral_not_nan(self) -> None:
+        close = pd.Series([100.0] * 30)
+        rsi = _compute_rsi(close)
+        self.assertAlmostEqual(rsi.iloc[-1], 50.0, places=1)
+
+
+class ComputeVolumeSpikeTest(unittest.TestCase):
+    def test_first_window_rows_are_nan(self) -> None:
+        df = pd.DataFrame({"Close": [10.0] * 30, "Volume": [100.0] * 30})
+        spike = _compute_volume_spike(df)
+        self.assertTrue(spike.iloc[:_VOLUME_SPIKE_WINDOW_DAYS - 1].isna().all())
+
+    def test_flags_volume_more_than_double_trailing_average(self) -> None:
+        volumes = [100.0] * 25 + [300.0]  # last day is 3x the trailing avg
+        df = pd.DataFrame({"Close": [10.0] * 26, "Volume": volumes})
+        spike = _compute_volume_spike(df)
+        self.assertTrue(bool(spike.iloc[-1]))
+
+    def test_does_not_flag_volume_under_threshold(self) -> None:
+        volumes = [100.0] * 25 + [150.0]  # last day is only 1.5x the trailing avg
+        df = pd.DataFrame({"Close": [10.0] * 26, "Volume": volumes})
+        spike = _compute_volume_spike(df)
+        self.assertFalse(bool(spike.iloc[-1]))
+
+    def test_missing_volume_column_returns_all_nan(self) -> None:
+        df = pd.DataFrame({"Close": [10.0] * 25})
+        spike = _compute_volume_spike(df)
+        self.assertTrue(spike.isna().all())
+
+
+class SafeMarketCapTest(unittest.TestCase):
+    def test_returns_market_cap_in_cr(self) -> None:
+        fake_ticker = MagicMock()
+        fake_ticker.fast_info.market_cap = 1_500_000_000  # ₹150 Cr
+        self.assertAlmostEqual(_safe_market_cap_cr(fake_ticker), 150.0, places=2)
+
+    def test_missing_market_cap_returns_none(self) -> None:
+        fake_ticker = MagicMock()
+        fake_ticker.fast_info.market_cap = None
+        self.assertIsNone(_safe_market_cap_cr(fake_ticker))
+
+    def test_exception_returns_none_not_raise(self) -> None:
+        fake_ticker = MagicMock()
+        type(fake_ticker).fast_info = property(lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
+        self.assertIsNone(_safe_market_cap_cr(fake_ticker))
+
+
+class ExtractMarketCapTest(unittest.TestCase):
+    def test_error_result_returns_none(self) -> None:
+        self.assertIsNone(_extract_market_cap({"error": "no data", "symbol": "X"}))
+
+    def test_missing_market_cap_returns_none(self) -> None:
+        self.assertIsNone(_extract_market_cap({"symbol": "ABC", "df": None}))
+
+    def test_present_market_cap_is_extracted(self) -> None:
+        result = _extract_market_cap({"symbol": "ABC", "df": None, "market_cap_cr": 42.5})
+        self.assertEqual(result, {"symbol": "ABC", "market_cap_cr": 42.5})
+
+
 def _stock(symbol: str) -> dict:
     return {"symbol": symbol, "name": symbol, "isin": None, "series": "SM", "exchange": "NSE"}
 
@@ -127,6 +242,7 @@ class RunHealthSignalTest(unittest.TestCase):
             patch.object(sme_ema_pipeline, "_upsert_stocks"),
             patch.object(sme_ema_pipeline, "_upsert_signals"),
             patch.object(sme_ema_pipeline, "_upsert_liquidity"),
+            patch.object(sme_ema_pipeline, "_upsert_market_cap"),
             patch.object(sme_ema_pipeline, "_prune_signals"),
             patch.object(sme_ema_pipeline, "_print_summary"),
         ]

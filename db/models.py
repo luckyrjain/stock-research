@@ -1,7 +1,7 @@
 import os
 
 from sqlalchemy import (
-    Column, Date, DateTime, ForeignKey, Index, Integer,
+    Boolean, Column, Date, DateTime, ForeignKey, Index, Integer,
     MetaData, Numeric, String, Table, UniqueConstraint, text,
 )
 from sqlalchemy import create_engine as _create_engine
@@ -25,6 +25,10 @@ sme_stocks = Table(
     # the shown price.
     Column("avg_volume_20d",   Numeric(16, 2)),
     Column("avg_turnover_20d", Numeric(16, 2)),
+    # Market cap in ₹ Cr, via yfinance fast_info (one extra lightweight
+    # request per stock beyond the OHLCV history() fetch). NULL until the
+    # first run after this column was added, or if fast_info didn't have it.
+    Column("market_cap_cr", Numeric(16, 2)),
 )
 
 ema_signals = Table(
@@ -36,6 +40,10 @@ ema_signals = Table(
     Column("close_price", Numeric(12, 4)),
     Column("ema20",       Numeric(12, 4)),
     Column("ema50",       Numeric(12, 4)),
+    # Standard momentum-screener confirmation signals alongside the EMA
+    # cross — see sme_ema_pipeline._compute_rsi / _compute_volume_spike.
+    Column("rsi14",        Numeric(6, 2)),
+    Column("volume_spike", Boolean),
     Column("cross_type",  String(10)),   # 'golden' | 'death' | NULL ('cross' is reserved in SQL)
     Column("run_at",      DateTime(timezone=True), server_default=text("NOW()")),
     UniqueConstraint("symbol", "trade_date", name="uq_ema_signals_symbol_date"),
@@ -82,6 +90,51 @@ verdict_history = Table(
     Column("created_at",     DateTime(timezone=True), server_default=text("NOW()")),
     UniqueConstraint("symbol", "verdict_date", name="uq_verdict_history_symbol_date"),
     Index("idx_verdict_history_symbol", "symbol"),
+)
+
+
+# Minimal magic-link auth (see auth.py): no passwords. A user is created on
+# first successful link click, never via a separate signup step. Existing
+# watchlist_items/positions stay keyed by the anonymous client_id — accounts
+# are additive, not a migration (see CLAUDE.md's "Account & magic-link auth
+# flow" for the reasoning).
+users = Table(
+    "users",
+    metadata,
+    Column("id",         Integer, primary_key=True, autoincrement=True),
+    Column("email",      String(320), nullable=False, unique=True),
+    Column("created_at", DateTime(timezone=True), server_default=text("NOW()")),
+)
+
+# Single-use, short-lived tokens emailed to a user to sign in. Only a SHA-256
+# hash of the token is ever stored — the raw token exists only in the email
+# itself and the process memory that generated it, so a DB leak alone can't
+# be used to sign in as anyone.
+magic_links = Table(
+    "magic_links",
+    metadata,
+    Column("id",         Integer, primary_key=True, autoincrement=True),
+    Column("email",      String(320), nullable=False),
+    Column("token_hash", String(64),  nullable=False, unique=True),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("used_at",    DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), server_default=text("NOW()")),
+    Index("idx_magic_links_email", "email"),
+)
+
+# Opaque bearer session tokens (same hash-only-storage convention as
+# magic_links above). The frontend's Next.js proxy routes hold the raw token
+# in an httpOnly cookie and forward it as `Authorization: Bearer <token>` —
+# this table (and auth.py) never sees a cookie, only the token.
+sessions = Table(
+    "sessions",
+    metadata,
+    Column("id",         Integer, primary_key=True, autoincrement=True),
+    Column("user_id",    Integer, ForeignKey("users.id"), nullable=False),
+    Column("token_hash", String(64), nullable=False, unique=True),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), server_default=text("NOW()")),
+    Index("idx_sessions_user", "user_id"),
 )
 
 

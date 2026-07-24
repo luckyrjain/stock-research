@@ -247,20 +247,39 @@ export interface SmeSignal {
   exchange:          string;
   avg_volume_20d:    number | null;   // avg daily share volume, last 20 trading days
   avg_turnover_20d:  number | null;   // avg daily turnover in ₹, last 20 trading days
+  market_cap_cr:     number | null;   // ₹ Cr, via yfinance fast_info
   trade_date:        string;           // 'YYYY-MM-DD'
   close_price:       number | null;
   ema20:             number | null;
   ema50:             number | null;
-  cross:             'golden' | 'death';
+  rsi14:             number | null;   // Wilder's RSI(14), 0-100
+  volume_spike:      boolean | null;  // day's volume > 2x its trailing 20d average
+  // In the default "crosses" view every row is a real cross event (never
+  // null); in "regime" view (?view=regime) this is the stock's latest row,
+  // which usually isn't a cross day at all, so it's null there.
+  cross:             'golden' | 'death' | null;
   in_golden_cross:   boolean;
 }
 
+// "golden crosses in the last 90d: X% follow-through" — of golden crosses in
+// the lookback window that have had `forward_days` trading days to play out,
+// the share that closed higher. win_rate is null when sample_size is 0
+// (never guessed at); a cross too recent to have resolved yet is excluded
+// from the sample rather than counted as a loss.
+export interface SmeGoldenHitRate {
+  sample_size:    number;
+  win_rate:       number | null;   // 0-100
+  lookback_days:  number;
+  forward_days:   number;
+}
+
 export interface SmeSignalsResponse {
-  signals:          SmeSignal[];
-  total_monitored:  number;
-  golden_now:       number;          // stocks currently in golden-cross regime
-  last_run:         string | null;   // ISO timestamp or null
-  refreshing:       boolean;         // a pipeline refresh is running server-side
+  signals:              SmeSignal[];
+  total_monitored:      number;
+  golden_now:           number;          // stocks currently in golden-cross regime
+  last_run:             string | null;   // ISO timestamp or null
+  refreshing:           boolean;         // a pipeline refresh is running server-side
+  golden_hit_rate_90d:  SmeGoldenHitRate;
 }
 
 export interface SmeSignalHistoryRow {

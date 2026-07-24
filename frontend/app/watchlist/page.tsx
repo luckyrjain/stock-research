@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useWatchlist } from '@/lib/watchlist';
 import HeaderSearch from '@/components/header-search';
+import AuthWidget from '@/components/auth-widget';
 
 interface LivePrice {
   price: number;
@@ -70,6 +71,7 @@ export default function WatchlistPage() {
           </Link>
           <div className="ml-auto flex items-center gap-3">
             <HeaderSearch />
+            <AuthWidget />
           </div>
         </div>
 

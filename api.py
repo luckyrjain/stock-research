@@ -90,9 +90,7 @@ _RATE_LIMIT_CALLS: dict[str, list[float]] = {}
 _RATE_LIMIT_LOCK = threading.Lock()
 
 
-def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: float) -> None:
-    client_ip = request.client.host if request.client else "unknown"
-    key = f"{bucket}:{client_ip}"
+def _check_rate_limit(key: str, max_calls: int, window_seconds: float) -> None:
     now = time.monotonic()
     with _RATE_LIMIT_LOCK:
         calls = [t for t in _RATE_LIMIT_CALLS.get(key, []) if now - t < window_seconds]
@@ -104,6 +102,11 @@ def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: f
             )
         calls.append(now)
         _RATE_LIMIT_CALLS[key] = calls
+
+
+def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: float) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(f"{bucket}:{client_ip}", max_calls, window_seconds)
 
 
 # A dedicated, explicitly-sized executor for this app's blocking work (LLM
@@ -1222,16 +1225,33 @@ async def get_verdict_history(request: Request, symbol: str):
     return {"symbol": sym, "history": history}
 
 
+_HIT_RATE_LOOKBACK_DAYS       = 90   # window of golden crosses considered
+_HIT_RATE_FORWARD_TRADING_DAYS = 20  # "follow-through" horizon, matching the
+                                      # +20d window used elsewhere (cross_events)
+
+
 @app.get("/api/sme-signals")
 async def get_sme_signals(
+    request: Request,
     lookback:  int = Query(5, ge=1, le=30, description="Days back to check for crosses"),
     direction: str = Query("all", description="all | golden | death"),
+    view:      str = Query("crosses", description="crosses | regime"),
 ):
-    """Return SME stocks with an EMA20/EMA50 golden or death cross in the last N days."""
+    """Return SME stocks with an EMA20/EMA50 golden or death cross in the last N days
+    (view=crosses, the default), or the latest row for every monitored stock regardless
+    of whether it has crossed recently (view=regime) — the "golden-now" stat in the
+    default view has no way to say which specific stocks make it up without this;
+    lookback/direction are ignored in regime view since there's no cross-event window
+    to filter by.
+    """
     import os
+
+    _rate_limit(request, "sme_signals", max_calls=60, window_seconds=60)
 
     if direction not in ("all", "golden", "death"):
         raise HTTPException(status_code=422, detail="direction must be one of: all, golden, death")
+    if view not in ("crosses", "regime"):
+        raise HTTPException(status_code=422, detail="view must be one of: crosses, regime")
     if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the SME pipeline first.")
 
@@ -1240,32 +1260,57 @@ async def get_sme_signals(
 
         engine = _get_db_engine()
         with engine.connect() as conn:
-            rows = conn.execute(_text("""
-                WITH latest AS (
-                    SELECT DISTINCT ON (symbol) symbol, (ema20 > ema50) AS in_golden_cross
-                    FROM ema_signals
-                    ORDER BY symbol, trade_date DESC
-                )
-                SELECT
-                    s.symbol,
-                    s.name,
-                    s.exchange,
-                    s.avg_volume_20d::float   AS avg_volume_20d,
-                    s.avg_turnover_20d::float AS avg_turnover_20d,
-                    e.trade_date::text   AS trade_date,
-                    e.close_price::float AS close_price,
-                    e.ema20::float       AS ema20,
-                    e.ema50::float       AS ema50,
-                    e.cross_type         AS "cross",
-                    COALESCE(l.in_golden_cross, FALSE) AS in_golden_cross
-                FROM ema_signals e
-                JOIN sme_stocks  s USING (symbol)
-                LEFT JOIN latest l USING (symbol)
-                WHERE e.cross_type IS NOT NULL
-                  AND (:direction = 'all' OR e.cross_type = :direction)
-                  AND e.trade_date >= CURRENT_DATE - (:lookback * INTERVAL '1 day')
-                ORDER BY e.trade_date DESC, s.symbol
-            """), {"lookback": lookback, "direction": direction}).mappings().fetchall()
+            if view == "regime":
+                rows = conn.execute(_text("""
+                    SELECT DISTINCT ON (s.symbol)
+                        s.symbol,
+                        s.name,
+                        s.exchange,
+                        s.avg_volume_20d::float   AS avg_volume_20d,
+                        s.avg_turnover_20d::float AS avg_turnover_20d,
+                        s.market_cap_cr::float    AS market_cap_cr,
+                        e.trade_date::text   AS trade_date,
+                        e.close_price::float AS close_price,
+                        e.ema20::float       AS ema20,
+                        e.ema50::float       AS ema50,
+                        e.rsi14::float       AS rsi14,
+                        e.volume_spike       AS volume_spike,
+                        e.cross_type         AS "cross",
+                        (e.ema20 > e.ema50)  AS in_golden_cross
+                    FROM ema_signals e
+                    JOIN sme_stocks s USING (symbol)
+                    ORDER BY s.symbol, e.trade_date DESC
+                """)).mappings().fetchall()
+            else:
+                rows = conn.execute(_text("""
+                    WITH latest AS (
+                        SELECT DISTINCT ON (symbol) symbol, (ema20 > ema50) AS in_golden_cross
+                        FROM ema_signals
+                        ORDER BY symbol, trade_date DESC
+                    )
+                    SELECT
+                        s.symbol,
+                        s.name,
+                        s.exchange,
+                        s.avg_volume_20d::float   AS avg_volume_20d,
+                        s.avg_turnover_20d::float AS avg_turnover_20d,
+                        s.market_cap_cr::float    AS market_cap_cr,
+                        e.trade_date::text   AS trade_date,
+                        e.close_price::float AS close_price,
+                        e.ema20::float       AS ema20,
+                        e.ema50::float       AS ema50,
+                        e.rsi14::float       AS rsi14,
+                        e.volume_spike       AS volume_spike,
+                        e.cross_type         AS "cross",
+                        COALESCE(l.in_golden_cross, FALSE) AS in_golden_cross
+                    FROM ema_signals e
+                    JOIN sme_stocks  s USING (symbol)
+                    LEFT JOIN latest l USING (symbol)
+                    WHERE e.cross_type IS NOT NULL
+                      AND (:direction = 'all' OR e.cross_type = :direction)
+                      AND e.trade_date >= CURRENT_DATE - (:lookback * INTERVAL '1 day')
+                    ORDER BY e.trade_date DESC, s.symbol
+                """), {"lookback": lookback, "direction": direction}).mappings().fetchall()
 
             total_monitored = conn.execute(
                 _text("SELECT COUNT(*) FROM sme_stocks")
@@ -1283,12 +1328,51 @@ async def get_sme_signals(
                 _text("SELECT MAX(run_at)::text FROM ema_signals")
             ).scalar()
 
+            # Aggregate hit-rate: of golden crosses in the last 90 days that have
+            # had _HIT_RATE_FORWARD_TRADING_DAYS trading days to play out, what
+            # share closed higher N trading days later? One SQL pass — LEAD()
+            # over each symbol's own trade_date-ordered series finds the close
+            # N trading-day rows later, exactly like _compute_cross_events's
+            # index-based forward return, just aggregated across every stock at
+            # once instead of one symbol's stored series. A cross too recent to
+            # have resolved yet (LEAD returns NULL) is excluded from the sample,
+            # not counted as a loss.
+            hit_rate_row = conn.execute(_text("""
+                WITH ordered AS (
+                    SELECT
+                        trade_date, close_price, cross_type,
+                        LEAD(close_price, :forward_days) OVER (
+                            PARTITION BY symbol ORDER BY trade_date
+                        ) AS close_later
+                    FROM ema_signals
+                )
+                SELECT
+                    COUNT(*) FILTER (WHERE close_later IS NOT NULL) AS sample_size,
+                    COUNT(*) FILTER (WHERE close_later > close_price) AS wins
+                FROM ordered
+                WHERE cross_type = 'golden'
+                  AND trade_date >= CURRENT_DATE - (:lookback_days * INTERVAL '1 day')
+            """), {
+                "forward_days": _HIT_RATE_FORWARD_TRADING_DAYS,
+                "lookback_days": _HIT_RATE_LOOKBACK_DAYS,
+            }).mappings().first()
+
+        sample_size = int(hit_rate_row["sample_size"] or 0)
+        wins = int(hit_rate_row["wins"] or 0)
+        win_rate = round(wins / sample_size * 100, 1) if sample_size else None
+
         return {
-            "signals":         [dict(r) for r in rows],
-            "total_monitored": int(total_monitored),
-            "golden_now":      int(golden_now),
-            "last_run":        last_run,
-            "refreshing":      _SME_REFRESHING,
+            "signals":          [dict(r) for r in rows],
+            "total_monitored":  int(total_monitored),
+            "golden_now":       int(golden_now),
+            "last_run":         last_run,
+            "refreshing":       _SME_REFRESHING,
+            "golden_hit_rate_90d": {
+                "sample_size": sample_size,
+                "win_rate":    win_rate,
+                "lookback_days": _HIT_RATE_LOOKBACK_DAYS,
+                "forward_days":  _HIT_RATE_FORWARD_TRADING_DAYS,
+            },
         }
 
     loop = asyncio.get_running_loop()
@@ -1641,6 +1725,122 @@ async def get_consolidated(request: Request, symbol: str):
         loop.run_in_executor(None, _sme_sync),
     )
     return {"symbol": sym, "analysis": analysis, "market_pick": market_pick, "sme": sme}
+
+
+# ── Account & magic-link auth ────────────────────────────────────────────────
+# Minimal, passwordless auth (see auth.py + email_sender.py). A session token
+# is a bearer credential the frontend's Next.js proxy routes hold in an
+# httpOnly cookie and send here as `Authorization: Bearer <token>` — this
+# file never sees a cookie. Existing watchlist_items/positions stay keyed by
+# the anonymous client_id; nothing here reads or migrates that data — an
+# account is additive today, not a replacement for it.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Where the magic link should point — the Next.js app, not this API directly,
+# since /auth/verify needs to run in the browser to receive the session cookie
+# on the frontend's own origin. Distinct from ALLOWED_ORIGINS (a CORS
+# allowlist that may hold several origins) — this is the one canonical URL to
+# embed in an outbound email.
+_FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
+
+class AuthRequestLinkRequest(BaseModel):
+    email: str
+
+
+def _bearer_token_from_request(request: Request) -> str | None:
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        token = header[7:].strip()
+        return token or None
+    return None
+
+
+@app.post("/api/auth/request-link")
+async def request_magic_link(request: Request, body: AuthRequestLinkRequest):
+    _rate_limit(request, "auth_request_link", max_calls=5, window_seconds=900)
+    email = body.email.lower().strip()
+    if len(email) > 320 or not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=422, detail="Invalid email address.")
+    # The IP-keyed limit above doesn't stop an attacker with rotating IPs from
+    # email-bombing one victim's inbox — each IP gets its own fresh budget.
+    # Also cap by the target address itself, independent of caller IP.
+    _check_rate_limit(f"auth_request_link_email:{email}", max_calls=5, window_seconds=3600)
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+
+    def _sync() -> bool:
+        import auth as _auth
+        from email_sender import send_magic_link_email
+
+        token = _auth.create_magic_link(email)
+        login_url = f"{_FRONTEND_URL}/auth/verify?token={token}"
+        return send_magic_link_email(email, login_url)
+
+    loop = asyncio.get_running_loop()
+    try:
+        delivered = await loop.run_in_executor(None, _sync)
+    except Exception as exc:
+        log_event(LOGGER, "auth_request_link_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Could not send sign-in link. See server logs.")
+    if not delivered:
+        # Logged server-side in send_magic_link_email; the link itself was still
+        # created, so a fixed SMTP config lets the same link start working without
+        # the user needing to re-request it. The response deliberately doesn't say
+        # "failed" here to avoid leaking SMTP configuration state to the caller.
+        log_event(LOGGER, "auth_link_email_not_delivered", level="warning", email=email)
+    return {"sent": True}
+
+
+@app.get("/api/auth/verify")
+async def verify_magic_link(request: Request, token: str = Query(...)):
+    _rate_limit(request, "auth_verify", max_calls=20, window_seconds=300)
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+
+    def _sync() -> dict | None:
+        import auth as _auth
+
+        user = _auth.verify_magic_link(token)
+        if user is None:
+            return None
+        session_token = _auth.create_session(user["id"])
+        return {"user": user, "session_token": session_token}
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, _sync)
+    except Exception as exc:
+        log_event(LOGGER, "auth_verify_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    if result is None:
+        raise HTTPException(status_code=401, detail="This sign-in link is invalid, expired, or already used.")
+    return result
+
+
+@app.get("/api/auth/me")
+async def get_current_user(request: Request):
+    token = _bearer_token_from_request(request)
+    if not token or not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=401, detail="Not signed in.")
+
+    import auth as _auth
+
+    loop = asyncio.get_running_loop()
+    user = await loop.run_in_executor(None, _auth.get_user_for_session, token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not signed in.")
+    return {"user": user}
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    token = _bearer_token_from_request(request)
+    if token and os.environ.get("DATABASE_URL"):
+        import auth as _auth
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _auth.delete_session, token)
+    return {"ok": True}
 
 
 if __name__ == "__main__":

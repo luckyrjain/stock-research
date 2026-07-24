@@ -4,8 +4,11 @@ SME Stocks EMA Crossover Pipeline
 Fetches all Indian SME stocks (NSE Emerge + BSE SME), downloads 1 year of
 daily OHLCV, computes EMA 20 and EMA 50, detects golden/death crosses
 (EMA20 crossing EMA50) and stores the last ~3 months in PostgreSQL. Also
-stores avg daily volume/turnover (last 20 trading days) per stock, from the
-same OHLCV fetch — no extra network calls — to flag illiquid names.
+computes RSI(14) and a volume-spike flag per day (momentum-screener
+confirmation signals alongside the EMA cross), and stores avg daily
+volume/turnover + market cap per stock, from the same OHLCV/fast_info fetch
+— no extra network calls beyond one lightweight fast_info lookup per stock
+— to flag illiquid names and show market cap inline.
 
 Usage:
     python sme_ema_pipeline.py --setup-db   # create tables (idempotent)
@@ -61,7 +64,8 @@ def _fetch_ohlcv(stock: dict) -> dict:
     suffix   = ".NS" if exchange == "NSE" else ".BO"
     ticker   = f"{symbol}{suffix}"
     try:
-        df = yf.Ticker(ticker).history(period=_OHLCV_PERIOD, interval="1d", auto_adjust=True)
+        yf_ticker = yf.Ticker(ticker)
+        df = yf_ticker.history(period=_OHLCV_PERIOD, interval="1d", auto_adjust=True)
         if df.empty:
             return {"error": f"no data returned by yfinance", "symbol": symbol}
         # Keep Volume alongside Close (used for liquidity, see _compute_liquidity)
@@ -74,9 +78,28 @@ def _fetch_ohlcv(stock: dict) -> dict:
         df = df[cols].dropna(subset=["Close"])
         if "Volume" in df.columns:
             df["Volume"] = df["Volume"].fillna(0)
-        return {"symbol": symbol, "exchange": exchange, "df": df}
+        return {
+            "symbol": symbol, "exchange": exchange, "df": df,
+            "market_cap_cr": _safe_market_cap_cr(yf_ticker),
+        }
     except Exception as exc:
         return {"error": str(exc), "symbol": symbol}
+
+
+def _safe_market_cap_cr(yf_ticker) -> float | None:
+    """Market cap in ₹ Cr, via fast_info — a second request per stock beyond
+    history(), but a light one. Trailing P/E deliberately isn't fetched here:
+    it needs yfinance's full .info scrape (much heavier), which across
+    potentially hundreds of SME stocks per run would meaningfully add to this
+    pipeline's already rate-limit-sensitive runtime for one inline column.
+    Best-effort and never raises — a market cap miss must not cost this stock
+    its OHLCV/cross data, so this is never counted as an OHLCV fetch error.
+    """
+    try:
+        mcap = getattr(yf_ticker.fast_info, "market_cap", None)
+        return round(mcap / 1e7, 2) if mcap else None
+    except Exception:
+        return None
 
 
 # ── Phase 3: EMA computation ──────────────────────────────────────────────────
@@ -97,6 +120,8 @@ def _compute_ema_signals(result: dict) -> list[dict]:
 
     df["ema20"] = df["Close"].ewm(span=20, adjust=False).mean()
     df["ema50"] = df["Close"].ewm(span=50, adjust=False).mean()
+    df["rsi14"] = _compute_rsi(df["Close"])
+    df["volume_spike"] = _compute_volume_spike(df)
 
     if has_enough_history:
         above = df["ema20"] > df["ema50"]
@@ -119,13 +144,16 @@ def _compute_ema_signals(result: dict) -> list[dict]:
     for idx, row in df.iterrows():
         trade_date = idx.date() if hasattr(idx, "date") else idx
         cross = row["cross"]
+        volume_spike = row["volume_spike"]
         rows.append({
-            "symbol":      symbol,
-            "trade_date":  trade_date,
-            "close_price": _safe_float(row["Close"]),
-            "ema20":       _safe_float(row["ema20"]),
-            "ema50":       _safe_float(row["ema50"]),
-            "cross":       None if (cross is None or pd.isna(cross)) else str(cross),
+            "symbol":       symbol,
+            "trade_date":   trade_date,
+            "close_price":  _safe_float(row["Close"]),
+            "ema20":        _safe_float(row["ema20"]),
+            "ema50":        _safe_float(row["ema50"]),
+            "rsi14":        _safe_float(row["rsi14"]),
+            "volume_spike": bool(volume_spike) if pd.notna(volume_spike) else None,
+            "cross":        None if (cross is None or pd.isna(cross)) else str(cross),
         })
     return rows
 
@@ -136,6 +164,58 @@ def _safe_float(val) -> float | None:
         return round(f, 4) if not np.isnan(f) else None
     except (TypeError, ValueError):
         return None
+
+
+_RSI_PERIOD = 14
+
+
+def _compute_rsi(close: pd.Series) -> pd.Series:
+    """RSI(14), Wilder-style exponential smoothing via pandas ewm — standard
+    momentum-screener confirmation alongside the EMA cross. Note this isn't a
+    bit-exact match to textbook Wilder's method (which seeds avg_gain/avg_loss
+    with a plain mean of the first 14 deltas before switching to smoothing;
+    ewm(adjust=False) instead seeds recursively from the very first delta) —
+    the difference only affects the first handful of post-warmup values and
+    has fully decayed away by the time anything here gets stored (only the
+    last _STORE_DAYS rows of a full year's fetch are ever persisted).
+    NaN for the first _RSI_PERIOD rows (not enough history to smooth over
+    yet); a completely flat price (no gains or losses at all, vanishingly
+    rare for a real stock) is treated as neutral (50), not undefined, since a
+    straight-up (avg_loss == 0, avg_gain > 0) or straight-down (avg_gain ==
+    0, avg_loss > 0) move already resolves correctly to 100/0 through plain
+    float division.
+    """
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / _RSI_PERIOD, adjust=False, min_periods=_RSI_PERIOD).mean()
+    avg_loss = loss.ewm(alpha=1 / _RSI_PERIOD, adjust=False, min_periods=_RSI_PERIOD).mean()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.where(~((avg_gain == 0) & (avg_loss == 0)), 50.0)
+    return rsi
+
+
+_VOLUME_SPIKE_WINDOW_DAYS = 20
+_VOLUME_SPIKE_MULTIPLIER  = 2.0
+
+
+def _compute_volume_spike(df: pd.DataFrame) -> pd.Series:
+    """True when a day's volume is more than _VOLUME_SPIKE_MULTIPLIER times
+    its trailing _VOLUME_SPIKE_WINDOW_DAYS average — a cross with no volume
+    confirmation behind it is a weak signal on its own. NaN (never guessed)
+    for the first _VOLUME_SPIKE_WINDOW_DAYS rows of a stock's history, or
+    for the whole series if this fetch has no Volume column at all (see
+    _fetch_ohlcv) — comparing against NaN would otherwise silently resolve
+    to False ("no spike") rather than "unknown," so those rows are masked
+    back to NaN explicitly rather than trusting the comparison operator.
+    """
+    if "Volume" not in df.columns:
+        return pd.Series(np.nan, index=df.index)
+    avg_volume = df["Volume"].rolling(window=_VOLUME_SPIKE_WINDOW_DAYS, min_periods=_VOLUME_SPIKE_WINDOW_DAYS).mean()
+    spike = df["Volume"] > (_VOLUME_SPIKE_MULTIPLIER * avg_volume)
+    return spike.where(avg_volume.notna())
 
 
 _LIQUIDITY_WINDOW_DAYS = 20
@@ -202,15 +282,17 @@ def _upsert_signals(engine, rows: list[dict]) -> None:
             conn.execute(
                 text("""
                     INSERT INTO ema_signals
-                        (symbol, trade_date, close_price, ema20, ema50, cross_type, run_at)
+                        (symbol, trade_date, close_price, ema20, ema50, rsi14, volume_spike, cross_type, run_at)
                     VALUES
-                        (:symbol, :trade_date, :close_price, :ema20, :ema50, :cross, NOW())
+                        (:symbol, :trade_date, :close_price, :ema20, :ema50, :rsi14, :volume_spike, :cross, NOW())
                     ON CONFLICT ON CONSTRAINT uq_ema_signals_symbol_date DO UPDATE SET
-                        close_price = EXCLUDED.close_price,
-                        ema20       = EXCLUDED.ema20,
-                        ema50       = EXCLUDED.ema50,
-                        cross_type  = EXCLUDED.cross_type,
-                        run_at      = NOW()
+                        close_price  = EXCLUDED.close_price,
+                        ema20        = EXCLUDED.ema20,
+                        ema50        = EXCLUDED.ema50,
+                        rsi14        = EXCLUDED.rsi14,
+                        volume_spike = EXCLUDED.volume_spike,
+                        cross_type   = EXCLUDED.cross_type,
+                        run_at       = NOW()
                 """),
                 batch,
             )
@@ -237,6 +319,31 @@ def _upsert_liquidity(engine, rows: list[dict]) -> None:
                 r,
             )
     log_event(LOGGER, "sme_liquidity_upserted", count=len(rows))
+
+
+def _extract_market_cap(result: dict) -> dict | None:
+    """None if the stock errored out or fast_info's market cap wasn't
+    available (see _safe_market_cap_cr) — never invented."""
+    if "error" in result:
+        return None
+    mcap = result.get("market_cap_cr")
+    if mcap is None:
+        return None
+    return {"symbol": result["symbol"], "market_cap_cr": mcap}
+
+
+def _upsert_market_cap(engine, rows: list[dict]) -> None:
+    """Update sme_stocks.market_cap_cr. Same UPDATE-not-upsert pattern and
+    reasoning as _upsert_liquidity — known only after Phase 2's fetch."""
+    if not rows:
+        return
+    with engine.begin() as conn:
+        for r in rows:
+            conn.execute(
+                text("UPDATE sme_stocks SET market_cap_cr = :market_cap_cr WHERE symbol = :symbol"),
+                r,
+            )
+    log_event(LOGGER, "sme_market_cap_upserted", count=len(rows))
 
 
 def _prune_signals(engine) -> None:
@@ -342,21 +449,26 @@ def run(force: bool = False, lookback_days: int = _LOOKBACK_DAYS) -> bool:
                 ohlcv_ok.append(res)
     log_event(LOGGER, "sme_ohlcv_fetch_completed", fetched=len(ohlcv_ok), errors=errors)
 
-    # Phase 3: compute EMAs + golden/death cross flags, and liquidity
+    # Phase 3: compute EMAs + golden/death cross flags, RSI/volume-spike, and liquidity
     log_event(LOGGER, "sme_phase_started", phase="compute_ema_crosses")
     all_rows = []
     liquidity_rows = []
+    market_cap_rows = []
     for res in ohlcv_ok:
         all_rows.extend(_compute_ema_signals(res))
         liq = _compute_liquidity(res)
         if liq:
             liquidity_rows.append(liq)
+        mcap = _extract_market_cap(res)
+        if mcap:
+            market_cap_rows.append(mcap)
     log_event(LOGGER, "sme_signal_rows_computed", rows=len(all_rows), stocks=len(ohlcv_ok))
 
     # Phase 4: write to PostgreSQL
     log_event(LOGGER, "sme_phase_started", phase="write_postgres")
     _upsert_signals(engine, all_rows)
     _upsert_liquidity(engine, liquidity_rows)
+    _upsert_market_cap(engine, market_cap_rows)
     _prune_signals(engine)
 
     # Phase 5: print crossover summary
