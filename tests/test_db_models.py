@@ -67,9 +67,18 @@ class TableSchemaTest(unittest.TestCase):
 
     def test_watchlist_items_columns_and_constraints(self) -> None:
         cols = set(watchlist_items.columns.keys())
-        self.assertEqual(cols, {"id", "client_id", "symbol", "company", "exchange", "added_at"})
-        self.assertFalse(watchlist_items.columns["client_id"].nullable)
+        self.assertEqual(cols, {"id", "client_id", "user_id", "symbol", "company", "exchange", "added_at"})
+        # Nullable, not required: a row is owned by client_id OR user_id, never both.
+        self.assertTrue(watchlist_items.columns["client_id"].nullable)
+        self.assertTrue(watchlist_items.columns["user_id"].nullable)
         self.assertFalse(watchlist_items.columns["symbol"].nullable)
+
+        fk_targets = {
+            f"{fk.column.table.name}.{fk.column.name}"
+            for col in watchlist_items.columns
+            for fk in col.foreign_keys
+        }
+        self.assertIn("users.id", fk_targets)
 
         unique_constraint_cols = [
             tuple(c.name for c in constraint.columns)
@@ -77,9 +86,20 @@ class TableSchemaTest(unittest.TestCase):
             if constraint.__class__.__name__ == "UniqueConstraint"
         ]
         self.assertIn(("client_id", "symbol"), unique_constraint_cols)
+        self.assertIn(("user_id", "symbol"), unique_constraint_cols)
+
+        check_constraints = [
+            c for c in watchlist_items.constraints if c.__class__.__name__ == "CheckConstraint"
+        ]
+        self.assertEqual(len(check_constraints), 1)
+        # Exercise the actual expression, not just its presence — a flipped
+        # operator (= instead of <>) would still pass a bare count check but
+        # would let rows with both or neither identity set through.
+        self.assertEqual(str(check_constraints[0].sqltext), "(client_id IS NULL) <> (user_id IS NULL)")
 
         index_columns = {tuple(c.name for c in idx.columns) for idx in watchlist_items.indexes}
         self.assertIn(("client_id",), index_columns)
+        self.assertIn(("user_id",), index_columns)
 
     def test_users_columns(self) -> None:
         cols = set(users.columns.keys())

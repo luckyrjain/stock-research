@@ -1,7 +1,7 @@
 import os
 
 from sqlalchemy import (
-    Boolean, Column, Date, DateTime, ForeignKey, Index, Integer,
+    Boolean, CheckConstraint, Column, Date, DateTime, ForeignKey, Index, Integer,
     MetaData, Numeric, String, Table, UniqueConstraint, text,
 )
 from sqlalchemy import create_engine as _create_engine
@@ -52,24 +52,39 @@ ema_signals = Table(
 )
 
 # Cross-mode watchlist (stock analysis / market picks / SME signals share this
-# one table). There is no account system yet — client_id is a UUID the
-# frontend generates on first use and keeps in localStorage (see
-# frontend/lib/watchlist.ts). This is not real multi-device sync (a cleared
-# browser loses its client_id and, with it, access to its rows), but it does
-# mean the data itself lives in Postgres rather than only in one browser's
-# localStorage, and a future account system can adopt a client_id's rows
-# wholesale once real auth exists.
+# one table). Each row is owned by exactly one identity: either the anonymous
+# per-browser client_id (a UUID the frontend generates on first use and keeps
+# in localStorage — see frontend/lib/watchlist.ts) for a logged-out visitor,
+# or user_id for a signed-in account (see auth.py) — never both, never
+# neither (enforced by the CHECK below). Signing in does NOT claim/merge an
+# existing client_id's rows onto the account; api.py simply prefers the
+# account identity over client_id whenever a valid session is present, so a
+# freshly-signed-in user starts with whatever their account has already
+# accumulated, not their anonymous history (see CLAUDE.md's "Account &
+# magic-link auth flow" for the reasoning). Two separate UNIQUE constraints
+# (rather than one over both columns) are needed because Postgres treats NULL
+# as distinct from any other NULL in a unique index — a single
+# UNIQUE(client_id, user_id, symbol) would let one account row exist per
+# symbol without limit, since every anonymous row's user_id is NULL and every
+# account row's client_id is NULL.
 watchlist_items = Table(
     "watchlist_items",
     metadata,
     Column("id",         Integer, primary_key=True, autoincrement=True),
-    Column("client_id",  String(36),  nullable=False),
+    Column("client_id",  String(36)),
+    Column("user_id",    Integer, ForeignKey("users.id")),
     Column("symbol",     String(20),  nullable=False),
     Column("company",    String(200)),
     Column("exchange",   String(5)),
     Column("added_at",   DateTime(timezone=True), server_default=text("NOW()")),
+    CheckConstraint(
+        "(client_id IS NULL) <> (user_id IS NULL)",
+        name="ck_watchlist_exactly_one_owner",
+    ),
     UniqueConstraint("client_id", "symbol", name="uq_watchlist_client_symbol"),
+    UniqueConstraint("user_id", "symbol", name="uq_watchlist_user_symbol"),
     Index("idx_watchlist_client", "client_id"),
+    Index("idx_watchlist_user", "user_id"),
 )
 
 # One row per (symbol, day) the analysis pipeline actually ran, populated by
@@ -95,8 +110,9 @@ verdict_history = Table(
 
 # Minimal magic-link auth (see auth.py): no passwords. A user is created on
 # first successful link click, never via a separate signup step. Existing
-# watchlist_items/positions stay keyed by the anonymous client_id — accounts
-# are additive, not a migration (see CLAUDE.md's "Account & magic-link auth
+# anonymous client_id data is never migrated onto an account — watchlist_items
+# rows are simply owned by whichever identity (client_id or user_id) was
+# active when each row was added (see CLAUDE.md's "Account & magic-link auth
 # flow" for the reasoning).
 users = Table(
     "users",

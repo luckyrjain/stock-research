@@ -29,7 +29,17 @@ export function getClientId(): string {
 // from and subscribes to this single cache instead of each independently
 // fetching /api/watchlist on mount.
 let cachedItems: WatchlistItem[] | null = null;
-let inFlight: Promise<WatchlistItem[]> | null = null;
+// Resolves to null on failure (never rejects) — null means "keep whatever
+// cachedItems already had," not "the watchlist is empty."
+let inFlight: Promise<WatchlistItem[] | null> | null = null;
+// Bumped by refreshWatchlist() so a fetch already in flight when the
+// caller's identity changes (e.g. a slow anonymous request still running at
+// the moment of sign-in/sign-out) can't clobber the fresher result if it
+// resolves after the refresh's own fetch — same fix as lib/auth.ts's
+// fetchMe()/refreshAuth(), and just as important here: on logout, a stale
+// account-scoped response arriving late would otherwise briefly re-display
+// the signed-out-from account's rows, not just show outdated data.
+let generation = 0;
 const listeners = new Set<() => void>();
 
 function notify(): void {
@@ -37,24 +47,49 @@ function notify(): void {
 }
 
 async function fetchItems(): Promise<WatchlistItem[]> {
-  if (inFlight) return inFlight;
-  const clientId = getClientId();
-  inFlight = fetch(`/api/watchlist?client_id=${encodeURIComponent(clientId)}`)
-    .then(res => (res.ok ? res.json() : { items: [] }))
-    .then((data: { items?: WatchlistItem[] }) => data.items ?? [])
-    .catch(() => [])
-    .finally(() => { inFlight = null; });
+  const myGeneration = generation;
+  if (!inFlight) {
+    const clientId = getClientId();
+    // client_id is always sent, but the backend transparently prefers a
+    // valid account session over it when one is present (see api.py's
+    // _resolve_watchlist_owner) — this fetch doesn't need to know which
+    // identity actually served the request.
+    inFlight = fetch(`/api/watchlist?client_id=${encodeURIComponent(clientId)}`, { cache: 'no-store' })
+      .then(res => (res.ok ? res.json() : { items: null }))
+      .then((data: { items?: WatchlistItem[] | null }) => data.items ?? null)
+      .catch(() => null)
+      .finally(() => { inFlight = null; });
+  }
   const items = await inFlight;
-  cachedItems = items;
+  if (myGeneration !== generation) {
+    // A refresh (identity change) superseded this fetch — its own, later
+    // request owns the cache now; don't let a straggler overwrite it.
+    return cachedItems ?? [];
+  }
+  // A failure (items === null) leaves the previous value in place rather
+  // than wiping a populated watchlist to empty, matching toggle()/remove()
+  // below's "leave state as-is" convention on a failed mutation.
+  cachedItems = items ?? cachedItems ?? [];
   notify();
-  return items;
+  return cachedItems;
+}
+
+/** Re-fetches /api/watchlist and updates every subscribed useWatchlist()
+ * instance — call after sign-in/sign-out so the watchlist switches between
+ * the account's rows and the anonymous client_id's rows without a full page
+ * reload (the module-level cache above otherwise has no way to know the
+ * caller's identity changed). */
+export function refreshWatchlist(): Promise<WatchlistItem[]> {
+  generation++;
+  inFlight = null;
+  return fetchItems();
 }
 
 /** Shared cross-component watchlist state, backed by Postgres (watchlist_items,
- * keyed by an anonymous per-browser client_id — see getClientId above). No
- * account system yet, so this doesn't sync across devices/browsers, but the
- * data itself lives in the database rather than only in one browser's
- * localStorage. */
+ * keyed by an anonymous per-browser client_id — see getClientId above) or, once
+ * signed in, an account (see refreshWatchlist above and CLAUDE.md's "Watchlist
+ * flow"). The hook itself doesn't need to know which identity is active — the
+ * backend resolves that per request. */
 export function useWatchlist() {
   const [items, setItems] = useState<WatchlistItem[]>(cachedItems ?? []);
   const [loading, setLoading] = useState(cachedItems === null);

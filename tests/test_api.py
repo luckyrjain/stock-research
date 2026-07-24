@@ -1258,6 +1258,192 @@ class WatchlistEndpointsTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 503)
 
 
+class _SqlRecordingConn:
+    """Fake SQLAlchemy connection: returns queued results in call order and
+    records the SQL text + bound params of every execute() call."""
+
+    def __init__(self, results: list) -> None:
+        self._results = list(results)
+        self.queries: list[tuple[str, dict]] = []
+
+    def execute(self, stmt, params=None, *_args, **_kwargs):
+        self.queries.append((str(stmt), params or {}))
+        return self._results.pop(0)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+class WatchlistAccountLinkingTest(unittest.TestCase):
+    """A valid session always wins over client_id — see api.py's
+    _resolve_watchlist_owner. These tests cover the account-backed identity
+    path added alongside the pre-existing anonymous client_id one above."""
+
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        api._DB_ENGINE = None
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._DB_ENGINE = None
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_get_with_valid_session_queries_by_user_id_ignoring_client_id(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = [
+            {"symbol": "TCS", "company": "Tata Consultancy Services", "exchange": "NSE",
+             "addedAt": "2026-01-01T00:00:00"},
+        ]
+        conn = _SqlRecordingConn([rows_result])
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value = conn
+
+        with patch("api._get_db_engine", return_value=fake_engine), \
+             patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
+            resp = client.get(
+                "/api/watchlist?client_id=client-abc",
+                headers={"Authorization": "Bearer sometoken"},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["items"][0]["symbol"], "TCS")
+        query_text, params = conn.queries[0]
+        self.assertIn("user_id = :owner_value", query_text)
+        self.assertNotIn("client_id", query_text)
+        self.assertEqual(params, {"owner_value": 42})
+
+    def test_get_without_session_falls_back_to_client_id(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = []
+        conn = _SqlRecordingConn([rows_result])
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value = conn
+
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.get("/api/watchlist?client_id=client-abc")
+
+        self.assertEqual(resp.status_code, 200)
+        query_text, params = conn.queries[0]
+        self.assertIn("client_id = :owner_value", query_text)
+        self.assertEqual(params, {"owner_value": "client-abc"})
+
+    def test_get_with_expired_session_falls_back_to_client_id(self) -> None:
+        # An invalid/expired bearer token isn't a 401 on this endpoint — it
+        # just isn't treated as identifying anyone, same as no token at all.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = []
+        conn = _SqlRecordingConn([rows_result])
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value = conn
+
+        with patch("api._get_db_engine", return_value=fake_engine), \
+             patch("auth.get_user_for_session", return_value=None):
+            resp = client.get(
+                "/api/watchlist?client_id=client-abc",
+                headers={"Authorization": "Bearer expired-token"},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        query_text, _params = conn.queries[0]
+        self.assertIn("client_id", query_text)
+
+    def test_get_without_session_or_client_id_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.get("/api/watchlist")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_post_with_valid_session_inserts_by_user_id_no_client_id_needed(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        lock_result = MagicMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = 0
+        insert_result = MagicMock()
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = [
+            {"symbol": "TCS", "company": "", "exchange": "NSE", "addedAt": "2026-01-01T00:00:00"},
+        ]
+        begin_conn = _SqlRecordingConn([lock_result, count_result, insert_result])
+        connect_conn = _SqlRecordingConn([rows_result])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = begin_conn
+        fake_engine.connect.return_value = connect_conn
+
+        with patch("api._get_db_engine", return_value=fake_engine), \
+             patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
+            # No client_id in the body at all — the account identity is sufficient.
+            resp = client.post(
+                "/api/watchlist", json={"symbol": "tcs"},
+                headers={"Authorization": "Bearer sometoken"},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        insert_query, insert_params = begin_conn.queries[2]
+        self.assertIn("INSERT INTO watchlist_items (user_id", insert_query)
+        self.assertIn("ON CONFLICT (user_id, symbol)", insert_query)
+        self.assertEqual(insert_params["owner_value"], 42)
+
+    def test_post_without_session_or_client_id_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.post("/api/watchlist", json={"symbol": "TCS"})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_post_over_cap_for_account_returns_422(self) -> None:
+        # Mirrors WatchlistEndpointsTest.test_post_over_cap_returns_422 for the
+        # account-owned path — the cap must bind per-owner, not just per-client_id.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        lock_result = MagicMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = api._MAX_WATCHLIST_ITEMS_PER_CLIENT
+        begin_conn = _SqlRecordingConn([lock_result, count_result])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = begin_conn
+
+        with patch("api._get_db_engine", return_value=fake_engine), \
+             patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
+            resp = client.post(
+                "/api/watchlist", json={"symbol": "TCS"},
+                headers={"Authorization": "Bearer sometoken"},
+            )
+
+        self.assertEqual(resp.status_code, 422)
+        count_query, count_params = begin_conn.queries[1]
+        self.assertIn("user_id = :owner_value", count_query)
+        self.assertEqual(count_params["owner_value"], 42)
+
+    def test_delete_with_valid_session_deletes_by_user_id(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        delete_result = MagicMock()
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = []
+        begin_conn = _SqlRecordingConn([delete_result])
+        connect_conn = _SqlRecordingConn([rows_result])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = begin_conn
+        fake_engine.connect.return_value = connect_conn
+
+        with patch("api._get_db_engine", return_value=fake_engine), \
+             patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
+            resp = client.delete("/api/watchlist/TCS", headers={"Authorization": "Bearer sometoken"})
+
+        self.assertEqual(resp.status_code, 200)
+        delete_query, delete_params = begin_conn.queries[0]
+        self.assertIn("user_id = :owner_value", delete_query)
+        self.assertEqual(delete_params["owner_value"], 42)
+
+    def test_delete_without_session_or_client_id_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.delete("/api/watchlist/TCS")
+        self.assertEqual(resp.status_code, 422)
+
+
 class VerdictHistoryEndpointTest(unittest.TestCase):
     """Read-only aggregation over verdict_history.load_history() — degrades to
     an empty list rather than an error, same philosophy as /api/consolidated."""

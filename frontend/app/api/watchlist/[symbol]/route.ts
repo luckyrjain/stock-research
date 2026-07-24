@@ -1,3 +1,5 @@
+import { getSessionTokenFromRequest } from '@/lib/auth-cookie';
+
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
 export async function DELETE(
@@ -7,11 +9,13 @@ export async function DELETE(
   const { symbol } = await params;
   const { searchParams } = new URL(req.url);
   const qs = searchParams.toString();
+  const token = getSessionTokenFromRequest(req);
 
   let upstream: Response;
   try {
     upstream = await fetch(`${API}/api/watchlist/${encodeURIComponent(symbol)}${qs ? `?${qs}` : ''}`, {
       method: 'DELETE',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
       cache: 'no-store',
     });
   } catch {

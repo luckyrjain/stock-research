@@ -18,9 +18,9 @@ A second mode — **Market Picks** — runs a multi-agent pipeline that scrapes 
 
 A third mode — **SME Signals** — is a PostgreSQL-backed batch pipeline (`sme_ema_pipeline.py`) that screens all NSE Emerge + BSE SME stocks for EMA20/EMA50 **golden cross** and **death cross** events, served at `/sme-signals` via `GET /api/sme-signals`.
 
-A **Watchlist** ties the three modes together: a star button in each dashboard adds/removes a stock from a PostgreSQL-backed `watchlist_items` table, and `/watchlist` lists everything starred with live prices. Rows are still keyed by an anonymous per-browser `client_id` (a UUID in `localStorage`), not an account — see "Account & magic-link auth flow" below for the (separate, additive) account system.
+A **Watchlist** ties the three modes together: a star button in each dashboard adds/removes a stock from a PostgreSQL-backed `watchlist_items` table, and `/watchlist` lists everything starred with live prices. Each row is owned by either an anonymous per-browser `client_id` (a UUID in `localStorage`) or, once signed in, an account (`user_id`) — see "Watchlist flow" below for how a request's identity is resolved, and "Account & magic-link auth flow" for the account system itself. Signing in never migrates an existing `client_id`'s rows onto the account.
 
-A minimal **account system** (magic-link email, no passwords) exists via `POST /api/auth/request-link` + `GET /api/auth/verify` — a `Sign in` link appears in every page's nav bar (`AuthWidget`). It does not yet replace or migrate the anonymous `client_id` watchlist/positions data above; the two identities coexist.
+A minimal **account system** (magic-link email, no passwords) exists via `POST /api/auth/request-link` + `GET /api/auth/verify` — a `Sign in` link appears in every page's nav bar (`AuthWidget`). The watchlist (above) is account-aware; "I bought this" positions tracking (`frontend/lib/positions.ts`) remains purely anonymous/`localStorage`-only for now, with no backend of its own to link to an account.
 
 A shared **search box** (`HeaderSearch`, in every page's nav bar) answers "what does AlphaPulse think about X" in one query: `GET /api/consolidated/{symbol}` is pure aggregation of what the three modes above have already cached/computed for that symbol — no new fetching, no LLM calls. Any section is `null` when that pipeline hasn't run for the symbol yet (the common case), not an error.
 
@@ -470,29 +470,60 @@ For a local/self-hosted alternative, a crontab entry works too:
 ### Watchlist flow
 
 The `watchlist_items` table (PostgreSQL, `DATABASE_URL`) is the one piece of shared state
-connecting the three otherwise-independent modes:
+connecting the three otherwise-independent modes. Each row is owned by exactly one
+identity — the anonymous per-browser `client_id`, or, once signed in, the account's
+`user_id` — enforced by `ck_watchlist_exactly_one_owner` (`CHECK ((client_id IS NULL) <>
+(user_id IS NULL))`) plus two separate `UNIQUE` constraints (`(client_id, symbol)` and
+`(user_id, symbol)` — a single combined constraint wouldn't work, since Postgres treats
+every row's `NULL` as distinct from every other `NULL`, so it wouldn't actually cap either
+identity to one row per symbol).
 
-1. `GET /api/watchlist?client_id=`, `POST /api/watchlist` (`{client_id, symbol, company, exchange}`),
-   `DELETE /api/watchlist/{symbol}?client_id=` — all in `api.py`, using the same cached
-   engine (`_get_db_engine()`) as the SME endpoints
-2. No accounts: `client_id` is a UUID generated client-side (`crypto.randomUUID()`) and
-   persisted in `localStorage` — it groups one browser's rows, nothing more
-3. `frontend/lib/watchlist.ts`'s `useWatchlist()` hook holds a module-level shared cache +
+1. `GET /api/watchlist?client_id=`, `POST /api/watchlist` (`{client_id, symbol, company, exchange}`,
+   `client_id` optional), `DELETE /api/watchlist/{symbol}?client_id=` — all in `api.py`, using
+   the same cached engine (`_get_db_engine()`) as the SME endpoints
+2. **Identity resolution** (`api._resolve_watchlist_owner()`): a valid session (the
+   `Authorization: Bearer <token>` header — see "Account & magic-link auth flow" below) always
+   wins over `client_id` when both are present in a request, since the whole point of an
+   account is that it doesn't depend on which browser sent the request. An expired/invalid
+   token isn't a 401 here — this endpoint doesn't require being signed in, so it just falls
+   through to the `client_id` path, same as no token at all. A request with neither a valid
+   session nor a well-formed `client_id` gets 422.
+3. **No migration on sign-in**: an anonymous `client_id`'s existing rows are never
+   claimed/merged onto an account when a user signs in — a freshly-signed-in user simply
+   starts seeing whatever rows their account already owns (possibly none), and their old
+   anonymous rows remain reachable only by that same browser's `client_id` while logged out.
+   This mirrors the same deliberate scope call `db/models.py`'s `users` table comment
+   documents for the auth system as a whole.
+4. `client_id` is a UUID generated client-side (`crypto.randomUUID()`) and persisted in
+   `localStorage` — it groups one browser's anonymous rows, nothing more
+5. `frontend/lib/watchlist.ts`'s `useWatchlist()` hook holds a module-level shared cache +
    subscriber list so every mounted `WatchlistButton` (stock analysis, Market Picks rows,
    SME Signals rows) reads/writes the same in-memory state without each firing its own
-   fetch or needing React Context
-4. `/watchlist` fans out to `GET /api/prices` for live quotes on whatever's starred
-5. Same defensive conventions as SME endpoints: 503 if `DATABASE_URL` unset/DB unreachable
-   (sanitized — no raw exception text in the response), 422 on invalid `client_id`/`symbol`,
-   rate-limited via `_rate_limit()`, capped at 200 items per `client_id`
+   fetch or needing React Context. It always sends `client_id` regardless of auth state — the
+   backend transparently decides which identity actually owns the request, so the hook itself
+   doesn't need to know. `refreshWatchlist()` clears that cache and re-fetches; it's called
+   from `/auth/verify`'s success path and from `useAuth()`'s `logout()`, since neither a
+   sign-in nor a sign-out otherwise gives the watchlist's independent module-level cache any
+   signal that the caller's identity just changed.
+6. The Next.js proxy routes (`app/api/watchlist/route.ts`, `app/api/watchlist/[symbol]/route.ts`)
+   forward the session cookie as `Authorization: Bearer <token>` alongside the existing
+   `client_id` passthrough — same pattern as the `/api/auth/*` proxy routes — so `api.py`
+   never sees a cookie, only that header.
+7. `/watchlist` fans out to `GET /api/prices` for live quotes on whatever's starred
+8. Same defensive conventions as SME endpoints: 503 if `DATABASE_URL` unset/DB unreachable
+   (sanitized — no raw exception text in the response), 422 on invalid `client_id`/`symbol`/
+   missing identity, rate-limited via `_rate_limit()`, capped at 200 items per identity
+   (`_MAX_WATCHLIST_ITEMS_PER_CLIENT`, same cap for both client_id- and user_id-owned rows)
 
 ### Account & magic-link auth flow
 
 Minimal, passwordless auth — no OAuth, no separate signup step. Additive on top of the
-anonymous `client_id` identity above: existing `watchlist_items`/positions data is untouched
-and still keyed by `client_id`; signing in doesn't currently claim or merge it onto an
-account (a deliberate scope call — see the Tier 2 product-queue discussion this shipped
-from).
+anonymous `client_id` identity above: `watchlist_items` rows an anonymous browser already
+had stay exactly as they were and keyed by `client_id` — signing in doesn't claim or merge
+them onto the account (a deliberate scope call — see the Tier 2 product-queue discussion
+this shipped from, and "Watchlist flow" above for how a signed-in request's identity is
+resolved). "I bought this" positions tracking has no backend at all yet (see the Market
+Picks pipeline docs), so there's nothing for an account to link there.
 
 1. **Request a link** — `POST /api/auth/request-link` (`{email}`), rate-limited both per-IP
    (5/15 min) and per-target-address (5/hour) — the address-keyed limit exists because an
