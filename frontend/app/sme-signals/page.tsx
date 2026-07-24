@@ -648,8 +648,24 @@ export default function SmeSignalsPage() {
                               >
                                 {s.symbol}
                               </Link>
+                            ) : s.isin ? (
+                              // BSE's own scrip code (`s.symbol`) isn't a directly
+                              // analyzable ticker — deep-link via ISIN instead, which
+                              // the home page resolves through /api/validate first
+                              // (same resolution ticker-search.tsx already does for
+                              // user-typed ISINs).
+                              <Link
+                                href={`/?symbol=${encodeURIComponent(s.isin)}`}
+                                onClick={e => e.stopPropagation()}
+                                title={`Resolve via ISIN ${s.isin}`}
+                                className="font-semibold text-tx hover:text-accent transition-colors text-sm"
+                              >
+                                {s.symbol}
+                              </Link>
                             ) : (
-                              <span className="font-semibold text-tx text-sm">{s.symbol}</span>
+                              <span className="font-semibold text-tx text-sm" title="No ISIN on record for this listing — can't be resolved to an analyzable ticker">
+                                {s.symbol}
+                              </span>
                             )}
                             <ExchangeBadge exchange={s.exchange} />
                           </div>
@@ -760,7 +776,7 @@ export default function SmeSignalsPage() {
         {/* Footer hint */}
         {!loading && !error && signals.length > 0 && (
           <p className="text-[10px] text-muted/50 mt-3">
-            Click an NSE symbol to run full analysis. BSE SME symbols are scrip codes and can&apos;t be analysed directly.
+            Click a symbol to run full analysis. A BSE listing without an ISIN on record can&apos;t be resolved to an analyzable ticker yet.
           </p>
         )}
 
