@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from db.models import ema_signals, get_engine, magic_links, sessions, sme_stocks, users, watchlist_items
+from db.models import api_keys, ema_signals, get_engine, magic_links, sessions, sme_stocks, users, watchlist_items
 
 
 class GetEngineTest(unittest.TestCase):
@@ -134,6 +134,30 @@ class TableSchemaTest(unittest.TestCase):
         self.assertIn("users.id", fk_targets)
 
         index_columns = {tuple(c.name for c in idx.columns) for idx in sessions.indexes}
+        self.assertIn(("user_id",), index_columns)
+
+    def test_api_keys_columns_and_constraints(self) -> None:
+        cols = set(api_keys.columns.keys())
+        self.assertEqual(cols, {
+            "id", "user_id", "key_hash", "key_prefix", "label",
+            "created_at", "last_used_at", "revoked_at",
+        })
+        self.assertFalse(api_keys.columns["user_id"].nullable)
+        self.assertFalse(api_keys.columns["key_hash"].nullable)
+        self.assertTrue(api_keys.columns["key_hash"].unique)
+        self.assertFalse(api_keys.columns["key_prefix"].nullable)
+        self.assertTrue(api_keys.columns["label"].nullable)
+        self.assertTrue(api_keys.columns["last_used_at"].nullable)
+        self.assertTrue(api_keys.columns["revoked_at"].nullable)
+
+        fk_targets = {
+            f"{fk.column.table.name}.{fk.column.name}"
+            for col in api_keys.columns
+            for fk in col.foreign_keys
+        }
+        self.assertIn("users.id", fk_targets)
+
+        index_columns = {tuple(c.name for c in idx.columns) for idx in api_keys.indexes}
         self.assertIn(("user_id",), index_columns)
 
 

@@ -1700,12 +1700,11 @@ async def remove_from_watchlist(request: Request, symbol: str, client_id: str | 
 # scraping, no SME pipeline run. Any section that hasn't been computed yet
 # for this symbol (or has gone stale past that pipeline's own TTL) is simply
 # null in the response — that's the expected common case, not an error.
-@app.get("/api/consolidated/{symbol}")
-async def get_consolidated(request: Request, symbol: str):
-    _rate_limit(request, "consolidated", max_calls=30, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+async def _consolidated_payload(sym: str) -> dict:
+    """Shared aggregation body behind both GET /api/consolidated/{symbol}
+    (internal, unauthenticated, IP rate-limited) and GET /api/v1/consolidated/
+    {symbol} (external, API-key-gated) — the data returned is identical
+    either way, only who's allowed to ask and how often differs."""
 
     def _analysis_sync() -> dict | None:
         import cache
@@ -1771,6 +1770,15 @@ async def get_consolidated(request: Request, symbol: str):
         loop.run_in_executor(None, _sme_sync),
     )
     return {"symbol": sym, "analysis": analysis, "market_pick": market_pick, "sme": sme}
+
+
+@app.get("/api/consolidated/{symbol}")
+async def get_consolidated(request: Request, symbol: str):
+    _rate_limit(request, "consolidated", max_calls=30, window_seconds=60)
+    sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    return await _consolidated_payload(sym)
 
 
 # ── Account & magic-link auth ────────────────────────────────────────────────
@@ -1887,6 +1895,111 @@ async def logout(request: Request):
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _auth.delete_session, token)
     return {"ok": True}
+
+
+# ── API key management (programmatic access) ─────────────────────────────────
+# Session-authenticated endpoints for a signed-in user to manage their own
+# long-lived keys. The keys themselves gate the separate /api/v1/* surface
+# below, aimed at external/scripted callers rather than the frontend.
+class CreateApiKeyRequest(BaseModel):
+    label: str | None = None
+
+
+async def _require_session_user(request: Request) -> dict:
+    token = _bearer_token_from_request(request)
+    if not token or not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=401, detail="Not signed in.")
+
+    import auth as _auth
+
+    loop = asyncio.get_running_loop()
+    user = await loop.run_in_executor(None, _auth.get_user_for_session, token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not signed in.")
+    return user
+
+
+@app.post("/api/api-keys", status_code=201)
+async def create_api_key(request: Request, body: CreateApiKeyRequest):
+    _rate_limit(request, "api_keys_create", max_calls=20, window_seconds=3600)
+    user = await _require_session_user(request)
+    label = (body.label or "").strip()[:120] or None
+
+    import auth as _auth
+
+    loop = asyncio.get_running_loop()
+    try:
+        key = await loop.run_in_executor(None, _auth.create_api_key, user["id"], label)
+    except Exception as exc:
+        log_event(LOGGER, "api_key_create_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Could not create API key. See server logs.")
+    return key
+
+
+@app.get("/api/api-keys")
+async def list_api_keys(request: Request):
+    user = await _require_session_user(request)
+
+    import auth as _auth
+
+    loop = asyncio.get_running_loop()
+    keys = await loop.run_in_executor(None, _auth.list_api_keys, user["id"])
+    return {"keys": keys}
+
+
+@app.delete("/api/api-keys/{key_id}")
+async def revoke_api_key(request: Request, key_id: int):
+    user = await _require_session_user(request)
+
+    import auth as _auth
+
+    loop = asyncio.get_running_loop()
+    revoked = await loop.run_in_executor(None, _auth.revoke_api_key, user["id"], key_id)
+    if not revoked:
+        raise HTTPException(status_code=404, detail="No such API key.")
+    return {"ok": True}
+
+
+# ── Public v1 API (external, API-key-gated) ──────────────────────────────────
+# A small, deliberately narrow surface for scripted/external consumers —
+# distinct from the internal Next.js proxy routes under /api/*, which the
+# frontend calls directly and which stay session-cookie/client_id-based.
+# Auth here is a raw key in the `X-API-Key` header, never `Authorization:
+# Bearer` — that header is reserved for the internal session-token
+# convention (see the auth section above), and reusing it here would let a
+# forwarded session token accidentally satisfy this check.
+def _api_key_from_request(request: Request) -> str | None:
+    key = request.headers.get("x-api-key", "").strip()
+    return key or None
+
+
+async def _require_api_key_user(request: Request) -> int:
+    """Returns the owning user_id for a valid X-API-Key header, else raises
+    401. Also applies a per-user rate limit distinct from the IP-keyed limits
+    on internal endpoints, since a legitimate integration may call from a
+    shared/rotating IP."""
+    raw_key = _api_key_from_request(request)
+    if not raw_key or not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header.")
+
+    import auth as _auth
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, _auth.get_user_for_api_key, raw_key)
+    if result is None:
+        raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header.")
+    user_id = result["user_id"]
+    _check_rate_limit(f"api_v1:{user_id}", max_calls=100, window_seconds=3600)
+    return user_id
+
+
+@app.get("/api/v1/consolidated/{symbol}")
+async def get_consolidated_v1(request: Request, symbol: str):
+    await _require_api_key_user(request)
+    sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    return await _consolidated_payload(sym)
 
 
 if __name__ == "__main__":

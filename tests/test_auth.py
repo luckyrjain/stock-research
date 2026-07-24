@@ -226,5 +226,149 @@ class TtlConstantsTest(unittest.TestCase):
         self.assertGreater(auth.SESSION_TTL, auth.MAGIC_LINK_TTL * 10)
 
 
+class CreateApiKeyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        auth._ENGINE = None
+
+    def tearDown(self) -> None:
+        auth._ENGINE = None
+
+    def test_inserts_hashed_key_and_returns_raw_key_once(self) -> None:
+        row = MagicMock()
+        row.mappings.return_value.first.return_value = {
+            "id": 3, "label": "my script", "created_at": "2026-01-01T00:00:00Z",
+        }
+        conn = _FakeConn([row])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = conn
+
+        with patch("auth._get_engine", return_value=fake_engine):
+            result = auth.create_api_key(7, "my script")
+
+        self.assertTrue(result["key"].startswith("apk_"))
+        self.assertEqual(result["key_prefix"], result["key"][:12])
+        self.assertEqual(result["id"], 3)
+        self.assertEqual(result["label"], "my script")
+
+        args, _kwargs = conn.calls[0]
+        _stmt, params = args
+        self.assertEqual(params["user_id"], 7)
+        self.assertEqual(params["key_hash"], auth._hash_token(result["key"]))
+        self.assertNotEqual(params["key_hash"], result["key"])
+        self.assertEqual(params["key_prefix"], result["key_prefix"])
+
+    def test_raises_on_db_failure(self) -> None:
+        with patch("auth._get_engine", side_effect=RuntimeError("connection refused")):
+            with self.assertRaises(RuntimeError):
+                auth.create_api_key(1)
+
+
+class ListApiKeysTest(unittest.TestCase):
+    def setUp(self) -> None:
+        auth._ENGINE = None
+
+    def tearDown(self) -> None:
+        auth._ENGINE = None
+
+    def test_returns_rows_for_user_newest_first(self) -> None:
+        rows = [
+            {"id": 2, "key_prefix": "apk_bb", "label": None, "created_at": "t2",
+             "last_used_at": None, "revoked_at": None},
+            {"id": 1, "key_prefix": "apk_aa", "label": "old", "created_at": "t1",
+             "last_used_at": "t1.5", "revoked_at": None},
+        ]
+        result_mock = MagicMock()
+        result_mock.mappings.return_value.all.return_value = rows
+        conn = _FakeConn([result_mock])
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value = conn
+
+        with patch("auth._get_engine", return_value=fake_engine):
+            keys = auth.list_api_keys(7)
+
+        self.assertEqual(keys, rows)
+        args, _kwargs = conn.calls[0]
+        _stmt, params = args
+        self.assertEqual(params["user_id"], 7)
+
+
+class RevokeApiKeyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        auth._ENGINE = None
+
+    def tearDown(self) -> None:
+        auth._ENGINE = None
+
+    def test_returns_true_when_a_row_is_revoked(self) -> None:
+        result_mock = MagicMock()
+        result_mock.first.return_value = (5,)
+        conn = _FakeConn([result_mock])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = conn
+
+        with patch("auth._get_engine", return_value=fake_engine):
+            result = auth.revoke_api_key(7, 5)
+
+        self.assertTrue(result)
+        args, _kwargs = conn.calls[0]
+        _stmt, params = args
+        self.assertEqual(params, {"key_id": 5, "user_id": 7})
+
+    def test_returns_false_when_no_row_matches(self) -> None:
+        result_mock = MagicMock()
+        result_mock.first.return_value = None
+        conn = _FakeConn([result_mock])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = conn
+
+        with patch("auth._get_engine", return_value=fake_engine):
+            result = auth.revoke_api_key(7, 999)
+
+        self.assertFalse(result)
+
+
+class GetUserForApiKeyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        auth._ENGINE = None
+
+    def tearDown(self) -> None:
+        auth._ENGINE = None
+
+    def test_returns_none_for_empty_key(self) -> None:
+        self.assertIsNone(auth.get_user_for_api_key(""))
+        self.assertIsNone(auth.get_user_for_api_key(None))
+
+    def test_returns_user_id_and_stamps_last_used(self) -> None:
+        result_mock = MagicMock()
+        result_mock.mappings.return_value.first.return_value = {"user_id": 7}
+        conn = _FakeConn([result_mock])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = conn
+
+        with patch("auth._get_engine", return_value=fake_engine):
+            result = auth.get_user_for_api_key("apk_sometoken")
+
+        self.assertEqual(result, {"user_id": 7})
+        args, _kwargs = conn.calls[0]
+        stmt, params = args
+        self.assertIn("SET last_used_at = NOW()", str(stmt))
+        self.assertIn("revoked_at IS NULL", str(stmt))
+        self.assertEqual(params["key_hash"], auth._hash_token("apk_sometoken"))
+
+    def test_returns_none_for_revoked_or_unknown_key(self) -> None:
+        result_mock = MagicMock()
+        result_mock.mappings.return_value.first.return_value = None
+        conn = _FakeConn([result_mock])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = conn
+
+        with patch("auth._get_engine", return_value=fake_engine):
+            self.assertIsNone(auth.get_user_for_api_key("apk_bad"))
+
+    def test_swallows_db_errors_and_returns_none(self) -> None:
+        with patch("auth._get_engine", side_effect=RuntimeError("connection refused: password exposed")):
+            self.assertIsNone(auth.get_user_for_api_key("apk_x"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -151,3 +151,22 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- Long-lived programmatic-access credentials (same hash-only-storage
+-- convention as magic_links/sessions above). No fixed TTL — valid until
+-- revoked_at is set. key_prefix is not secret; it's stored only so the
+-- key-management UI can list keys without ever re-displaying the raw secret.
+CREATE TABLE IF NOT EXISTS api_keys (
+    id            SERIAL PRIMARY KEY,
+    user_id       INTEGER NOT NULL REFERENCES users(id),
+    key_hash      VARCHAR(64)  NOT NULL UNIQUE,
+    key_prefix    VARCHAR(16)  NOT NULL,
+    label         VARCHAR(120),
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+    last_used_at  TIMESTAMPTZ,
+    revoked_at    TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);

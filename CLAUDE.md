@@ -593,6 +593,38 @@ Picks pipeline docs), so there's nothing for an account to link there.
    401 (not 200 with a null user) when there's no session, so `useAuth()`'s `loading` state
    distinguishes "still checking" from "confirmed signed out."
 
+### Programmatic API access flow
+
+A signed-in user can mint long-lived API keys for scripts/integrations, separate from the
+session-cookie identity the frontend itself uses. Two independent pieces:
+
+1. **Key management** (session-authenticated, same identity as everything else under "Account
+   & magic-link auth flow" above) — `POST /api/api-keys` (`{label?}`, 201, returns the row
+   *including the raw key* — the only response that ever does, since `auth.create_api_key()`
+   never persists it, only its SHA-256 hash, the same convention as `magic_links`/`sessions`),
+   `GET /api/api-keys` (list metadata only — `key_prefix`, not the key or its hash), `DELETE
+   /api/api-keys/{id}` (revoke; 404 if the id doesn't exist or isn't owned by the caller — never
+   a 403, so the endpoint doesn't confirm/deny another user's key IDs exist). A key has no fixed
+   TTL, unlike a session — it's valid until explicitly revoked, since a script can't "re-sign-in"
+   through a magic link the way a browser redirects through one. `frontend/app/api-keys/page.tsx`
+   (linked from `AuthWidget`'s dropdown) is the management UI: the create form shows the raw key
+   exactly once, in a copy-to-clipboard box, with an explicit "won't be shown again" warning;
+   the list table shows every key including revoked ones (badged), never re-displaying the secret.
+2. **The gated surface itself** — `GET /api/v1/consolidated/{symbol}`, deliberately the *only*
+   `/api/v1/*` route today: a thin auth/rate-limit wrapper around the exact same
+   `_consolidated_payload()` helper `GET /api/consolidated/{symbol}` already calls (extracted out
+   of that handler specifically so the two paths can't drift), so "what does AlphaPulse think
+   about X" is available to external callers with zero duplicated aggregation logic. Auth here is
+   a raw key in the `X-API-Key` header — deliberately **not** `Authorization: Bearer`, which is
+   reserved for the internal session-token convention above; reusing that header would let a
+   forwarded session token accidentally satisfy this check. `_require_api_key_user()` validates
+   the key via `auth.get_user_for_api_key()` (which also opportunistically stamps
+   `last_used_at`) and applies a per-*user* rate limit (`api_v1:{user_id}`, 100/hour) rather than
+   per-IP like the internal endpoints — a legitimate integration may run from a shared or
+   rotating IP, so IP-keying would be the wrong bucket here. More `/api/v1/*` routes can follow
+   the same wrapper-around-an-existing-handler pattern later; this PR intentionally ships one
+   real endpoint rather than a speculative surface no caller has asked for yet.
+
 ### Consolidated view flow
 
 `GET /api/consolidated/{symbol}` answers "what does AlphaPulse think about X" without
