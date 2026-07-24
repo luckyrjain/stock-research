@@ -7,6 +7,7 @@ import type { TaskName, TaskStatus, Phase, SSEMessage, Report } from '@/types';
 import TickerSearch     from '@/components/ticker-search';
 import ProgressTracker  from '@/components/progress-tracker';
 import ResultsDashboard from '@/components/results-dashboard';
+import HeaderSearch     from '@/components/header-search';
 
 const ALL_TASKS: TaskName[] = ['stock_info', 'research', 'news', 'shareholding', 'mf_holdings'];
 
@@ -166,6 +167,9 @@ function HomePageInner() {
               >
                 Watchlist →
               </Link>
+              <div className="ml-auto flex items-center gap-3">
+                <HeaderSearch />
+              </div>
             </div>
 
             <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} compact />

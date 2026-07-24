@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'rea
 import Link from 'next/link';
 import type { SmeSignal, SmeSignalHistoryResponse, SmeSignalsResponse } from '@/types';
 import EmaChart from '@/components/ema-chart';
+import HeaderSearch from '@/components/header-search';
 import WatchlistButton from '@/components/watchlist-button';
 
 // ── Filter types ──────────────────────────────────────────────────────────────
@@ -272,6 +273,7 @@ export default function SmeSignalsPage() {
             Watchlist
           </Link>
           <div className="ml-auto flex items-center gap-3">
+            <HeaderSearch />
             <button
               onClick={startRefresh}
               disabled={refreshing}

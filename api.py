@@ -1254,6 +1254,88 @@ async def remove_from_watchlist(request: Request, symbol: str, client_id: str = 
     return {"items": items}
 
 
+# ── Consolidated view ──────────────────────────────────────────────────────────
+# "What does AlphaPulse think about X" spans three independently-run pipelines
+# today, so answering it means visiting three pages. This endpoint answers it
+# in one request by reading whatever each pipeline has ALREADY computed —
+# stock analysis's own cache, the market-picks result cache, and the SME
+# pipeline's latest stored regime. It fetches no new data: no LLM calls, no
+# scraping, no SME pipeline run. Any section that hasn't been computed yet
+# for this symbol (or has gone stale past that pipeline's own TTL) is simply
+# null in the response — that's the expected common case, not an error.
+@app.get("/api/consolidated/{symbol}")
+async def get_consolidated(request: Request, symbol: str):
+    _rate_limit(request, "consolidated", max_calls=30, window_seconds=60)
+    sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+
+    def _analysis_sync() -> dict | None:
+        import cache
+
+        data = cache.load(sym, "analysis")
+        if not data:
+            return None
+        return {
+            "recommendation": data.get("recommendation"),
+            "confidence":     data.get("confidence"),
+            "summary":        data.get("summary"),
+            "as_of":          data.get("_meta", {}).get("fetched_at"),
+        }
+
+    def _market_pick_sync() -> dict | None:
+        cached = _load_picks_cache()
+        if not cached:
+            return None
+        for pick in cached.get("picks", []):
+            if str(pick.get("symbol", "")).upper() == sym:
+                return {
+                    "rank":             pick.get("rank"),
+                    "recommendation":   pick.get("recommendation"),
+                    "confidence_score": pick.get("confidence_score"),
+                    "summary":          pick.get("summary"),
+                    "generated_at":     cached.get("generated_at"),
+                }
+        return None
+
+    def _sme_sync() -> dict | None:
+        if not os.environ.get("DATABASE_URL"):
+            return None
+        try:
+            from sqlalchemy import text as _text
+
+            engine = _get_db_engine()
+            with engine.connect() as conn:
+                row = conn.execute(_text("""
+                    SELECT
+                        e.trade_date::text    AS trade_date,
+                        e.cross_type          AS "cross",
+                        (e.ema20 > e.ema50)   AS in_golden_cross,
+                        s.name,
+                        s.exchange
+                    FROM ema_signals e
+                    JOIN sme_stocks  s USING (symbol)
+                    WHERE e.symbol = :symbol
+                    ORDER BY e.trade_date DESC
+                    LIMIT 1
+                """), {"symbol": sym}).mappings().first()
+        except Exception as exc:
+            # Best-effort: a stock most commonly just isn't an SME stock at all
+            # (no row), and a genuine DB hiccup here shouldn't fail the whole
+            # aggregated response when the other two sections are fine on their own.
+            log_event(LOGGER, "consolidated_sme_query_failed", level="warning", symbol=sym, error=str(exc))
+            return None
+        return dict(row) if row else None
+
+    loop = asyncio.get_running_loop()
+    analysis, market_pick, sme = await asyncio.gather(
+        loop.run_in_executor(None, _analysis_sync),
+        loop.run_in_executor(None, _market_pick_sync),
+        loop.run_in_executor(None, _sme_sync),
+    )
+    return {"symbol": sym, "analysis": analysis, "market_pick": market_pick, "sme": sme}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)

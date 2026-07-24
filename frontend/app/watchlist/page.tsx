@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useWatchlist } from '@/lib/watchlist';
+import HeaderSearch from '@/components/header-search';
 
 interface LivePrice {
   price: number;
@@ -63,6 +64,9 @@ export default function WatchlistPage() {
           </Link>
           <span className="text-border-hi">|</span>
           <span className="text-sm font-semibold text-accent">Watchlist</span>
+          <div className="ml-auto flex items-center gap-3">
+            <HeaderSearch />
+          </div>
         </div>
 
         <div className="mb-6">

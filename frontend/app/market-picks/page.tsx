@@ -8,6 +8,7 @@ import type {
   MarketPick,
 } from '@/types';
 import MarketPicksDashboard from '@/components/market-picks-dashboard';
+import HeaderSearch from '@/components/header-search';
 
 interface SourceState {
   name: string;
@@ -352,14 +353,17 @@ export default function MarketPicksPage() {
           <Link href="/watchlist" className="text-sm text-muted hover:text-tx transition-colors">
             Watchlist
           </Link>
-          {isRunning && (
-            <button
-              onClick={() => { esRef.current?.close(); setPhase('idle'); }}
-              className="ml-auto text-xs text-muted hover:text-tx transition-colors"
-            >
-              Cancel
-            </button>
-          )}
+          <div className="ml-auto flex items-center gap-3">
+            {isRunning && (
+              <button
+                onClick={() => { esRef.current?.close(); setPhase('idle'); }}
+                className="text-xs text-muted hover:text-tx transition-colors"
+              >
+                Cancel
+              </button>
+            )}
+            <HeaderSearch />
+          </div>
         </div>
 
         {/* ── Idle ── */}
