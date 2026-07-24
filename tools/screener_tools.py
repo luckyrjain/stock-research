@@ -37,8 +37,8 @@ def _resolve_screener_slug(symbol: str) -> str:
     return upper  # best effort
 
 
-def _fetch_soup(symbol: str) -> BeautifulSoup:
-    slug = _resolve_screener_slug(symbol)
+def _fetch_soup(symbol: str, slug: str | None = None) -> BeautifulSoup:
+    slug = slug or _resolve_screener_slug(symbol)
     url = f"https://www.screener.in/company/{slug}/"
     resp = requests.get(url, headers=_HEADERS, timeout=20)
     resp.raise_for_status()
@@ -209,7 +209,7 @@ def get_peer_comparison(symbol: str) -> str:
     Input: NSE stock symbol, e.g. RELIANCE, TCS, INFY."""
     try:
         slug = _resolve_screener_slug(symbol)
-        soup = _fetch_soup(symbol)
+        soup = _fetch_soup(symbol, slug=slug)
         table = _parse_peer_table(soup)
 
         self_row = None

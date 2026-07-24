@@ -204,6 +204,26 @@ class ParsePeerTableTest(unittest.TestCase):
 
 
 class GetPeerComparisonTest(unittest.TestCase):
+    def test_resolves_slug_only_once_and_passes_it_to_fetch(self) -> None:
+        # Regression test: get_peer_comparison used to resolve the Screener slug
+        # both explicitly and again inside _fetch_soup(), wasting a request and
+        # risking a self-row mismatch if the two resolutions ever disagreed.
+        html = """
+        <section id="peers">
+          <table>
+            <thead><tr><th>Name</th><th>P/E</th></tr></thead>
+            <tbody><tr><td><a href="/company/TCS/">TCS</a></td><td>28</td></tr></tbody>
+          </table>
+        </section>
+        """
+        resolve_mock = MagicMock(return_value="TCS")
+        fetch_soup_mock = MagicMock(return_value=BeautifulSoup(html, "lxml"))
+        with patch("tools.screener_tools._resolve_screener_slug", resolve_mock), \
+             patch("tools.screener_tools._fetch_soup", fetch_soup_mock):
+            get_peer_comparison.run(symbol="TCS")
+        resolve_mock.assert_called_once_with("TCS")
+        fetch_soup_mock.assert_called_once_with("TCS", slug="TCS")
+
     def test_splits_self_median_and_peers(self) -> None:
         html = """
         <section id="peers">
