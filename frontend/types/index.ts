@@ -212,11 +212,31 @@ export interface MarketPicksTierStat {
 }
 
 export interface MarketPicksHistoryResponse {
-  symbols:        MarketPickTrackRecord[];
-  snapshot_count: number;
-  win_rate:       number | null;   // 0-100, share of ALL picks with change_pct > 0
-  tier_stats:     Record<string, MarketPicksTierStat>;
-  avg_alpha_pct:  number | null;
+  symbols:         MarketPickTrackRecord[];
+  snapshot_count:  number;
+  win_rate:        number | null;   // 0-100, share of ALL picks with change_pct > 0
+  tier_stats:      Record<string, MarketPicksTierStat>;
+  avg_alpha_pct:   number | null;
+  available_dates: string[];        // 'YYYY-MM-DD', every date with a stored snapshot
+}
+
+// One pick as stored in a single day's output/_history/<date>.json snapshot —
+// a narrower field set than the live MarketPick (see market_picks_pipeline.py's
+// _save_history), since only what's needed for trend tracking is persisted.
+export interface MarketPicksSnapshotPick {
+  symbol:            string;
+  confidence:        number;
+  effective_signal:  number;
+  mention_count:     number;
+  current_price:     number | null;
+  recommendation:    string | null;
+}
+
+// GET /api/market-picks/history?date=YYYY-MM-DD — that single day's full pick
+// list, verbatim, instead of the cross-date aggregation above.
+export interface MarketPicksDailySnapshot {
+  date:  string;
+  picks: MarketPicksSnapshotPick[];
 }
 
 // ── SME EMA Signals ──────────────────────────────────────────────────────────

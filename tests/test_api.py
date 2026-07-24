@@ -414,7 +414,56 @@ class MarketPicksHistoryEndpointTest(unittest.TestCase):
         self.assertEqual(resp.json(), {
             "symbols": [], "snapshot_count": 0,
             "win_rate": None, "tier_stats": {}, "avg_alpha_pct": None,
+            "available_dates": [],
         })
+
+    def test_available_dates_lists_every_snapshot_date(self) -> None:
+        self._write_snapshot("2026-07-01", [
+            {"symbol": "ABC", "confidence": 60, "mention_count": 1, "current_price": 100.0, "recommendation": "BUY"},
+        ])
+        self._write_snapshot("2026-07-08", [
+            {"symbol": "ABC", "confidence": 70, "mention_count": 2, "current_price": 110.0, "recommendation": "BUY"},
+        ])
+        with patch("yfinance.Ticker", side_effect=ConnectionError("no network in test")):
+            resp = client.get("/api/market-picks/history")
+        self.assertEqual(resp.json()["available_dates"], ["2026-07-01", "2026-07-08"])
+
+    def test_date_param_returns_that_days_full_snapshot(self) -> None:
+        self._write_snapshot("2026-07-01", [
+            {"symbol": "ABC", "confidence": 60, "mention_count": 1, "current_price": 100.0, "recommendation": "BUY"},
+            {"symbol": "XYZ", "confidence": 40, "mention_count": 2, "current_price": 50.0, "recommendation": "HOLD"},
+        ])
+        self._write_snapshot("2026-07-08", [
+            {"symbol": "ABC", "confidence": 70, "mention_count": 2, "current_price": 110.0, "recommendation": "BUY"},
+        ])
+        resp = client.get("/api/market-picks/history?date=2026-07-01")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["date"], "2026-07-01")
+        self.assertEqual(len(body["picks"]), 2)
+        self.assertEqual({p["symbol"] for p in body["picks"]}, {"ABC", "XYZ"})
+
+    def test_date_param_missing_snapshot_returns_404(self) -> None:
+        self._write_snapshot("2026-07-01", [
+            {"symbol": "ABC", "confidence": 60, "mention_count": 1, "current_price": 100.0, "recommendation": "BUY"},
+        ])
+        resp = client.get("/api/market-picks/history?date=2026-07-02")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_date_param_malformed_returns_422(self) -> None:
+        resp = client.get("/api/market-picks/history?date=not-a-date")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_date_param_ignores_aggregation_entirely(self) -> None:
+        # A malformed sibling snapshot must not affect a valid ?date= lookup —
+        # the date path never touches the aggregation loop at all.
+        (Path(self._tmpdir) / "2026-06-01.json").write_text("{not valid json")
+        self._write_snapshot("2026-07-01", [
+            {"symbol": "ABC", "confidence": 60, "mention_count": 1, "current_price": 100.0, "recommendation": "BUY"},
+        ])
+        resp = client.get("/api/market-picks/history?date=2026-07-01")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()["picks"]), 1)
 
     def test_snapshot_count_preserved_when_no_symbols_have_picks(self) -> None:
         # Regression: 3 valid daily runs happened, each finding zero picks (or

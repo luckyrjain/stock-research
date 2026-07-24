@@ -1,9 +1,14 @@
+import { NextRequest } from 'next/server';
+
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const date = req.nextUrl.searchParams.get('date');
+  const qs = date ? `?date=${encodeURIComponent(date)}` : '';
+
   let upstream: Response;
   try {
-    upstream = await fetch(`${API}/api/market-picks/history`, { cache: 'no-store' });
+    upstream = await fetch(`${API}/api/market-picks/history${qs}`, { cache: 'no-store' });
   } catch {
     return Response.json(
       { error: 'Backend unavailable. Make sure the analysis service is running.' },

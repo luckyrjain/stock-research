@@ -62,6 +62,7 @@ stock-research/
 │   │   └── consolidated-card.tsx Modal rendering GET /api/consolidated/{symbol}'s three sections
 │   ├── app/api/                  Thin Next.js proxy routes → FastAPI backend
 │   ├── lib/watchlist.ts          useWatchlist() hook (DB-backed via /api/watchlist, anonymous client_id)
+│   ├── lib/positions.ts          usePositions() hook ("I bought this" — localStorage only, no backend)
 │   ├── lib/useStockAnalysis.ts   Per-symbol SSE analysis hook, shared by the home page and /compare
 │   └── types/index.ts            Canonical TS types for all SSE messages and reports
 └── output/                 Cache files (gitignored); also where CLI saves report JSON
@@ -323,6 +324,30 @@ distinguishable here), `cache_fresh`, and `next_scheduled_at` (computed in `api.
 mirror the cron schedule above — kept in sync by hand, there's no way to share one source of truth
 between a GitHub Actions cron expression and this Python computation). Powers the idle `/market-picks`
 hero's true "Last scan" / "Next scheduled scan" line, replacing an unverifiable "every week" claim.
+
+**Browsing a specific day's picks**: `GET /api/market-picks/history` normally aggregates every
+`output/_history/<date>.json` snapshot into a per-symbol first/last-seen roll-up (see "Market picks
+track record" below) — it never surfaces one day's actual full list. `?date=YYYY-MM-DD` is a second
+code path on the same handler that skips aggregation entirely and returns that single day's snapshot
+verbatim (`{"date": ..., "picks": [...]}`, the same shape `_save_history()` wrote it in — just the six
+fields persisted there, not the full live `MarketPick` shape); 404 if no snapshot exists for that date
+(weekend, holiday, or before this feature existed), 422 if `date` isn't `YYYY-MM-DD`. The no-`date`
+aggregated response also grew an `available_dates` field (every date with a stored snapshot) so the
+frontend's date picker (`/market-picks/history`) can bound its `<input type="date">` and step
+Prev/Next through actual snapshot days without a second round trip.
+
+**Positions ("I bought this")**: purely client-side — no backend endpoint, no DB table.
+`frontend/lib/positions.ts`'s `usePositions()` hook persists a `Position[]` (symbol, company,
+exchange, `entry_price`/`target_price`/`stop_loss` captured at mark-time from the live `MarketPick`,
+and a `bought_at` timestamp) straight to `localStorage` under `alphapulse_positions`, using the same
+module-level shared-cache-plus-listener-set pattern `useWatchlist()` uses for its Postgres-backed
+data — here there's simply no fetch step, since localStorage reads/writes are synchronous.
+`PositionButton` (next to `TradeBox`'s entry/target/stop-loss in each pick's expanded row) toggles a
+pick in/out of this list; `PositionsStrip` (rendered above the phase content on `/market-picks`, so it
+shows regardless of whether a fresh scan has run) polls the *existing* `GET /api/prices` endpoint every
+30 s for the tracked symbols' live price — no new backend work — and computes P&L client-side against
+each position's stored entry, flagging "At target" / "At stop-loss" when the live price clears either
+level.
 
 ### SME golden cross flow
 

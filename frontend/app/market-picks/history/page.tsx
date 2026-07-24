@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import type { MarketPicksHistoryResponse, MarketPickTrackRecord } from '@/types';
+import type { MarketPicksHistoryResponse, MarketPickTrackRecord, MarketPicksDailySnapshot } from '@/types';
 import HeaderSearch from '@/components/header-search';
 
 function RecBadge({ rec }: { rec: string | null }) {
@@ -41,6 +41,14 @@ export default function MarketPicksHistoryPage() {
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
 
+  // A specific day's full pick list, browsed via the date picker below — a
+  // separate fetch from the cross-date aggregation above, since the backend
+  // returns a completely different shape for ?date=.
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [daily,        setDaily]        = useState<MarketPicksDailySnapshot | null>(null);
+  const [dailyLoading, setDailyLoading] = useState(false);
+  const [dailyError,   setDailyError]   = useState<string | null>(null);
+
   useEffect(() => {
     let cancelled = false;
     fetch('/api/market-picks/history')
@@ -55,7 +63,34 @@ export default function MarketPicksHistoryPage() {
     return () => { cancelled = true; };
   }, []);
 
+  useEffect(() => {
+    if (!selectedDate) { setDaily(null); setDailyError(null); return; }
+    let cancelled = false;
+    setDailyLoading(true);
+    setDailyError(null);
+    fetch(`/api/market-picks/history?date=${encodeURIComponent(selectedDate)}`)
+      .then(async res => {
+        const json = await res.json().catch(() => null);
+        if (!res.ok) throw new Error((json && (json.detail || json.error)) || `Error ${res.status}`);
+        return json as MarketPicksDailySnapshot;
+      })
+      .then(json => { if (!cancelled) setDaily(json); })
+      .catch((e: Error) => { if (!cancelled) setDailyError(e.message || "Could not load that day's snapshot."); })
+      .finally(() => { if (!cancelled) setDailyLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedDate]);
+
   const symbols: MarketPickTrackRecord[] = data?.symbols ?? [];
+  const availableDates = data?.available_dates ?? [];
+  const minDate = availableDates[0];
+  const maxDate = availableDates[availableDates.length - 1];
+
+  function stepDate(delta: number) {
+    if (!selectedDate || availableDates.length === 0) return;
+    const idx = availableDates.indexOf(selectedDate);
+    const nextIdx = idx + delta;
+    if (nextIdx >= 0 && nextIdx < availableDates.length) setSelectedDate(availableDates[nextIdx]);
+  }
   const withPriceData = symbols.filter(s => s.change_pct != null);
   const avgChange = withPriceData.length > 0
     ? withPriceData.reduce((sum, s) => sum + (s.change_pct ?? 0), 0) / withPriceData.length
@@ -164,7 +199,135 @@ export default function MarketPicksHistoryPage() {
           </div>
         )}
 
-        {!error && (
+        {/* Date picker — browse a specific day's full pick list, instead of
+            the aggregated per-symbol roll-up below */}
+        {!error && !loading && (
+          <div className="flex flex-wrap items-center gap-2 mb-4">
+            <label htmlFor="history-date" className="text-xs font-semibold text-muted mr-1">
+              Browse a specific day
+            </label>
+            <input
+              id="history-date"
+              type="date"
+              value={selectedDate ?? ''}
+              min={minDate}
+              max={maxDate}
+              disabled={availableDates.length === 0}
+              onChange={e => setSelectedDate(e.target.value || null)}
+              className="bg-card border border-border rounded-xl px-3 py-2 text-xs text-tx
+                         focus:outline-none focus:border-accent/40 transition-colors disabled:opacity-50"
+            />
+            <button
+              type="button"
+              onClick={() => stepDate(-1)}
+              disabled={!selectedDate || availableDates.indexOf(selectedDate) <= 0}
+              aria-label="Previous snapshot day"
+              className="px-2.5 py-2 rounded-lg border border-border text-xs text-muted
+                         hover:text-tx hover:border-border-hi transition-colors
+                         disabled:opacity-30 disabled:pointer-events-none"
+            >
+              ← Prev
+            </button>
+            <button
+              type="button"
+              onClick={() => stepDate(1)}
+              disabled={!selectedDate || availableDates.indexOf(selectedDate) >= availableDates.length - 1}
+              aria-label="Next snapshot day"
+              className="px-2.5 py-2 rounded-lg border border-border text-xs text-muted
+                         hover:text-tx hover:border-border-hi transition-colors
+                         disabled:opacity-30 disabled:pointer-events-none"
+            >
+              Next →
+            </button>
+            {selectedDate && (
+              <button
+                type="button"
+                onClick={() => setSelectedDate(null)}
+                className="px-2.5 py-2 rounded-lg text-xs text-muted hover:text-tx transition-colors"
+              >
+                ✕ Back to aggregated view
+              </button>
+            )}
+          </div>
+        )}
+
+        {!error && selectedDate && (
+          <div className="rounded-xl border border-border overflow-hidden mb-6">
+            {dailyError ? (
+              <div className="px-5 py-4 text-sell text-sm">{dailyError}</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border bg-surface sticky top-0 z-10">
+                      {[
+                        { label: 'Symbol',         cls: 'text-left'  },
+                        { label: 'Recommendation', cls: 'text-left'  },
+                        { label: 'Confidence',     cls: 'text-right' },
+                        { label: 'Signal',         cls: 'text-right' },
+                        { label: 'Mentions',       cls: 'text-right' },
+                        { label: 'Price',          cls: 'text-right' },
+                      ].map(({ label, cls }) => (
+                        <th key={label} className={`px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider ${cls}`}>
+                          {label}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dailyLoading ? (
+                      Array.from({ length: 6 }).map((_, i) => (
+                        <tr key={i} className="border-b border-border/60">
+                          <td className="px-4 py-4"><Skeleton className="h-3.5 w-16" /></td>
+                          <td className="px-4 py-4"><Skeleton className="h-5 w-20" /></td>
+                          <td className="px-4 py-4"><Skeleton className="h-3.5 w-10 ml-auto" /></td>
+                          <td className="px-4 py-4"><Skeleton className="h-3.5 w-10 ml-auto" /></td>
+                          <td className="px-4 py-4"><Skeleton className="h-3.5 w-8 ml-auto" /></td>
+                          <td className="px-4 py-4"><Skeleton className="h-3.5 w-14 ml-auto" /></td>
+                        </tr>
+                      ))
+                    ) : !daily || daily.picks.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="px-4 py-16 text-center text-muted text-sm">
+                          No picks recorded in this snapshot.
+                        </td>
+                      </tr>
+                    ) : (
+                      daily.picks.map(p => (
+                        <tr key={p.symbol} className="border-b border-border/60 hover:bg-surface/60 transition-colors">
+                          <td className="px-4 py-4">
+                            <Link href={`/?symbol=${p.symbol}`} className="font-semibold text-tx hover:text-accent transition-colors text-sm">
+                              {p.symbol}
+                            </Link>
+                          </td>
+                          <td className="px-4 py-4"><RecBadge rec={p.recommendation} /></td>
+                          <td className="px-4 py-4 text-right">
+                            <span className="font-mono tabular-nums text-xs text-tx">{p.confidence.toFixed(0)}</span>
+                          </td>
+                          <td className="px-4 py-4 text-right">
+                            <span className={`font-mono tabular-nums text-xs font-semibold ${pctColor(p.effective_signal)}`}>
+                              {p.effective_signal.toFixed(2)}
+                            </span>
+                          </td>
+                          <td className="px-4 py-4 text-right">
+                            <span className="font-mono tabular-nums text-xs text-muted">{p.mention_count}</span>
+                          </td>
+                          <td className="px-4 py-4 text-right">
+                            <span className="font-mono tabular-nums text-xs text-tx">
+                              {p.current_price != null ? `₹${p.current_price.toFixed(2)}` : '—'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {!error && !selectedDate && (
           <div className="rounded-xl border border-border overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">

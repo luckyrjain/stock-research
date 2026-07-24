@@ -4,6 +4,8 @@ import React, { useState, useMemo, useEffect, useId } from 'react';
 import type { MarketPick, PickSource } from '@/types';
 import InfoTooltip from './info-tooltip';
 import WatchlistButton from './watchlist-button';
+import PositionButton from './position-button';
+import { usePositions } from '@/lib/positions';
 
 type SortKey    = 'confidence_score' | 'change_pct' | 'pe_ratio';
 type ConfFilter = 'all' | 'high' | 'medium' | 'low';
@@ -223,13 +225,23 @@ function TradeBox({ pick }: { pick: MarketPick }) {
 
   return (
     <div className="rounded-xl border border-border bg-bg overflow-hidden">
-      <div className="px-4 py-2.5 border-b border-border bg-surface/50 flex items-center justify-between">
+      <div className="px-4 py-2.5 border-b border-border bg-surface/50 flex items-center justify-between gap-2">
         <span className="text-[10px] font-bold text-muted uppercase tracking-widest">Trade Setup</span>
-        {riskReward && (
-          <span className="text-[10px] font-semibold text-accent bg-accent/10 px-2 py-0.5 rounded-full border border-accent/20">
-            R:R = 1 : {riskReward}
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {riskReward && (
+            <span className="text-[10px] font-semibold text-accent bg-accent/10 px-2 py-0.5 rounded-full border border-accent/20">
+              R:R = 1 : {riskReward}
+            </span>
+          )}
+          <PositionButton
+            symbol={pick.symbol}
+            company={pick.company}
+            exchange={pick.exchange}
+            entry_price={pick.entry_price}
+            target_price={pick.target_price}
+            stop_loss={pick.stop_loss}
+          />
+        </div>
       </div>
       <div className="grid grid-cols-3 divide-x divide-border">
         <div className="px-4 py-3.5">
@@ -390,6 +402,7 @@ function SortableHeader({ label, sortK, currentKey, currentDir, onSort, tooltip 
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function MarketPicksDashboard({ picks, generatedAt, fromCache, onRescan, pricesLastUpdated }: Props) {
+  const { isPositioned } = usePositions();
   const [expanded,   setExpanded]   = useState<Set<string>>(new Set());
   const [sortKey,    setSortKey]    = useState<SortKey | null>(null);
   const [sortDir,    setSortDir]    = useState<'desc' | 'asc'>('desc');
@@ -683,6 +696,15 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                             exchange={pick.exchange}
                             size="sm"
                           />
+                          {isPositioned(pick.symbol) && (
+                            <span
+                              className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5
+                                         rounded-full bg-buy/12 text-buy border border-buy/25"
+                              title="You've marked this as bought — see Trade Setup for live P&L"
+                            >
+                              Bought
+                            </span>
+                          )}
                         </div>
                       </td>
 
