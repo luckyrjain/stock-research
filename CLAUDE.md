@@ -35,6 +35,7 @@ stock-research/
 ├── schemas.py              Normalization contracts: raw tool output → canonical dicts
 ├── market_picks_pipeline.py  Multi-agent weekly picks pipeline (6 phases)
 ├── sme_ema_pipeline.py     SME golden/death cross batch pipeline (PostgreSQL)
+├── verdict_history.py      Daily verdict/price snapshots (PostgreSQL) — powers the hero's timeline strip
 ├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
 ├── observability.py        Structured JSON logging via log_event()
 ├── requirements.txt
@@ -235,7 +236,7 @@ Provider is auto-detected from whichever key is present (checked in the order ab
 | `ANALYST_MODEL` | provider default | Model for the analyst LLM call — the only model-selection env var that does anything; data fetching doesn't call an LLM (see "Agent architecture") |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Only needed when `LLM_PROVIDER=ollama` |
 | `LOG_LEVEL` | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`) |
-| `DATABASE_URL` | unset | PostgreSQL DSN — required for the SME signals pipeline (`/api/sme-signals`) and for the watchlist (`/api/watchlist`) |
+| `DATABASE_URL` | unset | PostgreSQL DSN — required for the SME signals pipeline (`/api/sme-signals`), the watchlist (`/api/watchlist`), and the verdict timeline (`/api/verdict-history/{symbol}`) |
 
 ### Frontend
 
@@ -389,6 +390,36 @@ layout compressed rather than actually reflowing. `/compare`'s own column layout
 switches from stacked to side-by-side at `2xl:` (1536px) specifically so that by the time
 two columns sit side by side, each is wide enough for `ResultsDashboard`'s own layout to
 still look right — below that, the two reports stack full-width instead of squeezing.
+
+### Verdict history flow
+
+"How does today's call compare to a past one for this stock?" was previously unanswerable
+in the web app — the CLI wrote a dated `report_<date>.json` per run (`main.py`), but that
+file never left disk, and `api.py`'s SSE endpoint didn't write anything comparable at all.
+
+1. `verdict_history.py` (repo root, alongside `cache.py`) is a small persistence module with
+   two functions: `save_snapshot(symbol, analysis, signal_context, stock_info)` upserts one
+   row per `(symbol, verdict_date)` into the `verdict_history` Postgres table (recommendation,
+   confidence, current_price, signal_score); `load_history(symbol, limit=60)` reads them back
+   oldest-first. Both are best-effort — a missing `DATABASE_URL` or a DB hiccup is logged and
+   swallowed, never raised, the same convention `signals/store.py` uses for its own audit trail.
+2. `save_snapshot()` is called from **both** entry points that produce a report — `main.py`'s
+   CLI pipeline (all three exit paths: cache-hit early return and the normal run) and `api.py`'s
+   `/api/analyse/{symbol}` SSE stream, right after `_build_report()` — so the timeline reflects
+   web usage and CLI usage identically, the same lockstep `main._build_report()` already
+   enforces between the two entry points. A same-day re-run (cache hit, force refresh) upserts
+   the existing row instead of adding a duplicate, so "one row per day" holds regardless of how
+   many times the pipeline actually ran that day.
+3. `GET /api/verdict-history/{symbol}` is pure read-aggregation over `load_history()` — no LLM
+   calls, no scraping. Degrades to `{"symbol": ..., "history": []}` (200, not 503) when
+   `DATABASE_URL` is unset or the query fails, matching `/api/consolidated`'s "a missing section
+   isn't an error" philosophy, since this is a supplementary strip on top of a report that has
+   already loaded successfully — a DB hiccup here must not look like the whole analysis failed.
+4. `ResultsDashboard`'s hero renders a `VerdictTimeline` strip (fetched independently, same
+   pattern as `PriceSparkline`/`usePeerComparison`) showing each stored day as a small
+   recommendation badge with its date, chained left-to-right, latest one ring-highlighted. Needs
+   at least 2 stored days to render at all — a symbol analysed for the first time today has
+   nothing to compare against yet.
 
 ### Shared state and queues
 

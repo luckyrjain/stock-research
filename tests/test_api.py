@@ -913,6 +913,45 @@ class WatchlistEndpointsTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 503)
 
 
+class VerdictHistoryEndpointTest(unittest.TestCase):
+    """Read-only aggregation over verdict_history.load_history() — degrades to
+    an empty list rather than an error, same philosophy as /api/consolidated."""
+
+    def setUp(self) -> None:
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_invalid_symbol_returns_422(self) -> None:
+        resp = client.get("/api/verdict-history/bad symbol")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_rate_limited_returns_429(self) -> None:
+        api._RATE_LIMIT_CALLS["verdict_history:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/verdict-history/TCS")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_returns_empty_history_when_nothing_stored(self) -> None:
+        with patch("verdict_history.load_history", return_value=[]):
+            resp = client.get("/api/verdict-history/TCS")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"symbol": "TCS", "history": []})
+
+    def test_returns_history_with_mocked_load(self) -> None:
+        fake_history = [
+            {"date": "2026-07-01", "recommendation": "HOLD", "confidence": "MEDIUM", "current_price": 100.0, "signal_score": 2.0},
+            {"date": "2026-07-24", "recommendation": "BUY", "confidence": "HIGH", "current_price": 110.5, "signal_score": 6.0},
+        ]
+        with patch("verdict_history.load_history", return_value=fake_history):
+            resp = client.get("/api/verdict-history/tcs")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["symbol"], "TCS")
+        self.assertEqual(len(body["history"]), 2)
+        self.assertEqual(body["history"][1]["recommendation"], "BUY")
+
+
 class ConsolidatedEndpointTest(unittest.TestCase):
     """The consolidated view is pure aggregation of what the three pipelines
     have already cached/computed — no new fetching. Each section is

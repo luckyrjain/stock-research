@@ -27,6 +27,7 @@ from tools.news_tools import get_latest_news
 from tools.nse_tools import get_mf_holdings, get_stock_quote
 from tools.screener_tools import get_fundamentals, get_holdings
 from tools.nse_filings_tools import get_nse_filings
+from verdict_history import save_snapshot as save_verdict_snapshot
 
 load_dotenv()
 
@@ -263,6 +264,7 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         all_data = {n: cache.load(symbol, n) for n in ALL_DATA_TASKS}
         analysis = cache.load(symbol, "analysis") or {}
         _print_report(all_data, analysis)
+        save_verdict_snapshot(symbol, analysis, None, all_data.get("stock_info") or {})
         return
 
     # ── Step 1: fetch stale data tasks directly (no LLM) ─────────────────────
@@ -311,6 +313,7 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
 
     # ── Step 3: save merged report ────────────────────────────────────────────
     report = _build_report(symbol, all_data, analysis, signal_context)
+    save_verdict_snapshot(symbol, analysis, signal_context, all_data.get("stock_info") or {})
     report_dir = Path("output") / symbol
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f"report_{date.today()}.json"

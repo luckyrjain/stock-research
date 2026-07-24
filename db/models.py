@@ -56,6 +56,26 @@ watchlist_items = Table(
     Index("idx_watchlist_client", "client_id"),
 )
 
+# One row per (symbol, day) the analysis pipeline actually ran, populated by
+# verdict_history.save_snapshot() from both main.py (CLI) and api.py's
+# /api/analyse SSE stream. Powers the "verdict timeline" strip in the stock
+# analysis hero — a same-day re-run (cache hit or force refresh) upserts the
+# existing row rather than adding a duplicate.
+verdict_history = Table(
+    "verdict_history",
+    metadata,
+    Column("id",             Integer, primary_key=True, autoincrement=True),
+    Column("symbol",         String(20), nullable=False),
+    Column("verdict_date",   Date,       nullable=False),
+    Column("recommendation", String(10)),
+    Column("confidence",     String(10)),
+    Column("current_price",  Numeric(14, 4)),
+    Column("signal_score",   Numeric(6, 2)),
+    Column("created_at",     DateTime(timezone=True), server_default=text("NOW()")),
+    UniqueConstraint("symbol", "verdict_date", name="uq_verdict_history_symbol_date"),
+    Index("idx_verdict_history_symbol", "symbol"),
+)
+
 
 def get_engine(database_url: str | None = None):
     url = database_url or os.environ["DATABASE_URL"]

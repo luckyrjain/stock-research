@@ -39,3 +39,20 @@ CREATE TABLE IF NOT EXISTS watchlist_items (
 );
 
 CREATE INDEX IF NOT EXISTS idx_watchlist_client ON watchlist_items(client_id);
+
+-- One row per (symbol, day) the analysis pipeline actually ran. Powers the
+-- "verdict timeline" strip on the stock analysis hero. A same-day re-run
+-- upserts the existing row rather than adding a duplicate.
+CREATE TABLE IF NOT EXISTS verdict_history (
+    id              SERIAL PRIMARY KEY,
+    symbol          VARCHAR(20) NOT NULL,
+    verdict_date    DATE        NOT NULL,
+    recommendation  VARCHAR(10),
+    confidence      VARCHAR(10),
+    current_price   NUMERIC(14, 4),
+    signal_score    NUMERIC(6, 2),
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(symbol, verdict_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_verdict_history_symbol ON verdict_history(symbol);
