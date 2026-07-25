@@ -71,14 +71,19 @@ export interface Filing {
   attachment: string | null;   // URL to the NSE PDF, when NSE provides one
 }
 
-// Quarterly Sales/EPS mini-trend scraped from Screener's Quarterly Results
-// table — same page fundamentals already fetches, so it's free. Oldest first,
-// same convention as PriceHistory. Absent/empty when Screener doesn't expose
-// a clean, fully-numeric window for both rows (e.g. a recent IPO).
+// Quarterly Sales/EPS/operating-margin mini-trend scraped from Screener's
+// Quarterly Results table — same page fundamentals already fetches, so it's
+// free. Oldest first, same convention as PriceHistory. revenue/eps are
+// absent/empty (the whole object is omitted) when Screener doesn't expose a
+// clean, fully-numeric window for both rows (e.g. a recent IPO).
+// operating_margin is independently optional — several sectors (banks,
+// NBFCs) routinely omit that row even when revenue/eps are present, so it's
+// absent rather than guessed at, never backfilled from revenue/eps.
 export interface QuarterlyTrend {
-  quarters: string[];   // e.g. "Mar 2024", oldest first
-  revenue:  number[];   // aligned with quarters
-  eps:      number[];   // aligned with quarters
+  quarters:          string[];         // e.g. "Mar 2024", oldest first
+  revenue:           number[];         // aligned with quarters
+  eps:               number[];         // aligned with quarters
+  operating_margin?: number[];         // % — aligned with quarters, when present
 }
 
 export interface Report {

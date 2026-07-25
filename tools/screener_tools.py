@@ -118,13 +118,18 @@ def _extract_latest_metric_from_tables(soup: BeautifulSoup, labels: tuple[str, .
 
 
 def _extract_quarterly_trend(soup: BeautifulSoup, max_periods: int = 8) -> dict:
-    """Sales/EPS mini-trend from Screener's Quarterly Results table
-    (section#quarters) — the same company page `get_fundamentals` already
-    fetches, so this is free (no extra network round trip). Oldest-first,
-    capped to the most recent `max_periods` quarters, matching PriceHistory's
-    convention. Returns {} rather than a partial/misaligned series if either
-    row is missing or any of the last `max_periods` cells doesn't parse as a
-    number (e.g. "-" for a pre-IPO period) — never guess at a gap."""
+    """Sales/EPS/operating-margin mini-trend from Screener's Quarterly Results
+    table (section#quarters) — the same company page `get_fundamentals`
+    already fetches, so this is free (no extra network round trip).
+    Oldest-first, capped to the most recent `max_periods` quarters, matching
+    PriceHistory's convention. Returns {} rather than a partial/misaligned
+    series if the Sales or EPS row is missing or any of the last
+    `max_periods` cells doesn't parse as a number (e.g. "-" for a pre-IPO
+    period) — never guess at a gap. Operating margin (OPM %) is a genuinely
+    optional third line on top of that: Screener reports it as its own
+    percentage row (never derived/computed here), but several sectors
+    (banks, NBFCs) routinely omit that row entirely — absent, not guessed,
+    when it isn't cleanly present for the same window as revenue/eps."""
     section = soup.find("section", {"id": "quarters"})
     if not section:
         return {}
@@ -146,7 +151,7 @@ def _extract_quarterly_trend(soup: BeautifulSoup, max_periods: int = 8) -> dict:
                 continue
             values: list[float | None] = []
             for cell in cells[1:]:
-                raw = _clean(cell.get_text(" ", strip=True))
+                raw = _clean(cell.get_text(" ", strip=True)).replace("%", "")
                 try:
                     values.append(float(raw))
                 except ValueError:
@@ -164,7 +169,15 @@ def _extract_quarterly_trend(soup: BeautifulSoup, max_periods: int = 8) -> dict:
     if n < 2 or any(v is None for v in revenue_n) or any(v is None for v in eps_n):
         return {}
 
-    return {"quarters": periods_n, "revenue": revenue_n, "eps": eps_n}
+    result = {"quarters": periods_n, "revenue": revenue_n, "eps": eps_n}
+
+    opm = _row_values(("OPM %", "OPM"))
+    if opm is not None and len(opm) >= n:
+        opm_n = opm[-n:]
+        if not any(v is None for v in opm_n):
+            result["operating_margin"] = opm_n
+
+    return result
 
 
 @tool("Get Screener.in Fundamentals")

@@ -419,6 +419,22 @@ function QuarterlyTrendCard({ trend }: { trend: QuarterlyTrend | undefined }) {
             ariaLabel={`Quarterly EPS trend over the last ${trend.quarters.length} quarters`}
           />
         </div>
+        {trend.operating_margin && trend.operating_margin.length === trend.quarters.length && (
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-sm text-muted">Operating Margin</span>
+              <span className="font-mono font-semibold text-tx text-sm">
+                {fmt(trend.operating_margin[trend.operating_margin.length - 1], 1)}%
+              </span>
+            </div>
+            <Sparkline
+              closes={trend.operating_margin}
+              width={220}
+              height={32}
+              ariaLabel={`Quarterly operating margin trend over the last ${trend.quarters.length} quarters`}
+            />
+          </div>
+        )}
       </div>
     </Card>
   );

@@ -224,12 +224,14 @@ class GetHoldingsTest(unittest.TestCase):
 
 
 class ExtractQuarterlyTrendTest(unittest.TestCase):
-    def _table_html(self, sales_row: str = None, eps_row: str = None) -> str:
+    def _table_html(self, sales_row: str = None, eps_row: str = None, opm_row: str = None) -> str:
         rows = []
         if sales_row is not None:
             rows.append(f"<tr><td>Sales</td>{sales_row}</tr>")
         if eps_row is not None:
             rows.append(f"<tr><td>EPS in Rs</td>{eps_row}</tr>")
+        if opm_row is not None:
+            rows.append(f"<tr><td>OPM %</td>{opm_row}</tr>")
         return f"""
         <section id="quarters">
           <table>
@@ -284,6 +286,79 @@ class ExtractQuarterlyTrendTest(unittest.TestCase):
         )
         soup = BeautifulSoup(html, "lxml")
         self.assertEqual(_extract_quarterly_trend(soup), {})
+
+    def test_includes_operating_margin_when_present(self) -> None:
+        html = self._table_html(
+            sales_row="<td>1000</td><td>1100</td><td>1200</td>",
+            eps_row="<td>10.5</td><td>11.0</td><td>11.8</td>",
+            opm_row="<td>18.5%</td><td>19.2%</td><td>20.1%</td>",
+        )
+        soup = BeautifulSoup(html, "lxml")
+        trend = _extract_quarterly_trend(soup)
+        self.assertEqual(trend["operating_margin"], [18.5, 19.2, 20.1])
+
+    def test_omits_operating_margin_when_row_absent(self) -> None:
+        # Banks/NBFCs routinely omit an OPM % row entirely — absent rather
+        # than guessed, revenue/eps must still come through on their own.
+        html = self._table_html(
+            sales_row="<td>1000</td><td>1100</td><td>1200</td>",
+            eps_row="<td>10.5</td><td>11.0</td><td>11.8</td>",
+        )
+        soup = BeautifulSoup(html, "lxml")
+        trend = _extract_quarterly_trend(soup)
+        self.assertNotIn("operating_margin", trend)
+        self.assertEqual(trend["revenue"], [1000.0, 1100.0, 1200.0])
+
+    def test_omits_operating_margin_when_unparseable_cell_present(self) -> None:
+        html = self._table_html(
+            sales_row="<td>1000</td><td>1100</td><td>1200</td>",
+            eps_row="<td>10.5</td><td>11.0</td><td>11.8</td>",
+            opm_row="<td>-</td><td>19.2%</td><td>20.1%</td>",
+        )
+        soup = BeautifulSoup(html, "lxml")
+        trend = _extract_quarterly_trend(soup)
+        self.assertNotIn("operating_margin", trend)
+        self.assertEqual(trend["revenue"], [1000.0, 1100.0, 1200.0])
+
+    def test_omits_operating_margin_when_row_shorter_than_window(self) -> None:
+        # OPM % row present but with fewer cells than the Sales/EPS window
+        # (e.g. Screener only started reporting it partway through this
+        # stock's history) — must be omitted entirely rather than risk
+        # aligning the wrong quarters against periods_n/revenue_n/eps_n.
+        html = """
+        <section id="quarters">
+          <table>
+            <thead><tr><th></th><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th></tr></thead>
+            <tbody>
+              <tr><td>Sales</td><td>100</td><td>200</td><td>300</td><td>400</td></tr>
+              <tr><td>EPS in Rs</td><td>1</td><td>2</td><td>3</td><td>4</td></tr>
+              <tr><td>OPM %</td><td>14%</td><td>16%</td></tr>
+            </tbody>
+          </table>
+        </section>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        trend = _extract_quarterly_trend(soup)
+        self.assertNotIn("operating_margin", trend)
+        self.assertEqual(trend["revenue"], [100.0, 200.0, 300.0, 400.0])
+        self.assertEqual(trend["eps"], [1.0, 2.0, 3.0, 4.0])
+
+    def test_operating_margin_capped_to_max_periods_window(self) -> None:
+        html = """
+        <section id="quarters">
+          <table>
+            <thead><tr><th></th><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th></tr></thead>
+            <tbody>
+              <tr><td>Sales</td><td>100</td><td>200</td><td>300</td><td>400</td></tr>
+              <tr><td>EPS in Rs</td><td>1</td><td>2</td><td>3</td><td>4</td></tr>
+              <tr><td>OPM %</td><td>10%</td><td>12%</td><td>14%</td><td>16%</td></tr>
+            </tbody>
+          </table>
+        </section>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        trend = _extract_quarterly_trend(soup, max_periods=2)
+        self.assertEqual(trend["operating_margin"], [14.0, 16.0])
 
 
 class ParsePeerTableTest(unittest.TestCase):
