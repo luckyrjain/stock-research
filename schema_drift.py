@@ -66,5 +66,14 @@ def log_drift_if_any(task_name: str, raw_data: Any, **context: Any) -> None:
                 problems=problems,
                 **context,
             )
-    except Exception:  # pylint: disable=broad-exception-caught
-        pass
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        # A bug in check_drift() itself (e.g. a future CONTRACTS["types"]
+        # typo) must not go completely untraced, or this whole feature
+        # could silently stop working with zero signal — same "log once via
+        # the normal structured path, then degrade" instinct as
+        # error_tracking.py's own capture_error(). Best-effort itself: a
+        # broken log_event() here still must not propagate.
+        try:
+            log_event(LOGGER, "schema_drift_check_failed", level="warning", task=task_name, error=str(exc))
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass

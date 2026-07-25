@@ -34,11 +34,13 @@ class CheckDriftTest(unittest.TestCase):
         self.assertEqual(problems, [])
 
     def test_none_value_is_not_drift(self) -> None:
-        # A field explicitly present-but-None (this codebase's "never
-        # invent" convention for a genuinely unknown value) isn't a type
-        # mismatch either.
-        problems = schema_drift.check_drift("shareholding", {
-            "symbol": "TCS", "shareholding_pattern": {}, "pledge_pct": None,
+        # A *typed* field explicitly present-but-None (this codebase's
+        # "never invent" convention for a genuinely unknown value) isn't a
+        # type mismatch either — quarterly_trend is in research's "types"
+        # map, unlike pledge_pct (untyped, scalar-only), so this actually
+        # exercises the `value is not None` guard in check_drift().
+        problems = schema_drift.check_drift("research", {
+            "symbol": "TCS", "ratios": {}, "quarterly_trend": None,
         })
         self.assertEqual(problems, [])
 
@@ -92,6 +94,22 @@ class LogDriftIfAnyTest(unittest.TestCase):
     def test_never_raises_on_malformed_input(self) -> None:
         schema_drift.log_drift_if_any("research", object())  # must not raise
 
+    def test_check_drift_bug_is_traced_not_silently_swallowed(self) -> None:
+        # A bug in check_drift() itself (e.g. a future CONTRACTS["types"]
+        # typo) must leave some trace rather than silently disabling the
+        # whole feature — same instinct as error_tracking.py's own
+        # capture_error() logging once before it degrades.
+        with patch("schema_drift.check_drift", side_effect=RuntimeError("boom")), \
+             patch("schema_drift.log_event") as mock_log:
+            schema_drift.log_drift_if_any("research", {"symbol": "TCS"})  # must not raise
+
+        mock_log.assert_called_once()
+        args, kwargs = mock_log.call_args
+        self.assertEqual(args[1], "schema_drift_check_failed")
+        self.assertEqual(kwargs["level"], "warning")
+        self.assertEqual(kwargs["task"], "research")
+        self.assertIn("boom", kwargs["error"])
+
 
 class FetchTaskIntegrationTest(unittest.TestCase):
     """Confirms main._fetch_task — the single choke point all six data-slice
@@ -120,6 +138,23 @@ class FetchTaskIntegrationTest(unittest.TestCase):
             _fetch_task("research", "TCS", "run-1")
 
         mock_drift.assert_called_once()
+
+    def test_json_text_payload_triggers_drift_check(self) -> None:
+        # In real production every tool except filings returns a
+        # json.dumps(...) string via crewai's .run() convention, so
+        # _fetch_task takes the parse_json_object branch, not the plain-dict
+        # branch above — that's a second, separate call site for
+        # log_drift_if_any (main.py's JSON-text success path) that must be
+        # covered independently, or a regression there would go undetected.
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = '{"symbol": "TCS", "ratios": "not-a-dict"}'
+
+        with patch("main.get_fundamentals", fake_tool), \
+             patch("main.log_drift_if_any") as mock_drift:
+            result = _fetch_task("research", "TCS", "run-1")
+
+        self.assertEqual(result, {"symbol": "TCS", "ratios": "not-a-dict"})
+        mock_drift.assert_called_once_with("research", result, run_id="run-1", symbol="TCS")
 
     def test_error_payload_still_reaches_drift_check_as_a_noop(self) -> None:
         # check_drift() itself is what skips error payloads (see
