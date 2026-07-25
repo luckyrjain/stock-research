@@ -47,6 +47,7 @@ stock-research/
 ├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
 ├── observability.py        Structured JSON logging via log_event()
 ├── error_tracking.py       Optional Sentry-style hook, wired into log_event()'s error-level path
+├── schema_drift.py         Type-drift detection for the six scraped data slices
 ├── requirements.txt
 ├── .env.example
 ├── config/
@@ -746,6 +747,50 @@ or grouped-by-stack-trace on a production error without grepping logs after the 
    elsewhere in this doc). `RealSdkRegressionTest` (point 6 above) verifies the real SDK's
    *client-side* behavior — what gets handed to its transport layer — not that a live ingest
    endpoint actually accepts and stores it.
+
+### Schema-drift detection (`schema_drift.py`)
+
+The six data slices (`stock_info`, `research`, `news`, `shareholding`, `mf_holdings`,
+`filings`) are all scraped, and tools never raise (see "Important Rules for Claude" below) —
+a scraped source restructuring its HTML/JSON (Screener.in renaming a table, NSE changing a
+field) doesn't crash the fetch, it just silently returns something under the expected key
+that's no longer the expected *shape*. `schemas.CONTRACTS`'s existing `"required"` list only
+checks presence, and most other fields are legitimately absent per-symbol by this codebase's
+own "never invent" convention — so a naive "did the key set change" check would be constant
+false-positive noise on exactly the symbols/fields this convention already expects to be thin.
+
+1. `schemas.CONTRACTS` gained an optional `"types"` entry per task — a `{field: type}` map for
+   *container-shaped* fields only (`dict`/`list`), e.g. `research: {"ratios": dict,
+   "quarterly_trend": dict}`. This is the single source of truth `schema_drift.py` reads from —
+   no second hand-maintained field list to drift out of sync with `schemas.py` itself.
+2. `schema_drift.check_drift(task_name, raw_data)` is a pure function: for each field in that
+   task's `"types"` map that's *present* in `raw_data`, checks its Python type matches. A field
+   that's simply absent (the common, legitimate "never invent" case) is skipped, not flagged —
+   this only fires when a field is present but has changed shape (e.g. `ratios` coming back as a
+   `list` instead of a `dict`), which is never a legitimate per-symbol variation and is exactly
+   the case that breaks every downstream `.get()`/iteration call written for the declared shape,
+   often silently (many call sites are themselves defensively wrapped, so a shape flip can
+   degrade a section to "missing" several layers away from where the drift actually happened).
+3. `schema_drift.log_drift_if_any(task_name, raw_data, **context)` wraps `check_drift()` in a
+   try/except that never raises — matching the "tools must not raise" convention even though
+   this isn't a tool itself, since it's called from the same fetch loop a real tool failure
+   already can't be allowed to break. When drift is found it calls `observability.log_event()`
+   at `level="warning"` (not `"error"` — this needs a human to look at the scraper, not an
+   on-call page through the Phase 15 Sentry hook) with the field-level problem descriptions plus
+   whatever `run_id`/`symbol` context the caller passed through.
+4. Wired into `main._fetch_task()` — the single choke point all six data-slice fetches already
+   go through for both the CLI and `api.py`'s SSE endpoint (`main.py`'s own module docstring:
+   "also contains `_fetch_task`... shared with `api.py`") — right after a successful
+   `tool_attempt_succeeded` log, on both the raw-dict and parsed-JSON-text success paths. No
+   other call site needed changing to get coverage across every entry point that fetches these
+   six slices.
+5. Deliberately scoped to only these six "data slices" (the term CLAUDE.md's own "Project
+   Overview" section already uses) — not the growing set of standalone scrapers outside
+   `ALL_DATA_TASKS` (peers, insider activity, street consensus, FII/DII flow, macro context,
+   valuation band, NIFTY 500 constituents, SME stock lists). Those already carry their own
+   disclosed-limitation notes elsewhere in this doc about being unverified against live
+   responses in this sandbox; extending drift detection to them is future work, not silently
+   assumed to already be covered by this pass.
 
 ### SME golden cross flow
 

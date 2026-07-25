@@ -118,28 +118,44 @@ def _norm_filings(data: dict) -> dict:
     }
 
 CONTRACTS: dict[str, dict] = {
+    # "types" is optional per-contract and only lists container-shaped raw
+    # fields (dict/list) whose *type* — not just presence — matters: a field
+    # silently changing from a dict to a list (e.g. a scraper's target site
+    # restructuring a table) breaks every downstream `.get()`/iteration call
+    # on it in a way "required" field presence alone doesn't catch, since
+    # the field is still there — schema_drift.py checks this on raw tool
+    # output, before normalize() runs. Only checked when the field is
+    # present; a field this codebase's own "never invent" convention
+    # legitimately omits per-symbol (e.g. a thin quarterly_trend window) is
+    # not drift and must not be flagged.
     "stock_info": {
         "required":  ["symbol", "current_price"],
+        "types":     {"prices_by_exchange": dict},
         "normalize": _norm_stock_info,
     },
     "research": {
         "required":  ["symbol", "ratios"],
+        "types":     {"ratios": dict, "quarterly_trend": dict},
         "normalize": _norm_research,
     },
     "news": {
         "required":  ["articles"],
+        "types":     {"articles": list},
         "normalize": _norm_news,
     },
     "shareholding": {
         "required":  ["symbol", "shareholding_pattern"],
+        "types":     {"shareholding_pattern": dict},
         "normalize": _norm_shareholding,
     },
     "mf_holdings": {
         "required":  ["symbol", "mutual_funds"],
+        "types":     {"mutual_funds": list},
         "normalize": _norm_mf_holdings,
     },
     "filings": {
         "required":  [],
+        "types":     {"filings": list},
         "normalize": _norm_filings,
     },
 }
