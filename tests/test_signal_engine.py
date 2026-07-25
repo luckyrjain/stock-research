@@ -48,7 +48,7 @@ class WeightsForSectorTest(unittest.TestCase):
                 weights = _weights_for_sector(sector)
                 self.assertEqual(weights["valuation"], 0.45)
                 self.assertEqual(weights["growth"], 0.3)
-                self.assertEqual(weights["macro"], 0.25)
+                self.assertEqual(weights["macro"], 0.20)
                 # Untouched weights carry over from the default unchanged.
                 self.assertEqual(weights["volume"], _DEFAULT_WEIGHTS["volume"])
                 self.assertEqual(weights["filings"], _DEFAULT_WEIGHTS["filings"])
@@ -59,8 +59,11 @@ class WeightsForSectorTest(unittest.TestCase):
             with self.subTest(sector=sector):
                 weights = _weights_for_sector(sector)
                 self.assertEqual(weights["growth"], 0.45)
-                self.assertEqual(weights["valuation"], 0.35)
                 self.assertEqual(weights["macro"], 0.1)
+                # valuation is deliberately left untouched for this group —
+                # only growth/macro move, so their +0.05/-0.05 deltas net to
+                # zero without needing a third lever.
+                self.assertEqual(weights["valuation"], _DEFAULT_WEIGHTS["valuation"])
 
     def test_cyclical_sector_tilts_toward_technical_and_volume(self) -> None:
         for sector in ("Basic Materials", "Energy", "Industrials", "Consumer Cyclical"):
@@ -77,9 +80,17 @@ class WeightsForSectorTest(unittest.TestCase):
                 self.assertEqual(weights["filings"], _DEFAULT_WEIGHTS["filings"])
                 self.assertEqual(weights["macro"], _DEFAULT_WEIGHTS["macro"])
 
-    def test_cyclical_sector_weight_sum_matches_default_baseline(self) -> None:
-        weights = _weights_for_sector("Energy")
-        self.assertAlmostEqual(sum(weights.values()), sum(_DEFAULT_WEIGHTS.values()), places=6)
+    def test_every_sector_group_weight_sum_matches_default_baseline(self) -> None:
+        # Regression test: rate_sensitive and growth previously summed to
+        # 1.60 and 1.50 respectively instead of the shared 1.55 baseline —
+        # only cyclical (which happened to be correct) had this invariant
+        # tested, so the other two shipped silently miscalibrated. Every
+        # override group must be covered here, not just one representative.
+        baseline = sum(_DEFAULT_WEIGHTS.values())
+        for sector in ("Financial Services", "Technology", "Energy"):
+            with self.subTest(sector=sector):
+                weights = _weights_for_sector(sector)
+                self.assertAlmostEqual(sum(weights.values()), baseline, places=6)
 
     def test_never_mutates_the_shared_default_dict(self) -> None:
         _weights_for_sector("Financial Services")

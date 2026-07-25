@@ -63,12 +63,15 @@ _SECTOR_WEIGHT_OVERRIDES = {
     # Capital-intensive, rate-sensitive: valuation and the macro overlay
     # (FII/DII flow + RBI rate/inflation) matter more; growth is weighted
     # down since these are typically mature, income-oriented businesses
-    # rather than high-growth compounders.
-    "rate_sensitive": {"valuation": 0.45, "growth": 0.3, "macro": 0.25},
+    # rather than high-growth compounders. Deltas from baseline: valuation
+    # +0.05, growth -0.10, macro +0.05 -- net 0, preserving the 1.55 sum.
+    "rate_sensitive": {"valuation": 0.45, "growth": 0.3, "macro": 0.20},
     # Asset-light, growth-driven: growth carries more weight; the macro
     # overlay (domestic rate/inflation, FII/DII flow) is less directly
-    # relevant to export-oriented, globally-priced businesses.
-    "growth": {"growth": 0.45, "valuation": 0.35, "macro": 0.1},
+    # relevant to export-oriented, globally-priced businesses. Valuation is
+    # deliberately left at baseline here (only growth/macro move) -- deltas:
+    # growth +0.05, macro -0.05 -- net 0.
+    "growth": {"growth": 0.45, "macro": 0.1},
     # Cyclical: price/volume momentum (the technical + volume signals) is
     # more informative for a cyclical business than for a steady compounder,
     # so both are weighted up — offset by weighting valuation/growth down,

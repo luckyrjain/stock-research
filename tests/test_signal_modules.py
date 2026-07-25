@@ -92,6 +92,15 @@ class ValuationSignalTest(unittest.TestCase):
         self.assertEqual(valuation_signal({"pe": 40}).value, "FAIR")
         self.assertEqual(valuation_signal({"pe": 15}).value, "FAIR")
 
+    def test_negative_pe_returns_unknown_not_undervalued(self) -> None:
+        # Regression test: a negative P/E (loss-making company) used to pass
+        # the `not pe` guard (a negative number is truthy) and then satisfy
+        # `pe < 15`, misreading it as UNDERVALUED (+0.6, the largest bullish
+        # score this signal can produce) instead of degrading to UNKNOWN.
+        sig = valuation_signal({"pe": -8})
+        self.assertEqual(sig.value, "UNKNOWN")
+        self.assertEqual(sig.score, 0)
+
 
 class FilingsSignalTest(unittest.TestCase):
     def test_no_filings_returns_none(self) -> None:
