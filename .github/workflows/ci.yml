@@ -54,3 +54,39 @@ jobs:
         # error only surfaces under the production minifier, not tsc or
         # `next dev`. Build once here so that class of bug can't land silently.
         run: npm run build
+
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run E2E suite
+        # No FastAPI backend is started in this job — every test mocks its
+        # own backend responses at the browser network layer (see
+        # playwright.config.ts's own comment on why). npm run dev (started
+        # automatically via webServer in playwright.config.ts) is enough.
+        run: npx playwright test
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 14

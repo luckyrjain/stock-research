@@ -15,3 +15,7 @@ frontend/.next/
 frontend/node_modules/
 frontend/.env.local
 frontend/tsconfig.tsbuildinfo
+
+# Playwright
+frontend/test-results/
+frontend/playwright-report/

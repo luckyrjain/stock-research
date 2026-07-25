@@ -81,6 +81,8 @@ stock-research/
 │   ├── lib/auth.ts               useAuth() hook (session-cookie-backed; same shared-cache pattern as useWatchlist)
 │   ├── lib/auth-cookie.ts        Server-only cookie helpers used by app/api/auth/* route handlers
 │   ├── lib/useStockAnalysis.ts   Per-symbol SSE analysis hook, shared by the home page and /compare
+│   ├── e2e/                      Playwright E2E specs — every backend response is mocked (see below)
+│   ├── playwright.config.ts      webServer runs `npm run dev`; no real backend involved
 │   ├── components/auth-widget.tsx "Sign in" link or email+logout dropdown, in every page's nav bar
 │   └── types/index.ts            Canonical TS types for all SSE messages and reports
 └── output/                 Cache files (gitignored); also where CLI saves report JSON
@@ -184,13 +186,33 @@ These tool functions are decorated with `@tool` from `crewai.tools` purely for a
 cd frontend && npm run dev   # starts on port 3000
 ```
 
-### Type-checking (no test suite or lint config exists)
+### Type-checking (no lint config exists)
 
 ```bash
 cd frontend && npx tsc --noEmit
 ```
 
-There is no ESLint config and no frontend test suite. TypeScript strict mode (`"strict": true`) is the primary code quality gate.
+There is no ESLint config. TypeScript strict mode (`"strict": true`) is the primary code quality
+gate alongside the E2E suite below.
+
+### End-to-end tests (Playwright)
+
+```bash
+cd frontend && npx playwright install --with-deps chromium   # once, or in a fresh CI runner
+cd frontend && npm run test:e2e
+```
+
+`frontend/e2e/*.spec.ts` covers core flows (home page search + a full mocked stock-analysis run,
+watchlist, screener, portfolio) against `npm run dev`. **Every backend response is mocked at the
+browser network layer** (`page.route()`, see `frontend/e2e/fixtures.ts` for the shared SSE/JSON
+fixture builders) — this suite never talks to a real FastAPI backend, matching this repo's
+existing "no live external calls in CI" convention (`tests/*.py`'s own docstring already states
+this for the pytest suite; a live E2E run would mean real NSE/yfinance/Screener.in scraping on
+every PR, exactly the flakiness that convention exists to avoid). Anything a test doesn't
+explicitly mock falls through to the Next.js proxy routes' existing "backend unavailable" 503
+handling (no FastAPI process runs in the E2E job at all), which the frontend already renders
+gracefully — so an unmocked add-on fetch (e.g. peer comparison, insider activity) degrades to
+"not available" instead of hanging or crashing the page.
 
 ### Design system
 
