@@ -22,6 +22,7 @@ from crew import ALL_DATA_TASKS, run_analysis_with_fallback
 from db.models import get_engine
 from email_sender import send_watchlist_alert_email
 from main import _fetch_task
+from error_tracking import init_error_tracking
 from observability import get_logger, log_event
 from schemas import normalize as schema_normalize
 from signals.engine import run_signal_engine
@@ -202,6 +203,7 @@ def run(force: bool = False) -> bool:
 
 
 def main() -> None:
+    init_error_tracking()
     parser = argparse.ArgumentParser(description="Watchlist recommendation-change email alerts")
     parser.add_argument("--force", action="store_true", help="Bypass all data/analysis caches")
     args = parser.parse_args()

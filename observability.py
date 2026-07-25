@@ -4,6 +4,8 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
+import error_tracking
+
 
 def _configure_root_logger() -> None:
     root = logging.getLogger("stock_research")
@@ -30,6 +32,7 @@ def log_event(
     event: str,
     *,
     level: str = "info",
+    exc: BaseException | None = None,
     **fields: Any,
 ) -> None:
     payload = {
@@ -38,3 +41,13 @@ def log_event(
         **fields,
     }
     getattr(logger, level.lower(), logger.info)(json.dumps(payload, ensure_ascii=False, default=str))
+
+    if level.lower() == "error":
+        # Forward to the optional Sentry-style hook (see error_tracking.py) —
+        # a no-op unless SENTRY_DSN is configured. Wrapped defensively so a
+        # broken/unreachable error-tracking backend can never break the
+        # primary structured-logging path this function exists for.
+        try:
+            error_tracking.capture_error(event, fields, exc=exc)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass

@@ -46,6 +46,7 @@ stock-research/
 ├── watchlist_alerts.py     Daily batch job: emails signed-in users on a watched stock's recommendation change
 ├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
 ├── observability.py        Structured JSON logging via log_event()
+├── error_tracking.py       Optional Sentry-style hook, wired into log_event()'s error-level path
 ├── requirements.txt
 ├── .env.example
 ├── config/
@@ -286,6 +287,8 @@ Provider is auto-detected from whichever key is present (checked in the order ab
 | `SMTP_USER` / `SMTP_PASSWORD` | unset | SMTP auth — skipped if either is unset |
 | `SMTP_FROM` | `SMTP_USER` or `noreply@alphapulse.local` | From address on the sign-in email |
 | `SMTP_USE_TLS` | `true` | Set to `false` only for a local/dev relay that doesn't speak STARTTLS |
+| `SENTRY_DSN` | unset | Forwards every error-level `observability.log_event()` call to a Sentry-compatible ingest endpoint (see "Error tracking / APM hook" below). No-op without it — `sentry-sdk` is a hard dependency but does nothing until this is set |
+| `SENTRY_ENVIRONMENT` | `production` | Tag attached to every event sent to Sentry when `SENTRY_DSN` is set (e.g. `staging`) |
 
 ### Frontend
 
@@ -675,6 +678,60 @@ flagged this as the blocker to scaling past a single process).
 5. Docker Compose gained a `redis` service (`redis:7-alpine`, persisted via a named volume) and
    wires `REDIS_URL` into the `backend` service automatically — a manual/non-Compose deployment
    only needs to set `REDIS_URL` once it scales past one worker (see `docs/deployment.md`).
+
+### Error tracking / APM hook (`error_tracking.py`)
+
+Every error-level `observability.log_event()` call already carries a structured JSON payload
+(`event`, and whatever `**fields` the call site attached — `symbol`, `run_id`, `error`, etc.), but
+until now it only ever reached stdout/the process log. There was no way to get paged, deduped,
+or grouped-by-stack-trace on a production error without grepping logs after the fact.
+
+1. `error_tracking.py` (repo root, alongside `cache.py`/`rate_limiter.py`) is a small pluggable
+   hook gated behind the optional `SENTRY_DSN` env var — unset by default, so `log_event()`
+   behaves exactly as before with zero behavior change out of the box. "Pluggable" here means
+   swappable ingest endpoint (real Sentry, self-hosted Sentry, GlitchTip — anything that speaks
+   the same DSN/`init()` protocol), not a plugin registry of multiple simultaneous backends; this
+   codebase has exactly one thing that consumes errors today (`log_event`'s error-level path), so
+   a heavier abstraction on top of that would be speculative.
+2. `init_error_tracking()` is called once per process at every entry point that can emit an
+   error-level `log_event()` — `api.py` (module-level, right after `LOGGER = get_logger("api")`,
+   so it runs once per worker process) and the CLI `main()` of `main.py`, `sme_ema_pipeline.py`,
+   `market_picks_pipeline.py`, `watchlist_alerts.py`, and `screener_pipeline.py`. It's idempotent
+   (a second call is a harmless no-op, guarded by a module-level `_initialized` flag) since
+   `sentry_sdk.init()` itself isn't safe to call twice with different configs — this matters
+   because e.g. `watchlist_alerts.py` imports `main.py` (for `_fetch_task`), and `api.py`'s
+   background SME/screener refresh endpoints run those pipelines' `run()` functions in-process
+   inside the already-initialized API server, not through their CLI `main()` at all.
+3. **Same graceful-degradation convention as `DATABASE_URL`/`SMTP_HOST`/`REDIS_URL`** elsewhere in
+   this codebase: unset `SENTRY_DSN`, a missing `sentry-sdk` package (logged once via stdlib
+   `logging`, not `observability.log_event` — this module is a dependency *of* observability.py,
+   so routing its own diagnostics back through `log_event` would be circular), or a failed
+   `sentry_sdk.init()`/capture call all degrade to a silent no-op rather than breaking the
+   request/batch job that triggered the error in the first place. `sentry-sdk` is still a hard
+   `requirements.txt` dependency (same pattern as `redis` — always installed, behavior gated by
+   the env var) rather than conditionally installed, so there's no separate install step once a
+   deployment is ready to set `SENTRY_DSN`.
+4. `observability.log_event()`'s error-level path (`level="error"`, the existing convention every
+   call site already uses) forwards `(event, fields, exc)` to `error_tracking.capture_error()`,
+   wrapped in its own try/except so a broken/unreachable Sentry backend can never break the
+   primary structured-logging path `log_event` exists for. `log_event()` gained a new optional
+   `exc: BaseException | None` keyword — existing call sites are unchanged (still passing
+   `error=str(exc)` as a field, which is what the log line itself shows); passing the actual
+   exception object too is opt-in and only worth doing at a handful of the most valuable
+   top-level `except Exception as exc:` sites, since it's what gives Sentry a real grouped stack
+   trace instead of just a message string.
+5. `capture_error()` tags the Sentry event with the `event` name, attaches every other field as
+   Sentry "extra" context (skipping `error` itself — that string just duplicates what
+   `capture_exception`'s own stack trace already conveys), and calls `capture_exception(exc)` when
+   an exception object was passed, or `capture_message(event, level="error")` otherwise.
+6. **Disclosed limitation**: `sentry_sdk.init()`'s actual behavior — DSN parsing, event delivery,
+   what a captured event looks like in a live Sentry project — was not verified against a real
+   Sentry account in this sandbox (no outbound internet to sentry.io; same disclosure as the
+   FII/DII/RBI scrapers and the sector-taxonomy assumption elsewhere in this doc). `tests/
+   test_error_tracking.py` mocks `sentry_sdk` at the `sys.modules` level (the same
+   crewai-mocking pattern `tests/conftest.py` already documents) to verify this module's own
+   control flow — init/capture argument shapes, graceful degradation on a missing package or a
+   failed call — not that a live Sentry ingest endpoint actually accepts what's sent to it.
 
 ### SME golden cross flow
 

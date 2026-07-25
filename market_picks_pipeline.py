@@ -25,6 +25,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
+from error_tracking import init_error_tracking
 from observability import get_logger, log_event
 
 load_dotenv()
@@ -1478,6 +1479,7 @@ def main() -> None:
     instead of silently caching a result nobody should trust for the next
     7 days.
     """
+    init_error_tracking()
     pipeline = MarketPicksPipeline()
     picks = pipeline.run()
     generated_at = datetime.now(timezone.utc).isoformat()

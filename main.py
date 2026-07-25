@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 
 import cache
 from crew import ALL_DATA_TASKS, parse_json_object, run_analysis_with_fallback
+from error_tracking import init_error_tracking
 from observability import get_logger, log_event
 from schemas import normalize as schema_normalize
 from schemas import validate as schema_validate
@@ -221,6 +222,7 @@ def _print_status(symbol: str) -> None:
 
 def main():  # pylint: disable=too-many-locals,too-many-statements
     """Run the CLI stock research pipeline for a given NSE symbol."""
+    init_error_tracking()
 
     parser = argparse.ArgumentParser(description="NSE stock research pipeline")
     parser.add_argument("symbol", help="NSE stock symbol (e.g. RELIANCE, TCS)")
