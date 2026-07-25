@@ -65,9 +65,9 @@ def _parse_pit_row(row: dict) -> dict | None:
     date_str = (row.get("intimDt") or row.get("date") or "").strip()
 
     try:
-        qty   = int(float(row.get("secAcq") or 0))
-        value = float(row.get("secVal") or 0)
-    except (TypeError, ValueError):
+        qty   = int(float(str(row.get("secAcq") or 0).replace(",", "")))
+        value = float(str(row.get("secVal") or 0).replace(",", ""))
+    except (TypeError, ValueError, AttributeError):
         return None
 
     if not symbol or not person or qty <= 0 or value < _MIN_VALUE_INR:
@@ -135,7 +135,7 @@ def _parse_pit_date(date_str: str) -> str | None:
     for fmt in ("%d-%b-%Y %H:%M", "%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y"):
         try:
             return datetime.strptime(date_str, fmt).replace(tzinfo=timezone.utc).isoformat()
-        except ValueError:
+        except (ValueError, TypeError):
             pass
     return None
 
@@ -207,6 +207,12 @@ def fetch_insider_trades_for_symbol(symbol: str, lookback_days: int = _SYMBOL_LO
     raw = _fetch_pit_rows(sess, lookback_days)
 
     trades: list[dict] = []
+    # fetch_insider_trades() (market-wide) dedupes by article title — an
+    # undocumented divergence otherwise, since NSE's PIT feed can return the
+    # same disclosure more than once (e.g. an amended/re-filed row). This
+    # dedups on the same real-world-event fields the market-wide title
+    # already bakes in (person, action, quantity, value, date).
+    seen: set[tuple] = set()
     for row in raw:
         try:
             parsed = _parse_pit_row(row)
@@ -215,6 +221,10 @@ def fetch_insider_trades_for_symbol(symbol: str, lookback_days: int = _SYMBOL_LO
             continue
         if not parsed or parsed["symbol"] != sym:
             continue
+        key = (parsed["person"], parsed["action"], parsed["quantity"], parsed["value"], parsed["date"])
+        if key in seen:
+            continue
+        seen.add(key)
         trades.append({k: v for k, v in parsed.items() if k != "symbol"})
 
     trades.sort(key=lambda t: t["date_iso"] or "", reverse=True)

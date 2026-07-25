@@ -28,10 +28,29 @@ _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit
 
 _PERCENT_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*%")
 
+# The `table tr` selector below scans every table on RBI's homepage, not
+# just the "Current Rates" widget this module's docstring describes — its
+# exact HTML structure couldn't be verified against a live response in this
+# sandbox (see module docstring). A percentage from an unrelated table
+# elsewhere on the page (a promo, an unrelated stat) could false-positive
+# match before the real rate. Bounding each field to its real-world
+# plausible range is a cheap, verification-independent guard against
+# trusting such a match blindly — same "bound rather than trust an
+# unscoped/unverified match" pattern as tools/nse_fii_dii_tools.py's
+# _PLAUSIBLE_MAX_NET_CR. India's repo rate has stayed within roughly this
+# band for decades; CPI inflation is given a wider band to allow for real
+# extreme prints while still rejecting an obviously-unrelated percentage.
+_REPO_RATE_RANGE = (2.0, 15.0)
+_CPI_RANGE = (-5.0, 20.0)
 
-def _parse_percent(text: str) -> float | None:
+
+def _parse_percent(text: str, plausible_range: tuple[float, float] = (-1000.0, 1000.0)) -> float | None:
     match = _PERCENT_RE.search(text or "")
-    return float(match.group(1)) if match else None
+    if not match:
+        return None
+    value = float(match.group(1))
+    lo, hi = plausible_range
+    return value if lo <= value <= hi else None
 
 
 def get_macro_context() -> dict:
@@ -52,9 +71,9 @@ def get_macro_context() -> dict:
                 continue
             label = cells[0].lower()
             if "repo rate" in label and repo_rate is None:
-                repo_rate = _parse_percent(cells[1])
+                repo_rate = _parse_percent(cells[1], _REPO_RATE_RANGE)
             elif "cpi" in label and cpi is None:
-                cpi = _parse_percent(cells[1])
+                cpi = _parse_percent(cells[1], _CPI_RANGE)
 
         return {"repo_rate_pct": repo_rate, "cpi_inflation_pct": cpi}
     except Exception as exc:  # pylint: disable=broad-exception-caught

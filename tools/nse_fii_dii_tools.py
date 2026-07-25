@@ -14,6 +14,8 @@ module: a shape mismatch (NSE changed its response format) degrades to an
 `{"error": ...}` dict exactly like a network failure would, rather than
 raising into the signal engine.
 """
+import time
+
 import requests
 
 from observability import get_logger, log_event
@@ -27,12 +29,24 @@ _NSE_HEADERS = {
     "Referer": "https://www.nseindia.com",
 }
 
+# signals/macro.py's ±500/±3000 Cr thresholds assume NSE's `netValue` field
+# is already in ₹ Crore, which could not be verified against a live response
+# in this sandbox (see this module's own docstring). A single day's net
+# FII or DII equity flow beyond this ceiling would be extraordinary for the
+# real Indian market — more likely a unit mismatch (e.g. raw rupees instead
+# of crore) than a genuine figure — so it's dropped ("never invent") rather
+# than fed to the signal engine as if it were trustworthy. Same "bound
+# rather than trust an unverified format guess" pattern as
+# tools/nse_tools.py's _percent_from_ambiguous_value.
+_PLAUSIBLE_MAX_NET_CR = 100_000.0
+
 
 def _nse_session() -> requests.Session:
     sess = requests.Session()
     sess.headers.update(_NSE_HEADERS)
     try:
         sess.get("https://www.nseindia.com", timeout=8)
+        time.sleep(0.5)
     except Exception:  # pylint: disable=broad-exception-caught
         pass
     return sess
@@ -42,9 +56,10 @@ def _to_float(value) -> float | None:
     if value is None:
         return None
     try:
-        return float(str(value).replace(",", "").strip())
+        parsed = float(str(value).replace(",", "").strip())
     except (TypeError, ValueError):
         return None
+    return parsed if abs(parsed) <= _PLAUSIBLE_MAX_NET_CR else None
 
 
 def get_fii_dii_flow() -> dict:

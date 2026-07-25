@@ -45,6 +45,16 @@ def _first(deal: dict, keys: tuple) -> object | None:
     return None
 
 
+def _to_int(value: object) -> int:
+    """NSE's quantity fields can come back comma-formatted (e.g. "5,00,000")
+    — stripping commas before int() avoids silently misreading an otherwise
+    valid row as unparseable (a bare int()/float() call raises on a comma).
+    Deliberately does NOT swallow a genuine parse failure — callers already
+    wrap this in their own try/except and log+skip a truly malformed row,
+    the same convention as elsewhere in this module."""
+    return int(float(str(value if value is not None else 0).replace(",", "")))
+
+
 def _nse_session() -> requests.Session:
     sess = requests.Session()
     sess.headers.update(_NSE_HEADERS)
@@ -78,9 +88,9 @@ def _parse_deal_row(deal: dict, deal_type: str) -> dict | None:
     date_str  = str(_first(deal, _DATE_KEYS) or "").strip()
 
     try:
-        qty   = int(qty_raw)
-        price = float(price_raw)
-    except (TypeError, ValueError):
+        qty   = int(float(str(qty_raw).replace(",", "")))
+        price = float(str(price_raw).replace(",", ""))
+    except (TypeError, ValueError, AttributeError):
         return None
 
     if not symbol or not client or qty <= 0 or price <= 0:
@@ -95,7 +105,7 @@ def _parse_deal_row(deal: dict, deal_type: str) -> dict | None:
         try:
             pub_iso = datetime.strptime(date_str, fmt).replace(tzinfo=timezone.utc).isoformat()
             break
-        except ValueError:
+        except (ValueError, TypeError):
             pass
 
     return {
@@ -155,7 +165,7 @@ def _fetch_deals(sess: requests.Session, endpoint: str, min_qty: int, deal_type:
     seen: set[str] = set()
     for deal in raw:
         try:
-            qty = int(_first(deal, _QTY_KEYS) or 0)
+            qty = _to_int(_first(deal, _QTY_KEYS))
             if qty < min_qty:
                 continue
             art = _deal_to_article(deal, deal_type)
@@ -204,6 +214,12 @@ def fetch_bulk_block_deals_for_symbol(symbol: str) -> dict:
     sym = symbol.upper().strip() if isinstance(symbol, str) else ""
     sess = _nse_session()
     deals: list[dict] = []
+    # _fetch_deals() (market-wide) dedupes by article title — an
+    # undocumented divergence otherwise, since NSE's bulk/block-deals
+    # endpoints can return the same deal more than once. This dedups on the
+    # same real-world-event fields the market-wide title already bakes in
+    # (client, action, quantity, price, deal_type, date).
+    seen: set[tuple] = set()
     for endpoint, min_qty, deal_type in (
         ("bulk-deals",  _MIN_BULK_QTY,  "Bulk Deal"),
         ("block-deals", _MIN_BLOCK_QTY, "Block Deal"),
@@ -211,7 +227,7 @@ def fetch_bulk_block_deals_for_symbol(symbol: str) -> dict:
         raw = _fetch_deal_rows(sess, endpoint)
         for deal in raw:
             try:
-                qty = int(_first(deal, _QTY_KEYS) or 0)
+                qty = _to_int(_first(deal, _QTY_KEYS))
                 if qty < min_qty:
                     continue
                 parsed = _parse_deal_row(deal, deal_type)
@@ -220,6 +236,13 @@ def fetch_bulk_block_deals_for_symbol(symbol: str) -> dict:
                 continue
             if not parsed or parsed["symbol"] != sym:
                 continue
+            key = (
+                parsed["client"], parsed["action"], parsed["quantity"],
+                parsed["price"], parsed["deal_type"], parsed["date"],
+            )
+            if key in seen:
+                continue
+            seen.add(key)
             deals.append({k: v for k, v in parsed.items() if k != "symbol"})
 
     deals.sort(key=lambda d: d["date_iso"] or "", reverse=True)

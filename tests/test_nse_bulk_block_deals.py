@@ -238,6 +238,26 @@ class FetchBulkBlockDealsForSymbolTest(unittest.TestCase):
             result = fetch_bulk_block_deals_for_symbol(None)
         self.assertEqual(result, {"symbol": "", "deals": []})
 
+    def test_duplicate_row_is_deduped_like_the_market_wide_function(self) -> None:
+        # Regression test: _fetch_deals() (market-wide) dedupes by article
+        # title, but this per-symbol function used to have no dedup at all
+        # — NSE's bulk/block-deals endpoints can return the same deal more
+        # than once, which used to double-count it.
+        sess = self._session_pair([self._deal(), self._deal()], [])
+        with patch("tools.nse_bulk_block_deals._nse_session", return_value=sess):
+            result = fetch_bulk_block_deals_for_symbol("tcs")
+        self.assertEqual(len(result["deals"]), 1)
+
+    def test_comma_formatted_quantity_parses_correctly(self) -> None:
+        # Regression test: a comma-formatted quantity used to raise
+        # ValueError in the bare int()/float() calls, silently dropping an
+        # otherwise valid deal instead of being parsed.
+        sess = self._session_pair([self._deal(bdQty="1,00,000")], [])
+        with patch("tools.nse_bulk_block_deals._nse_session", return_value=sess):
+            result = fetch_bulk_block_deals_for_symbol("tcs")
+        self.assertEqual(len(result["deals"]), 1)
+        self.assertEqual(result["deals"][0]["quantity"], 100000)
+
 
 if __name__ == "__main__":
     unittest.main()

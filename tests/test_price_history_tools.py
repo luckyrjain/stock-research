@@ -77,6 +77,31 @@ class GetPriceSeriesTest(unittest.TestCase):
             result = get_price_series("TCS")
         self.assertEqual(len(result["closes"]), 20)
 
+    def test_short_range_request_does_not_poison_cache_for_a_later_wider_request(self) -> None:
+        # Regression test: caching under a single "price_history" key with
+        # no regard for the caller's `days` used to mean a short-range
+        # request (e.g. days=30) would populate the shared cache with too
+        # few rows, and a later, wider request within the same 6h TTL
+        # window (e.g. signals/technical.py's default days=180) would
+        # wrongly reuse that too-short series.
+        fake_ticker = MagicMock()
+        fake_ticker.history.return_value = self._fake_df(200)
+
+        with patch("yfinance.Ticker", return_value=fake_ticker) as ticker_cls:
+            narrow = get_price_series("TCS", days=30)
+            self.assertEqual(len(narrow["closes"]), 30)
+
+            ticker_cls.side_effect = AssertionError("should reuse cache, not refetch")
+            wide = get_price_series("TCS", days=180)
+        self.assertEqual(len(wide["closes"]), 180)
+
+    def test_fetch_always_requests_the_max_window_regardless_of_requested_days(self) -> None:
+        fake_ticker = MagicMock()
+        fake_ticker.history.return_value = self._fake_df(60)
+        with patch("yfinance.Ticker", return_value=fake_ticker):
+            get_price_series("TCS", days=30)
+        fake_ticker.history.assert_called_once_with(period="365d", interval="1d", auto_adjust=True)
+
 
 if __name__ == "__main__":
     unittest.main()

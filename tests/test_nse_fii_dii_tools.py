@@ -17,6 +17,18 @@ class ToFloatTest(unittest.TestCase):
     def test_unparseable_string_returns_none_not_raise(self) -> None:
         self.assertIsNone(_to_float("N/A"))
 
+    def test_implausibly_large_value_is_dropped_not_trusted(self) -> None:
+        # Regression test: signals/macro.py's ±500/±3000 Cr thresholds
+        # assume netValue is already in ₹ Crore, which isn't verifiable
+        # against a live NSE response in this sandbox. A single day's net
+        # flow far beyond any plausible real figure is more likely a unit
+        # mismatch than a genuine number, so it's dropped rather than fed
+        # to the signal engine as if it were trustworthy.
+        self.assertIsNone(_to_float("500000000"))
+
+    def test_plausible_large_value_still_converts(self) -> None:
+        self.assertEqual(_to_float("45000.5"), 45000.5)
+
 
 class GetFiiDiiFlowTest(unittest.TestCase):
     def _session(self, json_data):
