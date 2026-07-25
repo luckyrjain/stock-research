@@ -10,7 +10,11 @@ def filings_signal(features: dict) -> Signal:
 
     hits = []
     for f in filings:
-        text = (f.get("title", "") + " " + f.get("desc", "")).lower()
+        # A filing's title/desc can be present-but-None (e.g. a scraper
+        # passing through a null field) rather than simply absent, in which
+        # case f.get(key, "") returns None, not the default — guard with
+        # `or ""` so this never raises on a malformed/None text field.
+        text = ((f.get("title") or "") + " " + (f.get("desc") or "")).lower()
         for k in KEYWORDS:
             if k in text:
                 hits.append(k)

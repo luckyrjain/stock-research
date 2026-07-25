@@ -59,6 +59,54 @@ class ExtractGrowthMetricsTest(unittest.TestCase):
         soup = BeautifulSoup("<p>nothing relevant</p>", "lxml")
         self.assertEqual(_extract_growth_metrics(soup), {})
 
+    def test_sibling_blocks_sharing_a_wrapper_div_are_not_mislabeled(self) -> None:
+        # Regression test: find_all() visits an ancestor before its children,
+        # so a wrapping div around both growth widgets used to win the match
+        # immediately (its combined text trivially contains both labels),
+        # and the regex then grabbed whichever period appeared first in that
+        # combined text for BOTH block labels — silently mislabeling Profit
+        # growth with Sales growth values (or vice versa) whenever real
+        # Screener markup nests the two widgets under a shared container,
+        # which is a very common HTML pattern.
+        html = """
+        <div class="outer-wrapper">
+          <div class="card"><div>Compounded Sales Growth</div><div>10 Years: 15% 5 Years: 18% 3 Years: 22%</div></div>
+          <div class="card"><div>Compounded Profit Growth</div><div>10 Years: 20% 5 Years: 25% 3 Years: 30%</div></div>
+        </div>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        metrics = _extract_growth_metrics(soup)
+        self.assertEqual(metrics["Sales growth 3Y"], "22%")
+        self.assertEqual(metrics["Sales growth 5Y"], "18%")
+        self.assertEqual(metrics["Profit growth 3Y"], "30%")
+        self.assertEqual(metrics["Profit growth 5Y"], "25%")
+
+    def test_flat_sibling_rows_sharing_one_table_are_not_mislabeled(self) -> None:
+        # Regression test: when Sales and Profit growth rows are flat
+        # siblings inside one shared <table> (no per-block wrapper at all,
+        # not even a shared outer div), that table is simultaneously the
+        # ONLY candidate satisfying "contains the label + a period marker"
+        # for BOTH block labels — the shortest-container heuristic alone
+        # can't tell them apart, and a regex search over that shared text
+        # would return whichever period appears first for both labels,
+        # silently mislabeling Profit growth with Sales growth's values.
+        html = """
+        <table class="ranges-table">
+          <tr><td>Compounded Sales Growth</td><td>10 Years:</td><td>15%</td></tr>
+          <tr><td></td><td>5 Years:</td><td>18%</td></tr>
+          <tr><td></td><td>3 Years:</td><td>22%</td></tr>
+          <tr><td>Compounded Profit Growth</td><td>10 Years:</td><td>20%</td></tr>
+          <tr><td></td><td>5 Years:</td><td>25%</td></tr>
+          <tr><td></td><td>3 Years:</td><td>30%</td></tr>
+        </table>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        metrics = _extract_growth_metrics(soup)
+        self.assertEqual(metrics["Sales growth 3Y"], "22%")
+        self.assertEqual(metrics["Sales growth 5Y"], "18%")
+        self.assertEqual(metrics["Profit growth 3Y"], "30%")
+        self.assertEqual(metrics["Profit growth 5Y"], "25%")
+
 
 class ExtractLatestMetricFromTablesTest(unittest.TestCase):
     def test_returns_last_nonempty_value_in_row(self) -> None:
@@ -222,6 +270,47 @@ class GetHoldingsTest(unittest.TestCase):
             result_str = get_holdings.run(symbol="TCS")
         result = json.loads(result_str)
         self.assertNotIn("pledge_pct", result)
+
+    def test_trailing_delta_column_is_not_trusted_as_latest_quarter(self) -> None:
+        # Regression test: unlike _extract_quarterly_trend/_extract_valuation_band
+        # elsewhere in this file, get_holdings used to trust cells[-1] as
+        # "the latest shareholding %" with no header cross-check at all. If
+        # Screener ever adds a trailing summary/delta column, that would
+        # silently be read as the latest value instead of the real one.
+        html = """
+        <html><body>
+          <section id="shareholding">
+            <table>
+              <thead><tr><th>Category</th><th>Mar 2025</th><th>Jun 2025</th><th>Q-o-Q Change</th></tr></thead>
+              <tbody>
+                <tr><td>Promoters+</td><td>50%</td><td>52.5%</td><td>+2.5%</td></tr>
+              </tbody>
+            </table>
+          </section>
+        </body></html>
+        """
+        with patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup(html, "lxml")):
+            result_str = get_holdings.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertEqual(result["shareholding_pattern"], {})
+
+    def test_normal_period_header_still_trusts_last_column(self) -> None:
+        html = """
+        <html><body>
+          <section id="shareholding">
+            <table>
+              <thead><tr><th>Category</th><th>Mar 2025</th><th>Jun 2025</th></tr></thead>
+              <tbody>
+                <tr><td>Promoters+</td><td>50%</td><td>52.5%</td></tr>
+              </tbody>
+            </table>
+          </section>
+        </body></html>
+        """
+        with patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup(html, "lxml")):
+            result_str = get_holdings.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertEqual(result["shareholding_pattern"]["Promoters"], 52.5)
 
 
 class ExtractQuarterlyTrendTest(unittest.TestCase):
