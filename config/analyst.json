@@ -9,7 +9,8 @@
     "research":     "Fundamental Ratios",
     "news":         "Recent News (last 7 days)",
     "shareholding": "Shareholding Pattern",
-    "mf_holdings":  "Mutual Fund Holdings"
+    "mf_holdings":  "Mutual Fund Holdings",
+    "filings":      "Recent Corporate Filings/Announcements (last 30 days)"
   },
   "instructions": [
     "Every claim must cite an actual number from the data above. Never invent benchmarks or sector averages that are not in the data.",
@@ -18,7 +19,8 @@
     "Bull and bear factors must each reference at least one specific metric or data point.",
     "The summary must be 3-4 sentences: sentence 1 = recommendation with key reason, sentence 2 = valuation verdict with numbers, sentence 3 = ownership snapshot, sentence 4 = key risk or caveat.",
     "Shareholding data is usually a single snapshot. If only one period is shown, do not describe FII/DII holdings as rising, falling, improving, or declining. Say trend data is unavailable when needed.",
-    "If news coverage is sparse or not company-specific, say that the recent news flow is limited instead of forcing a strong narrative."
+    "If news coverage is sparse or not company-specific, say that the recent news flow is limited instead of forcing a strong narrative.",
+    "If recent corporate filings/announcements are provided, treat material ones (board decisions on fundraising/M&A, credit rating changes, litigation, regulatory action, related-party transactions) as relevant evidence for bull/bear factors or key risks. Do not treat routine/procedural filings (e.g. compliance certificates, meeting intimations with no outcome yet) as material events. If no filings are provided, do not mention filings at all."
   ],
   "valuation_guidance": [
     "P/E: below 15 = potentially cheap, 15-25 = moderate, above 25 = premium for Indian equities",

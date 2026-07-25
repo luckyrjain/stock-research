@@ -25,6 +25,7 @@ def build_analysis_prompt(symbol: str, all_data: dict[str, dict]) -> str:
             - Financial ratios
             - News summaries
             - Shareholding data
+            - Recent corporate filings/announcements (if any)
             - Quantitative signals (if provided)
 
             =====================
