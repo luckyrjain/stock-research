@@ -411,6 +411,25 @@ class ExtractValuationBandTest(unittest.TestCase):
         soup = BeautifulSoup(html, "lxml")
         self.assertEqual(_extract_valuation_band(soup), {})
 
+    def test_row_with_extra_trailing_ttm_column_returns_empty_dict(self) -> None:
+        # A trailing "TTM" column only the header (not this data row) carries
+        # would otherwise mispair each real P/E with the wrong year once both
+        # lists are independently truncated by [-n:] — must bail out instead
+        # of silently misaligning years to values.
+        html = self._ratios_html(
+            years="<th>Mar 2021</th><th>Mar 2022</th><th>Mar 2023</th><th>Mar 2024</th><th>TTM</th>",
+            pe_row="<td>18.2</td><td>20.1</td><td>22.5</td><td>19.8</td>",
+        )
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(_extract_valuation_band(soup), {})
+
+    def test_row_with_extra_leading_cell_returns_empty_dict(self) -> None:
+        html = self._ratios_html(
+            pe_row="<td>x</td><td>18.2</td><td>20.1</td><td>22.5</td><td>19.8</td><td>24.3</td>",
+        )
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(_extract_valuation_band(soup), {})
+
 
 class ParsePeerTableTest(unittest.TestCase):
     def test_parses_headers_and_rows_generically(self) -> None:

@@ -834,6 +834,24 @@ class PeersEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIsNone(resp.json()["absolute_anchor"])
 
+    def test_stale_cache_missing_absolute_anchor_key_backfills_null(self) -> None:
+        # A response cached before this field existed has no "absolute_anchor"
+        # key at all (not an explicit null) — the endpoint must still return a
+        # consistent shape rather than silently omitting the key.
+        cache.save("TCS", "peers", {
+            "symbol": "TCS",
+            "self": {"name": "TCS", "slug": "TCS", "values": {"P/E": "28"}},
+            "peers": [],
+            "sector_median": None,
+            "percentiles": {},
+        })
+        with patch("tools.screener_tools.get_peer_comparison") as should_not_run:
+            resp = client.get("/api/peers/TCS")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("absolute_anchor", resp.json())
+        self.assertIsNone(resp.json()["absolute_anchor"])
+        should_not_run.run.assert_not_called()
+
 
 class InsiderActivityEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -1000,6 +1018,14 @@ class ValuationAnchorHelperTest(unittest.TestCase):
 
     def test_no_pe_column_in_self_row_returns_none(self) -> None:
         self_row = {"values": {"ROCE %": "52"}}
+        band = {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [20.0, 22.0, 26.0]}
+        self.assertIsNone(api._compute_valuation_anchor(self_row, band))
+
+    def test_unparseable_pe_value_returns_none(self) -> None:
+        # Column is present but its value doesn't parse as a number (e.g.
+        # Screener rendered "-" for a loss-making quarter) — distinct code
+        # path from the column being absent entirely (above).
+        self_row = {"values": {"P/E": "-"}}
         band = {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [20.0, 22.0, 26.0]}
         self.assertIsNone(api._compute_valuation_anchor(self_row, band))
 

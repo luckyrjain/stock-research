@@ -451,10 +451,12 @@ own history*, which was the analyst-lens gap this closes. `_compute_valuation_an
    doesn't have this data" elsewhere in this module.
 2. `_compute_valuation_anchor()` finds the current P/E in `self`'s own peer-row
    values (whichever column key contains "P/E", case-insensitive) and ranks it
-   against `valuation_band.pe` using the same mean-rank percentile math as
-   `_compute_peer_percentiles`, just against the stock's own history instead of
-   its peers. Returns `None` (not a guessed number) when there's no parseable
-   current P/E or fewer than 3 years of band history.
+   against `valuation_band.pe` using the same mean-rank percentile formula as
+   `_compute_peer_percentiles` — but, unlike that function (which folds `self`
+   into the ranked population), `current_pe` is ranked against `pe_values`
+   alone: it's today's live snapshot, not itself one of the historical yearly
+   observations. Returns `None` (not a guessed number) when there's no
+   parseable current P/E or fewer than 3 years of band history.
 3. `results-dashboard.tsx`'s `ValuationAnchorBadge` renders inside the existing
    "Peer Comparison" card, right below the table — buy/hold/sell-toned by
    percentile (≤33rd cheap, ≥67th expensive vs. its own range), showing the

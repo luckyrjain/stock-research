@@ -48,7 +48,7 @@ function PercentileBadge({ value }: { value: number }) {
 // reads as buy-toned, high (expensive vs. its own history) as sell-toned,
 // same color convention as the BUY/HOLD/SELL badges elsewhere in this file.
 function ValuationAnchorBadge({ anchor }: { anchor: PeerComparison['absolute_anchor'] }) {
-  if (!anchor) return null;
+  if (!anchor || anchor.years.length === 0) return null;
   const tone = anchor.percentile <= 33 ? 'text-buy border-buy/25 bg-buy/10'
     : anchor.percentile >= 67 ? 'text-sell border-sell/25 bg-sell/10'
     : 'text-hold border-hold/25 bg-hold/10';

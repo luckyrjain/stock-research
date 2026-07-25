@@ -232,6 +232,12 @@ def _extract_valuation_band(soup: BeautifulSoup, max_years: int = 5) -> dict:
 
     if pe_values is None:
         return {}
+    if len(pe_values) != len(years):
+        # Row and header cell counts disagree (e.g. a trailing "TTM" column
+        # only one of the two carries) — [-n:] truncation on each independently
+        # would silently pair a P/E value with the wrong year rather than fail
+        # loudly, so bail out instead of guessing an alignment.
+        return {}
 
     n = min(len(years), len(pe_values), max_years)
     years_n, pe_n = years[-n:], pe_values[-n:]

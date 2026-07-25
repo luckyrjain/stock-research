@@ -1141,7 +1141,14 @@ def _compute_valuation_anchor(self_row: dict | None, valuation_band: dict) -> di
     ever said "cheap/expensive vs. peers," never "cheap/expensive vs. its own
     history"). None when `self_row` has no parseable current P/E, or
     `valuation_band` has fewer than 3 years on record (see
-    tools/screener_tools.py::_extract_valuation_band) — never guessed."""
+    tools/screener_tools.py::_extract_valuation_band) — never guessed.
+
+    Percentile math mirrors `_compute_peer_percentiles`' mean-rank formula,
+    but the population it ranks against differs on purpose: `current_pe` is
+    today's live snapshot, not itself one of the historical yearly
+    observations, so it is ranked against `pe_values` alone rather than
+    folded into that population the way `self` is folded into the peer set
+    below."""
     if not self_row or not valuation_band:
         return None
     pe_values = valuation_band.get("pe") or []
@@ -1194,7 +1201,11 @@ async def get_peers(request: Request, symbol: str):
 
         cached = cache.load(sym, "peers")
         if cached is not None:
-            return {k: v for k, v in cached.items() if k != "_meta"}
+            # A response cached before absolute_anchor existed won't have the
+            # key at all (vs. a fresh response's explicit None) — backfill so
+            # every response has a consistent, self-describing shape rather
+            # than relying on the frontend treating undefined == null.
+            return {"absolute_anchor": None, **{k: v for k, v in cached.items() if k != "_meta"}}
 
         from tools.screener_tools import get_peer_comparison
 
