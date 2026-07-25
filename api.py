@@ -1270,11 +1270,15 @@ async def get_verdict_history(request: Request, symbol: str):
     from verdict_history import load_history
 
     loop = asyncio.get_running_loop()
-    history, live = await asyncio.gather(
-        loop.run_in_executor(None, load_history, sym),
-        loop.run_in_executor(None, _fetch_live_price_sync, sym),
-    )
-    scored = _score_verdict_history(history, live.get("price"))
+    history = await loop.run_in_executor(None, load_history, sym)
+    # The frontend's VerdictTimeline needs at least 2 entries to render at
+    # all — skip the extra yfinance round trip entirely below that, since
+    # nothing would consume the scored fields anyway.
+    live_price = None
+    if len(history) >= 2:
+        live = await loop.run_in_executor(None, _fetch_live_price_sync, sym)
+        live_price = live.get("price")
+    scored = _score_verdict_history(history, live_price)
     win_count = sum(1 for e in scored if e["outcome"] == "win")
     scored_count = sum(1 for e in scored if e["outcome"] is not None)
     win_rate = round(win_count / scored_count * 100, 1) if scored_count else None

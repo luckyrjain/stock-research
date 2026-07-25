@@ -1574,16 +1574,35 @@ class VerdictHistoryEndpointTest(unittest.TestCase):
         self.assertEqual(body["scored_count"], 2)
         self.assertEqual(body["win_rate"], 50.0)
 
-    def test_returns_history_unscored_when_live_price_unavailable(self) -> None:
+    def test_skips_live_price_fetch_when_fewer_than_two_entries(self) -> None:
+        # VerdictTimeline itself never renders below 2 stored days — no point
+        # spending an extra yfinance call on a response nothing will use.
         fake_history = [
             {"date": "2026-07-24", "recommendation": "BUY", "confidence": "HIGH", "current_price": 110.5, "signal_score": 6.0},
         ]
         with patch("verdict_history.load_history", return_value=fake_history), \
-             patch.object(api, "_fetch_live_price_sync", return_value={}):
+             patch.object(api, "_fetch_live_price_sync") as fetch_live:
             resp = client.get("/api/verdict-history/TCS")
         body = resp.json()
+        fetch_live.assert_not_called()
         self.assertIsNone(body["history"][0]["return_since_pct"])
         self.assertIsNone(body["history"][0]["outcome"])
+        self.assertIsNone(body["win_rate"])
+        self.assertEqual(body["scored_count"], 0)
+
+    def test_returns_history_unscored_when_live_price_unavailable(self) -> None:
+        fake_history = [
+            {"date": "2026-07-01", "recommendation": "HOLD", "confidence": "MEDIUM", "current_price": 100.0, "signal_score": 2.0},
+            {"date": "2026-07-24", "recommendation": "BUY", "confidence": "HIGH", "current_price": 110.5, "signal_score": 6.0},
+        ]
+        with patch("verdict_history.load_history", return_value=fake_history), \
+             patch.object(api, "_fetch_live_price_sync", return_value={}) as fetch_live:
+            resp = client.get("/api/verdict-history/TCS")
+        body = resp.json()
+        fetch_live.assert_called_once_with("TCS")
+        for entry in body["history"]:
+            self.assertIsNone(entry["return_since_pct"])
+            self.assertIsNone(entry["outcome"])
         self.assertIsNone(body["win_rate"])
         self.assertEqual(body["scored_count"], 0)
 
@@ -1623,6 +1642,16 @@ class ScoreVerdictHistoryTest(unittest.TestCase):
     def test_exactly_flat_is_unscored(self) -> None:
         history = [{"recommendation": "BUY", "current_price": 100.0}]
         scored = api._score_verdict_history(history, 100.0)
+        self.assertEqual(scored[0]["return_since_pct"], 0)
+        self.assertIsNone(scored[0]["outcome"])
+
+    def test_rounding_induced_flat_is_also_unscored(self) -> None:
+        # A genuinely nonzero move that rounds to 0.00% is treated the same
+        # as a literally-identical price — the graded outcome stays
+        # consistent with the 0.00% the UI actually displays, rather than
+        # grading on a move too small to show up in the rounded number.
+        history = [{"recommendation": "BUY", "current_price": 100.0}]
+        scored = api._score_verdict_history(history, 100.003)
         self.assertEqual(scored[0]["return_since_pct"], 0)
         self.assertIsNone(scored[0]["outcome"])
 
