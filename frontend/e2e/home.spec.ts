@@ -45,7 +45,10 @@ test.describe('Home page', () => {
     await page.goto('/');
     const input = page.getByLabel('NSE or BSE stock ticker');
     await input.fill(symbol);
-    await expect(page.getByText('Symbol found')).toBeVisible({ timeout: 5000 });
+    // "Symbol found" also exists as an sr-only live-region announcement, but
+    // the actual visible confirmation is the company-name/exchange row that
+    // ticker-search.tsx renders once validation resolves — wait for that.
+    await expect(page.getByText(validationResult(symbol).company)).toBeVisible({ timeout: 5000 });
 
     await page.getByRole('button', { name: 'Analyse Stock' }).click();
 
