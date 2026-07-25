@@ -458,6 +458,21 @@ export interface CreatedApiKey extends ApiKey {
   key: string;
 }
 
+// GET /api/api-keys also returns tier + usage — this account's current
+// standing against the same sliding-window limit GET /api/v1/* enforces
+// (api.py::_TIER_LIMITS), a non-mutating peek via rate_limiter.get_usage_count.
+export interface ApiUsage {
+  calls:           number;
+  limit:           number;
+  window_seconds:  number;
+}
+
+export interface ApiKeysResponse {
+  keys:   ApiKey[];
+  tier:   'free' | 'pro';
+  usage:  ApiUsage;
+}
+
 // Structured (not LLM-article) promoter/director insider trades and
 // bulk/block deals for one symbol — the same NSE feeds Market Picks already
 // scrapes for discovery, surfaced here directly instead of only ever

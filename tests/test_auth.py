@@ -163,7 +163,7 @@ class GetUserForSessionTest(unittest.TestCase):
 
     def test_returns_user_for_valid_session(self) -> None:
         result_mock = MagicMock()
-        result_mock.mappings.return_value.first.return_value = {"id": 7, "email": "a@b.com"}
+        result_mock.mappings.return_value.first.return_value = {"id": 7, "email": "a@b.com", "tier": "free"}
         conn = _FakeConn([result_mock])
         fake_engine = MagicMock()
         fake_engine.connect.return_value = conn
@@ -171,7 +171,7 @@ class GetUserForSessionTest(unittest.TestCase):
         with patch("auth._get_engine", return_value=fake_engine):
             user = auth.get_user_for_session("some-token")
 
-        self.assertEqual(user, {"id": 7, "email": "a@b.com"})
+        self.assertEqual(user, {"id": 7, "email": "a@b.com", "tier": "free"})
 
     def test_returns_none_for_expired_or_unknown_session(self) -> None:
         result_mock = MagicMock()
@@ -344,7 +344,7 @@ class GetUserForApiKeyTest(unittest.TestCase):
 
     def test_returns_user_id_and_stamps_last_used(self) -> None:
         result_mock = MagicMock()
-        result_mock.mappings.return_value.first.return_value = {"user_id": 7}
+        result_mock.mappings.return_value.first.return_value = {"user_id": 7, "tier": "free"}
         conn = _FakeConn([result_mock])
         fake_engine = MagicMock()
         fake_engine.begin.return_value = conn
@@ -352,7 +352,7 @@ class GetUserForApiKeyTest(unittest.TestCase):
         with patch("auth._get_engine", return_value=fake_engine):
             result = auth.get_user_for_api_key("apk_sometoken")
 
-        self.assertEqual(result, {"user_id": 7})
+        self.assertEqual(result, {"user_id": 7, "tier": "free"})
         args, _kwargs = conn.calls[0]
         stmt, params = args
         self.assertIn("SET last_used_at = NOW()", str(stmt))

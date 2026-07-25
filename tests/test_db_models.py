@@ -103,7 +103,7 @@ class TableSchemaTest(unittest.TestCase):
 
     def test_users_columns(self) -> None:
         cols = set(users.columns.keys())
-        self.assertEqual(cols, {"id", "email", "created_at"})
+        self.assertEqual(cols, {"id", "email", "created_at", "tier"})
         self.assertTrue(users.columns["id"].primary_key)
         self.assertFalse(users.columns["email"].nullable)
         self.assertTrue(users.columns["email"].unique)

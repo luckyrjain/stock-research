@@ -95,6 +95,49 @@ class IsAllowedRedisTest(_MemoryStateResetMixin, unittest.TestCase):
             self.assertFalse(rate_limiter.is_allowed("k", max_calls=1, window_seconds=60))
 
 
+class GetUsageCountMemoryTest(_MemoryStateResetMixin, unittest.TestCase):
+    def test_reports_count_without_counting_as_a_call(self) -> None:
+        with patch("time.monotonic", return_value=1000.0):
+            rate_limiter.is_allowed("k", max_calls=10, window_seconds=60)
+            rate_limiter.is_allowed("k", max_calls=10, window_seconds=60)
+            # A peek must not itself add a call — asking twice reports the
+            # same count both times.
+            self.assertEqual(rate_limiter.get_usage_count("k", 60), 2)
+            self.assertEqual(rate_limiter.get_usage_count("k", 60), 2)
+
+    def test_zero_for_unseen_key(self) -> None:
+        self.assertEqual(rate_limiter.get_usage_count("never-called", 60), 0)
+
+    def test_window_expiry_drops_stale_calls(self) -> None:
+        with patch("time.monotonic", return_value=1000.0):
+            rate_limiter.is_allowed("k", max_calls=10, window_seconds=10)
+        with patch("time.monotonic", return_value=1011.0):
+            self.assertEqual(rate_limiter.get_usage_count("k", 10), 0)
+
+
+class GetUsageCountRedisTest(_MemoryStateResetMixin, unittest.TestCase):
+    def test_uses_redis_when_available(self) -> None:
+        os.environ["REDIS_URL"] = "redis://localhost:6379/0"
+        fake_client = MagicMock()
+        fake_client.eval.return_value = 3
+        with patch("rate_limiter._get_redis_client", return_value=fake_client), \
+             patch("time.time", return_value=1234.5):
+            count = rate_limiter.get_usage_count("k", 60)
+        self.assertEqual(count, 3)
+        fake_client.eval.assert_called_once_with(
+            rate_limiter._USAGE_COUNT_SCRIPT, 1, "ratelimit:k", 1234.5, 60,
+        )
+
+    def test_falls_back_to_memory_on_redis_error(self) -> None:
+        os.environ["REDIS_URL"] = "redis://localhost:6379/0"
+        fake_client = MagicMock()
+        fake_client.eval.side_effect = ConnectionError("boom")
+        with patch("rate_limiter._get_redis_client", return_value=fake_client), \
+             patch("time.monotonic", return_value=1000.0):
+            rate_limiter._is_allowed_memory("k", max_calls=10, window_seconds=60)
+            self.assertEqual(rate_limiter.get_usage_count("k", 60), 1)
+
+
 class SlotConcurrencyMemoryTest(_MemoryStateResetMixin, unittest.TestCase):
     def test_acquire_up_to_limit_then_rejects(self) -> None:
         self.assertTrue(rate_limiter.try_acquire_slot("s", limit=2))

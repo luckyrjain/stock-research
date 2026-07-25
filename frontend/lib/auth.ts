@@ -6,6 +6,7 @@ import { refreshWatchlist } from '@/lib/watchlist';
 export interface AuthUser {
   id: number;
   email: string;
+  tier: 'free' | 'pro';
 }
 
 // Module-level shared cache, same pattern as watchlist.ts's useWatchlist():
