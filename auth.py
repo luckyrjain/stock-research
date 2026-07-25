@@ -165,3 +165,105 @@ def delete_session(token: str) -> None:
             )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         log_event(LOGGER, "session_delete_failed", level="warning", error=str(exc))
+
+
+# ── Programmatic API access (api_keys) ──────────────────────────────────────
+# A key is a bearer credential like a session token, but scoped to external/
+# scripted callers instead of a browser: it has no fixed expiry (a script
+# can't "re-sign-in" the way a browser redirects through a magic link), so it
+# stays valid until its owner explicitly revokes it. Same hash-only-storage
+# convention as magic_links/sessions — create_api_key is the only place the
+# raw key ever exists outside process memory, and it's returned to the
+# caller exactly once.
+_API_KEY_PREFIX = "apk_"
+
+
+def create_api_key(user_id: int, label: str | None = None) -> dict:
+    """Issues a fresh API key for an already-known user_id. Returns the full
+    row including the raw key (present only in this return value — never
+    persisted, never retrievable again after this call)."""
+    from sqlalchemy import text
+
+    raw_key = _API_KEY_PREFIX + secrets.token_urlsafe(32)
+    key_prefix = raw_key[:12]
+    engine = _get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            INSERT INTO api_keys (user_id, key_hash, key_prefix, label)
+            VALUES (:user_id, :key_hash, :key_prefix, :label)
+            RETURNING id, label, created_at
+        """), {
+            "user_id": user_id,
+            "key_hash": _hash_token(raw_key),
+            "key_prefix": key_prefix,
+            "label": label,
+        }).mappings().first()
+    return {
+        "id": row["id"],
+        "key": raw_key,
+        "key_prefix": key_prefix,
+        "label": row["label"],
+        "created_at": row["created_at"],
+        # A freshly-created key is never used or revoked yet — included
+        # explicitly (rather than omitted) so this return value has the same
+        # shape as list_api_keys()' rows, plus the one-time `key` field.
+        "last_used_at": None,
+        "revoked_at": None,
+    }
+
+
+def list_api_keys(user_id: int) -> list[dict]:
+    """Returns metadata for every key belonging to user_id, newest first —
+    never the raw key or its hash, only what a management UI needs to let a
+    user tell keys apart and revoke the right one."""
+    from sqlalchemy import text
+
+    engine = _get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, key_prefix, label, created_at, last_used_at, revoked_at
+            FROM api_keys
+            WHERE user_id = :user_id
+            ORDER BY created_at DESC
+        """), {"user_id": user_id}).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def revoke_api_key(user_id: int, key_id: int) -> bool:
+    """Revokes one of user_id's own keys. Returns False (not an error) if
+    key_id doesn't exist, isn't owned by user_id, or was already revoked —
+    the caller (api.py) turns that into a 404."""
+    from sqlalchemy import text
+
+    engine = _get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            UPDATE api_keys
+            SET revoked_at = NOW()
+            WHERE id = :key_id AND user_id = :user_id AND revoked_at IS NULL
+            RETURNING id
+        """), {"key_id": key_id, "user_id": user_id}).first()
+    return row is not None
+
+
+def get_user_for_api_key(raw_key: str) -> dict | None:
+    """Returns {"user_id":} for a valid, non-revoked key and opportunistically
+    stamps last_used_at, else None. Never raises — same "a DB hiccup looks
+    like an invalid credential, not a 500" convention as get_user_for_session."""
+    if not raw_key:
+        return None
+    try:
+        from sqlalchemy import text
+
+        engine = _get_engine()
+        with engine.begin() as conn:
+            row = conn.execute(text("""
+                UPDATE api_keys
+                SET last_used_at = NOW()
+                WHERE key_hash = :key_hash AND revoked_at IS NULL
+                RETURNING user_id
+            """), {"key_hash": _hash_token(raw_key)}).mappings().first()
+        return {"user_id": row["user_id"]} if row else None
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        log_event(LOGGER, "api_key_lookup_failed", level="warning", error=str(exc))
+        return None

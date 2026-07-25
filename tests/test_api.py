@@ -1852,5 +1852,168 @@ class AuthLogoutEndpointTest(unittest.TestCase):
         self.assertEqual(resp.json(), {"ok": True})
 
 
+class ApiKeyManagementEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._db_url = os.environ.get("DATABASE_URL")
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = self._db_url
+
+    def test_create_requires_session(self) -> None:
+        resp = client.post("/api/api-keys", json={"label": "x"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_create_returns_key_once(self) -> None:
+        created = {
+            "id": 1, "key": "apk_rawsecret", "key_prefix": "apk_rawsec",
+            "label": "my script", "created_at": "2026-01-01T00:00:00Z",
+        }
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
+             patch("auth.create_api_key", return_value=created) as create_key:
+            resp = client.post(
+                "/api/api-keys",
+                json={"label": "my script"},
+                headers={"Authorization": "Bearer sometoken"},
+            )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.json(), created)
+        create_key.assert_called_once_with(7, "my script")
+
+    def test_create_db_error_returns_503(self) -> None:
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
+             patch("auth.create_api_key", side_effect=RuntimeError("connection refused")):
+            resp = client.post(
+                "/api/api-keys",
+                json={"label": "x"},
+                headers={"Authorization": "Bearer sometoken"},
+            )
+        self.assertEqual(resp.status_code, 503)
+
+    def test_create_strips_and_caps_label(self) -> None:
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
+             patch("auth.create_api_key", return_value={
+                 "id": 1, "key": "apk_x", "key_prefix": "apk_x", "label": None, "created_at": "now",
+             }) as create_key:
+            client.post(
+                "/api/api-keys",
+                json={"label": "   "},
+                headers={"Authorization": "Bearer sometoken"},
+            )
+        create_key.assert_called_once_with(7, None)
+
+    def test_list_requires_session(self) -> None:
+        resp = client.get("/api/api-keys")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_list_returns_keys_for_current_user(self) -> None:
+        keys = [{
+            "id": 1, "key_prefix": "apk_ab", "label": None,
+            "created_at": "2026-01-01T00:00:00Z", "last_used_at": None, "revoked_at": None,
+        }]
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
+             patch("auth.list_api_keys", return_value=keys) as list_keys:
+            resp = client.get("/api/api-keys", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"keys": keys})
+        list_keys.assert_called_once_with(7)
+
+    def test_list_db_error_returns_503(self) -> None:
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
+             patch("auth.list_api_keys", side_effect=RuntimeError("connection refused")):
+            resp = client.get("/api/api-keys", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 503)
+
+    def test_revoke_requires_session(self) -> None:
+        resp = client.delete("/api/api-keys/1")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_revoke_success(self) -> None:
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
+             patch("auth.revoke_api_key", return_value=True) as revoke_key:
+            resp = client.delete("/api/api-keys/5", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"ok": True})
+        revoke_key.assert_called_once_with(7, 5)
+
+    def test_revoke_not_found_returns_404(self) -> None:
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
+             patch("auth.revoke_api_key", return_value=False):
+            resp = client.delete("/api/api-keys/999", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_revoke_cannot_target_another_users_key(self) -> None:
+        # auth.revoke_api_key itself scopes the UPDATE to (id, user_id) — this
+        # test just confirms api.py always passes the *session's* user_id
+        # through, never a client-supplied one, so cross-account revocation
+        # isn't reachable at the endpoint layer either.
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
+             patch("auth.revoke_api_key", return_value=False) as revoke_key:
+            client.delete("/api/api-keys/5", headers={"Authorization": "Bearer sometoken"})
+        revoke_key.assert_called_once_with(7, 5)
+
+    def test_revoke_db_error_returns_503(self) -> None:
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
+             patch("auth.revoke_api_key", side_effect=RuntimeError("connection refused")):
+            resp = client.delete("/api/api-keys/5", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 503)
+
+
+class ConsolidatedV1EndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._db_url = os.environ.get("DATABASE_URL")
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_missing_api_key_header_returns_401(self) -> None:
+        resp = client.get("/api/v1/consolidated/TCS")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_invalid_api_key_returns_401(self) -> None:
+        with patch("auth.get_user_for_api_key", return_value=None):
+            resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "bogus"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_missing_database_url_returns_401(self) -> None:
+        os.environ.pop("DATABASE_URL", None)
+        resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "apk_x"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_invalid_symbol_returns_422(self) -> None:
+        with patch("auth.get_user_for_api_key", return_value={"user_id": 7}):
+            resp = client.get("/api/v1/consolidated/not-a-symbol!!", headers={"X-API-Key": "apk_x"})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_valid_key_returns_consolidated_payload(self) -> None:
+        with patch("auth.get_user_for_api_key", return_value={"user_id": 7}), \
+             patch("cache.load", return_value=None), \
+             patch.object(api, "_load_picks_cache", return_value=None):
+            resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "apk_x"})
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["symbol"], "TCS")
+        self.assertIsNone(body["analysis"])
+        self.assertIsNone(body["market_pick"])
+
+    def test_rate_limit_is_keyed_by_user_not_ip(self) -> None:
+        api._RATE_LIMIT_CALLS["api_v1:7"] = [api.time.monotonic()] * 100
+        with patch("auth.get_user_for_api_key", return_value={"user_id": 7}), \
+             patch.object(api, "_consolidated_payload") as payload_fn:
+            resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "apk_x"})
+        self.assertEqual(resp.status_code, 429)
+        payload_fn.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

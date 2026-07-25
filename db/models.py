@@ -153,6 +153,29 @@ sessions = Table(
     Index("idx_sessions_user", "user_id"),
 )
 
+# Long-lived programmatic-access credentials (see "Programmatic API access
+# flow" in CLAUDE.md) — same hash-only-storage convention as magic_links/
+# sessions above: the raw key is shown to its owner exactly once, at creation
+# time, and never persisted. Unlike a session, a key has no fixed TTL — it's
+# valid until explicitly revoked (revoked_at set), since a script/integration
+# holding it can't "re-sign-in" the way a browser can. `key_prefix` is not
+# secret (first few chars of the raw key) — stored only so the key-management
+# UI can list keys in a way a user can tell apart without ever re-displaying
+# the secret.
+api_keys = Table(
+    "api_keys",
+    metadata,
+    Column("id",           Integer, primary_key=True, autoincrement=True),
+    Column("user_id",      Integer, ForeignKey("users.id"), nullable=False),
+    Column("key_hash",     String(64), nullable=False, unique=True),
+    Column("key_prefix",   String(16), nullable=False),
+    Column("label",        String(120)),
+    Column("created_at",   DateTime(timezone=True), server_default=text("NOW()")),
+    Column("last_used_at", DateTime(timezone=True)),
+    Column("revoked_at",   DateTime(timezone=True)),
+    Index("idx_api_keys_user", "user_id"),
+)
+
 
 def get_engine(database_url: str | None = None):
     url = database_url or os.environ["DATABASE_URL"]

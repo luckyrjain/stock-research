@@ -380,3 +380,20 @@ export interface PeerComparison {
   sector_median:  PeerRow | null;
   percentiles:    Record<string, number>;  // 0–100, keyed by the same column labels as `values`
 }
+
+// Programmatic API access (GET/POST/DELETE /api/api-keys). `key` is present
+// only in the POST response, shown to the caller exactly once — GET never
+// returns it, only key_prefix, so the management UI can list keys without
+// ever re-displaying the secret.
+export interface ApiKey {
+  id:            number;
+  key_prefix:    string;
+  label:         string | null;
+  created_at:    string;
+  last_used_at:  string | null;
+  revoked_at:    string | null;
+}
+
+export interface CreatedApiKey extends ApiKey {
+  key: string;
+}
