@@ -32,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from sqlalchemy import text
 
-from db.models import get_engine, metadata
+from db.models import get_engine, metadata, screener_stocks
 from observability import get_logger, log_event
 from tools.nifty500_tools import get_nifty500_constituents
 
@@ -48,21 +48,37 @@ _MAX_ACCEPTABLE_ERROR_RATE = 0.5
 
 
 def _fetch_one(stock: dict) -> dict:
-    """Fetch quote + technical metrics for one stock. Never raises."""
+    """Fetch quote + technical metrics for one stock. Never raises.
+
+    The two calls are isolated in their own try/except — a technical_signal
+    failure (e.g. a transient pandas/price-history hiccup) must not discard
+    an otherwise-good quote (price/P/E/market cap/sector), and vice versa.
+    rsi14/ema_trend simply stay null (never guessed) if technical_signal
+    couldn't be computed, same as when it legitimately returns UNKNOWN for
+    too little history.
+    """
     symbol = stock["symbol"]
     try:
         from tools.nse_tools import get_stock_quote
-        from signals.technical import technical_signal
 
         quote = json.loads(get_stock_quote.run(symbol=symbol))
         if quote.get("error"):
             return {"error": quote["error"], "symbol": symbol}
 
-        tech = technical_signal(symbol)
-        rsi14 = tech.meta.get("rsi14")
+        rsi14 = None
         ema_trend = None
-        if "ema20_above_ema50" in tech.meta:
-            ema_trend = "bullish" if tech.meta["ema20_above_ema50"] else "bearish"
+        try:
+            from signals.technical import technical_signal
+
+            tech = technical_signal(symbol)
+            rsi14 = tech.meta.get("rsi14")
+            if "ema20_above_ema50" in tech.meta:
+                ema_trend = "bullish" if tech.meta["ema20_above_ema50"] else "bearish"
+        except Exception as exc:
+            log_event(
+                LOGGER, "screener_technical_signal_failed", level="debug",
+                symbol=symbol, error=str(exc),
+            )
 
         return {
             "symbol":         symbol,
@@ -178,7 +194,7 @@ def main() -> None:
     parser.add_argument("--setup-db", action="store_true",
                         help="Create DB tables and exit")
     parser.add_argument("--reset-db", action="store_true",
-                        help="Drop and recreate DB tables, then exit")
+                        help="Drop and recreate the screener_stocks table, then exit")
     parser.add_argument("--force",    action="store_true",
                         help="Bypass 24 h cache on the NIFTY 500 constituent list")
     args = parser.parse_args()
@@ -188,10 +204,17 @@ def main() -> None:
         return
 
     if args.reset_db:
+        # Scoped to this pipeline's own table, not metadata.drop_all() — the
+        # shared MetaData() in db/models.py holds every table in the app
+        # (users, sessions, watchlist_items, ...), and dropping all of them
+        # just to reset screener_stocks would take down unrelated,
+        # NOT-regenerable data. sme_ema_pipeline.py --reset-db predates this
+        # and still has that broader-than-intended blast radius — see
+        # CLAUDE.md's disclosed limitation on it under "SME golden cross flow".
         engine = get_engine()
-        metadata.drop_all(engine)
-        metadata.create_all(engine)
-        log_event(LOGGER, "screener_db_tables_reset")
+        screener_stocks.drop(engine, checkfirst=True)
+        screener_stocks.create(engine, checkfirst=True)
+        log_event(LOGGER, "screener_db_table_reset")
         return
 
     healthy = run(force=args.force)

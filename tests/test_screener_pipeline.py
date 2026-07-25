@@ -69,6 +69,42 @@ class FetchOneTest(unittest.TestCase):
         self.assertIn("error", result)
         self.assertEqual(result["symbol"], "XYZ")
 
+    def test_technical_signal_failure_does_not_discard_a_good_quote(self) -> None:
+        # A transient pandas/price-history hiccup inside technical_signal must
+        # not throw away an otherwise-good quote (price/P/E/market cap) — the
+        # two fetches are isolated in their own try/except specifically so
+        # this degrades to null rsi14/ema_trend, not a dropped row.
+        quote = {"current_price": 100.0, "pe_ratio": 15.0, "company_name": "XYZ Ltd"}
+        with patch("tools.nse_tools.get_stock_quote", _fake_quote_tool(quote)), \
+             patch("signals.technical.technical_signal", side_effect=RuntimeError("boom")):
+            result = screener_pipeline._fetch_one(_stock("XYZ"))
+        self.assertNotIn("error", result)
+        self.assertEqual(result["pe_ratio"], 15.0)
+        self.assertIsNone(result["rsi14"])
+        self.assertIsNone(result["ema_trend"])
+
+
+class ResetDbScopeTest(unittest.TestCase):
+    """--reset-db must only touch this pipeline's own table — db/models.py's
+    MetaData() is shared across every table in the app (users, sessions,
+    watchlist_items, ...), so metadata.drop_all() here would take down
+    unrelated, NOT-regenerable data. See sme_ema_pipeline.py's own
+    --reset-db, which predates this fix and still has that broader-than-
+    intended blast radius (documented as a disclosed limitation in
+    CLAUDE.md)."""
+
+    def test_reset_db_drops_and_creates_only_screener_stocks(self) -> None:
+        fake_engine = MagicMock()
+        with patch("sys.argv", ["screener_pipeline.py", "--reset-db"]), \
+             patch.object(screener_pipeline, "get_engine", return_value=fake_engine), \
+             patch.object(screener_pipeline, "screener_stocks") as fake_table, \
+             patch.object(screener_pipeline, "metadata") as fake_metadata:
+            screener_pipeline.main()
+
+        fake_table.drop.assert_called_once_with(fake_engine, checkfirst=True)
+        fake_table.create.assert_called_once_with(fake_engine, checkfirst=True)
+        fake_metadata.drop_all.assert_not_called()
+
 
 class RunHealthSignalTest(unittest.TestCase):
     """run()'s return value drives whether the scheduled CI workflow (and the

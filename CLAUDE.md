@@ -663,6 +663,18 @@ flagged this as the blocker to scaling past a single process).
 CLI: `--setup-db` (create tables), `--reset-db` (drop + recreate — required after schema
 changes; data is fully regenerable), `--force` (bypass list cache), `--lookback N`.
 
+**Disclosed limitation**: `--reset-db` calls `metadata.drop_all(engine)`/`create_all(engine)`
+against the single shared `MetaData()` in `db/models.py` — the same object every other table
+in this app (`users`, `sessions`, `watchlist_items`, `verdict_history`, `api_keys`, and
+`screener_stocks`) is registered on. Running `sme_ema_pipeline.py --reset-db` therefore drops
+and recreates every table in the database, not just `sme_stocks`/`ema_signals` — "data is
+fully regenerable" above is only true for this pipeline's own tables, not for accounts/
+sessions/watchlist rows belonging to other features. `screener_pipeline.py --reset-db` (see
+"Custom screener flow" below) was scoped to its own table specifically to avoid repeating this;
+this script predates that fix and hasn't been changed to match, since a blast-radius change to
+an existing operational command is riskier to make speculatively than to flag here for whoever
+touches this next.
+
 The DB column for the cross is named `cross_type` (`'golden'`/`'death'`/`NULL`) because
 `CROSS` is a reserved SQL keyword; the API/TS field is `cross`.
 
@@ -776,7 +788,11 @@ mirroring `sme_ema_pipeline.py`'s shape, served at `/screener` via `GET /api/scr
    (RSI14 + EMA20/EMA50 trend posture, off the already-6h-cached `price_history` series — see
    "Technical signal" above). Both results are upserted into a new stored-metrics table,
    `screener_stocks`, so `GET /api/screener` never needs a live fetch per request — the same
-   "fetch once, filter/sort many" shape `sme_stocks`/`ema_signals` already established.
+   "fetch once, filter/sort many" shape `sme_stocks`/`ema_signals` already established. The two
+   fetches are isolated in their own try/except inside `_fetch_one()` — a `technical_signal`
+   failure (a transient pandas/price-history hiccup) must not discard an otherwise-good quote
+   (price/P/E/market cap/sector); `rsi14`/`ema_trend` simply stay `null` in that case, same as
+   when `technical_signal` legitimately returns `UNKNOWN` for too little price history.
 3. **Industry vs. sector**: `nse_industry` (from the NIFTY 500 list itself, a real
    NSE-published classification) is the primary filter-chip dimension, in preference to
    `sector` (yfinance's own field, kept on the table for reference) — `sector`'s GICS-vs-
@@ -800,11 +816,16 @@ mirroring `sme_ema_pipeline.py`'s shape, served at `/screener` via `GET /api/scr
    filter chips, P/E and market-cap numeric inputs, click-to-sort column headers) — a "Screener"
    nav link was added alongside "SME Signals" across every page's nav bar. Each row carries a
    `WatchlistButton`, tying this mode into the same cross-mode watchlist as the other three.
-7. **Daily auto-run**: `.github/workflows/screener-cron.yml` runs at 13:30 UTC (19:00 IST) on
-   weekdays — after `sme-cron.yml` (13:00 UTC) so that pipeline's own writes have settled, and
-   after NSE's 15:30 IST close. Same `DATABASE_URL`-secret-required, fail-fast-with-a-clear-
-   message pattern as `sme-cron.yml`. `screener_pipeline.py` also has a `--setup-db`/`--reset-db`/
-   `--force` CLI, same shape as `sme_ema_pipeline.py`.
+7. **Daily auto-run**: `.github/workflows/screener-cron.yml` runs at 14:00 UTC (19:30 IST) on
+   weekdays — after `sme-cron.yml` (13:00 UTC) so that pipeline's own writes have settled, after
+   NSE's 15:30 IST close, and 30 minutes after `watchlist-alerts-cron.yml` (also 13:30 UTC) so
+   the two independent jobs don't hit the same DB connection pool / Actions minute at once. Same
+   `DATABASE_URL`-secret-required, fail-fast-with-a-clear-message pattern as `sme-cron.yml`.
+   `screener_pipeline.py` also has a `--setup-db`/`--reset-db`/`--force` CLI, same shape as
+   `sme_ema_pipeline.py` — except `--reset-db` here is scoped to dropping/recreating only the
+   `screener_stocks` table (`screener_stocks.drop()`/`.create()`, not `metadata.drop_all()`),
+   unlike `sme_ema_pipeline.py --reset-db`, which operates on the shared `MetaData()` and so
+   drops every table in the app — see that command's own disclosed limitation above.
 
 ### Watchlist flow
 

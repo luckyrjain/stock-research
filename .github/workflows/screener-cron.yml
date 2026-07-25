@@ -2,10 +2,13 @@ name: Custom Screener Pipeline
 
 on:
   schedule:
-    # 19:00 IST (UTC+5:30) on weekdays = 13:30 UTC. Runs after sme-cron.yml
-    # (13:00 UTC) so that pipeline's own writes have settled, and after NSE's
-    # 15:30 IST close plus a buffer for end-of-day data to settle.
-    - cron: '30 13 * * 1-5'
+    # 19:30 IST (UTC+5:30) on weekdays = 14:00 UTC. Runs after sme-cron.yml
+    # (13:00 UTC) so that pipeline's own writes have settled, and 30 minutes
+    # after watchlist-alerts-cron.yml (also 13:30 UTC) to avoid both jobs
+    # hitting the same DB connection pool / GitHub Actions minute at once —
+    # this pipeline and that one don't share any table, so this is purely
+    # about avoiding unnecessary concurrent load, not a correctness issue.
+    - cron: '0 14 * * 1-5'
   workflow_dispatch:
 
 jobs:
