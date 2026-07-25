@@ -758,7 +758,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
             <Card title={<>
               Quant Signals
               <InfoTooltip title="Quant Signals" align="left">
-                <p>A composite score from valuation, growth, volume, filings, and technical (RSI/EMA trend) signals, each scored −1 (bearish) to +1 (bullish) and blended into the Final Score.</p>
+                <p>A composite score from valuation, growth, volume, filings, technical (RSI/EMA trend), and macro (FII/DII flow, RBI rate/inflation) signals, each scored −1 (bearish) to +1 (bullish) and blended into the Final Score.</p>
                 <p>This runs independently of the AI analyst and is one input to its recommendation.</p>
               </InfoTooltip>
             </>}>

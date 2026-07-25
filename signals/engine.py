@@ -7,15 +7,19 @@ from signals.models import SignalResult
 from signals.growth import growth_signal
 from signals.filings import filings_signal
 from signals.technical import technical_signal
+from signals.macro import macro_signal
 
 def run_signal_engine(symbol: str, all_data: dict) -> SignalResult:
     """Compute weighted signal scores and return a trading verdict.
 
-    Every signal but `technical` reads from `features` (already-fetched
-    data, no I/O of its own). `technical` fetches its own OHLCV input (see
-    signals/technical.py) — callers running inside an asyncio event loop
-    must invoke this function via an executor, not directly, the same as
-    every other blocking call in this codebase's SSE paths.
+    `technical` and `macro` are the only signals that do their own I/O —
+    every other signal reads from `features` (already-fetched data).
+    `technical` fetches its own OHLCV input (see signals/technical.py);
+    `macro` fetches (cached, market-wide, not per-symbol) FII/DII flow and
+    RBI rate/inflation context (see signals/macro.py). Callers running
+    inside an asyncio event loop must invoke this function via an
+    executor, not directly, the same as every other blocking call in this
+    codebase's SSE paths.
     """
     features = extract_features(all_data)
 
@@ -25,6 +29,7 @@ def run_signal_engine(symbol: str, all_data: dict) -> SignalResult:
         "growth": growth_signal(features),
         "filings": filings_signal(features),
         "technical": technical_signal(symbol),
+        "macro": macro_signal(),
     }
 
     weights = {
@@ -33,6 +38,7 @@ def run_signal_engine(symbol: str, all_data: dict) -> SignalResult:
         "growth": 0.4,
         "filings": 0.2,
         "technical": 0.2,
+        "macro": 0.15,
     }
 
     score = 0

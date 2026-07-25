@@ -5,6 +5,8 @@ with a top-level _meta.fetched_at timestamp.
 """
 
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +24,8 @@ TTL_HOURS: dict[str, float] = {
     "peers":            24,   # peer comparison table — fundamentals-like, doesn't move fast
     "index_history":    24,   # ^NSEI daily closes for the picks-history alpha stat
     "insider_activity": 24,   # insider trades + bulk/block deals — disclosed with lag anyway
+    "fii_dii_flow":     24,   # market-wide, published once per trading day
+    "macro_context":    24,   # RBI repo rate / CPI — changes at most monthly, daily refresh is plenty
 }
 
 
@@ -56,14 +60,31 @@ def load(symbol: str, task_name: str) -> dict | None:
 
 
 def save(symbol: str, task_name: str, data: dict) -> None:
-    """Write a copy of data to cache, stamping _meta.fetched_at."""
+    """Write a copy of data to cache, stamping _meta.fetched_at.
+
+    Written atomically (tempfile + os.replace) rather than a direct
+    write_text — every other cache write is symbol-scoped (one writer per
+    file in practice), but the market-wide pseudo-symbol tasks
+    (fii_dii_flow/macro_context, see signals/macro.py) can have several
+    ThreadPoolExecutor workers race to fill the same cache file on a
+    concurrent miss, and a direct write_text's interleaved writes could
+    otherwise leave invalid JSON on disk for the next reader.
+    """
     if _is_failed_payload(data):
         return
     p = cache_path(symbol, task_name)
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(data)
     payload["_meta"] = {"fetched_at": datetime.now(timezone.utc).isoformat()}
-    p.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    fd, tmp_path = tempfile.mkstemp(dir=p.parent, prefix=f".{task_name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(payload, indent=2, ensure_ascii=False))
+        os.replace(tmp_path, p)
+    except Exception:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
 
 
 def is_fresh(symbol: str, task_name: str) -> bool:
