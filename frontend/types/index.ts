@@ -328,6 +328,38 @@ export interface SmeSignalHistoryResponse {
   cross_events:  SmeCrossEvent[];         // every cross in that window, most recent first
 }
 
+// Custom screener (see GET /api/screener, screener_pipeline.py) — a
+// stored-metrics row for one NIFTY 500 stock. Every numeric field is null
+// (never guessed) when yfinance/Screener didn't have it for this stock.
+export interface ScreenerStock {
+  symbol:          string;
+  company_name:    string | null;
+  exchange:        string | null;
+  // From the NIFTY 500 constituent list itself (NSE's own published
+  // classification) — the primary filter-chip dimension, in preference to
+  // `sector` below (yfinance's own field, whose taxonomy for NSE/BSE
+  // symbols is an explicitly disclosed unverified assumption elsewhere in
+  // this codebase — see signals/engine.py).
+  nse_industry:    string | null;
+  sector:          string | null;
+  current_price:   number | null;
+  pe_ratio:        number | null;
+  market_cap_cr:   number | null;
+  avg_volume_10d:  number | null;
+  rsi14:           number | null;
+  ema_trend:       'bullish' | 'bearish' | null;
+  fetched_at:      string | null;   // ISO timestamp
+}
+
+export interface ScreenerResponse {
+  stocks:            ScreenerStock[];
+  total:              number;         // count matching the current filters
+  total_monitored:    number;         // total rows in screener_stocks, unfiltered
+  industries:         string[];       // real, currently-populated nse_industry values
+  last_run:           string | null;  // ISO timestamp or null
+  refreshing:         boolean;        // a pipeline refresh is running server-side
+}
+
 export type MarketPicksSSEMessage =
   | { event: 'picks_start';       sources: { name: string; type: string }[] }
   | { event: 'source_done';       source: string; articles: number; status: 'ok' | 'empty' }

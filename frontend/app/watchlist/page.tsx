@@ -68,6 +68,10 @@ export default function WatchlistPage() {
             SME Signals
           </Link>
           <span className="text-border-hi">|</span>
+          <Link href="/screener" className="text-sm text-muted hover:text-tx transition-colors">
+            Screener
+          </Link>
+          <span className="text-border-hi">|</span>
           <span className="text-sm font-semibold text-accent">Watchlist</span>
           <span className="text-border-hi">|</span>
           <Link href="/compare" className="text-sm text-muted hover:text-tx transition-colors">

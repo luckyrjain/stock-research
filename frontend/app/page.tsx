@@ -119,6 +119,12 @@ function HomePageInner() {
                 SME Signals →
               </Link>
               <Link
+                href="/screener"
+                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
+              >
+                Screener →
+              </Link>
+              <Link
                 href="/watchlist"
                 className="text-xs font-semibold text-muted hover:text-accent transition-colors"
               >

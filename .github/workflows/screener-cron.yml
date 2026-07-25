@@ -1,0 +1,41 @@
+name: Custom Screener Pipeline
+
+on:
+  schedule:
+    # 19:30 IST (UTC+5:30) on weekdays = 14:00 UTC. Runs after sme-cron.yml
+    # (13:00 UTC) so that pipeline's own writes have settled, and 30 minutes
+    # after watchlist-alerts-cron.yml (also 13:30 UTC) to avoid both jobs
+    # hitting the same DB connection pool / GitHub Actions minute at once —
+    # this pipeline and that one don't share any table, so this is purely
+    # about avoiding unnecessary concurrent load, not a correctness issue.
+    - cron: '0 14 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    name: Run custom screener pipeline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check DATABASE_URL is configured
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL secret is not set. Add a network-reachable Postgres connection string in repo Settings > Secrets and variables > Actions > New repository secret (name: DATABASE_URL) before this workflow can run."
+            exit 1
+          fi
+
+      - name: Run custom screener pipeline
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python screener_pipeline.py

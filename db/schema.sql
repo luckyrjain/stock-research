@@ -168,3 +168,31 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
+
+-- Custom stock screener (see screener_pipeline.py) — stored metrics for the
+-- NIFTY 500 universe (NSE's own published index membership; a bounded, real
+-- universe, not "all NSE stocks"), refreshed by a daily batch pipeline so
+-- GET /api/screener can filter/sort without a live fetch per request, the
+-- same shape as sme_stocks/ema_signals above. nse_industry comes from the
+-- NIFTY 500 constituent list itself; sector is yfinance's own field, kept
+-- for reference but not the primary filter (see signals/engine.py's
+-- disclosed sector-taxonomy caveat). rsi14/ema_trend reuse the same
+-- signals/technical.py computation the main stock-analysis flow already
+-- has, just persisted here for querying.
+CREATE TABLE IF NOT EXISTS screener_stocks (
+    symbol          VARCHAR(20) PRIMARY KEY,
+    company_name    VARCHAR(200),
+    exchange        VARCHAR(5),
+    nse_industry    VARCHAR(100),
+    sector          VARCHAR(100),
+    current_price   NUMERIC(14, 4),
+    pe_ratio        NUMERIC(10, 2),
+    market_cap_cr   NUMERIC(16, 2),
+    avg_volume_10d  NUMERIC(16, 2),
+    rsi14           NUMERIC(6, 2),
+    ema_trend       VARCHAR(10),   -- 'bullish' | 'bearish' | NULL
+    fetched_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_screener_stocks_industry ON screener_stocks(nse_industry);
+CREATE INDEX IF NOT EXISTS idx_screener_stocks_sector   ON screener_stocks(sector);

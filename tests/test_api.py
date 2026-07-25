@@ -1388,6 +1388,142 @@ class SmeRefreshEndpointTest(unittest.TestCase):
         mocked_create_task.assert_called_once()
 
 
+def _fake_screener_engine(rows, total, total_monitored, industries, last_run):
+    rows_result = MagicMock()
+    rows_result.mappings.return_value.fetchall.return_value = rows
+    total_result = MagicMock()
+    total_result.scalar.return_value = total
+    total_monitored_result = MagicMock()
+    total_monitored_result.scalar.return_value = total_monitored
+    industries_result = MagicMock()
+    industries_result.scalars.return_value.all.return_value = industries
+    last_run_result = MagicMock()
+    last_run_result.scalar.return_value = last_run
+
+    conn = _FakeConn([rows_result, total_result, total_monitored_result, industries_result, last_run_result])
+    engine = MagicMock()
+    engine.connect.return_value = conn
+    return engine
+
+
+class ScreenerEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
+
+    def test_rate_limited_returns_429(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rate_limiter._memory_calls["screener:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/screener")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_missing_database_url_returns_503(self) -> None:
+        resp = client.get("/api/screener")
+        self.assertEqual(resp.status_code, 503)
+
+    def test_invalid_ema_trend_returns_422_even_without_db(self) -> None:
+        resp = client.get("/api/screener?ema_trend=sideways")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_invalid_sort_column_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.get("/api/screener?sort=company_name")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_invalid_order_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.get("/api/screener?order=sideways")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_returns_stocks_shape_with_mocked_engine(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        fake_engine = _fake_screener_engine(
+            rows=[{"symbol": "TCS", "pe_ratio": 28.5, "ema_trend": "bullish"}],
+            total=1, total_monitored=500,
+            industries=["Information Technology", "Banking"],
+            last_run="2026-07-20T00:00:00",
+        )
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.get("/api/screener")
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["total"], 1)
+        self.assertEqual(body["total_monitored"], 500)
+        self.assertEqual(body["industries"], ["Information Technology", "Banking"])
+        self.assertEqual(body["stocks"][0]["symbol"], "TCS")
+        self.assertFalse(body["refreshing"])
+
+    def test_db_error_returns_sanitized_503(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("api._get_db_engine", side_effect=RuntimeError("connection refused: password exposed")):
+            resp = client.get("/api/screener")
+        self.assertEqual(resp.status_code, 503)
+        self.assertNotIn("password", resp.text)
+        self.assertNotIn("exposed", resp.text)
+
+    def test_refreshing_flag_reflects_lock_state(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        fake_engine = _fake_screener_engine(rows=[], total=0, total_monitored=0, industries=[], last_run=None)
+        rate_limiter._memory_locks["screener_refresh"] = True
+        try:
+            with patch("api._get_db_engine", return_value=fake_engine):
+                resp = client.get("/api/screener")
+            self.assertTrue(resp.json()["refreshing"])
+        finally:
+            rate_limiter._memory_locks.pop("screener_refresh", None)
+
+
+class ScreenerRefreshEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        rate_limiter._memory_locks.clear()
+        rate_limiter._memory_calls.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        rate_limiter._memory_locks.clear()
+        rate_limiter._memory_calls.clear()
+
+    def test_missing_database_url_returns_503(self) -> None:
+        resp = client.post("/api/screener/refresh")
+        self.assertEqual(resp.status_code, 503)
+
+    def test_already_refreshing_returns_409(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rate_limiter._memory_locks["screener_refresh"] = True
+        resp = client.post("/api/screener/refresh")
+        self.assertEqual(resp.status_code, 409)
+
+    def test_rate_limited_returns_429_before_starting_pipeline(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rate_limiter._memory_calls["screener_refresh:testclient"] = [api.time.monotonic()] * 3
+        resp = client.post("/api/screener/refresh")
+        self.assertEqual(resp.status_code, 429)
+        self.assertFalse(rate_limiter.is_locked("screener_refresh"))
+
+    def test_accepted_when_under_limit_and_not_already_running(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+
+        def _close_and_stub(coro):
+            coro.close()
+            return MagicMock()
+
+        with patch("api.asyncio.create_task", side_effect=_close_and_stub) as mocked_create_task:
+            resp = client.post("/api/screener/refresh")
+        self.assertEqual(resp.status_code, 202)
+        self.assertTrue(rate_limiter.is_locked("screener_refresh"))
+        mocked_create_task.assert_called_once()
+
+
 class WatchlistEndpointsTest(unittest.TestCase):
     """No account system exists — client_id is an opaque frontend-generated
     identifier, not a real user. These tests cover validation, the missing-DB
