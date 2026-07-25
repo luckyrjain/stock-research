@@ -67,6 +67,29 @@ class GetMacroContextTest(unittest.TestCase):
             result = get_macro_context()
         self.assertIn("error", result)
 
+    def test_implausible_repo_rate_is_dropped_not_trusted(self) -> None:
+        # Regression test: the `table tr` selector scans every table on the
+        # RBI homepage, not just the "Current Rates" widget (its exact HTML
+        # structure isn't verified in this sandbox — see module docstring).
+        # A percentage from an unrelated table could false-positive match
+        # before the real rate; bounding to India's real-world repo-rate
+        # range catches an obviously-wrong match without needing to know
+        # the page's exact structure.
+        html = _html_with_table([("Policy Repo Rate", "85.00%"), ("CPI Inflation", "5.10%")])
+        with patch("tools.macro_context_tools.requests.get", return_value=self._response(html)):
+            result = get_macro_context()
+        self.assertIsNone(result["repo_rate_pct"])
+        self.assertEqual(result["cpi_inflation_pct"], 5.1)
+
+    def test_implausible_first_match_does_not_block_a_later_plausible_one(self) -> None:
+        html = _html_with_table([
+            ("Policy Repo Rate (unrelated stat)", "85.00%"),
+            ("Policy Repo Rate", "6.50%"),
+        ])
+        with patch("tools.macro_context_tools.requests.get", return_value=self._response(html)):
+            result = get_macro_context()
+        self.assertEqual(result["repo_rate_pct"], 6.5)
+
     def test_first_matching_row_wins_when_duplicated(self) -> None:
         html = _html_with_table([
             ("Policy Repo Rate", "6.50%"),

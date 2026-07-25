@@ -199,6 +199,28 @@ class FetchInsiderTradesForSymbolTest(unittest.TestCase):
             result = fetch_insider_trades_for_symbol(None)
         self.assertEqual(result, {"symbol": "", "trades": []})
 
+    def test_duplicate_row_is_deduped_like_the_market_wide_function(self) -> None:
+        # Regression test: fetch_insider_trades() (market-wide) dedupes by
+        # article title, but this per-symbol function used to have no dedup
+        # at all — NSE's PIT feed can return the same disclosure more than
+        # once (e.g. an amended/re-filed row), which used to double-count it.
+        rows = [_pit_row(symbol="TESTCO"), _pit_row(symbol="TESTCO")]
+        with patch("tools.nse_insider_trades._nse_session", return_value=self._session(rows)):
+            result = fetch_insider_trades_for_symbol("testco")
+        self.assertEqual(len(result["trades"]), 1)
+
+    def test_comma_formatted_quantity_and_value_parse_correctly(self) -> None:
+        # Regression test: nse_fii_dii_tools._to_float() strips thousands-
+        # separator commas, but this row parser didn't — a comma-formatted
+        # value used to raise ValueError, silently dropping an otherwise
+        # valid trade instead of being parsed.
+        rows = [_pit_row(symbol="TESTCO", secAcq="1,00,000", secVal="5,00,00,000")]
+        with patch("tools.nse_insider_trades._nse_session", return_value=self._session(rows)):
+            result = fetch_insider_trades_for_symbol("testco")
+        self.assertEqual(len(result["trades"]), 1)
+        self.assertEqual(result["trades"][0]["quantity"], 100000)
+        self.assertEqual(result["trades"][0]["value"], 50000000.0)
+
 
 if __name__ == "__main__":
     unittest.main()
