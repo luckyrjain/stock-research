@@ -791,6 +791,77 @@ class PeersEndpointTest(unittest.TestCase):
         self.assertEqual(resp.json()["percentiles"], {})
 
 
+class InsiderActivityEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-insider-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
+        self._cache_patch.start()
+        self.addCleanup(self._cache_patch.stop)
+        api._RATE_LIMIT_CALLS.clear()
+
+    def tearDown(self) -> None:
+        api._RATE_LIMIT_CALLS.clear()
+
+    def test_invalid_symbol_returns_422(self) -> None:
+        resp = client.get("/api/insider-activity/bad symbol")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_rate_limited_returns_429(self) -> None:
+        api._RATE_LIMIT_CALLS["insider_activity:testclient"] = [api.time.monotonic()] * 30
+        resp = client.get("/api/insider-activity/TCS")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_combines_and_caches_both_sources(self) -> None:
+        fake_insider = {"symbol": "TCS", "trades": [{"person": "R Kumar", "action": "BUY"}]}
+        fake_bulk = {"symbol": "TCS", "deals": [{"client": "Big Fund", "action": "SELL"}]}
+        with patch("tools.nse_insider_trades.fetch_insider_trades_for_symbol", return_value=fake_insider) as insider_fn, \
+             patch("tools.nse_bulk_block_deals.fetch_bulk_block_deals_for_symbol", return_value=fake_bulk) as bulk_fn:
+            resp = client.get("/api/insider-activity/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["symbol"], "TCS")
+        self.assertEqual(body["insider_trades"], fake_insider["trades"])
+        self.assertEqual(body["bulk_block_deals"], fake_bulk["deals"])
+        insider_fn.assert_called_once_with("TCS")
+        bulk_fn.assert_called_once_with("TCS")
+
+        # Second call must be served from cache — neither scraper reruns.
+        with patch("tools.nse_insider_trades.fetch_insider_trades_for_symbol") as should_not_run_insider, \
+             patch("tools.nse_bulk_block_deals.fetch_bulk_block_deals_for_symbol") as should_not_run_bulk:
+            resp2 = client.get("/api/insider-activity/TCS")
+        self.assertEqual(resp2.status_code, 200)
+        self.assertEqual(resp2.json(), body)
+        should_not_run_insider.assert_not_called()
+        should_not_run_bulk.assert_not_called()
+
+    def test_both_empty_returns_empty_lists_not_error(self) -> None:
+        with patch("tools.nse_insider_trades.fetch_insider_trades_for_symbol",
+                   return_value={"symbol": "TCS", "trades": []}), \
+             patch("tools.nse_bulk_block_deals.fetch_bulk_block_deals_for_symbol",
+                   return_value={"symbol": "TCS", "deals": []}):
+            resp = client.get("/api/insider-activity/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["insider_trades"], [])
+        self.assertEqual(body["bulk_block_deals"], [])
+
+    def test_one_source_failing_does_not_take_down_the_other(self) -> None:
+        # Both underlying tool functions are documented to never raise, but
+        # this endpoint has its own defensive try/except around each — a
+        # future violation of that contract in one source must not 500 the
+        # whole response when the other source is fine.
+        fake_bulk = {"symbol": "TCS", "deals": [{"client": "Big Fund", "action": "SELL"}]}
+        with patch("tools.nse_insider_trades.fetch_insider_trades_for_symbol",
+                   side_effect=RuntimeError("NSE schema drifted")), \
+             patch("tools.nse_bulk_block_deals.fetch_bulk_block_deals_for_symbol", return_value=fake_bulk):
+            resp = client.get("/api/insider-activity/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["insider_trades"], [])
+        self.assertEqual(body["bulk_block_deals"], fake_bulk["deals"])
+
+
 class PeerPercentileHelperTest(unittest.TestCase):
     def test_tie_is_split_evenly(self) -> None:
         self_row = {"values": {"P/E": "25"}}

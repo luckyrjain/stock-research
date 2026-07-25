@@ -404,3 +404,35 @@ export interface ApiKey {
 export interface CreatedApiKey extends ApiKey {
   key: string;
 }
+
+// Structured (not LLM-article) promoter/director insider trades and
+// bulk/block deals for one symbol — the same NSE feeds Market Picks already
+// scrapes for discovery, surfaced here directly instead of only ever
+// showing up when a stock happens to make the weekly picks list. Both lists
+// are empty (never null) when NSE has nothing for this symbol — the
+// expected common case, not an error.
+export interface InsiderTrade {
+  person:     string;
+  category:   string;
+  action:     'BUY' | 'SELL';
+  quantity:   number;
+  value:      number;
+  date:       string;
+  date_iso:   string | null;
+}
+
+export interface BulkBlockDeal {
+  client:     string;
+  action:     'BUY' | 'SELL';
+  quantity:   number;
+  price:      number;
+  deal_type:  'Bulk Deal' | 'Block Deal';
+  date:       string;
+  date_iso:   string | null;
+}
+
+export interface InsiderActivity {
+  symbol:            string;
+  insider_trades:    InsiderTrade[];
+  bulk_block_deals:  BulkBlockDeal[];
+}

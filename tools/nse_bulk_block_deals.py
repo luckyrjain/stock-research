@@ -64,7 +64,12 @@ def _fmt_qty(n: int) -> str:
     return f"{n:,}"
 
 
-def _deal_to_article(deal: dict, deal_type: str) -> dict | None:
+def _parse_deal_row(deal: dict, deal_type: str) -> dict | None:
+    """Shared parse step for one bulk/block deal row (no quantity threshold —
+    callers apply their own min_qty, same separation the original code had).
+    Returns None if malformed. Used by both _deal_to_article() (market-wide
+    LLM-article feed, for pick discovery) and fetch_bulk_block_deals_for_symbol()
+    (structured, one symbol, for single-stock research)."""
     symbol    = str(_first(deal, _SYMBOL_KEYS) or "").upper().strip()
     client    = str(_first(deal, _CLIENT_KEYS) or "").strip()
     qty_raw   = _first(deal, _QTY_KEYS) or 0
@@ -85,6 +90,35 @@ def _deal_to_article(deal: dict, deal_type: str) -> dict | None:
     if not action:
         return None
 
+    pub_iso: str | None = None
+    for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            pub_iso = datetime.strptime(date_str, fmt).replace(tzinfo=timezone.utc).isoformat()
+            break
+        except ValueError:
+            pass
+
+    return {
+        "symbol":     symbol,
+        "client":     client,
+        "action":     action,
+        "quantity":   qty,
+        "price":      price,
+        "deal_type":  deal_type,
+        "date":       date_str,
+        "date_iso":   pub_iso,
+    }
+
+
+def _deal_to_article(deal: dict, deal_type: str) -> dict | None:
+    parsed = _parse_deal_row(deal, deal_type)
+    if not parsed:
+        return None
+    symbol, client, action, qty, price, date_str = (
+        parsed["symbol"], parsed["client"], parsed["action"],
+        parsed["quantity"], parsed["price"], parsed["date"],
+    )
+
     verb = "bought" if action == "BUY" else "sold"
     title = (
         f"{client} {verb} {_fmt_qty(qty)} shares of {symbol} "
@@ -97,29 +131,25 @@ def _deal_to_article(deal: dict, deal_type: str) -> dict | None:
         f"Date: {date_str}."
     )
 
-    pub_iso: str | None = None
-    for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y"):
-        try:
-            pub_iso = datetime.strptime(date_str, fmt).replace(tzinfo=timezone.utc).isoformat()
-            break
-        except ValueError:
-            pass
-
     return {
         "title":        title,
         "summary":      summary,
         "url":          "https://www.nseindia.com/companies-listing/corporate-filings-bulk-block-deals",
-        "published_at": pub_iso,
+        "published_at": parsed["date_iso"],
     }
 
 
-def _fetch_deals(sess: requests.Session, endpoint: str, min_qty: int, deal_type: str) -> list[dict]:
+def _fetch_deal_rows(sess: requests.Session, endpoint: str) -> list[dict]:
     try:
         r = sess.get(f"https://www.nseindia.com/api/{endpoint}", timeout=10)
         r.raise_for_status()
-        raw = r.json().get("data") or []
+        return r.json().get("data") or []
     except Exception:
         return []
+
+
+def _fetch_deals(sess: requests.Session, endpoint: str, min_qty: int, deal_type: str) -> list[dict]:
+    raw = _fetch_deal_rows(sess, endpoint)
 
     articles: list[dict] = []
     seen: set[str] = set()
@@ -158,6 +188,42 @@ def fetch_nse_bulk_block_deals() -> dict:
         _fetch_deals(sess, "block-deals", _MIN_BLOCK_QTY, "Block Deal")
     )
     return {"source": "NSE Bulk/Block Deals", "type": "brokerage", "articles": articles}
+
+
+def fetch_bulk_block_deals_for_symbol(symbol: str) -> dict:
+    """Structured (not LLM-article) bulk/block deals for one symbol, for the
+    single-stock research flow — same NSE endpoints and quantity thresholds
+    as fetch_nse_bulk_block_deals() (market-wide, for pick discovery), just
+    filtered to one symbol. NSE's own bulk-deals/block-deals endpoints only
+    ever return "recent trading days" (no date-range parameter to widen),
+    unlike the PIT insider-trades endpoint — so unlike
+    fetch_insider_trades_for_symbol(), there's no wider lookback to request
+    here; most stocks simply won't have a recent deal, which is the expected
+    common case, not an error. Returns {"symbol", "deals": []} (never
+    raises)."""
+    sym = symbol.upper().strip()
+    sess = _nse_session()
+    deals: list[dict] = []
+    for endpoint, min_qty, deal_type in (
+        ("bulk-deals",  _MIN_BULK_QTY,  "Bulk Deal"),
+        ("block-deals", _MIN_BLOCK_QTY, "Block Deal"),
+    ):
+        raw = _fetch_deal_rows(sess, endpoint)
+        for deal in raw:
+            try:
+                qty = int(_first(deal, _QTY_KEYS) or 0)
+                if qty < min_qty:
+                    continue
+                parsed = _parse_deal_row(deal, deal_type)
+            except Exception as exc:
+                logger.debug("Skipping malformed %s row: %s", deal_type, exc)
+                continue
+            if not parsed or parsed["symbol"] != sym:
+                continue
+            deals.append({k: v for k, v in parsed.items() if k != "symbol"})
+
+    deals.sort(key=lambda d: d["date_iso"] or "", reverse=True)
+    return {"symbol": sym, "deals": deals}
 
 
 NSE_BULK_SOURCES = [
