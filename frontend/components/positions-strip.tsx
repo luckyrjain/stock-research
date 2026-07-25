@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { usePositions } from '@/lib/positions';
 
 interface LivePrice {
@@ -56,6 +57,9 @@ export default function PositionsStrip() {
       <div className="flex items-center gap-2 mb-2.5">
         <h2 className="text-xs font-bold text-muted uppercase tracking-widest">Your Positions</h2>
         <span className="text-[10px] text-muted/60">{positions.length} tracked</span>
+        <Link href="/portfolio" className="ml-auto text-[10px] font-semibold text-accent hover:underline">
+          View full portfolio →
+        </Link>
       </div>
       <div className="flex gap-3 overflow-x-auto pb-1">
         {positions.map(pos => {

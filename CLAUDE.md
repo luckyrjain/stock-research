@@ -66,6 +66,7 @@ stock-research/
 │   ├── app/sme-signals/page.tsx  SME golden cross screener
 │   ├── app/screener/page.tsx     NIFTY 500 custom screener
 │   ├── app/watchlist/page.tsx    Cross-mode watchlist page
+│   ├── app/portfolio/page.tsx    Aggregate return summary over tracked "I bought this" positions
 │   ├── app/compare/page.tsx      Two stock analysis reports side by side (?symbols=TCS,INFY)
 │   ├── components/               Dashboard, search, progress tracker, market picks dashboard
 │   │   ├── header-search.tsx     Shared "what does AlphaPulse think about X" search box (every nav bar)
@@ -595,6 +596,26 @@ shows regardless of whether a fresh scan has run) polls the *existing* `GET /api
 30 s for the tracked symbols' live price — no new backend work — and computes P&L client-side against
 each position's stored entry, flagging "At target" / "At stop-loss" when the live price clears either
 level.
+
+**Portfolio summary** (`/portfolio`): an aggregate view over every tracked position, addressing the
+Product-lens gap "positions aren't aggregated into a portfolio" — `PositionsStrip` only ever showed
+one card per position, with no roll-up. Purely client-side, same as the rest of this feature: no new
+backend endpoint, reuses the exact same `GET /api/prices` poll `PositionsStrip` already makes (30 s
+interval), just computed over the full `positions` array instead of rendered per-card. `Position`
+carries no share-count/quantity field (only `entry_price`/`target_price`/`stop_loss` per symbol), so a
+real capital-weighted portfolio value (₹ invested, ₹ current) isn't data this page actually has —
+computing one would mean silently assuming "1 share per position," which would violate this
+codebase's "never invent" convention the same way guessing a missing scraped field would. The
+aggregate stats shown are therefore explicitly equal-weighted across positions and labeled as such:
+win rate (share of priced positions currently above entry — the adjacent "W/L" breakdown also
+surfaces a "flat" count for exactly-0%-P&L positions, so the two numbers always reconcile), average
+P&L% (a plain mean of each position's own % move, not a capital-weighted return), best/worst
+performer, and counts at target/stop-loss. `PositionsStrip` gained a "View full portfolio →" link;
+`/market-picks`'s nav bar gained a "Portfolio" link alongside "Watchlist"; `/portfolio`'s own nav bar
+links to every sibling section (same full set every other page's nav bar carries), even though no
+*other* page links back to it — positions are only ever created from the Market Picks flow, so that
+one entry point (plus `PositionsStrip`'s link) is enough for discoverability without adding a seventh
+item to every other page's already-long nav bar.
 
 ### Shared-state rate limiting (`rate_limiter.py`)
 

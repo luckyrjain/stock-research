@@ -381,6 +381,10 @@ export default function MarketPicksPage() {
             Watchlist
           </Link>
           <span className="text-border-hi">|</span>
+          <Link href="/portfolio" className="text-sm text-muted hover:text-tx transition-colors">
+            Portfolio
+          </Link>
+          <span className="text-border-hi">|</span>
           <Link href="/compare" className="text-sm text-muted hover:text-tx transition-colors">
             Compare
           </Link>
