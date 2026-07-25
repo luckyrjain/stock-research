@@ -184,6 +184,7 @@ def fetch_nse_emerge_stocks(force: bool = False) -> list[dict]:
         logger.warning("NSE Emerge fetch failed: %s", exc)
 
     if _NSE_EMERGE_CACHE.exists():
+        logger.warning("NSE Emerge: using stale cache")
         return json.loads(_NSE_EMERGE_CACHE.read_text())
     return []
 
