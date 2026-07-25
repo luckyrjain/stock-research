@@ -89,8 +89,26 @@ CREATE INDEX IF NOT EXISTS idx_verdict_history_symbol ON verdict_history(symbol)
 CREATE TABLE IF NOT EXISTS users (
     id          SERIAL PRIMARY KEY,
     email       VARCHAR(320) NOT NULL UNIQUE,
-    created_at  TIMESTAMPTZ DEFAULT NOW()
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    -- API access tier ('free' | 'pro') gating the per-user rate limit on
+    -- GET /api/v1/*. No real payment processing exists — every account is
+    -- 'free' until an operator updates this column by hand.
+    tier        VARCHAR(10) NOT NULL DEFAULT 'free',
+    CONSTRAINT ck_users_tier CHECK (tier IN ('free', 'pro'))
 );
+
+-- ADD COLUMN IF NOT EXISTS for a live database from before this column
+-- existed — the CREATE TABLE IF NOT EXISTS above is a no-op there. Postgres
+-- has no ADD CONSTRAINT IF NOT EXISTS, so the CHECK is guarded the same way
+-- watchlist_items' constraints are further down this file.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS tier VARCHAR(10) NOT NULL DEFAULT 'free';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_users_tier') THEN
+        ALTER TABLE users ADD CONSTRAINT ck_users_tier CHECK (tier IN ('free', 'pro'));
+    END IF;
+END $$;
 
 -- Links watchlist_items to an account, now that users exists. Exactly one of
 -- client_id/user_id must be set per row (see the comment on watchlist_items'

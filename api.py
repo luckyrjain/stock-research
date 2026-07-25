@@ -2301,6 +2301,12 @@ async def create_api_key(request: Request, body: CreateApiKeyRequest):
 
 @app.get("/api/api-keys")
 async def list_api_keys(request: Request):
+    """Also returns `tier` and `usage` (this account's current standing
+    against the same sliding-window limit GET /api/v1/* enforces) — a usage
+    dashboard alongside key management, not a separate endpoint, since a
+    user managing their keys is exactly who wants to see this. `usage.calls`
+    is a non-mutating peek (rate_limiter.get_usage_count) — checking it never
+    itself counts as a call against the limit it's reporting on."""
     user = await _require_session_user(request)
 
     import auth as _auth
@@ -2311,7 +2317,17 @@ async def list_api_keys(request: Request):
     except Exception as exc:
         log_event(LOGGER, "api_key_list_failed", level="error", error=str(exc))
         raise HTTPException(status_code=503, detail="Could not list API keys. See server logs.")
-    return {"keys": keys}
+
+    tier = user.get("tier") or _DEFAULT_TIER
+    limit = _TIER_LIMITS.get(tier, _TIER_LIMITS[_DEFAULT_TIER])
+    calls = await loop.run_in_executor(
+        None, rate_limiter.get_usage_count, f"api_v1:{user['id']}", _API_V1_WINDOW_SECONDS,
+    )
+    return {
+        "keys": keys,
+        "tier": tier,
+        "usage": {"calls": calls, "limit": limit, "window_seconds": _API_V1_WINDOW_SECONDS},
+    }
 
 
 @app.delete("/api/api-keys/{key_id}")
@@ -2344,11 +2360,22 @@ def _api_key_from_request(request: Request) -> str | None:
     return key or None
 
 
+_API_V1_WINDOW_SECONDS = 3600
+# Calls/hour by account tier — 'pro' exists as a column on `users` today with
+# no real payment flow behind it (see db/models.py's own note), so every
+# account is 'free' in practice until an operator flips it by hand. An
+# unrecognized tier value (shouldn't happen given the column's DB default,
+# but never trust a stored value blindly) falls back to 'free', the safer
+# direction to fail in.
+_TIER_LIMITS = {"free": 100, "pro": 1000}
+_DEFAULT_TIER = "free"
+
+
 async def _require_api_key_user(request: Request) -> int:
     """Returns the owning user_id for a valid X-API-Key header, else raises
-    401. Also applies a per-user rate limit distinct from the IP-keyed limits
-    on internal endpoints, since a legitimate integration may call from a
-    shared/rotating IP."""
+    401. Also applies a per-user, tier-scaled rate limit distinct from the
+    IP-keyed limits on internal endpoints, since a legitimate integration may
+    call from a shared/rotating IP."""
     raw_key = _api_key_from_request(request)
     if not raw_key or not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header.")
@@ -2360,7 +2387,8 @@ async def _require_api_key_user(request: Request) -> int:
     if result is None:
         raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header.")
     user_id = result["user_id"]
-    _check_rate_limit(f"api_v1:{user_id}", max_calls=100, window_seconds=3600)
+    limit = _TIER_LIMITS.get(result.get("tier") or _DEFAULT_TIER, _TIER_LIMITS[_DEFAULT_TIER])
+    _check_rate_limit(f"api_v1:{user_id}", max_calls=limit, window_seconds=_API_V1_WINDOW_SECONDS)
     return user_id
 
 

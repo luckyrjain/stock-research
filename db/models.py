@@ -120,6 +120,15 @@ users = Table(
     Column("id",         Integer, primary_key=True, autoincrement=True),
     Column("email",      String(320), nullable=False, unique=True),
     Column("created_at", DateTime(timezone=True), server_default=text("NOW()")),
+    # API access tier (see "Programmatic API access flow" in CLAUDE.md) — 'free'
+    # or 'pro', gating the per-user rate limit on GET /api/v1/*. Deliberately no
+    # real payment processing: there is no signup/checkout flow that sets this
+    # to 'pro' today, so every account is 'free' in practice until an operator
+    # updates the column by hand. server_default keeps every pre-existing row
+    # (created before this column existed) a well-defined 'free' rather than
+    # NULL, which api._TIER_LIMITS would otherwise have to guess a fallback for.
+    Column("tier",        String(10), nullable=False, server_default=text("'free'")),
+    CheckConstraint("tier IN ('free', 'pro')", name="ck_users_tier"),
 )
 
 # Single-use, short-lived tokens emailed to a user to sign in. Only a SHA-256

@@ -78,10 +78,15 @@ def create_magic_link(email: str) -> str:
 
 def verify_magic_link(token: str) -> dict | None:
     """Atomically consumes a magic-link token: marks it used, then
-    get-or-creates the `users` row for its email. Returns {"id":, "email":}
-    on success, or None if the token is missing, expired, or already used
-    (an UPDATE ... WHERE used_at IS NULL ... RETURNING is inherently
-    race-safe — two concurrent clicks of the same link can't both win)."""
+    get-or-creates the `users` row for its email. Returns
+    {"id":, "email":, "tier":} on success, or None if the token is missing,
+    expired, or already used (an UPDATE ... WHERE used_at IS NULL ...
+    RETURNING is inherently race-safe — two concurrent clicks of the same
+    link can't both win). Includes `tier` for the same reason
+    get_user_for_session()/get_user_for_api_key() do — this dict flows out
+    through GET /api/auth/verify as the same {"user": {...}} shape
+    GET /api/auth/me returns, and frontend/lib/auth.ts's AuthUser type
+    declares tier as required."""
     from sqlalchemy import text
 
     engine = _get_engine()
@@ -101,9 +106,9 @@ def verify_magic_link(token: str) -> dict | None:
         user = conn.execute(text("""
             INSERT INTO users (email) VALUES (:email)
             ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
-            RETURNING id, email
+            RETURNING id, email, tier
         """), {"email": email}).mappings().first()
-    return {"id": user["id"], "email": user["email"]}
+    return {"id": user["id"], "email": user["email"], "tier": user["tier"]}
 
 
 def create_session(user_id: int) -> str:
@@ -127,9 +132,9 @@ def create_session(user_id: int) -> str:
 
 
 def get_user_for_session(token: str) -> dict | None:
-    """Returns {"id":, "email":} for a valid, non-expired session token, else
-    None. Never raises — a missing/invalid/expired session or a DB hiccup
-    should all just look like "not signed in", not a 500."""
+    """Returns {"id":, "email":, "tier":} for a valid, non-expired session
+    token, else None. Never raises — a missing/invalid/expired session or a
+    DB hiccup should all just look like "not signed in", not a 500."""
     if not token:
         return None
     try:
@@ -138,12 +143,12 @@ def get_user_for_session(token: str) -> dict | None:
         engine = _get_engine()
         with engine.connect() as conn:
             row = conn.execute(text("""
-                SELECT u.id, u.email
+                SELECT u.id, u.email, u.tier
                 FROM sessions s
                 JOIN users u ON u.id = s.user_id
                 WHERE s.token_hash = :token_hash AND s.expires_at > NOW()
             """), {"token_hash": _hash_token(token)}).mappings().first()
-        return {"id": row["id"], "email": row["email"]} if row else None
+        return {"id": row["id"], "email": row["email"], "tier": row["tier"]} if row else None
     except Exception as exc:  # pylint: disable=broad-exception-caught
         log_event(LOGGER, "session_lookup_failed", level="warning", error=str(exc))
         return None
@@ -247,9 +252,12 @@ def revoke_api_key(user_id: int, key_id: int) -> bool:
 
 
 def get_user_for_api_key(raw_key: str) -> dict | None:
-    """Returns {"user_id":} for a valid, non-revoked key and opportunistically
-    stamps last_used_at, else None. Never raises — same "a DB hiccup looks
-    like an invalid credential, not a 500" convention as get_user_for_session."""
+    """Returns {"user_id", "tier"} for a valid, non-revoked key and
+    opportunistically stamps last_used_at, else None. `tier` comes along in
+    the same query (no second round trip) since the only thing it's used for
+    is picking the per-user rate limit on the same request. Never raises —
+    same "a DB hiccup looks like an invalid credential, not a 500" convention
+    as get_user_for_session."""
     if not raw_key:
         return None
     try:
@@ -261,9 +269,9 @@ def get_user_for_api_key(raw_key: str) -> dict | None:
                 UPDATE api_keys
                 SET last_used_at = NOW()
                 WHERE key_hash = :key_hash AND revoked_at IS NULL
-                RETURNING user_id
+                RETURNING user_id, (SELECT tier FROM users WHERE users.id = api_keys.user_id) AS tier
             """), {"key_hash": _hash_token(raw_key)}).mappings().first()
-        return {"user_id": row["user_id"]} if row else None
+        return {"user_id": row["user_id"], "tier": row["tier"]} if row else None
     except Exception as exc:  # pylint: disable=broad-exception-caught
         log_event(LOGGER, "api_key_lookup_failed", level="warning", error=str(exc))
         return None

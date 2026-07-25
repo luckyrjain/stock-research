@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useAuth } from '@/lib/auth';
 import HeaderSearch from '@/components/header-search';
 import AuthWidget from '@/components/auth-widget';
-import type { ApiKey, CreatedApiKey } from '@/types';
+import type { ApiKey, ApiKeysResponse, ApiUsage, CreatedApiKey } from '@/types';
 
 function fmtDate(iso: string | null): string {
   if (!iso) return '—';
@@ -15,6 +15,8 @@ function fmtDate(iso: string | null): string {
 export default function ApiKeysPage() {
   const { user, loading: authLoading } = useAuth();
   const [keys, setKeys] = useState<ApiKey[]>([]);
+  const [tier, setTier] = useState<'free' | 'pro'>('free');
+  const [usage, setUsage] = useState<ApiUsage | null>(null);
   const [keysLoading, setKeysLoading] = useState(true);
   const [label, setLabel] = useState('');
   const [creating, setCreating] = useState(false);
@@ -26,11 +28,14 @@ export default function ApiKeysPage() {
     setKeysLoading(true);
     try {
       const res = await fetch('/api/api-keys', { cache: 'no-store' });
-      if (!res.ok) { setKeys([]); return; }
-      const data = await res.json() as { keys: ApiKey[] };
+      if (!res.ok) { setKeys([]); setUsage(null); return; }
+      const data = await res.json() as Partial<ApiKeysResponse>;
       setKeys(data.keys ?? []);
+      setTier(data.tier ?? 'free');
+      setUsage(data.usage ?? null);
     } catch {
       setKeys([]);
+      setUsage(null);
     } finally {
       setKeysLoading(false);
     }
@@ -122,6 +127,35 @@ export default function ApiKeysPage() {
           </div>
         ) : (
           <>
+            {usage && (
+              <div className="rounded-xl border border-border bg-card px-5 py-4 mb-6">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-muted">Usage</span>
+                    <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border
+                      ${tier === 'pro' ? 'text-accent border-accent/40 bg-accent/10' : 'text-muted border-border'}`}>
+                      {tier} tier
+                    </span>
+                  </div>
+                  <span className="font-mono text-xs text-muted tabular-nums">
+                    {usage.calls} / {usage.limit} calls this hour
+                  </span>
+                </div>
+                <div className="h-1.5 rounded-full bg-surface overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all ${usage.calls >= usage.limit ? 'bg-sell' : 'bg-accent'}`}
+                    style={{ width: `${Math.min(100, (usage.calls / Math.max(1, usage.limit)) * 100)}%` }}
+                  />
+                </div>
+                <p className="text-[10px] text-muted/70 mt-2">
+                  Applies across every key on this account, to{' '}
+                  <code className="text-tx bg-surface px-1 py-0.5 rounded">GET /api/v1/*</code> calls only —
+                  a sliding one-hour window, not a calendar-hour reset.
+                  {tier === 'free' && ' Higher-tier limits exist but aren’t self-serve yet.'}
+                </p>
+              </div>
+            )}
+
             <form onSubmit={handleCreate} className="flex items-end gap-2 mb-6">
               <div className="flex-1">
                 <label className="block text-xs font-semibold text-muted mb-1.5" htmlFor="label">

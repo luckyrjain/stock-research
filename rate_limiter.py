@@ -114,6 +114,38 @@ def is_allowed(key: str, max_calls: int, window_seconds: float) -> bool:
     return _is_allowed_memory(key, max_calls, window_seconds)
 
 
+_USAGE_COUNT_SCRIPT = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now - window)
+return redis.call('ZCARD', key)
+"""
+
+
+def _usage_count_memory(key: str, window_seconds: float) -> int:
+    now = time.monotonic()
+    with _memory_calls_lock:
+        calls = [t for t in _memory_calls.get(key, []) if now - t < window_seconds]
+        _memory_calls[key] = calls
+        return len(calls)
+
+
+def get_usage_count(key: str, window_seconds: float) -> int:
+    """Non-mutating peek at how many calls already count toward `key`'s
+    sliding window (does NOT itself count as a call, unlike is_allowed) — for
+    surfacing "N calls used this window" in a usage dashboard without
+    perturbing the count it's reporting on."""
+    client = _get_redis_client()
+    if client is not None:
+        try:
+            now = time.time()
+            return int(client.eval(_USAGE_COUNT_SCRIPT, 1, f"ratelimit:{key}", now, window_seconds))
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            _warn_redis_failure("redis_usage_count_failed", exc)
+    return _usage_count_memory(key, window_seconds)
+
+
 # ── Named-slot concurrency ceilings ──────────────────────────────────────────
 
 _ACQUIRE_SLOT_SCRIPT = """

@@ -2365,12 +2365,35 @@ class ApiKeyManagementEndpointTest(unittest.TestCase):
             "id": 1, "key_prefix": "apk_ab", "label": None,
             "created_at": "2026-01-01T00:00:00Z", "last_used_at": None, "revoked_at": None,
         }]
-        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com", "tier": "free"}), \
              patch("auth.list_api_keys", return_value=keys) as list_keys:
             resp = client.get("/api/api-keys", headers={"Authorization": "Bearer sometoken"})
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {"keys": keys})
+        body = resp.json()
+        self.assertEqual(body["keys"], keys)
+        self.assertEqual(body["tier"], "free")
+        self.assertEqual(body["usage"], {"calls": 0, "limit": 100, "window_seconds": 3600})
         list_keys.assert_called_once_with(7)
+
+    def test_list_usage_reflects_pro_tier_limit(self) -> None:
+        keys = []
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com", "tier": "pro"}), \
+             patch("auth.list_api_keys", return_value=keys):
+            resp = client.get("/api/api-keys", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["tier"], "pro")
+        self.assertEqual(body["usage"]["limit"], 1000)
+
+    def test_list_missing_tier_defaults_to_free(self) -> None:
+        # A session dict without "tier" (e.g. a stale test double, or a
+        # not-yet-migrated row) must not crash — falls back to 'free'.
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
+             patch("auth.list_api_keys", return_value=[]):
+            resp = client.get("/api/api-keys", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["tier"], "free")
+        self.assertEqual(resp.json()["usage"]["limit"], 100)
 
     def test_list_db_error_returns_503(self) -> None:
         with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
@@ -2457,6 +2480,32 @@ class ConsolidatedV1EndpointTest(unittest.TestCase):
         self.assertIsNone(body["market_pick"])
 
     def test_rate_limit_is_keyed_by_user_not_ip(self) -> None:
+        rate_limiter._memory_calls["api_v1:7"] = [api.time.monotonic()] * 100
+        with patch("auth.get_user_for_api_key", return_value={"user_id": 7, "tier": "free"}), \
+             patch.object(api, "_consolidated_payload") as payload_fn:
+            resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "apk_x"})
+        self.assertEqual(resp.status_code, 429)
+        payload_fn.assert_not_called()
+
+    def test_pro_tier_gets_a_higher_limit(self) -> None:
+        # 100 prior calls would exhaust the free-tier limit (see the test
+        # above) but must not exhaust pro's higher one.
+        rate_limiter._memory_calls["api_v1:7"] = [api.time.monotonic()] * 100
+        with patch("auth.get_user_for_api_key", return_value={"user_id": 7, "tier": "pro"}), \
+             patch("cache.load", return_value=None), \
+             patch.object(api, "_load_picks_cache", return_value=None):
+            resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "apk_x"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_unrecognized_tier_falls_back_to_free_limit(self) -> None:
+        rate_limiter._memory_calls["api_v1:7"] = [api.time.monotonic()] * 100
+        with patch("auth.get_user_for_api_key", return_value={"user_id": 7, "tier": "made-up-tier"}), \
+             patch.object(api, "_consolidated_payload") as payload_fn:
+            resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "apk_x"})
+        self.assertEqual(resp.status_code, 429)
+        payload_fn.assert_not_called()
+
+    def test_missing_tier_key_falls_back_to_free_limit(self) -> None:
         rate_limiter._memory_calls["api_v1:7"] = [api.time.monotonic()] * 100
         with patch("auth.get_user_for_api_key", return_value={"user_id": 7}), \
              patch.object(api, "_consolidated_payload") as payload_fn:

@@ -1008,7 +1008,7 @@ Picks pipeline docs), so there's nothing for an account to link there.
 ### Programmatic API access flow
 
 A signed-in user can mint long-lived API keys for scripts/integrations, separate from the
-session-cookie identity the frontend itself uses. Two independent pieces:
+session-cookie identity the frontend itself uses. Three independent pieces:
 
 1. **Key management** (session-authenticated, same identity as everything else under "Account
    & magic-link auth flow" above) — `POST /api/api-keys` (`{label?}`, 201, returns the row
@@ -1031,11 +1031,27 @@ session-cookie identity the frontend itself uses. Two independent pieces:
    reserved for the internal session-token convention above; reusing that header would let a
    forwarded session token accidentally satisfy this check. `_require_api_key_user()` validates
    the key via `auth.get_user_for_api_key()` (which also opportunistically stamps
-   `last_used_at`) and applies a per-*user* rate limit (`api_v1:{user_id}`, 100/hour) rather than
-   per-IP like the internal endpoints — a legitimate integration may run from a shared or
-   rotating IP, so IP-keying would be the wrong bucket here. More `/api/v1/*` routes can follow
-   the same wrapper-around-an-existing-handler pattern later; this PR intentionally ships one
-   real endpoint rather than a speculative surface no caller has asked for yet.
+   `last_used_at`) and applies a per-*user*, **tier-scaled** rate limit (`api_v1:{user_id}`, a
+   sliding one-hour window) rather than per-IP like the internal endpoints — a legitimate
+   integration may run from a shared or rotating IP, so IP-keying would be the wrong bucket here.
+   More `/api/v1/*` routes can follow the same wrapper-around-an-existing-handler pattern later;
+   this PR intentionally ships one real endpoint rather than a speculative surface no caller has
+   asked for yet.
+3. **Tiers + usage dashboard** — `users.tier` (`'free'` | `'pro'`, `db/models.py`) gates
+   `api._TIER_LIMITS` (`{"free": 100, "pro": 1000}` calls/hour). **No real payment processing
+   exists** — there is no signup/checkout flow that ever sets a row to `'pro'`; every account is
+   `'free'` until an operator updates the column by hand (`server_default 'free'` on the column
+   itself, so this is a safe no-op for every pre-existing row, not a breaking migration). An
+   unrecognized tier value falls back to `'free'` (`_DEFAULT_TIER`) rather than trusting a stored
+   value blindly. `rate_limiter.get_usage_count(key, window_seconds)` is a **non-mutating peek**
+   at the same sliding-window state `is_allowed()` already maintains (`ZCARD` after
+   `ZREMRANGEBYSCORE`, or the in-memory equivalent) — checking current usage never itself counts
+   as a call against the limit it's reporting on, unlike `is_allowed()`. `GET /api/api-keys`
+   (already session-authenticated for key management) now also returns `tier` and
+   `usage: {calls, limit, window_seconds}` in the same response — a usage dashboard alongside key
+   management, not a separate endpoint, since a user managing their keys is exactly who wants to
+   see this. `frontend/app/api-keys/page.tsx` renders it as a tier badge + a progress bar (red
+   past the limit) above the key-creation form.
 
 ### Consolidated view flow
 
