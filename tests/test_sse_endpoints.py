@@ -97,6 +97,31 @@ class AnalyseSuccessPathTest(unittest.TestCase):
         # must never leak into the report the frontend receives.
         self.assertNotIn("_degraded", done["report"]["analysis"])
 
+    def test_llm_slot_count_returns_to_zero_after_completion(self) -> None:
+        # Regression test: _release_llm_slot() used to be tied to the SSE
+        # consumer's own wait-loop finally block rather than to when the
+        # background analyst call actually finished, so a client disconnect
+        # could release the slot while the LLM call kept running — allowing
+        # more concurrent calls than _LLM_CONCURRENCY_LIMIT. The fix moved
+        # the release into the background task's own finally, with the
+        # outer safety-net release stood down right after handoff. Checking
+        # the real in-memory slot counter (not a mocked call count) so a
+        # double-release (net negative) from an incorrectly-still-active
+        # safety net, or a leaked slot (net positive), both fail this test.
+        def _fake_fetch_task(task_name, symbol, run_id, max_attempts=3):
+            return {"symbol": symbol, "task": task_name}
+
+        with patch("main._fetch_task", side_effect=_fake_fetch_task), \
+             patch("schemas.normalize", side_effect=lambda name, data: data), \
+             patch("schemas.validate", return_value=(True, "")), \
+             patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")), \
+             patch("signals.store.save_signal"), \
+             patch("crew.run_analysis_with_fallback", return_value=_fake_analysis("TCS")):
+            resp = client.get("/api/analyse/TCS")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(rate_limiter._memory_slots.get(api._LLM_SLOT_NAME, 0), 0)
+
     def test_llm_capacity_rejection_emits_error_event(self) -> None:
         with patch("api._acquire_llm_slot", return_value=False), \
              patch("main._fetch_task", return_value={"symbol": "TCS"}), \
@@ -123,10 +148,12 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
         self.addCleanup(patch.stopall)
         rate_limiter._memory_calls.clear()
         rate_limiter._memory_slots.clear()
+        rate_limiter._memory_locks.clear()
 
     def tearDown(self) -> None:
         rate_limiter._memory_calls.clear()
         rate_limiter._memory_slots.clear()
+        rate_limiter._memory_locks.clear()
 
     def _fake_pipeline(self, picks: list, healthy: bool = True):
         instance = MagicMock()
@@ -145,6 +172,10 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
         self.assertEqual(events[-1]["total_picks"], 1)
         self.assertFalse(events[-1]["from_cache"])
         self.assertTrue(market_picks_pipeline._PICKS_CACHE_PATH.exists())
+        # The single-run lock must be released once the pipeline completes,
+        # not left claimed — otherwise every subsequent force-refresh would
+        # 409 forever.
+        self.assertFalse(rate_limiter.is_locked("market_picks_refresh"))
 
     def test_degraded_run_is_not_cached(self) -> None:
         picks = [{"symbol": "TCS", "confidence_score": 80}]
@@ -171,6 +202,9 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
         events = _parse_sse(resp.text)
         self.assertEqual(events[-1]["event"], "error")
         self.assertIn("capacity", events[-1]["message"].lower())
+        # Capacity rejection happens before the pipeline ever launches — the
+        # lock must still be released here too, not just on the success path.
+        self.assertFalse(rate_limiter.is_locked("market_picks_refresh"))
 
 
 if __name__ == "__main__":

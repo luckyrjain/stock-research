@@ -35,23 +35,42 @@ LOGGER = get_logger("rate_limiter")
 
 _redis_client = None
 _redis_client_lock = threading.Lock()
+_redis_client_construction_failed = False
 _redis_warned = False
 
 
 def _get_redis_client():
     """Lazily construct a redis-py client (does not connect until first
-    command). Returns None if REDIS_URL isn't set — callers then use the
-    in-memory fallback directly, no Redis attempt made at all."""
-    global _redis_client
+    command). Returns None if REDIS_URL isn't set, or if construction itself
+    failed (e.g. a malformed URL) — callers then use the in-memory fallback
+    directly, same as every other Redis-call-failure path in this module.
+
+    A construction failure is remembered rather than retried on every call —
+    unlike a later command failure (which every caller already retries
+    fresh next time, since Redis being briefly unreachable is transient), a
+    bad REDIS_URL is a deterministic configuration problem that won't fix
+    itself mid-process, so retrying it on every single rate-limited request
+    would just be repeated, guaranteed-to-fail work."""
+    global _redis_client, _redis_client_construction_failed
     url = os.environ.get("REDIS_URL")
     if not url:
         return None
     if _redis_client is not None:
         return _redis_client
+    if _redis_client_construction_failed:
+        return None
     with _redis_client_lock:
-        if _redis_client is None:
+        if _redis_client is not None:
+            return _redis_client
+        if _redis_client_construction_failed:
+            return None
+        try:
             import redis
             _redis_client = redis.from_url(url, socket_connect_timeout=2, socket_timeout=2)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            _redis_client_construction_failed = True
+            _warn_redis_failure("redis_client_construction_failed", exc)
+            return None
         return _redis_client
 
 

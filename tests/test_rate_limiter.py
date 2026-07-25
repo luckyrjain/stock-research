@@ -12,6 +12,7 @@ class _MemoryStateResetMixin:
         rate_limiter._memory_slots.clear()
         rate_limiter._memory_locks.clear()
         rate_limiter._redis_client = None
+        rate_limiter._redis_client_construction_failed = False
         self._redis_url = os.environ.pop("REDIS_URL", None)
 
     def tearDown(self) -> None:
@@ -19,6 +20,7 @@ class _MemoryStateResetMixin:
         rate_limiter._memory_slots.clear()
         rate_limiter._memory_locks.clear()
         rate_limiter._redis_client = None
+        rate_limiter._redis_client_construction_failed = False
         if self._redis_url is not None:
             os.environ["REDIS_URL"] = self._redis_url
         else:
@@ -39,6 +41,32 @@ class GetRedisClientTest(_MemoryStateResetMixin, unittest.TestCase):
         self.assertIs(first, fake)
         self.assertIs(second, fake)
         from_url.assert_called_once()
+
+    def test_construction_failure_degrades_to_none_not_raise(self) -> None:
+        # Regression test: redis.from_url() previously wasn't wrapped in
+        # try/except, unlike every other Redis call site in this module —
+        # a malformed REDIS_URL made every rate-limited endpoint 500 for
+        # the life of the process instead of degrading gracefully.
+        os.environ["REDIS_URL"] = "not-a-valid-redis-url"
+        with patch("redis.from_url", side_effect=ValueError("bad scheme")):
+            client = rate_limiter._get_redis_client()  # must not raise
+        self.assertIsNone(client)
+
+    def test_construction_failure_is_remembered_not_retried(self) -> None:
+        os.environ["REDIS_URL"] = "not-a-valid-redis-url"
+        with patch("redis.from_url", side_effect=ValueError("bad scheme")) as from_url:
+            rate_limiter._get_redis_client()
+            rate_limiter._get_redis_client()
+        from_url.assert_called_once()
+
+    def test_construction_failure_falls_back_to_memory_rate_limit(self) -> None:
+        # End-to-end: is_allowed() must still work via the in-memory path
+        # when Redis client construction itself blows up, not just
+        # _get_redis_client() in isolation.
+        os.environ["REDIS_URL"] = "not-a-valid-redis-url"
+        with patch("redis.from_url", side_effect=ValueError("bad scheme")):
+            self.assertTrue(rate_limiter.is_allowed("k", max_calls=1, window_seconds=60))
+            self.assertFalse(rate_limiter.is_allowed("k", max_calls=1, window_seconds=60))
 
 
 class IsAllowedMemoryTest(_MemoryStateResetMixin, unittest.TestCase):
