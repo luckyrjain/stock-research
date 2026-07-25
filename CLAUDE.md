@@ -10,7 +10,7 @@ A full-stack Indian equity research platform. Given an NSE/BSE ticker (e.g. `TCS
 
 1. Validates the symbol across NSE autocomplete, BSE, and Screener.in
 2. Fetches six data slices in parallel (price, fundamentals, news, shareholding, MF holdings, filings)
-3. Runs a quantitative signal engine (valuation + growth + volume + filings + technical signals)
+3. Runs a quantitative signal engine (valuation + growth + volume + filings + technical + macro signals)
 4. Calls an LLM analyst to produce a structured `BUY`/`HOLD`/`SELL` recommendation
 5. Streams progress and the final report to the browser via Server-Sent Events
 
@@ -320,6 +320,42 @@ flow this whole product is centered on.
    `signal_context.signals` generically (`Object.entries(...).map(...)`), so the new
    `technical` entry appears automatically with no frontend code change — only its tooltip copy
    was updated to mention it.
+
+### Macro overlay signal (FII/DII flow + RBI rate/inflation)
+
+A market-wide overlay on top of the per-stock signals above — "is the broader institutional/rate
+backdrop a tailwind or a headwind right now" — blended into every symbol's signal score at a low
+weight (0.15), since it says nothing about the specific company.
+
+1. `tools/nse_fii_dii_tools.py::get_fii_dii_flow()` — NSE's own daily provisional FII/DII net
+   equity-flow report (₹ Cr). `tools/macro_context_tools.py::get_macro_context()` — RBI's policy
+   repo rate and CPI inflation, scraped from RBI's own "Current Rates" table. Both follow the
+   same never-raise, `{"error": ...}`-on-failure convention as every other `tools/*.py` module,
+   and never guess a missing field (e.g. a DII row NSE didn't return, or a CPI figure RBI's
+   homepage doesn't currently carry) — that field comes back `None`, never invented.
+   **Disclosed limitation**: neither scrape target could be verified against a live response in
+   this sandbox (no outbound internet — see the repeated disclosure elsewhere in this doc). Both
+   parsers are written defensively so a real-world layout/schema drift degrades to an error dict
+   rather than crashing the signal engine, but the actual selectors should be spot-checked against
+   live NSE/RBI responses before this ships to a real deployment.
+2. Unlike every other signal, this one is identical for every stock analysed on a given day, so
+   `signals/macro.py` caches both fetches under a fixed pseudo-symbol (`"_MACRO"`) rather than
+   fetching fresh per symbol — the same pattern `GET /api/market-picks/history` already uses to
+   cache the Nifty benchmark series under a `"NSEI"` pseudo-symbol. `cache.TTL_HOURS` gained
+   `fii_dii_flow` (24h — NSE publishes once per trading day) and `macro_context` (24h — RBI's repo
+   rate changes at most every MPC meeting and CPI is a monthly release, so daily refresh is purely
+   a ceiling, not a real cadence match).
+3. `signals/macro.py::macro_signal()` combines both inputs into one `Signal`: net FII+DII flow
+   (₹ Cr) contributes up to ±0.6 (weighted 0.6 within the signal) at ±3000 Cr thresholds; CPI
+   above 6% (above RBI's inflation-target upper bound) or below 4% contributes ∓0.4/+0.2
+   (weighted 0.4 within the signal) — repo rate is carried in `meta` for context but doesn't
+   independently move the score (CPI already captures the same tightening/easing direction more
+   directly). `UNKNOWN` (score 0) only when every one of the four underlying fields is `None`.
+4. `run_signal_engine()` calls `macro_signal()` unconditionally alongside `technical_signal()` —
+   both are the signals in this package that do their own I/O, so both are subject to the same
+   "callers on an asyncio event loop must invoke this via an executor" rule `api.py`'s
+   `/api/analyse/{symbol}` SSE endpoint already satisfies (see the "Technical signal" section
+   above — no further change to that call site was needed for `macro`).
 
 ### Peer comparison flow (`GET /api/peers/{symbol}`)
 

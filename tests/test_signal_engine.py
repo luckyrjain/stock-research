@@ -38,25 +38,31 @@ class ExtractFeaturesTest(unittest.TestCase):
 
 
 class RunSignalEngineTest(unittest.TestCase):
-    def _run(self, volume, valuation, growth, filings, technical=None, symbol="TCS"):
-        # technical defaults to a neutral (score 0) signal — it's the only
-        # signal that does its own I/O (see signals/technical.py), so it's
-        # always patched here rather than letting run_signal_engine call the
-        # real network-fetching implementation in a unit test.
+    def _run(self, volume, valuation, growth, filings, technical=None, macro=None, symbol="TCS"):
+        # technical/macro default to a neutral (score 0) signal — they're the
+        # only signals that do their own I/O (see signals/technical.py,
+        # signals/macro.py), so they're always patched here rather than
+        # letting run_signal_engine call the real network-fetching
+        # implementation in a unit test.
         with patch("signals.engine.volume_signal", return_value=volume), \
              patch("signals.engine.valuation_signal", return_value=valuation), \
              patch("signals.engine.growth_signal", return_value=growth), \
              patch("signals.engine.filings_signal", return_value=filings), \
              patch("signals.engine.technical_signal", return_value=technical or _sig(0.0)), \
+             patch("signals.engine.macro_signal", return_value=macro or _sig(0.0)), \
              patch("signals.engine.extract_features", return_value={}):
             return run_signal_engine(symbol, {})
 
     def test_weighted_score_is_computed_correctly(self) -> None:
-        # weights: valuation 0.4, volume 0.2, growth 0.4, filings 0.2, technical
-        # 0.2 — note these sum to 1.4, not 1.0, so final_score is not bounded
-        # to [-1, 1] even though each individual signal score is.
-        result = self._run(volume=_sig(1.0), valuation=_sig(1.0), growth=_sig(1.0), filings=_sig(1.0), technical=_sig(1.0))
-        self.assertAlmostEqual(result.final_score, 1.4, places=2)
+        # weights: valuation 0.4, volume 0.2, growth 0.4, filings 0.2,
+        # technical 0.2, macro 0.15 — note these sum to 1.55, not 1.0, so
+        # final_score is not bounded to [-1, 1] even though each individual
+        # signal score is.
+        result = self._run(
+            volume=_sig(1.0), valuation=_sig(1.0), growth=_sig(1.0), filings=_sig(1.0),
+            technical=_sig(1.0), macro=_sig(1.0),
+        )
+        self.assertAlmostEqual(result.final_score, 1.55, places=2)
 
         result2 = self._run(volume=_sig(0.0), valuation=_sig(1.0), growth=_sig(0.0), filings=_sig(0.0))
         self.assertAlmostEqual(result2.final_score, 0.4, places=2)
@@ -95,10 +101,13 @@ class RunSignalEngineTest(unittest.TestCase):
         self.assertAlmostEqual(result.final_score, 0.8, places=2)
 
     def test_result_carries_symbol_and_all_signals(self) -> None:
-        v, val, g, f, t = _sig(0.1), _sig(0.2), _sig(0.3), _sig(0.4), _sig(0.5)
-        result = self._run(volume=v, valuation=val, growth=g, filings=f, technical=t, symbol="INFY")
+        v, val, g, f, t, m = _sig(0.1), _sig(0.2), _sig(0.3), _sig(0.4), _sig(0.5), _sig(0.6)
+        result = self._run(volume=v, valuation=val, growth=g, filings=f, technical=t, macro=m, symbol="INFY")
         self.assertEqual(result.symbol, "INFY")
-        self.assertEqual(result.signals, {"volume": v, "valuation": val, "growth": g, "filings": f, "technical": t})
+        self.assertEqual(
+            result.signals,
+            {"volume": v, "valuation": val, "growth": g, "filings": f, "technical": t, "macro": m},
+        )
 
 
 if __name__ == "__main__":

@@ -22,6 +22,8 @@ TTL_HOURS: dict[str, float] = {
     "peers":            24,   # peer comparison table — fundamentals-like, doesn't move fast
     "index_history":    24,   # ^NSEI daily closes for the picks-history alpha stat
     "insider_activity": 24,   # insider trades + bulk/block deals — disclosed with lag anyway
+    "fii_dii_flow":     24,   # market-wide, published once per trading day
+    "macro_context":    24,   # RBI repo rate / CPI — changes at most monthly, daily refresh is plenty
 }
 
 
