@@ -28,46 +28,40 @@ load_dotenv()
 # / api._save_picks_cache) keep working unchanged.
 from market_picks_pipeline import load_picks_cache as _load_picks_cache
 from market_picks_pipeline import save_picks_cache as _save_picks_cache
+import rate_limiter
 
 
 # ── Global LLM concurrency ceiling ───────────────────────────────────────────
 # The per-IP rate limiters (_rate_limit below) only slow down a single IP — they
 # don't stop N different IPs (e.g. rotated) from each driving a concurrent,
 # expensive LLM pipeline at the same time: a single-stock analyst call, or a
-# full market-picks run (up to 35 stocks, dozens of LLM calls). This is a
-# coarse, single-process backstop: cap how many such pipelines can run at once,
-# regardless of caller or IP. Like the other in-memory guards in this file, it
-# does not survive a multi-worker deployment (see docs/deployment.md).
+# full market-picks run (up to 35 stocks, dozens of LLM calls). Cap how many
+# such pipelines can run at once, regardless of caller or IP. Backed by
+# rate_limiter.py — Redis-shared across workers when REDIS_URL is set, an
+# in-memory per-process counter otherwise (see docs/deployment.md).
 _LLM_CONCURRENCY_LIMIT = int(os.getenv("LLM_CONCURRENCY_LIMIT", "4"))
-_LLM_CONCURRENCY_LOCK = threading.Lock()
-_llm_concurrency_count = 0
+_LLM_SLOT_NAME = "llm_concurrency"
 
 
 def _acquire_llm_slot() -> bool:
     """Non-blocking: claims a slot and returns True if one is free, else False.
     Every True must be paired with exactly one _release_llm_slot() call."""
-    global _llm_concurrency_count
-    with _LLM_CONCURRENCY_LOCK:
-        if _llm_concurrency_count >= _LLM_CONCURRENCY_LIMIT:
-            return False
-        _llm_concurrency_count += 1
-        return True
+    return rate_limiter.try_acquire_slot(_LLM_SLOT_NAME, _LLM_CONCURRENCY_LIMIT)
 
 
 def _release_llm_slot() -> None:
-    global _llm_concurrency_count
-    with _LLM_CONCURRENCY_LOCK:
-        _llm_concurrency_count = max(0, _llm_concurrency_count - 1)
+    rate_limiter.release_slot(_LLM_SLOT_NAME)
 
 
 # ── SME signals: shared engine + refresh state ───────────────────────────────
-# _SME_REFRESHING is a single-process guard (see refresh_sme_signals below) —
-# running the API with multiple worker processes would let each worker start
-# its own refresh; the upserts are idempotent per (symbol, trade_date) so this
-# wastes NSE/yfinance quota rather than corrupting data.
+# The SME refresh guard (see refresh_sme_signals below) is now a
+# rate_limiter.py lock — Redis-shared across workers when REDIS_URL is set,
+# so two workers can no longer both start a refresh at once (previously a
+# single-process-only guard; see docs/deployment.md).
 _DB_ENGINE = None
 _DB_ENGINE_LOCK = threading.Lock()
-_SME_REFRESHING = False
+_SME_REFRESH_LOCK_NAME = "sme_refresh"
+_SME_REFRESH_LOCK_TTL_SECONDS = 3600  # generous upper bound on one pipeline run
 
 
 def _get_db_engine():
@@ -81,27 +75,18 @@ def _get_db_engine():
 
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────
-# Simple in-memory sliding-window limiter, keyed by (bucket, client IP). Only
-# guards the expensive/abusable routes (fresh LLM calls, forced full rescans,
-# forced SME pipeline runs) — single-process only, same assumption as
-# _SME_REFRESHING above; a multi-worker deployment would need a shared store
-# (e.g. Redis) instead.
-_RATE_LIMIT_CALLS: dict[str, list[float]] = {}
-_RATE_LIMIT_LOCK = threading.Lock()
+# Sliding-window limiter, keyed by (bucket, client IP). Only guards the
+# expensive/abusable routes (fresh LLM calls, forced full rescans, forced SME
+# pipeline runs). Backed by rate_limiter.py — Redis-shared across workers when
+# REDIS_URL is set, an in-memory per-process counter otherwise.
 
 
 def _check_rate_limit(key: str, max_calls: int, window_seconds: float) -> None:
-    now = time.monotonic()
-    with _RATE_LIMIT_LOCK:
-        calls = [t for t in _RATE_LIMIT_CALLS.get(key, []) if now - t < window_seconds]
-        if len(calls) >= max_calls:
-            _RATE_LIMIT_CALLS[key] = calls
-            raise HTTPException(
-                status_code=429,
-                detail=f"Rate limit exceeded: max {max_calls} requests per {int(window_seconds)}s on this endpoint. Try again later.",
-            )
-        calls.append(now)
-        _RATE_LIMIT_CALLS[key] = calls
+    if not rate_limiter.is_allowed(key, max_calls, window_seconds):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded: max {max_calls} requests per {int(window_seconds)}s on this endpoint. Try again later.",
+        )
 
 
 def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: float) -> None:
@@ -1479,7 +1464,7 @@ async def get_sme_signals(
             "total_monitored":  int(total_monitored),
             "golden_now":       int(golden_now),
             "last_run":         last_run,
-            "refreshing":       _SME_REFRESHING,
+            "refreshing":       rate_limiter.is_locked(_SME_REFRESH_LOCK_NAME),
             "golden_hit_rate_90d": {
                 "sample_size": sample_size,
                 "win_rate":    win_rate,
@@ -1594,18 +1579,24 @@ async def refresh_sme_signals(request: Request):
     """Run the SME EMA pipeline in the background. 409 if a run is in progress."""
     import os
 
-    global _SME_REFRESHING
     if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
-    if _SME_REFRESHING:
+    # Atomic claim (Redis-shared across workers when REDIS_URL is set, so two
+    # workers can no longer both pass this check and both start a refresh —
+    # unlike the old plain-bool guard this replaced). Checked before the rate
+    # limit, same order the old code used (409 takes priority over 429 when
+    # both would apply).
+    if not rate_limiter.try_acquire_lock(_SME_REFRESH_LOCK_NAME, _SME_REFRESH_LOCK_TTL_SECONDS):
         raise HTTPException(status_code=409, detail="A refresh is already running.")
-    _rate_limit(request, "sme_refresh", max_calls=3, window_seconds=3600)
+    try:
+        _rate_limit(request, "sme_refresh", max_calls=3, window_seconds=3600)
+    except HTTPException:
+        rate_limiter.release_lock(_SME_REFRESH_LOCK_NAME)
+        raise
 
-    _SME_REFRESHING = True
     loop = asyncio.get_running_loop()
 
     def _run_pipeline():
-        global _SME_REFRESHING
         try:
             from sme_ema_pipeline import run as run_sme_pipeline
             healthy = run_sme_pipeline()
@@ -1618,7 +1609,7 @@ async def refresh_sme_signals(request: Request):
         except Exception as exc:
             log_event(LOGGER, "sme_refresh_failed", level="error", error=str(exc))
         finally:
-            _SME_REFRESHING = False
+            rate_limiter.release_lock(_SME_REFRESH_LOCK_NAME)
 
     async def _launch():
         await loop.run_in_executor(None, _run_pipeline)

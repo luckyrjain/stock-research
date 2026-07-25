@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 import api
 import cache
 import market_picks_pipeline
+import rate_limiter
 from signals.models import Signal, SignalResult
 
 client = TestClient(api.app)
@@ -61,12 +62,12 @@ class AnalyseSuccessPathTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
         patch.object(cache, "CACHE_DIR", Path(self._tmpdir)).start()
         self.addCleanup(patch.stopall)
-        api._RATE_LIMIT_CALLS.clear()
-        api._llm_concurrency_count = 0
+        rate_limiter._memory_calls.clear()
+        rate_limiter._memory_slots.clear()
 
     def tearDown(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
-        api._llm_concurrency_count = 0
+        rate_limiter._memory_calls.clear()
+        rate_limiter._memory_slots.clear()
 
     def test_full_success_sequence_emits_start_task_done_analysing_done(self) -> None:
         def _fake_fetch_task(task_name, symbol, run_id, max_attempts=3):
@@ -120,12 +121,12 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
         # there, not on api.py (which no longer defines that name itself).
         patch.object(market_picks_pipeline, "_PICKS_CACHE_PATH", Path(self._tmpdir) / "picks.json").start()
         self.addCleanup(patch.stopall)
-        api._RATE_LIMIT_CALLS.clear()
-        api._llm_concurrency_count = 0
+        rate_limiter._memory_calls.clear()
+        rate_limiter._memory_slots.clear()
 
     def tearDown(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
-        api._llm_concurrency_count = 0
+        rate_limiter._memory_calls.clear()
+        rate_limiter._memory_slots.clear()
 
     def _fake_pipeline(self, picks: list, healthy: bool = True):
         instance = MagicMock()

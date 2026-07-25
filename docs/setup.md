@@ -36,6 +36,7 @@ Then edit `.env` and set the provider you want to use.
 | `OLLAMA_BASE_URL` | Ollama only | Default: `http://localhost:11434` |
 | `LOG_LEVEL` | No | `DEBUG` / `INFO` / `WARNING` — default: `INFO` |
 | `DATABASE_URL` | SME signals + watchlist | PostgreSQL DSN, e.g. `postgresql://user:pass@localhost:5432/sme_research` |
+| `REDIS_URL` | No (only past 1 backend worker/replica) | e.g. `redis://localhost:6379/0` — shares rate-limit/concurrency guards across workers; see [Deployment](deployment.md#scaling-read-this-before-adding-workers-or-replicas) |
 
 If `LLM_PROVIDER` is unset, the backend auto-detects the first key present in this order: `anthropic`, `openai`, `groq`, `google`, `openrouter`.
 

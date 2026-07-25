@@ -1,6 +1,7 @@
 # Local/self-hosted deployment. Needs a .env file (copy .env.example) with
-# at least one LLM provider key; DATABASE_URL is set here to point at the
-# postgres service below, so leave it unset in .env for this compose setup.
+# at least one LLM provider key; DATABASE_URL and REDIS_URL are set here to
+# point at the postgres/redis services below, so leave both unset in .env
+# for this compose setup.
 #
 #   docker compose up --build
 #
@@ -26,6 +27,23 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # Backs the rate limiter / LLM concurrency ceiling / SME refresh lock in
+  # rate_limiter.py — only load-bearing once you scale the backend past one
+  # worker/replica (see docs/deployment.md's "Scaling" section). A single
+  # worker (this compose file's default) works identically with or without
+  # it; included by default so `docker compose up --workers N` later just
+  # works without a compose file change.
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   backend:
     build:
       context: .
@@ -34,11 +52,14 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-stockresearch}:${POSTGRES_PASSWORD:-stockresearch}@postgres:5432/${POSTGRES_DB:-stockresearch}
+      REDIS_URL: redis://redis:6379/0
       ALLOWED_ORIGINS: http://localhost:3000
     ports:
       - "8000:8000"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     volumes:
       - backend_output:/app/output
@@ -58,4 +79,5 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
   backend_output:

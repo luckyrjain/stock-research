@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 import api
 import cache
+import rate_limiter
 
 client = TestClient(api.app)
 
@@ -85,10 +86,10 @@ class CorsTest(unittest.TestCase):
 
 class LlmConcurrencyCeilingTest(unittest.TestCase):
     def setUp(self) -> None:
-        api._llm_concurrency_count = 0
+        rate_limiter._memory_slots.clear()
 
     def tearDown(self) -> None:
-        api._llm_concurrency_count = 0
+        rate_limiter._memory_slots.clear()
 
     def test_acquire_up_to_limit_then_rejects(self) -> None:
         with patch("api._LLM_CONCURRENCY_LIMIT", 2):
@@ -106,12 +107,12 @@ class LlmConcurrencyCeilingTest(unittest.TestCase):
     def test_release_below_zero_is_clamped_not_negative(self) -> None:
         api._release_llm_slot()
         api._release_llm_slot()
-        self.assertEqual(api._llm_concurrency_count, 0)
+        self.assertEqual(rate_limiter._memory_slots.get("llm_concurrency", 0), 0)
 
 
 class RateLimitHelperTest(unittest.TestCase):
     def setUp(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_allows_up_to_max_calls_then_blocks(self) -> None:
         req = MagicMock()
@@ -270,28 +271,28 @@ class ValidateSymbolEndpointTest(unittest.TestCase):
 
 class AnalyseEndpointRateLimitTest(unittest.TestCase):
     def setUp(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_429_when_over_limit_without_running_pipeline(self) -> None:
         # Pre-seed the bucket at the max so the request is rejected before any
         # of the (unmocked, network-touching) analysis pipeline ever runs.
-        api._RATE_LIMIT_CALLS["analyse:testclient"] = [api.time.monotonic()] * 20
+        rate_limiter._memory_calls["analyse:testclient"] = [api.time.monotonic()] * 20
         resp = client.get("/api/analyse/TCS")
         self.assertEqual(resp.status_code, 429)
 
 
 class MarketPicksForceRateLimitTest(unittest.TestCase):
     def setUp(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_429_when_force_rescan_over_limit(self) -> None:
-        api._RATE_LIMIT_CALLS["market_picks_force:testclient"] = [api.time.monotonic()] * 3
+        rate_limiter._memory_calls["market_picks_force:testclient"] = [api.time.monotonic()] * 3
         resp = client.get("/api/market-picks?force=true")
         self.assertEqual(resp.status_code, 429)
 
@@ -303,28 +304,28 @@ class RemainingEndpointsRateLimitTest(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_429_on_prices_when_over_limit(self) -> None:
-        api._RATE_LIMIT_CALLS["prices:testclient"] = [api.time.monotonic()] * 30
+        rate_limiter._memory_calls["prices:testclient"] = [api.time.monotonic()] * 30
         resp = client.get("/api/prices?symbols=TCS")
         self.assertEqual(resp.status_code, 429)
 
     def test_429_on_validate_when_over_limit(self) -> None:
-        api._RATE_LIMIT_CALLS["validate:testclient"] = [api.time.monotonic()] * 30
+        rate_limiter._memory_calls["validate:testclient"] = [api.time.monotonic()] * 30
         resp = client.get("/api/validate/TCS")
         self.assertEqual(resp.status_code, 429)
 
     def test_429_on_prices_history_when_over_limit(self) -> None:
-        api._RATE_LIMIT_CALLS["prices_history:testclient"] = [api.time.monotonic()] * 60
+        rate_limiter._memory_calls["prices_history:testclient"] = [api.time.monotonic()] * 60
         resp = client.get("/api/prices/history/TCS")
         self.assertEqual(resp.status_code, 429)
 
     def test_429_on_market_picks_history_when_over_limit(self) -> None:
-        api._RATE_LIMIT_CALLS["market_picks_history:testclient"] = [api.time.monotonic()] * 60
+        rate_limiter._memory_calls["market_picks_history:testclient"] = [api.time.monotonic()] * 60
         resp = client.get("/api/market-picks/history")
         self.assertEqual(resp.status_code, 429)
 
@@ -351,10 +352,10 @@ class NextScheduledMarketPicksRunTest(unittest.TestCase):
 
 class MarketPicksStatusEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_returns_cache_metadata_and_next_scheduled_run(self) -> None:
         fake_status = {"last_run_at": "2026-07-20T00:00:00+00:00", "is_fresh": True}
@@ -375,7 +376,7 @@ class MarketPicksStatusEndpointTest(unittest.TestCase):
         self.assertFalse(body["cache_fresh"])
 
     def test_rate_limited_returns_429(self) -> None:
-        api._RATE_LIMIT_CALLS["market_picks_status:testclient"] = [api.time.monotonic()] * 60
+        rate_limiter._memory_calls["market_picks_status:testclient"] = [api.time.monotonic()] * 60
         resp = client.get("/api/market-picks/status")
         self.assertEqual(resp.status_code, 429)
 
@@ -721,17 +722,17 @@ class PeersEndpointTest(unittest.TestCase):
         self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
         self._cache_patch.start()
         self.addCleanup(self._cache_patch.stop)
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_invalid_symbol_returns_422(self) -> None:
         resp = client.get("/api/peers/bad symbol")
         self.assertEqual(resp.status_code, 422)
 
     def test_rate_limited_returns_429(self) -> None:
-        api._RATE_LIMIT_CALLS["peers:testclient"] = [api.time.monotonic()] * 30
+        rate_limiter._memory_calls["peers:testclient"] = [api.time.monotonic()] * 30
         resp = client.get("/api/peers/TCS")
         self.assertEqual(resp.status_code, 429)
 
@@ -798,17 +799,17 @@ class InsiderActivityEndpointTest(unittest.TestCase):
         self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
         self._cache_patch.start()
         self.addCleanup(self._cache_patch.stop)
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_invalid_symbol_returns_422(self) -> None:
         resp = client.get("/api/insider-activity/bad symbol")
         self.assertEqual(resp.status_code, 422)
 
     def test_rate_limited_returns_429(self) -> None:
-        api._RATE_LIMIT_CALLS["insider_activity:testclient"] = [api.time.monotonic()] * 30
+        rate_limiter._memory_calls["insider_activity:testclient"] = [api.time.monotonic()] * 30
         resp = client.get("/api/insider-activity/TCS")
         self.assertEqual(resp.status_code, 429)
 
@@ -889,17 +890,17 @@ class SmeSignalsEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
         api._DB_ENGINE = None
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
         api._DB_ENGINE = None
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_rate_limited_returns_429(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        api._RATE_LIMIT_CALLS["sme_signals:testclient"] = [api.time.monotonic()] * 60
+        rate_limiter._memory_calls["sme_signals:testclient"] = [api.time.monotonic()] * 60
         resp = client.get("/api/sme-signals")
         self.assertEqual(resp.status_code, 429)
 
@@ -1197,14 +1198,14 @@ class ComputeCrossEventsTest(unittest.TestCase):
 class SmeRefreshEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._SME_REFRESHING = False
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_locks.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._SME_REFRESHING = False
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_locks.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_missing_database_url_returns_503(self) -> None:
         resp = client.post("/api/sme-signals/refresh")
@@ -1212,17 +1213,17 @@ class SmeRefreshEndpointTest(unittest.TestCase):
 
     def test_already_refreshing_returns_409(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        api._SME_REFRESHING = True
+        rate_limiter._memory_locks["sme_refresh"] = True
         resp = client.post("/api/sme-signals/refresh")
         self.assertEqual(resp.status_code, 409)
 
     def test_rate_limited_returns_429_before_starting_pipeline(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        api._RATE_LIMIT_CALLS["sme_refresh:testclient"] = [api.time.monotonic()] * 3
+        rate_limiter._memory_calls["sme_refresh:testclient"] = [api.time.monotonic()] * 3
         resp = client.post("/api/sme-signals/refresh")
         self.assertEqual(resp.status_code, 429)
-        # Must not have flipped the refreshing flag or launched anything.
-        self.assertFalse(api._SME_REFRESHING)
+        # Must not have left the lock claimed or launched anything.
+        self.assertFalse(rate_limiter.is_locked("sme_refresh"))
 
     def test_accepted_when_under_limit_and_not_already_running(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
@@ -1239,7 +1240,7 @@ class SmeRefreshEndpointTest(unittest.TestCase):
         with patch("api.asyncio.create_task", side_effect=_close_and_stub) as mocked_create_task:
             resp = client.post("/api/sme-signals/refresh")
         self.assertEqual(resp.status_code, 202)
-        self.assertTrue(api._SME_REFRESHING)
+        self.assertTrue(rate_limiter.is_locked("sme_refresh"))
         mocked_create_task.assert_called_once()
 
 
@@ -1253,13 +1254,13 @@ class WatchlistEndpointsTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
         api._DB_ENGINE = None
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
         api._DB_ENGINE = None
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_get_missing_database_url_returns_503(self) -> None:
         resp = client.get("/api/watchlist?client_id=client-abc")
@@ -1302,7 +1303,7 @@ class WatchlistEndpointsTest(unittest.TestCase):
 
     def test_get_rate_limited_returns_429(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        api._RATE_LIMIT_CALLS["watchlist_read:testclient"] = [api.time.monotonic()] * 120
+        rate_limiter._memory_calls["watchlist_read:testclient"] = [api.time.monotonic()] * 120
         resp = client.get("/api/watchlist?client_id=client-abc")
         self.assertEqual(resp.status_code, 429)
 
@@ -1431,13 +1432,13 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
         api._DB_ENGINE = None
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
         api._DB_ENGINE = None
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_get_with_valid_session_queries_by_user_id_ignoring_client_id(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
@@ -1595,17 +1596,17 @@ class VerdictHistoryEndpointTest(unittest.TestCase):
     an empty list rather than an error, same philosophy as /api/consolidated."""
 
     def setUp(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_invalid_symbol_returns_422(self) -> None:
         resp = client.get("/api/verdict-history/bad symbol")
         self.assertEqual(resp.status_code, 422)
 
     def test_rate_limited_returns_429(self) -> None:
-        api._RATE_LIMIT_CALLS["verdict_history:testclient"] = [api.time.monotonic()] * 60
+        rate_limiter._memory_calls["verdict_history:testclient"] = [api.time.monotonic()] * 60
         resp = client.get("/api/verdict-history/TCS")
         self.assertEqual(resp.status_code, 429)
 
@@ -1744,20 +1745,20 @@ class ConsolidatedEndpointTest(unittest.TestCase):
 
         self._db_url = os.environ.pop("DATABASE_URL", None)
         api._DB_ENGINE = None
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
         api._DB_ENGINE = None
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_invalid_symbol_returns_422(self) -> None:
         resp = client.get("/api/consolidated/bad symbol")
         self.assertEqual(resp.status_code, 422)
 
     def test_rate_limited_returns_429(self) -> None:
-        api._RATE_LIMIT_CALLS["consolidated:testclient"] = [api.time.monotonic()] * 30
+        rate_limiter._memory_calls["consolidated:testclient"] = [api.time.monotonic()] * 30
         resp = client.get("/api/consolidated/TCS")
         self.assertEqual(resp.status_code, 429)
 
@@ -1841,12 +1842,12 @@ class ConsolidatedEndpointTest(unittest.TestCase):
 class AuthRequestLinkEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_missing_database_url_returns_503(self) -> None:
         resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
@@ -1894,7 +1895,7 @@ class AuthRequestLinkEndpointTest(unittest.TestCase):
 
     def test_rate_limited_returns_429(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        api._RATE_LIMIT_CALLS["auth_request_link:testclient"] = [api.time.monotonic()] * 5
+        rate_limiter._memory_calls["auth_request_link:testclient"] = [api.time.monotonic()] * 5
         resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
         self.assertEqual(resp.status_code, 429)
 
@@ -1903,13 +1904,13 @@ class AuthRequestLinkEndpointTest(unittest.TestCase):
         # from email-bombing one victim's inbox — the target address itself
         # must also be capped, independent of caller IP.
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        api._RATE_LIMIT_CALLS["auth_request_link_email:victim@example.com"] = [api.time.monotonic()] * 5
+        rate_limiter._memory_calls["auth_request_link_email:victim@example.com"] = [api.time.monotonic()] * 5
         resp = client.post("/api/auth/request-link", json={"email": "victim@example.com"})
         self.assertEqual(resp.status_code, 429)
 
     def test_email_rate_limit_is_scoped_per_address(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        api._RATE_LIMIT_CALLS["auth_request_link_email:someone-else@example.com"] = [api.time.monotonic()] * 5
+        rate_limiter._memory_calls["auth_request_link_email:someone-else@example.com"] = [api.time.monotonic()] * 5
         with patch("auth.create_magic_link", return_value="raw-token"), \
              patch("email_sender.send_magic_link_email", return_value=True):
             resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
@@ -1919,12 +1920,12 @@ class AuthRequestLinkEndpointTest(unittest.TestCase):
 class AuthVerifyEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_missing_database_url_returns_503(self) -> None:
         resp = client.get("/api/auth/verify?token=abc")
@@ -1955,7 +1956,7 @@ class AuthVerifyEndpointTest(unittest.TestCase):
 
     def test_rate_limited_returns_429(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        api._RATE_LIMIT_CALLS["auth_verify:testclient"] = [api.time.monotonic()] * 20
+        rate_limiter._memory_calls["auth_verify:testclient"] = [api.time.monotonic()] * 20
         resp = client.get("/api/auth/verify?token=x")
         self.assertEqual(resp.status_code, 429)
 
@@ -2025,7 +2026,7 @@ class ApiKeyManagementEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.get("DATABASE_URL")
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is None:
@@ -2136,14 +2137,14 @@ class ConsolidatedV1EndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.get("DATABASE_URL")
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is None:
             os.environ.pop("DATABASE_URL", None)
         else:
             os.environ["DATABASE_URL"] = self._db_url
-        api._RATE_LIMIT_CALLS.clear()
+        rate_limiter._memory_calls.clear()
 
     def test_missing_api_key_header_returns_401(self) -> None:
         resp = client.get("/api/v1/consolidated/TCS")
@@ -2176,7 +2177,7 @@ class ConsolidatedV1EndpointTest(unittest.TestCase):
         self.assertIsNone(body["market_pick"])
 
     def test_rate_limit_is_keyed_by_user_not_ip(self) -> None:
-        api._RATE_LIMIT_CALLS["api_v1:7"] = [api.time.monotonic()] * 100
+        rate_limiter._memory_calls["api_v1:7"] = [api.time.monotonic()] * 100
         with patch("auth.get_user_for_api_key", return_value={"user_id": 7}), \
              patch.object(api, "_consolidated_payload") as payload_fn:
             resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "apk_x"})
