@@ -69,6 +69,33 @@ def fetch_trendlyne_consensus() -> dict:
     return {"source": "Trendlyne / Analyst Consensus", "type": "brokerage", "articles": articles}
 
 
+def fetch_trendlyne_consensus_for_symbol(symbol: str, max_results: int = 10) -> dict:
+    """Recent Trendlyne-cited analyst commentary for one stock — a structured
+    article list (title/summary/url/published_at), scoped to this symbol the
+    same way fetch_trendlyne_consensus() scopes to "Trendlyne" market-wide.
+    Deliberately never a fabricated consensus rating or target price number —
+    this module searches GNews for articles that cite Trendlyne, it doesn't
+    scrape trendlyne.com's own numeric estimates, so a "12 analysts rate this
+    BUY, target ₹X" figure isn't data this module actually has; inventing one
+    would violate this codebase's "never invent" convention just as much as
+    guessing a missing scraped field would.
+    """
+    sym = symbol.upper().strip()
+    query = f'"Trendlyne" "{sym}" (buy OR upgrade OR "target price") NSE stock'
+
+    seen_urls: set[str] = set()
+    articles:  list[dict] = []
+    for art in _gnews(query, max_results=max_results):
+        url = art.get("url", "")
+        if url and url in seen_urls:
+            continue
+        if url:
+            seen_urls.add(url)
+        articles.append(art)
+
+    return {"symbol": sym, "articles": articles}
+
+
 TRENDLYNE_SOURCES = [
     ("Trendlyne / Analyst Consensus", "brokerage", "fetch_trendlyne_consensus"),
 ]

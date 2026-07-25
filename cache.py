@@ -26,6 +26,7 @@ TTL_HOURS: dict[str, float] = {
     "insider_activity": 24,   # insider trades + bulk/block deals — disclosed with lag anyway
     "fii_dii_flow":     24,   # market-wide, published once per trading day
     "macro_context":    24,   # RBI repo rate / CPI — changes at most monthly, daily refresh is plenty
+    "street_consensus": 24,   # Trendlyne-cited analyst commentary — a news search, not a live feed
 }
 
 

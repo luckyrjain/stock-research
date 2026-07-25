@@ -436,3 +436,21 @@ export interface InsiderActivity {
   insider_trades:    InsiderTrade[];
   bulk_block_deals:  BulkBlockDeal[];
 }
+
+// Trendlyne-cited analyst commentary for one stock — real article
+// titles/links/dates, never a fabricated consensus rating or target price
+// (see tools/trendlyne_agent.py::fetch_trendlyne_consensus_for_symbol —
+// this module searches GNews for articles that cite Trendlyne, it doesn't
+// scrape trendlyne.com's own numeric estimates). Empty articles (never
+// null) is the expected common case for most stocks on most days.
+export interface StreetConsensusArticle {
+  title:         string;
+  summary:       string;
+  url:           string;
+  published_at:  string | null;
+}
+
+export interface StreetConsensus {
+  symbol:    string;
+  articles:  StreetConsensusArticle[];
+}
