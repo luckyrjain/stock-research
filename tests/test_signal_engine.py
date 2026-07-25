@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from signals.features import extract_features
-from signals.engine import run_signal_engine
+from signals.engine import _DEFAULT_WEIGHTS, _weights_for_sector, run_signal_engine
 from signals.models import Signal
 
 
@@ -37,8 +37,48 @@ class ExtractFeaturesTest(unittest.TestCase):
         self.assertEqual(features["filings"], [])
 
 
+class WeightsForSectorTest(unittest.TestCase):
+    def test_unknown_or_missing_sector_uses_default_weights(self) -> None:
+        self.assertEqual(_weights_for_sector(None), _DEFAULT_WEIGHTS)
+        self.assertEqual(_weights_for_sector("Some Sector Nobody Heard Of"), _DEFAULT_WEIGHTS)
+
+    def test_rate_sensitive_sector_tilts_toward_valuation_and_macro(self) -> None:
+        for sector in ("Financial Services", "Real Estate", "Utilities"):
+            with self.subTest(sector=sector):
+                weights = _weights_for_sector(sector)
+                self.assertEqual(weights["valuation"], 0.45)
+                self.assertEqual(weights["growth"], 0.3)
+                self.assertEqual(weights["macro"], 0.25)
+                # Untouched weights carry over from the default unchanged.
+                self.assertEqual(weights["volume"], _DEFAULT_WEIGHTS["volume"])
+                self.assertEqual(weights["filings"], _DEFAULT_WEIGHTS["filings"])
+                self.assertEqual(weights["technical"], _DEFAULT_WEIGHTS["technical"])
+
+    def test_growth_sector_tilts_toward_growth_and_away_from_macro(self) -> None:
+        for sector in ("Technology", "Communication Services", "Healthcare"):
+            with self.subTest(sector=sector):
+                weights = _weights_for_sector(sector)
+                self.assertEqual(weights["growth"], 0.45)
+                self.assertEqual(weights["valuation"], 0.35)
+                self.assertEqual(weights["macro"], 0.1)
+
+    def test_cyclical_sector_tilts_toward_technical_and_volume(self) -> None:
+        for sector in ("Basic Materials", "Energy", "Industrials", "Consumer Cyclical"):
+            with self.subTest(sector=sector):
+                weights = _weights_for_sector(sector)
+                self.assertEqual(weights["technical"], 0.3)
+                self.assertEqual(weights["volume"], 0.3)
+                # Untouched weights carry over from the default unchanged.
+                self.assertEqual(weights["valuation"], _DEFAULT_WEIGHTS["valuation"])
+                self.assertEqual(weights["growth"], _DEFAULT_WEIGHTS["growth"])
+
+    def test_never_mutates_the_shared_default_dict(self) -> None:
+        _weights_for_sector("Financial Services")
+        self.assertEqual(_DEFAULT_WEIGHTS["valuation"], 0.4)
+
+
 class RunSignalEngineTest(unittest.TestCase):
-    def _run(self, volume, valuation, growth, filings, technical=None, macro=None, symbol="TCS"):
+    def _run(self, volume, valuation, growth, filings, technical=None, macro=None, symbol="TCS", sector=None):
         # technical/macro default to a neutral (score 0) signal — they're the
         # only signals that do their own I/O (see signals/technical.py,
         # signals/macro.py), so they're always patched here rather than
@@ -50,7 +90,7 @@ class RunSignalEngineTest(unittest.TestCase):
              patch("signals.engine.filings_signal", return_value=filings), \
              patch("signals.engine.technical_signal", return_value=technical or _sig(0.0)), \
              patch("signals.engine.macro_signal", return_value=macro or _sig(0.0)), \
-             patch("signals.engine.extract_features", return_value={}):
+             patch("signals.engine.extract_features", return_value={"sector": sector}):
             return run_signal_engine(symbol, {})
 
     def test_weighted_score_is_computed_correctly(self) -> None:
@@ -99,6 +139,22 @@ class RunSignalEngineTest(unittest.TestCase):
         result = self._run(volume=None, valuation=_sig(1.0), growth=_sig(1.0), filings=None, technical=None)
         # only valuation (0.4) + growth (0.4) contribute
         self.assertAlmostEqual(result.final_score, 0.8, places=2)
+
+    def test_sector_tilt_changes_final_score(self) -> None:
+        # Same underlying signal scores, different sector -> different
+        # weights -> different final_score. valuation=1.0, growth=0.0: a
+        # rate-sensitive sector weights valuation higher (0.45 vs 0.4), so
+        # its final_score should be strictly higher than the default.
+        common = dict(volume=_sig(0.0), valuation=_sig(1.0), growth=_sig(0.0), filings=_sig(0.0))
+        default_result = self._run(**common, sector=None)
+        rate_sensitive_result = self._run(**common, sector="Financial Services")
+        self.assertGreater(rate_sensitive_result.final_score, default_result.final_score)
+
+    def test_unrecognized_sector_falls_back_to_default_weighted_score(self) -> None:
+        common = dict(volume=_sig(0.0), valuation=_sig(1.0), growth=_sig(0.0), filings=_sig(0.0))
+        default_result = self._run(**common, sector=None)
+        unknown_result = self._run(**common, sector="Made Up Sector")
+        self.assertAlmostEqual(unknown_result.final_score, default_result.final_score, places=6)
 
     def test_result_carries_symbol_and_all_signals(self) -> None:
         v, val, g, f, t, m = _sig(0.1), _sig(0.2), _sig(0.3), _sig(0.4), _sig(0.5), _sig(0.6)
