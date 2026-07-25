@@ -6,6 +6,7 @@ from tools.nse_bulk_block_deals import (
     _fetch_deals,
     _first,
     _fmt_qty,
+    fetch_bulk_block_deals_for_symbol,
     fetch_nse_bulk_block_deals,
 )
 
@@ -138,6 +139,82 @@ class FetchNseBulkBlockDealsTest(unittest.TestCase):
             result = fetch_nse_bulk_block_deals()
         self.assertEqual(result["source"], "NSE Bulk/Block Deals")
         self.assertEqual(len(result["articles"]), 2)
+
+
+class FetchBulkBlockDealsForSymbolTest(unittest.TestCase):
+    def _deal(self, **overrides) -> dict:
+        base = {
+            "symbol": "TCS", "clientName": "Big Fund", "bdQty": 60000,
+            "bdPrice": 3500.5, "buySell": "BUY", "date": "01-Jan-2026",
+        }
+        base.update(overrides)
+        return base
+
+    def _session_pair(self, bulk_rows: list[dict], block_rows: list[dict]) -> MagicMock:
+        sess = MagicMock()
+        bulk_resp, block_resp = MagicMock(), MagicMock()
+        bulk_resp.json.return_value = {"data": bulk_rows}
+        block_resp.json.return_value = {"data": block_rows}
+        sess.get.side_effect = [bulk_resp, block_resp]
+        return sess
+
+    def test_filters_to_requested_symbol_across_both_endpoints(self) -> None:
+        sess = self._session_pair(
+            [self._deal(symbol="TCS"), self._deal(symbol="INFY")],
+            [self._deal(symbol="OTHER", bdQty=200_000)],
+        )
+        with patch("tools.nse_bulk_block_deals._nse_session", return_value=sess):
+            result = fetch_bulk_block_deals_for_symbol("tcs")
+        self.assertEqual(result["symbol"], "TCS")
+        self.assertEqual(len(result["deals"]), 1)
+        self.assertEqual(result["deals"][0]["deal_type"], "Bulk Deal")
+
+    def test_structured_not_article_shaped(self) -> None:
+        sess = self._session_pair([self._deal()], [])
+        with patch("tools.nse_bulk_block_deals._nse_session", return_value=sess):
+            result = fetch_bulk_block_deals_for_symbol("TCS")
+        deal = result["deals"][0]
+        self.assertEqual(deal["action"], "BUY")
+        self.assertEqual(deal["quantity"], 60000)
+        self.assertNotIn("title", deal)
+        self.assertNotIn("symbol", deal)
+
+    def test_below_min_qty_is_excluded_same_as_market_wide(self) -> None:
+        sess = self._session_pair([self._deal(bdQty=1000)], [])
+        with patch("tools.nse_bulk_block_deals._nse_session", return_value=sess):
+            result = fetch_bulk_block_deals_for_symbol("TCS")
+        self.assertEqual(result["deals"], [])
+
+    def test_block_deal_uses_its_own_higher_threshold(self) -> None:
+        # 60,000 clears the bulk-deal floor but not the block-deal one.
+        sess = self._session_pair([], [self._deal(bdQty=60000)])
+        with patch("tools.nse_bulk_block_deals._nse_session", return_value=sess):
+            result = fetch_bulk_block_deals_for_symbol("TCS")
+        self.assertEqual(result["deals"], [])
+
+    def test_sorted_newest_first_by_parsed_date_not_raw_string(self) -> None:
+        sess = self._session_pair(
+            [self._deal(date="01-Jan-2026", clientName="Earlier"),
+             self._deal(date="24-Jul-2026", clientName="Later")],
+            [],
+        )
+        with patch("tools.nse_bulk_block_deals._nse_session", return_value=sess):
+            result = fetch_bulk_block_deals_for_symbol("TCS")
+        self.assertEqual(result["deals"][0]["client"], "Later")
+        self.assertEqual(result["deals"][1]["client"], "Earlier")
+
+    def test_no_rows_returns_empty_deals_not_error(self) -> None:
+        sess = self._session_pair([], [])
+        with patch("tools.nse_bulk_block_deals._nse_session", return_value=sess):
+            result = fetch_bulk_block_deals_for_symbol("TCS")
+        self.assertEqual(result, {"symbol": "TCS", "deals": []})
+
+    def test_network_exception_returns_empty_deals(self) -> None:
+        sess = MagicMock()
+        sess.get.side_effect = ConnectionError("boom")
+        with patch("tools.nse_bulk_block_deals._nse_session", return_value=sess):
+            result = fetch_bulk_block_deals_for_symbol("TCS")
+        self.assertEqual(result, {"symbol": "TCS", "deals": []})
 
 
 if __name__ == "__main__":

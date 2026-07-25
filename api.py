@@ -1210,6 +1210,63 @@ async def get_peers(request: Request, symbol: str):
     return await loop.run_in_executor(None, _fetch_sync)
 
 
+@app.get("/api/insider-activity/{symbol}")
+async def get_insider_activity(request: Request, symbol: str):
+    """Structured promoter/director insider trades and bulk/block deals for
+    one symbol — the same NSE feeds tools/nse_insider_trades.py and
+    tools/nse_bulk_block_deals.py already scrape for the Market Picks
+    discovery pipeline, wired here as their own on-demand endpoint so a
+    researcher looking up one specific stock can see this activity directly
+    instead of it only ever surfacing (via LLM extraction) when a stock
+    happens to make the weekly picks list. Cached like peers/price-history
+    (24 h TTL) but intentionally outside ALL_DATA_TASKS — standalone and
+    on-demand, not part of the six-task analysis pipeline. Absent rather than
+    guessed: most stocks simply have no recent insider/bulk activity, which
+    is the expected common case, not an error.
+    """
+    _rate_limit(request, "insider_activity", max_calls=30, window_seconds=60)
+    sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+
+    def _load_cached() -> dict | None:
+        import cache
+
+        cached = cache.load(sym, "insider_activity")
+        return {k: v for k, v in cached.items() if k != "_meta"} if cached is not None else None
+
+    loop = asyncio.get_running_loop()
+    cached = await loop.run_in_executor(None, _load_cached)
+    if cached is not None:
+        return cached
+
+    def _fetch_insider() -> list[dict]:
+        from tools.nse_insider_trades import fetch_insider_trades_for_symbol
+
+        return fetch_insider_trades_for_symbol(sym).get("trades", [])
+
+    def _fetch_bulk_block() -> list[dict]:
+        from tools.nse_bulk_block_deals import fetch_bulk_block_deals_for_symbol
+
+        return fetch_bulk_block_deals_for_symbol(sym).get("deals", [])
+
+    # Two independent NSE endpoints — fetch concurrently rather than one
+    # after the other, same spirit as _consolidated_payload's parallel lookups.
+    insider_trades, bulk_block_deals = await asyncio.gather(
+        loop.run_in_executor(None, _fetch_insider),
+        loop.run_in_executor(None, _fetch_bulk_block),
+    )
+    result = {"symbol": sym, "insider_trades": insider_trades, "bulk_block_deals": bulk_block_deals}
+
+    def _save_cache() -> None:
+        import cache
+
+        cache.save(sym, "insider_activity", result)
+
+    await loop.run_in_executor(None, _save_cache)
+    return result
+
+
 def _score_verdict_history(history: list[dict], live_price: float | None) -> list[dict]:
     """Attaches return_since_pct/outcome to each stored verdict, scored against
     today's live price — "how has AlphaPulse's own call on this stock done so

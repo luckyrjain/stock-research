@@ -49,7 +49,14 @@ def _fmt_value(v: float) -> str:
     return f"₹{v / 100_000:.1f}L"
 
 
-def _trade_to_article(row: dict) -> dict | None:
+def _parse_pit_row(row: dict) -> dict | None:
+    """Shared parse+noise-filter step for one NSE PIT disclosure row. Returns
+    None if malformed or filtered out (wrong person category, an excluded
+    acquisition mode, or below the minimum value). Used by both
+    fetch_insider_trades() (market-wide LLM-article feed, for pick discovery)
+    and fetch_insider_trades_for_symbol() (structured, one symbol, for
+    single-stock research) so the two call sites can't drift on what counts
+    as a "real" insider trade."""
     symbol   = (row.get("symbol") or "").upper().strip()
     person   = (row.get("acqName") or "").strip()
     category = (row.get("personCategory") or "").strip()
@@ -78,6 +85,30 @@ def _trade_to_article(row: dict) -> dict | None:
     else:
         return None
 
+    # NSE's own date_str formats aren't lexically sortable (month abbreviations
+    # don't sort like calendar order) — date_iso exists purely so callers can
+    # sort chronologically.
+    return {
+        "symbol":   symbol,
+        "person":   person,
+        "category": category,
+        "action":   action,
+        "quantity": qty,
+        "value":    value,
+        "date":     date_str,
+        "date_iso": _parse_pit_date(date_str),
+    }
+
+
+def _trade_to_article(row: dict) -> dict | None:
+    parsed = _parse_pit_row(row)
+    if not parsed:
+        return None
+    symbol, person, category, action, qty, value, date_str = (
+        parsed["symbol"], parsed["person"], parsed["category"], parsed["action"],
+        parsed["quantity"], parsed["value"], parsed["date"],
+    )
+
     verb = "bought" if action == "BUY" else "sold"
     title = (
         f"{person} ({category}) {verb} {_fmt_value(value)} worth of {symbol} "
@@ -90,13 +121,7 @@ def _trade_to_article(row: dict) -> dict | None:
         f"Date: {date_str}."
     )
 
-    pub_iso: str | None = None
-    for fmt in ("%d-%b-%Y %H:%M", "%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y"):
-        try:
-            pub_iso = datetime.strptime(date_str, fmt).replace(tzinfo=timezone.utc).isoformat()
-            break
-        except ValueError:
-            pass
+    pub_iso = _parse_pit_date(date_str)
 
     return {
         "title":        title,
@@ -106,11 +131,18 @@ def _trade_to_article(row: dict) -> dict | None:
     }
 
 
-def fetch_insider_trades() -> dict:
-    """Fetch NSE promoter/director insider trades from the last two weeks."""
-    sess = _nse_session()
+def _parse_pit_date(date_str: str) -> str | None:
+    for fmt in ("%d-%b-%Y %H:%M", "%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(date_str, fmt).replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            pass
+    return None
+
+
+def _fetch_pit_rows(sess: requests.Session, lookback_days: int) -> list[dict]:
     to_d   = date.today()
-    from_d = to_d - timedelta(days=_LOOKBACK_DAYS)
+    from_d = to_d - timedelta(days=lookback_days)
     try:
         r = sess.get(
             "https://www.nseindia.com/api/corporates-pit",
@@ -122,9 +154,17 @@ def fetch_insider_trades() -> dict:
             timeout=15,
         )
         r.raise_for_status()
-        raw = r.json().get("data") or []
+        return r.json().get("data") or []
     except Exception:
-        raw = []
+        return []
+
+
+def fetch_insider_trades() -> dict:
+    """Fetch NSE promoter/director insider trades from the last two weeks,
+    market-wide — feeds the market-picks discovery pipeline as one more LLM
+    extraction source."""
+    sess = _nse_session()
+    raw = _fetch_pit_rows(sess, _LOOKBACK_DAYS)
 
     articles: list[dict] = []
     seen: set[str] = set()
@@ -147,6 +187,38 @@ def fetch_insider_trades() -> dict:
         )
 
     return {"source": "NSE Insider Trades", "type": "brokerage", "articles": articles}
+
+
+_SYMBOL_LOOKBACK_DAYS = 90  # wider than the 14d market-wide window: a single
+                            # stock's insider activity is comparatively sparse,
+                            # so a shorter window would too often show nothing
+
+
+def fetch_insider_trades_for_symbol(symbol: str, lookback_days: int = _SYMBOL_LOOKBACK_DAYS) -> dict:
+    """Structured (not LLM-article) insider-trading disclosures for one
+    symbol, for the single-stock research flow — same NSE PIT feed and noise
+    filters as fetch_insider_trades() (market-wide, for pick discovery), just
+    scoped to one symbol over a longer window. Returns {"symbol", "trades": []}
+    (never raises) if NSE has nothing, the request fails, or every row for
+    this symbol was filtered out as noise — absent rather than guessed, same
+    convention as every other tool in this codebase."""
+    sym = symbol.upper().strip()
+    sess = _nse_session()
+    raw = _fetch_pit_rows(sess, lookback_days)
+
+    trades: list[dict] = []
+    for row in raw:
+        try:
+            parsed = _parse_pit_row(row)
+        except Exception as exc:
+            logger.debug("Skipping malformed insider-trade row: %s", exc)
+            continue
+        if not parsed or parsed["symbol"] != sym:
+            continue
+        trades.append({k: v for k, v in parsed.items() if k != "symbol"})
+
+    trades.sort(key=lambda t: t["date_iso"] or "", reverse=True)
+    return {"symbol": sym, "trades": trades}
 
 
 INSIDER_SOURCES = [

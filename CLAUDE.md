@@ -305,6 +305,39 @@ that gap without touching the analyst step at all:
    bridges the two independent label sets (the research task's own ratio names
    vs. Screener's peer-table column headers, e.g. "ROCE" vs "ROCE %").
 
+### Insider & institutional activity flow (`GET /api/insider-activity/{symbol}`)
+
+`tools/nse_insider_trades.py` and `tools/nse_bulk_block_deals.py` already scrape NSE's
+promoter/director PIT disclosures and bulk/block deal feeds — but only as input to the
+Market Picks discovery pipeline, where each qualifying trade is formatted as a
+plain-language "article" for LLM extraction and then discarded. A researcher looking up
+one specific stock had no way to see this activity unless that stock happened to make the
+weekly picks list. This endpoint surfaces the same underlying data directly, per symbol:
+
+1. Both tool modules gained a `_parse_pit_row()`/`_parse_deal_row()` shared parse step
+   (returning a plain dict, not an LLM article) that the existing market-wide
+   `_trade_to_article()`/`_deal_to_article()` functions now build on top of — so the
+   market-wide and per-symbol paths can't drift on what counts as a "real" trade (same
+   category/mode/value-threshold filters either way). `fetch_insider_trades_for_symbol()`
+   and `fetch_bulk_block_deals_for_symbol()` are the new per-symbol entry points, returning
+   `{"symbol", "trades": [...]}` / `{"symbol", "deals": [...]}` — structured records, not
+   article text. Both sort on a separately-parsed `date_iso` field, never NSE's own raw date
+   string (month abbreviations like "Jan"/"Apr" don't sort lexically in calendar order).
+2. `fetch_insider_trades_for_symbol()` requests a 90-day window from NSE's PIT endpoint
+   (vs. the market-wide scraper's 14-day window) — a single stock's insider activity is
+   comparatively sparse, so a short window would too often show nothing. Bulk/block deals
+   have no equivalent widening: NSE's `bulk-deals`/`block-deals` endpoints only ever return
+   "recent trading days" with no date-range parameter to request more.
+3. `GET /api/insider-activity/{symbol}` fetches both sources concurrently
+   (`asyncio.gather`, same spirit as `_consolidated_payload`'s parallel lookups), combines
+   them, and caches the combined result (24 h TTL) — standalone and on-demand, intentionally
+   outside `ALL_DATA_TASKS`, same pattern as `peers`/`price_history`. Absent rather than
+   guessed: most stocks simply have no recent insider/bulk activity in the window, which
+   returns empty lists (never null), not an error.
+4. `results-dashboard.tsx`'s `InsiderActivityCard` (via `useInsiderActivity()`) renders
+   nothing when both lists are empty, and otherwise lists each trade/deal with a BUY/SELL
+   badge, counterparty name, value, and date — right after the Peer Comparison card.
+
 ### Symbol validation flow (`GET /api/validate/{symbol}`)
 
 Handles three input forms:
