@@ -299,14 +299,31 @@ class AnalyseEndpointRateLimitTest(unittest.TestCase):
 class MarketPicksForceRateLimitTest(unittest.TestCase):
     def setUp(self) -> None:
         rate_limiter._memory_calls.clear()
+        rate_limiter._memory_locks.clear()
 
     def tearDown(self) -> None:
         rate_limiter._memory_calls.clear()
+        rate_limiter._memory_locks.clear()
 
     def test_429_when_force_rescan_over_limit(self) -> None:
         rate_limiter._memory_calls["market_picks_force:testclient"] = [api.time.monotonic()] * 3
         resp = client.get("/api/market-picks?force=true")
         self.assertEqual(resp.status_code, 429)
+        # 429 must not have left the lock claimed — same "409 takes priority
+        # over 429" ordering as the SME/screener refresh endpoints, and the
+        # lock is acquired first, so a rejected request must release it.
+        self.assertFalse(rate_limiter.is_locked("market_picks_refresh"))
+
+    def test_already_running_returns_409(self) -> None:
+        # Regression test: /api/market-picks?force=true previously had no
+        # single-run lock at all, unlike /api/sme-signals/refresh and
+        # /api/screener/refresh — two overlapping full pipeline runs
+        # (the weekly cron's HTTP trigger racing a user's "Fresh scan"
+        # click) could both proceed, doubling real LLM/scraping cost on
+        # the most expensive pipeline in the app.
+        rate_limiter._memory_locks["market_picks_refresh"] = True
+        resp = client.get("/api/market-picks?force=true")
+        self.assertEqual(resp.status_code, 409)
 
 
 class RemainingEndpointsRateLimitTest(unittest.TestCase):

@@ -65,6 +65,15 @@ _DB_ENGINE_LOCK = threading.Lock()
 _SME_REFRESH_LOCK_NAME = "sme_refresh"
 _SME_REFRESH_LOCK_TTL_SECONDS = 3600  # generous upper bound on one pipeline run
 
+# Same single-flight pattern as the SME/screener refresh locks above, but for
+# market_picks() below — by far the most expensive pipeline in the app (dozens
+# of LLM calls plus a 20-source scrape per run), and previously the only
+# force-refresh path with no lock at all, guarded only by a 3/hour rate limit
+# and the shared LLM concurrency ceiling. Without this, the weekly cron's HTTP
+# trigger and a user's "Fresh scan" click could run two full pipelines at once.
+_MARKET_PICKS_REFRESH_LOCK_NAME = "market_picks_refresh"
+_MARKET_PICKS_REFRESH_LOCK_TTL_SECONDS = 3600  # generous upper bound on one pipeline run
+
 
 def _get_db_engine():
     global _DB_ENGINE
@@ -619,7 +628,16 @@ async def analyse(symbol: str, request: Request, force: bool = False):
                         sym, all_data, signal_context=signal_context, run_id=run_id
                     )
 
-                # Run analyst in thread; send heartbeats so the connection stays alive
+                # Run analyst in thread; send heartbeats so the connection stays alive.
+                # The LLM slot is released inside _run_and_signal()'s own finally —
+                # tied to when the background LLM call actually finishes, not to
+                # when the SSE consumer stops waiting for it (see market_picks()'s
+                # run_pipeline() for the same pattern). If the client disconnects
+                # mid-call, asyncio.wait_for()/GeneratorExit unwinds the consumer
+                # loop below, but this background task keeps running independently
+                # in the executor and still holds its slot for the call's real
+                # duration — releasing early here would let more concurrent LLM
+                # calls run than _LLM_CONCURRENCY_LIMIT permits.
                 done_q: asyncio.Queue = asyncio.Queue()
 
                 async def _run_and_signal():
@@ -666,20 +684,23 @@ async def analyse(symbol: str, request: Request, force: bool = False):
                             "news_highlights": "News commentary was unavailable because the analyst task failed.",
                             "institutional_trend": "Institutional trend commentary was unavailable because the analyst task failed.",
                         }
+                    finally:
+                        _release_llm_slot()
                     await done_q.put(result)
 
                 asyncio.create_task(_run_and_signal())
+                # Responsibility for releasing the slot has now been handed off to
+                # _run_and_signal()'s own finally above — stand down the outer
+                # safety-net release at the bottom of this function so a client
+                # disconnect from here on doesn't release it a second time.
+                llm_slot_acquired = False
 
-                try:
-                    while True:
-                        try:
-                            analysis = await asyncio.wait_for(done_q.get(), timeout=15)
-                            break
-                        except asyncio.TimeoutError:
-                            yield _heartbeat()
-                finally:
-                    _release_llm_slot()
-                    llm_slot_acquired = False
+                while True:
+                    try:
+                        analysis = await asyncio.wait_for(done_q.get(), timeout=15)
+                        break
+                    except asyncio.TimeoutError:
+                        yield _heartbeat()
 
                 cache.save(sym, "analysis", analysis)
             else:
@@ -716,9 +737,21 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
 
     ?force=true  — skip cache and run a fresh pipeline.
     """
+    lock_acquired = False
     if force:
-        # Only the cache-bypassing path is rate-limited — normal cached reads are cheap.
-        _rate_limit(request, "market_picks_force", max_calls=3, window_seconds=3600)
+        # Single-flight, same lock-then-rate-limit ordering as the SME/screener
+        # refresh endpoints (409 takes priority over 429 when both would apply)
+        # — acquired before the rate limit so a rejected/duplicate request never
+        # falsely claims the lock out from under a real in-flight run.
+        if not rate_limiter.try_acquire_lock(_MARKET_PICKS_REFRESH_LOCK_NAME, _MARKET_PICKS_REFRESH_LOCK_TTL_SECONDS):
+            raise HTTPException(status_code=409, detail="A fresh market-picks scan is already running.")
+        lock_acquired = True
+        try:
+            # Only the cache-bypassing path is rate-limited — normal cached reads are cheap.
+            _rate_limit(request, "market_picks_force", max_calls=3, window_seconds=3600)
+        except HTTPException:
+            rate_limiter.release_lock(_MARKET_PICKS_REFRESH_LOCK_NAME)
+            raise
     run_id = uuid.uuid4().hex[:12]
 
     async def stream():
@@ -742,55 +775,79 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
         # same as a single-stock analyst call, so it counts against the same ceiling.
         if not _acquire_llm_slot():
             log_event(LOGGER, "market_picks_capacity_rejected", level="warning", run_id=run_id)
+            if lock_acquired:
+                rate_limiter.release_lock(_MARKET_PICKS_REFRESH_LOCK_NAME)
             yield _sse({
                 "event": "error",
                 "message": "The server is at capacity for AI-driven pipelines right now — please try again in a moment.",
             })
             return
 
-        loop = asyncio.get_running_loop()
-        q: asyncio.Queue = asyncio.Queue()
+        # Everything from here through asyncio.create_task(_launch()) below is
+        # synchronous, non-blocking setup with no await/yield point — but if
+        # any of it did unexpectedly raise, run_pipeline() (the sole owner of
+        # the slot/lock release from this point on) would never launch to
+        # release them. Guard the setup itself so a failure here can't leak
+        # either, same defensive posture analyse()'s stream() already takes
+        # with its own top-level try/except/finally.
+        try:
+            loop = asyncio.get_running_loop()
+            q: asyncio.Queue = asyncio.Queue()
 
-        def on_event(payload: dict):
-            loop.call_soon_threadsafe(q.put_nowait, payload)
+            def on_event(payload: dict):
+                loop.call_soon_threadsafe(q.put_nowait, payload)
 
-        def run_pipeline():
-            try:
-                from market_picks_pipeline import MarketPicksPipeline
-                pipeline = MarketPicksPipeline()
-                picks = pipeline.run(on_event=on_event)
-                generated_at = datetime.now(timezone.utc).isoformat()
-                # A pipeline run that completes without raising but yields zero picks, or
-                # that pipeline.healthy flags as substantially degraded (e.g. most scrape
-                # sources failed simultaneously), must not be cached — caching it would
-                # serve that broken result as "fresh" for 6h and mask the outage from
-                # every subsequent visitor.
-                if picks and pipeline.healthy:
-                    _save_picks_cache(picks, generated_at)
-                else:
-                    log_event(
-                        LOGGER, "market_picks_degraded_result_not_cached", level="warning",
-                        run_id=run_id, picks=len(picks), healthy=pipeline.healthy,
-                    )
-                loop.call_soon_threadsafe(q.put_nowait, {
-                    "event":        "done",
-                    "picks":        picks,
-                    "generated_at": generated_at,
-                    "total_picks":  len(picks),
-                    "from_cache":   False,
-                })
-            except Exception as exc:
-                log_event(LOGGER, "market_picks_failed", level="error", run_id=run_id, error=str(exc))
-                loop.call_soon_threadsafe(q.put_nowait, {"event": "error", "message": str(exc)})
-            finally:
-                _release_llm_slot()
+            def run_pipeline():
+                try:
+                    from market_picks_pipeline import MarketPicksPipeline
+                    pipeline = MarketPicksPipeline()
+                    picks = pipeline.run(on_event=on_event)
+                    generated_at = datetime.now(timezone.utc).isoformat()
+                    # A pipeline run that completes without raising but yields zero picks, or
+                    # that pipeline.healthy flags as substantially degraded (e.g. most scrape
+                    # sources failed simultaneously), must not be cached — caching it would
+                    # serve that broken result as "fresh" for 6h and mask the outage from
+                    # every subsequent visitor.
+                    if picks and pipeline.healthy:
+                        _save_picks_cache(picks, generated_at)
+                    else:
+                        log_event(
+                            LOGGER, "market_picks_degraded_result_not_cached", level="warning",
+                            run_id=run_id, picks=len(picks), healthy=pipeline.healthy,
+                        )
+                    loop.call_soon_threadsafe(q.put_nowait, {
+                        "event":        "done",
+                        "picks":        picks,
+                        "generated_at": generated_at,
+                        "total_picks":  len(picks),
+                        "from_cache":   False,
+                    })
+                except Exception as exc:
+                    log_event(LOGGER, "market_picks_failed", level="error", run_id=run_id, error=str(exc))
+                    loop.call_soon_threadsafe(q.put_nowait, {"event": "error", "message": str(exc)})
+                finally:
+                    _release_llm_slot()
+                    if lock_acquired:
+                        rate_limiter.release_lock(_MARKET_PICKS_REFRESH_LOCK_NAME)
 
-        log_event(LOGGER, "market_picks_started", run_id=run_id)
+            log_event(LOGGER, "market_picks_started", run_id=run_id)
 
-        async def _launch():
-            await loop.run_in_executor(None, run_pipeline)
+            async def _launch():
+                await loop.run_in_executor(None, run_pipeline)
 
-        asyncio.create_task(_launch())
+            asyncio.create_task(_launch())
+        except Exception as exc:
+            # Setup itself failed before run_pipeline() could ever launch to
+            # release the slot/lock via its own finally — release them here
+            # instead so a currently-unreachable-in-practice failure (no
+            # await/yield point exists in this block today, but a future
+            # edit could add one) can't leak either.
+            log_event(LOGGER, "market_picks_setup_failed", level="error", run_id=run_id, error=str(exc))
+            _release_llm_slot()
+            if lock_acquired:
+                rate_limiter.release_lock(_MARKET_PICKS_REFRESH_LOCK_NAME)
+            yield _sse({"event": "error", "message": str(exc)})
+            return
 
         while True:
             try:
