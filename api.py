@@ -595,7 +595,9 @@ async def analyse(symbol: str, request: Request, force: bool = False):
                 yield _sse({"event": "error", "message": f"Symbol not valid: {err}"})
                 return
 
-            signal_result = run_signal_engine(sym, all_data)
+            # run_signal_engine now does its own (cached) network I/O for the
+            # technical signal — must not run directly on the event loop.
+            signal_result = await loop.run_in_executor(None, run_signal_engine, sym, all_data)
             signal_insight = interpret(signal_result)
             save_signal(signal_result)
             signal_context = {
@@ -1102,35 +1104,10 @@ async def get_price_history(request: Request, symbol: str, days: int = Query(180
     standalone, on-demand series, not part of the six-task analysis pipeline.
     """
     _rate_limit(request, "prices_history", max_calls=60, window_seconds=60)
-    sym = symbol.upper().strip()
+    from tools.price_history_tools import get_price_series
+
     loop = asyncio.get_running_loop()
-
-    def _fetch_sync() -> dict:
-        import cache
-
-        cached = cache.load(sym, "price_history")
-        if cached and len(cached.get("closes", [])) >= 5:
-            return {k: v for k, v in cached.items() if k != "_meta"}
-
-        import yfinance as yf
-        for suffix, exch in ((".NS", "NSE"), (".BO", "BSE")):
-            try:
-                df = yf.Ticker(sym + suffix).history(period=f"{days}d", interval="1d", auto_adjust=True)
-                if df.empty:
-                    continue
-                result = {
-                    "symbol":   sym,
-                    "exchange": exch,
-                    "dates":    [d.strftime("%Y-%m-%d") for d in df.index],
-                    "closes":   [round(float(c), 2) for c in df["Close"].tolist()],
-                }
-                cache.save(sym, "price_history", result)
-                return result
-            except Exception:
-                continue
-        return {"symbol": sym, "exchange": None, "dates": [], "closes": []}
-
-    return await loop.run_in_executor(None, _fetch_sync)
+    return await loop.run_in_executor(None, get_price_series, symbol, days)
 
 
 def _parse_peer_numeric(value) -> float | None:

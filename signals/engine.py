@@ -6,9 +6,17 @@ from signals.valuation import valuation_signal
 from signals.models import SignalResult
 from signals.growth import growth_signal
 from signals.filings import filings_signal
+from signals.technical import technical_signal
 
 def run_signal_engine(symbol: str, all_data: dict) -> SignalResult:
-    """Compute weighted signal scores and return a trading verdict."""
+    """Compute weighted signal scores and return a trading verdict.
+
+    Every signal but `technical` reads from `features` (already-fetched
+    data, no I/O of its own). `technical` fetches its own OHLCV input (see
+    signals/technical.py) — callers running inside an asyncio event loop
+    must invoke this function via an executor, not directly, the same as
+    every other blocking call in this codebase's SSE paths.
+    """
     features = extract_features(all_data)
 
     signals = {
@@ -16,6 +24,7 @@ def run_signal_engine(symbol: str, all_data: dict) -> SignalResult:
         "valuation": valuation_signal(features),
         "growth": growth_signal(features),
         "filings": filings_signal(features),
+        "technical": technical_signal(symbol),
     }
 
     weights = {
@@ -23,6 +32,7 @@ def run_signal_engine(symbol: str, all_data: dict) -> SignalResult:
         "volume": 0.2,
         "growth": 0.4,
         "filings": 0.2,
+        "technical": 0.2,
     }
 
     score = 0
