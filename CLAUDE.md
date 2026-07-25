@@ -430,6 +430,39 @@ that gap without touching the analyst step at all:
    bridges the two independent label sets (the research task's own ratio names
    vs. Screener's peer-table column headers, e.g. "ROCE" vs "ROCE %").
 
+**Absolute valuation anchor**: peer percentile only ever answers "cheap/expensive
+*vs. peers*" — it says nothing about whether the stock is cheap/expensive *vs. its
+own history*, which was the analyst-lens gap this closes. `_compute_valuation_anchor()`
+(`api.py`) is folded into the same `/api/peers/{symbol}` response as a sibling
+`absolute_anchor` field, not a new endpoint:
+
+1. `tools/screener_tools.py::_extract_valuation_band()` parses Screener's own
+   yearly Ratios table (`section#ratios`) for a "Price to Earning" row — the
+   same company page `get_peer_comparison()` already fetches, so this is free
+   (no extra network round trip), same pattern as `_extract_quarterly_trend`.
+   Returns `{}` (never guessed) when the row is absent or fewer than 3 years
+   are available — too thin a sample for a meaningful band. **Disclosed
+   limitation**: whether Screener actually renders a yearly "Price to Earning"
+   row under `section#ratios` (vs. only exposing historical P/E through its
+   separate interactive chart, which this scraper does not call) was not
+   verified against a live response in this sandbox — same disclosure as the
+   FII/DII/macro scrapers and the sector-taxonomy assumption above. If the row
+   isn't there under this id/label, this just returns `{}`, same as "Screener
+   doesn't have this data" elsewhere in this module.
+2. `_compute_valuation_anchor()` finds the current P/E in `self`'s own peer-row
+   values (whichever column key contains "P/E", case-insensitive) and ranks it
+   against `valuation_band.pe` using the same mean-rank percentile formula as
+   `_compute_peer_percentiles` — but, unlike that function (which folds `self`
+   into the ranked population), `current_pe` is ranked against `pe_values`
+   alone: it's today's live snapshot, not itself one of the historical yearly
+   observations. Returns `None` (not a guessed number) when there's no
+   parseable current P/E or fewer than 3 years of band history.
+3. `results-dashboard.tsx`'s `ValuationAnchorBadge` renders inside the existing
+   "Peer Comparison" card, right below the table — buy/hold/sell-toned by
+   percentile (≤33rd cheap, ≥67th expensive vs. its own range), showing the
+   current P/E, its percentile, and the raw low/median/high band. Renders
+   nothing when `absolute_anchor` is `null`.
+
 ### Insider & institutional activity flow (`GET /api/insider-activity/{symbol}`)
 
 `tools/nse_insider_trades.py` and `tools/nse_bulk_block_deals.py` already scrape NSE's

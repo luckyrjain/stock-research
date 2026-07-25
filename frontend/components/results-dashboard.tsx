@@ -42,6 +42,30 @@ function PercentileBadge({ value }: { value: number }) {
   );
 }
 
+// Where the stock's current P/E sits within its OWN last 3-5 years of
+// Screener-published P/E — an absolute anchor alongside PercentileBadge's
+// peer-relative reading above. Low percentile (cheap vs. its own history)
+// reads as buy-toned, high (expensive vs. its own history) as sell-toned,
+// same color convention as the BUY/HOLD/SELL badges elsewhere in this file.
+function ValuationAnchorBadge({ anchor }: { anchor: PeerComparison['absolute_anchor'] }) {
+  if (!anchor || anchor.years.length === 0) return null;
+  const tone = anchor.percentile <= 33 ? 'text-buy border-buy/25 bg-buy/10'
+    : anchor.percentile >= 67 ? 'text-sell border-sell/25 bg-sell/10'
+    : 'text-hold border-hold/25 bg-hold/10';
+  return (
+    <div
+      className={`mt-3 rounded-lg border px-3 py-2 text-xs ${tone}`}
+      title={`Current P/E ${anchor.current_pe} vs. its own ${anchor.years[0]}–${anchor.years[anchor.years.length - 1]} range (low ${anchor.low}, median ${anchor.median}, high ${anchor.high})`}
+    >
+      <span className="font-semibold">P/E {anchor.current_pe}</span>
+      {' — '}
+      {Math.round(anchor.percentile)}th percentile of its own {anchor.years.length}-year range
+      {' '}
+      <span className="text-muted">({anchor.low}–{anchor.high}, median {anchor.median})</span>
+    </div>
+  );
+}
+
 function PeerTable({ peers }: { peers: PeerComparison | null }) {
   if (!peers || (!peers.self && peers.peers.length === 0)) return null;
 
@@ -99,6 +123,7 @@ function PeerTable({ peers }: { peers: PeerComparison | null }) {
           Screener doesn&apos;t list sector peers for this stock, or the peer comparison table wasn&apos;t available.
         </p>
       )}
+      <ValuationAnchorBadge anchor={peers.absolute_anchor} />
     </Card>
   );
 }

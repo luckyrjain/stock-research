@@ -10,6 +10,7 @@ from tools.screener_tools import (
     _extract_growth_metrics,
     _extract_latest_metric_from_tables,
     _extract_quarterly_trend,
+    _extract_valuation_band,
     _parse_peer_table,
     _resolve_screener_slug,
     get_fundamentals,
@@ -361,6 +362,75 @@ class ExtractQuarterlyTrendTest(unittest.TestCase):
         self.assertEqual(trend["operating_margin"], [14.0, 16.0])
 
 
+class ExtractValuationBandTest(unittest.TestCase):
+    def _ratios_html(self, pe_row: str = None, years: str = None) -> str:
+        years = years or "<th>Mar 2020</th><th>Mar 2021</th><th>Mar 2022</th><th>Mar 2023</th><th>Mar 2024</th>"
+        rows = f"<tr><td>Price to Earning</td>{pe_row}</tr>" if pe_row is not None else ""
+        return f"""
+        <section id="ratios">
+          <table>
+            <thead><tr><th></th>{years}</tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+        </section>
+        """
+
+    def test_extracts_last_five_years(self) -> None:
+        html = self._ratios_html(pe_row="<td>18.2</td><td>20.1</td><td>22.5</td><td>19.8</td><td>24.3</td>")
+        soup = BeautifulSoup(html, "lxml")
+        band = _extract_valuation_band(soup)
+        self.assertEqual(band["years"], ["Mar 2020", "Mar 2021", "Mar 2022", "Mar 2023", "Mar 2024"])
+        self.assertEqual(band["pe"], [18.2, 20.1, 22.5, 19.8, 24.3])
+
+    def test_caps_to_max_years(self) -> None:
+        html = self._ratios_html(pe_row="<td>18.2</td><td>20.1</td><td>22.5</td><td>19.8</td><td>24.3</td>")
+        soup = BeautifulSoup(html, "lxml")
+        band = _extract_valuation_band(soup, max_years=3)
+        self.assertEqual(band["years"], ["Mar 2022", "Mar 2023", "Mar 2024"])
+        self.assertEqual(band["pe"], [22.5, 19.8, 24.3])
+
+    def test_missing_section_returns_empty_dict(self) -> None:
+        soup = BeautifulSoup("<html></html>", "lxml")
+        self.assertEqual(_extract_valuation_band(soup), {})
+
+    def test_missing_pe_row_returns_empty_dict(self) -> None:
+        html = self._ratios_html(pe_row=None)
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(_extract_valuation_band(soup), {})
+
+    def test_fewer_than_three_years_returns_empty_dict(self) -> None:
+        html = self._ratios_html(
+            pe_row="<td>19.8</td><td>24.3</td>",
+            years="<th>Mar 2023</th><th>Mar 2024</th>",
+        )
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(_extract_valuation_band(soup), {})
+
+    def test_unparseable_cell_in_window_returns_empty_dict(self) -> None:
+        html = self._ratios_html(pe_row="<td>-</td><td>20.1</td><td>22.5</td><td>19.8</td><td>24.3</td>")
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(_extract_valuation_band(soup), {})
+
+    def test_row_with_extra_trailing_ttm_column_returns_empty_dict(self) -> None:
+        # A trailing "TTM" column only the header (not this data row) carries
+        # would otherwise mispair each real P/E with the wrong year once both
+        # lists are independently truncated by [-n:] — must bail out instead
+        # of silently misaligning years to values.
+        html = self._ratios_html(
+            years="<th>Mar 2021</th><th>Mar 2022</th><th>Mar 2023</th><th>Mar 2024</th><th>TTM</th>",
+            pe_row="<td>18.2</td><td>20.1</td><td>22.5</td><td>19.8</td>",
+        )
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(_extract_valuation_band(soup), {})
+
+    def test_row_with_extra_leading_cell_returns_empty_dict(self) -> None:
+        html = self._ratios_html(
+            pe_row="<td>x</td><td>18.2</td><td>20.1</td><td>22.5</td><td>19.8</td><td>24.3</td>",
+        )
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(_extract_valuation_band(soup), {})
+
+
 class ParsePeerTableTest(unittest.TestCase):
     def test_parses_headers_and_rows_generically(self) -> None:
         html = """
@@ -483,6 +553,42 @@ class GetPeerComparisonTest(unittest.TestCase):
         result = json.loads(result_str)
         self.assertIn("error", result)
         self.assertEqual(result["symbol"], "TCS")
+
+    def test_includes_valuation_band_when_ratios_section_present(self) -> None:
+        html = """
+        <section id="peers">
+          <table>
+            <thead><tr><th>Name</th><th>P/E</th></tr></thead>
+            <tbody><tr><td><a href="/company/TCS/">TCS</a></td><td>28</td></tr></tbody>
+          </table>
+        </section>
+        <section id="ratios">
+          <table>
+            <thead><tr><th></th><th>Mar 2022</th><th>Mar 2023</th><th>Mar 2024</th></tr></thead>
+            <tbody><tr><td>Price to Earning</td><td>22.5</td><td>19.8</td><td>24.3</td></tr></tbody>
+          </table>
+        </section>
+        """
+        with patch("tools.screener_tools._resolve_screener_slug", return_value="TCS"), \
+             patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup(html, "lxml")):
+            result_str = get_peer_comparison.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertEqual(result["valuation_band"]["pe"], [22.5, 19.8, 24.3])
+
+    def test_omits_valuation_band_when_ratios_section_absent(self) -> None:
+        html = """
+        <section id="peers">
+          <table>
+            <thead><tr><th>Name</th><th>P/E</th></tr></thead>
+            <tbody><tr><td><a href="/company/TCS/">TCS</a></td><td>28</td></tr></tbody>
+          </table>
+        </section>
+        """
+        with patch("tools.screener_tools._resolve_screener_slug", return_value="TCS"), \
+             patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup(html, "lxml")):
+            result_str = get_peer_comparison.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertNotIn("valuation_band", result)
 
 
 if __name__ == "__main__":
