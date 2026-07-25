@@ -10,7 +10,7 @@ A full-stack Indian equity research platform. Given an NSE/BSE ticker (e.g. `TCS
 
 1. Validates the symbol across NSE autocomplete, BSE, and Screener.in
 2. Fetches six data slices in parallel (price, fundamentals, news, shareholding, MF holdings, filings)
-3. Runs a quantitative signal engine (valuation + growth + volume + filings signals)
+3. Runs a quantitative signal engine (valuation + growth + volume + filings + technical signals)
 4. Calls an LLM analyst to produce a structured `BUY`/`HOLD`/`SELL` recommendation
 5. Streams progress and the final report to the browser via Server-Sent Events
 
@@ -279,6 +279,47 @@ Provider is auto-detected from whichever key is present (checked in the order ab
 6. `signals.engine.run_signal_engine()` scores the canonical data and produces a verdict
 7. `crew.run_analysis_with_fallback()` calls `litellm.completion` in a thread; the SSE loop sends heartbeats (`: heartbeat`) every 15s while waiting
 8. Final `done` event carries the merged report dict
+
+### Technical signal (RSI14 + EMA20/50 posture)
+
+Extends the momentum-screener math `sme_ema_pipeline.py` already computes for SME stocks
+(golden/death cross, RSI(14)) to every symbol the main stock-analysis flow scores — previously
+that confirmation signal only existed for SME/Emerge stocks, not the primary NSE/BSE large-cap
+flow this whole product is centered on.
+
+1. `tools/price_history_tools.py::get_price_series(symbol, days=180)` is the shared daily-close
+   OHLCV fetch — extracted out of `GET /api/prices/history/{symbol}` (the sparkline endpoint)
+   rather than duplicated, so both call sites share one yfinance `.NS`/`.BO` fallback and one
+   `price_history` cache (6 h TTL, same as before this extraction).
+2. `signals/technical.py::technical_signal(symbol)` is the one signal in `signals/engine.py`
+   that does its own I/O — every other signal (`volume`, `valuation`, `growth`, `filings`) reads
+   from `features`, already-fetched data with no network calls of its own. It computes RSI(14)
+   (same Wilder-style `ewm` formula as `sme_ema_pipeline._compute_rsi`) and EMA20/EMA50 trend
+   posture over the cached close series, returning `UNKNOWN` (score 0, never guessed) when fewer
+   than `_MIN_CLOSES` (75, same value as `sme_ema_pipeline._MIN_HISTORY_DAYS`) closes are
+   available — not enough history for EMA50 to have meaningfully converged (e.g. a recent IPO).
+   The `price_history` cache this reads (see point 1) is on its own 6 h TTL, independent of the
+   six-task caches — a `?force=true` re-analysis bypasses `ALL_DATA_TASKS` but not this cache, so
+   the technical signal can lag up to 6 h behind a forced refresh of everything else. Acceptable
+   for a momentum-confirmation signal on daily-close data (a 6 h-old RSI/EMA reading rarely
+   flips), but worth knowing if it's ever surprising in a support ticket.
+3. `run_signal_engine(symbol, all_data)` calls `technical_signal(symbol)` directly (it already
+   received `symbol`, no signature change needed) and blends it in at weight 0.2 — the same tier
+   as `volume`/`filings` (confirmation signals), below `valuation`/`growth` (0.4, the primary
+   fundamental drivers).
+4. **Blocking-I/O consequence**: `run_signal_engine()` was previously pure CPU (dict lookups +
+   arithmetic over already-fetched data) and so was called directly inside `api.py`'s
+   `/api/analyse/{symbol}` async SSE generator, unwrapped. Adding a (cached, but still
+   potentially network-hitting) call inside it means that call site now must run through
+   `loop.run_in_executor()` like every other blocking call in the SSE path — the same "never
+   block the event loop" rule the "SSE bridge pattern" section below already documents. The
+   other three call sites (`main.py`'s CLI, `watchlist_alerts.py`'s batch loop,
+   `market_picks_pipeline.py`'s `_phase_research`) were already running inside a synchronous
+   script or a `ThreadPoolExecutor` worker, so they needed no change.
+5. `results-dashboard.tsx`'s existing "Quant Signals" card renders every entry in
+   `signal_context.signals` generically (`Object.entries(...).map(...)`), so the new
+   `technical` entry appears automatically with no frontend code change — only its tooltip copy
+   was updated to mention it.
 
 ### Peer comparison flow (`GET /api/peers/{symbol}`)
 
