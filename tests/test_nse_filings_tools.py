@@ -71,6 +71,69 @@ class GetNseFilingsTest(unittest.TestCase):
         called_url = sess.get.call_args[0][0]
         self.assertIn("issuer=Tata%20Group", called_url)
 
+    def test_null_subject_and_description_default_to_empty_string(self) -> None:
+        # Regression test: NSE sometimes returns a filing with subject/
+        # description present but null (not simply absent), which used to
+        # flow through as a bare None and crash signals/filings.py with a
+        # TypeError on string concatenation, taking down the whole analysis.
+        data = [{
+            "subject": None, "description": None,
+            "date": "01-Jan-2026", "category": "Financial Results",
+            "attchmntFile": None,
+        }]
+        sess = self._session(_resp(json_data=data))
+        with patch("tools.nse_filings_tools._get_session", return_value=sess):
+            result = get_nse_filings("TCS")
+
+        self.assertEqual(result["filings"][0]["title"], "")
+        self.assertEqual(result["filings"][0]["desc"], "")
+
+    def test_non_list_response_body_returns_error_not_raise(self) -> None:
+        sess = self._session(_resp(json_data={"unexpected": "shape"}))
+        with patch("tools.nse_filings_tools._get_session", return_value=sess):
+            result = get_nse_filings("TCS")
+        self.assertIn("error", result)
+        self.assertNotIn("filings", result)
+
+    def test_non_dict_item_in_list_is_skipped_not_raised(self) -> None:
+        data = [
+            "not-a-dict",
+            {"subject": "Board Meeting", "description": "Q4 results", "date": "01-Jan-2026"},
+        ]
+        sess = self._session(_resp(json_data=data))
+        with patch("tools.nse_filings_tools._get_session", return_value=sess):
+            result = get_nse_filings("TCS")
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["filings"][0]["title"], "Board Meeting")
+
+    def test_symbol_is_uppercased_and_url_encoded(self) -> None:
+        sess = self._session(_resp(json_data=[]))
+        with patch("tools.nse_filings_tools._get_session", return_value=sess):
+            result = get_nse_filings("tata steel")
+        called_url = sess.get.call_args[0][0]
+        self.assertIn("symbol=TATA%20STEEL", called_url)
+        self.assertEqual(result["symbol"], "TATA STEEL")
+
+    def test_date_window_uses_ist_not_local_time(self) -> None:
+        # Pin "now" to a moment that's a different calendar date in UTC vs
+        # IST to prove the request window is computed in IST, not whatever
+        # timezone the host process happens to be running in.
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        fixed_ist = datetime(2026, 1, 15, 2, 0, tzinfo=ZoneInfo("Asia/Kolkata"))  # 2026-01-14 20:30 UTC
+
+        class _FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed_ist if tz is not None else fixed_ist.replace(tzinfo=None)
+
+        sess = self._session(_resp(json_data=[]))
+        with patch("tools.nse_filings_tools._get_session", return_value=sess), \
+             patch("tools.nse_filings_tools.datetime", _FixedDatetime):
+            get_nse_filings("TCS", days=1)
+        called_url = sess.get.call_args[0][0]
+        self.assertIn("to_date=15-01-2026", called_url)
+
 
 if __name__ == "__main__":
     unittest.main()

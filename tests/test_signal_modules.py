@@ -135,6 +135,17 @@ class FilingsSignalTest(unittest.TestCase):
         sig = filings_signal({"filings": [{"title": "Board meeting intimation", "desc": "Routine"}]})
         self.assertEqual(sig.value, "NONE")
 
+    def test_none_title_or_desc_does_not_raise(self) -> None:
+        # Regression test: NSE sometimes omits/nulls a filing's subject or
+        # description, which used to reach here as an actual None (not
+        # simply absent), and f.get(key, "") + str raised a TypeError,
+        # crashing the whole analysis for that symbol.
+        sig = filings_signal({"filings": [{"title": None, "desc": None}]})
+        self.assertEqual(sig.value, "NONE")
+
+        sig = filings_signal({"filings": [{"title": "New order received", "desc": None}]})
+        self.assertEqual(sig.value, "WEAK_SIGNAL")
+
 
 class ToFloatTest(unittest.TestCase):
     def test_none_returns_none(self) -> None:

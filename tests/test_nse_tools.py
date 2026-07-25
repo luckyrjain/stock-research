@@ -47,6 +47,16 @@ class BuildQuotePayloadTest(unittest.TestCase):
         payload = _build_quote_payload("TCS", "NSE", {"currentPrice": 100, "dividendYield": 258.65})
         self.assertEqual(payload["dividend_yield_pct"], 0)
 
+    def test_ambiguous_fraction_close_to_one_is_dropped_not_shown_as_implausible_percent(self) -> None:
+        # Regression test: a 0-1 fraction close to 1 used to be multiplied
+        # straight into an implausible percent (e.g. a genuine 0.5%-yield
+        # value already in percent form, misread as a fraction, would show
+        # as a wildly wrong 50%). Rather than trust the format guess, an
+        # implausible result is now dropped to 0 ("never invent") instead
+        # of displayed as fact.
+        payload = _build_quote_payload("TCS", "NSE", {"currentPrice": 100, "dividendYield": 0.5})
+        self.assertEqual(payload["dividend_yield_pct"], 0)
+
     def test_company_name_prefers_long_name(self) -> None:
         payload = _build_quote_payload("TCS", "NSE", {
             "currentPrice": 100, "longName": "Tata Consultancy Services", "shortName": "TCS",
@@ -154,6 +164,69 @@ class GetMfHoldingsTest(unittest.TestCase):
         with patch("tools.nse_tools._nse_session", side_effect=ConnectionError("boom")):
             result = json.loads(get_mf_holdings.run(symbol="TCS"))
         self.assertIn("error", result)
+
+    def test_malformed_percentage_fact_is_skipped_not_aborting_whole_result(self) -> None:
+        # Regression test: one non-numeric percentage fact anywhere in a
+        # document with multiple shareholder records used to abort the
+        # entire XBRL walk (float() raising, uncaught) — worse than a
+        # partial result, since a document can carry dozens of records.
+        ns_di = "http://xbrl.org/2006/xbrldi"
+        xbrl = f'''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance" xmlns:di="{ns_di}">
+          <xbrli:context id="D_MF1">
+            <xbrli:scenario><di:typedMember><MutualFundsMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <xbrli:context id="D_MF2">
+            <xbrli:scenario><di:typedMember><MutualFundsMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <NameOfTheShareholder contextRef="D_MF1">Good Fund</NameOfTheShareholder>
+          <ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="MF1">0.035</ShareholdingAsAPercentageOfTotalNumberOfShares>
+          <NameOfTheShareholder contextRef="D_MF2">Bad Fund</NameOfTheShareholder>
+          <ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="MF2">not-a-number</ShareholdingAsAPercentageOfTotalNumberOfShares>
+        </xbrli:xbrl>'''
+
+        sess = MagicMock()
+        master_resp = MagicMock()
+        master_resp.json.return_value = [{"date": "2026-01-01", "xbrl": "https://nse.example/x.xml"}]
+        sess.get.return_value = master_resp
+
+        xbrl_resp = MagicMock()
+        xbrl_resp.content = xbrl.encode()
+
+        with patch("tools.nse_tools._nse_session", return_value=sess), \
+             patch("requests.get", return_value=xbrl_resp):
+            result = json.loads(get_mf_holdings.run(symbol="TCS"))
+
+        self.assertEqual(len(result["mutual_funds"]), 1)
+        self.assertEqual(result["mutual_funds"][0]["fund"], "Good Fund")
+
+    def test_implausible_holding_pct_is_dropped_from_results(self) -> None:
+        # Regression test: same ambiguous-format guard as dividend_yield_pct
+        # — a fraction of 0.5 would previously be multiplied into an
+        # implausible 50% single-fund holding rather than dropped.
+        ns_di = "http://xbrl.org/2006/xbrldi"
+        xbrl = f'''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance" xmlns:di="{ns_di}">
+          <xbrli:context id="D_MF1">
+            <xbrli:scenario>
+              <di:typedMember><MutualFundsMember/></di:typedMember>
+            </xbrli:scenario>
+          </xbrli:context>
+          <NameOfTheShareholder contextRef="D_MF1">Sample Mutual Fund</NameOfTheShareholder>
+          <ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="MF1">0.5</ShareholdingAsAPercentageOfTotalNumberOfShares>
+        </xbrli:xbrl>'''
+
+        sess = MagicMock()
+        master_resp = MagicMock()
+        master_resp.json.return_value = [{"date": "2026-01-01", "xbrl": "https://nse.example/x.xml"}]
+        sess.get.return_value = master_resp
+
+        xbrl_resp = MagicMock()
+        xbrl_resp.content = xbrl.encode()
+
+        with patch("tools.nse_tools._nse_session", return_value=sess), \
+             patch("requests.get", return_value=xbrl_resp):
+            result = json.loads(get_mf_holdings.run(symbol="TCS"))
+
+        self.assertEqual(result["mutual_funds"], [])
 
 
 if __name__ == "__main__":

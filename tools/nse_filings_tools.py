@@ -2,9 +2,12 @@
 
 import requests
 from datetime import datetime, timedelta
+from urllib.parse import quote
+from zoneinfo import ZoneInfo
 import time
 
 BASE_URL = "https://www.nseindia.com/api/corporate-announcements"
+_IST = ZoneInfo("Asia/Kolkata")
 
 
 def _get_session():
@@ -29,15 +32,19 @@ def _get_session():
 def get_nse_filings(symbol: str, issuer: str = "", days: int = 30) -> dict:
     try:
         session = _get_session()
+        sym = symbol.upper().strip()
 
-        to_date = datetime.today()
+        # NSE's trading day is IST, not this process's local timezone — most
+        # cloud hosts default to UTC, which for ~5.5h after UTC midnight is
+        # still "yesterday" in IST, silently shifting this window by a day.
+        to_date = datetime.now(_IST)
         from_date = to_date - timedelta(days=days)
-        issuer_param = f"&issuer={issuer.replace(' ', '%20')}" if issuer else ""
+        issuer_param = f"&issuer={quote(issuer)}" if issuer else ""
 
         url = (
             f"{BASE_URL}?"
             f"index=equities"
-            f"&symbol={symbol}"
+            f"&symbol={quote(sym)}"
             f"{issuer_param}"
             f"&from_date={from_date.strftime('%d-%m-%Y')}"
             f"&to_date={to_date.strftime('%d-%m-%Y')}"
@@ -47,29 +54,38 @@ def get_nse_filings(symbol: str, issuer: str = "", days: int = 30) -> dict:
         resp = session.get(url, timeout=10)
 
         if resp.status_code != 200:
-            return {"error": f"HTTP {resp.status_code}", "symbol": symbol}
+            return {"error": f"HTTP {resp.status_code}", "symbol": sym}
 
         if "application/json" not in resp.headers.get("Content-Type", ""):
             return {
                 "error": "Blocked / Non-JSON",
-                "symbol": symbol,
+                "symbol": sym,
                 "raw": resp.text[:200]
             }
 
         data = resp.json()
+        if not isinstance(data, list):
+            return {"error": "Unexpected response shape (expected a list)", "symbol": sym}
 
         filings = []
         for item in data:
+            if not isinstance(item, dict):
+                continue
             filings.append({
-                "title": item.get("subject"),
-                "desc": item.get("description"),
+                # Never a bare None for a text field, matching every other
+                # tool's convention — NSE sometimes omits/nulls these, and a
+                # None here used to crash signals/filings.py's string
+                # concatenation with a TypeError, taking down the whole
+                # analysis for that symbol.
+                "title": item.get("subject") or "",
+                "desc": item.get("description") or "",
                 "date": item.get("date"),
                 "category": item.get("category"),
                 "attachment": item.get("attchmntFile"),
             })
 
         return {
-            "symbol": symbol,
+            "symbol": sym,
             "count": len(filings),
             "filings": filings
         }

@@ -21,6 +21,33 @@ def _nse_session() -> requests.Session:
     return session
 
 
+def _percent_from_ambiguous_value(value: float | None, plausible_max: float) -> float | None:
+    """Best-effort percent from a source value that's ambiguously either
+    already a percent or a 0-1 fraction (yfinance's dividendYield field is
+    documented to vary in format across versions/tickers; NSE's XBRL
+    shareholding percent facts are conventionally fractions but not
+    guaranteed). A value already >1 is unambiguous (can't be a valid
+    fraction) and is returned as-is when plausible.
+
+    Rather than trust a *transformed* value blindly — a genuine sub-1%
+    figure already in percent form would otherwise get wrongly multiplied
+    into a wildly implausible percentage (e.g. a real 0.5% yield read as a
+    50% one) — any candidate result past `plausible_max` returns None
+    ("never invent") instead of a wrong number, since a real dividend yield
+    or single fund's shareholding this high would be extraordinary, so a
+    value past the ceiling more likely means the format guess was wrong
+    than that the number is real. Returns None (not 0) when the source
+    value itself is missing/negative, so a caller can tell "no reliable
+    value" apart from a genuine 0%.
+    """
+    if value is None or value < 0:
+        return None
+    if value == 0:
+        return 0.0
+    candidate = value * 100 if value <= 1 else value
+    return round(candidate, 4) if candidate <= plausible_max else None
+
+
 def _is_valid_quote(info: dict) -> bool:
     """Return True if yfinance info has usable price and market cap data."""
     price = info.get("currentPrice") or info.get("regularMarketPrice")
@@ -58,8 +85,11 @@ def _build_quote_payload(sym: str, exchange: str, info: dict) -> dict:
         "52w_high": info.get("fiftyTwoWeekHigh"),
         "52w_low": info.get("fiftyTwoWeekLow"),
         # yfinance should return dividendYield as a decimal (0.25 = 25%).
-        # Some tickers return it already in percentage form (e.g. 258.65); treat those as bad data.
-        "dividend_yield_pct": round((info.get("dividendYield") or 0) * 100, 2) if 0 < (info.get("dividendYield") or 0) <= 1 else 0,
+        # Some tickers return it already in percentage form (e.g. 258.65) —
+        # _percent_from_ambiguous_value drops any implausible result (>25%,
+        # an extraordinary dividend yield for a real equity) rather than
+        # trusting a wrong format guess.
+        "dividend_yield_pct": _percent_from_ambiguous_value(info.get("dividendYield"), plausible_max=25.0) or 0,
         "beta": info.get("beta"),
         "sector": info.get("sector"),
         "industry": info.get("industry"),
@@ -156,17 +186,28 @@ def get_mf_holdings(symbol: str) -> str:
                 ctx_name[base_id] = elem.text.strip()
 
             if local == "ShareholdingAsAPercentageOfTotalNumberOfShares" and elem.text:
-                # ctx_ref without "D_" prefix is the numeric context
-                ctx_pct[ctx_ref] = float(elem.text)
+                # ctx_ref without "D_" prefix is the numeric context. One
+                # non-numeric fact anywhere in a document that can carry
+                # dozens/hundreds of shareholder records must not abort the
+                # whole result — skip just that fact.
+                try:
+                    ctx_pct[ctx_ref] = float(elem.text)
+                except ValueError:
+                    continue
 
         funds = []
         for ctx_id, name in ctx_name.items():
             pct = ctx_pct.get(ctx_id)
             if pct is not None:
-                funds.append({
-                    "fund": name,
-                    "holding_pct": round(pct * 100, 4) if pct < 1 else round(pct, 4),
-                })
+                # A single fund holding >30% of a company's total shares
+                # outstanding would be extraordinary — same "drop rather
+                # than trust a wrong format guess" reasoning as
+                # dividend_yield_pct above. holding_pct can legitimately be
+                # 0.0 (distinct from None, the "unreliable" case), which
+                # is why this checks `is not None` rather than truthiness.
+                holding_pct = _percent_from_ambiguous_value(pct, plausible_max=30.0)
+                if holding_pct is not None:
+                    funds.append({"fund": name, "holding_pct": holding_pct})
 
         funds.sort(key=lambda x: x["holding_pct"], reverse=True)
 

@@ -1,6 +1,7 @@
 import json
 import re
 import requests
+from urllib.parse import quote
 from bs4 import BeautifulSoup
 from crewai.tools import tool
 
@@ -18,7 +19,7 @@ _HEADERS = {
 def _resolve_screener_slug(symbol: str) -> str:
     """Return the Screener slug for a symbol, falling back to search if direct URL 404s."""
     upper = symbol.upper()
-    resp = requests.get(f"https://www.screener.in/company/{upper}/", headers=_HEADERS, timeout=10)
+    resp = requests.get(f"https://www.screener.in/company/{quote(upper)}/", headers=_HEADERS, timeout=10)
     if resp.status_code == 200:
         return upper
     # 404 or redirect — search for the slug
@@ -39,7 +40,7 @@ def _resolve_screener_slug(symbol: str) -> str:
 
 def _fetch_soup(symbol: str, slug: str | None = None) -> BeautifulSoup:
     slug = slug or _resolve_screener_slug(symbol)
-    url = f"https://www.screener.in/company/{slug}/"
+    url = f"https://www.screener.in/company/{quote(slug)}/"
     resp = requests.get(url, headers=_HEADERS, timeout=20)
     resp.raise_for_status()
     return BeautifulSoup(resp.text, "lxml")
@@ -66,11 +67,30 @@ def _extract_growth_metrics(soup: BeautifulSoup) -> dict[str, str]:
 
     for block_label, output_prefix in block_map.items():
         block_text = ""
+        # Pick the SHORTEST matching container, not the first one in
+        # document order. find_all() visits ancestors before their
+        # children, so a wrapping div/section around both the Sales-growth
+        # and Profit-growth widgets would otherwise win immediately (its
+        # combined text trivially contains both labels) and silently hand
+        # back whichever growth block's numbers happen to appear first in
+        # that combined text — mislabeling Profit growth with Sales growth
+        # values or vice versa. The most specific container that still
+        # contains the label is always the shortest one, since any
+        # ancestor's text is a superset of it.
         for tag in soup.find_all(["section", "div", "table"]):
             text = " ".join(tag.stripped_strings)
-            if block_label.lower() in text.lower():
+            text_lower = text.lower()
+            if block_label.lower() not in text_lower:
+                continue
+            # Must also carry at least one period marker itself — otherwise
+            # this candidate is just the label's own leaf element (no
+            # numbers alongside it), and picking it would leave block_text
+            # non-empty but un-extractable, silently skipping this block
+            # instead of falling through to the full-text-scan fallback.
+            if "3 years" not in text_lower and "5 years" not in text_lower:
+                continue
+            if not block_text or len(text) < len(block_text):
                 block_text = text
-                break
 
         if not block_text:
             full_text = soup.get_text("\n", strip=True)
@@ -397,7 +417,25 @@ def get_holdings(symbol: str) -> str:
         if sh_section:
             table = sh_section.find("table")
             if table:
-                for row in table.select("tbody tr"):
+                # Don't blindly trust the last column position as "latest
+                # quarter" — if Screener ever adds a trailing summary/delta
+                # column (e.g. a "Q-o-Q change" column), cells[-1] would
+                # silently be read as the latest shareholding % instead of
+                # that delta value. Require the last header cell to not
+                # look like an obvious non-period column before trusting
+                # cells[-1] — same "never guess an alignment" instinct as
+                # _extract_quarterly_trend/_extract_valuation_band in this
+                # file, which explicitly validate header/row alignment.
+                header_cells = table.select("thead tr th")
+                last_header_text = (
+                    _clean(header_cells[-1].get_text(" ", strip=True)).lower() if header_cells else ""
+                )
+                _NON_PERIOD_MARKERS = ("change", "trend", "yoy", "qoq", "delta", "diff", "%chg", "chg")
+                trust_last_column = not header_cells or not any(
+                    marker in last_header_text for marker in _NON_PERIOD_MARKERS
+                )
+
+                for row in table.select("tbody tr") if trust_last_column else []:
                     cells = row.find_all("td")
                     if len(cells) >= 2:
                         # Strip trailing "+" tooltip indicator and whitespace
