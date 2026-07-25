@@ -85,6 +85,15 @@ export function useAuth() {
     try {
       await fetch('/api/auth/logout', { method: 'POST' });
     } finally {
+      // Same generation-bump + inFlight reset refreshAuth() uses above —
+      // without this, a fetchMe() call already in flight when logout()
+      // runs (e.g. a second useAuth() consumer's mount-time fetch) can
+      // resolve afterward, pass the (unbumped) generation check, and
+      // silently revert cachedUser back to the signed-in user: the nav
+      // bar would keep showing "signed in" after a real logout, with no
+      // self-correction until something else calls refreshAuth().
+      generation++;
+      inFlight = null;
       cachedUser = null;
       notify();
       // The watchlist's own module-level cache has no way to know the

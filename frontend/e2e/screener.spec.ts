@@ -46,4 +46,33 @@ test.describe('Screener page', () => {
 
     await expect(page.getByText(/hasn.t run yet/)).toBeVisible();
   });
+
+  test('debounces the Max P/E filter instead of firing one request per keystroke', async ({ page }) => {
+    // Regression test: peMax/marketCapMin used to be direct dependencies of
+    // fetchStocks, so every onChange fired a new GET /api/screener request —
+    // typing a multi-digit value could approach or trip the documented
+    // 60/min rate limit. Now debounced (420ms, same as ticker-search.tsx).
+    let requestCount = 0;
+    await page.route('**/api/screener?*', route => {
+      requestCount++;
+      return route.fulfill({
+        json: {
+          stocks: FIXTURE_STOCKS, total: FIXTURE_STOCKS.length, total_monitored: 500,
+          industries: [], last_run: new Date().toISOString(), refreshing: false,
+        },
+      });
+    });
+
+    await page.goto('/screener');
+    await expect(page.getByRole('link', { name: 'TCS' })).toBeVisible();
+    const afterInitialLoad = requestCount;
+
+    // Fast typing (well under the 420ms debounce window between keystrokes)
+    // must not fire a request per character.
+    await page.getByLabel('Max P/E').pressSequentially('12345', { delay: 30 });
+    expect(requestCount).toBe(afterInitialLoad);
+
+    // Exactly one request fires once typing settles past the debounce delay.
+    await expect.poll(() => requestCount, { timeout: 2000 }).toBe(afterInitialLoad + 1);
+  });
 });

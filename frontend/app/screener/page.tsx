@@ -124,9 +124,26 @@ export default function ScreenerPage() {
   const [rsiFilter,  setRsiFilter]  = useState<'all' | 'oversold' | 'overbought'>('all');
   const [peMax,      setPeMax]      = useState('');
   const [marketCapMin, setMarketCapMin] = useState('');
+  // fetchStocks fires on every change to these — debounce the text inputs
+  // (same 420ms as ticker-search.tsx) so a typed value doesn't fire one
+  // GET /api/screener request per keystroke against its 60/min rate limit.
+  // The filter chips above (industry/trend/RSI) are discrete clicks, not
+  // typed text, so they don't need this.
+  const [debouncedPeMax, setDebouncedPeMax] = useState('');
+  const [debouncedMarketCapMin, setDebouncedMarketCapMin] = useState('');
   const [sortKey,    setSortKey]    = useState<SortKey>('market_cap_cr');
   const [sortDir,    setSortDir]    = useState<'asc' | 'desc'>('desc');
   const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedPeMax(peMax), 420);
+    return () => clearTimeout(t);
+  }, [peMax]);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedMarketCapMin(marketCapMin), 420);
+    return () => clearTimeout(t);
+  }, [marketCapMin]);
 
   const fetchStocks = useCallback(async (silent = false) => {
     abortRef.current?.abort();
@@ -144,8 +161,8 @@ export default function ScreenerPage() {
       });
       if (rsiFilter === 'oversold') params.set('rsi_max', String(_RSI_OVERSOLD));
       if (rsiFilter === 'overbought') params.set('rsi_min', String(_RSI_OVERBOUGHT));
-      if (peMax.trim()) params.set('pe_max', peMax.trim());
-      if (marketCapMin.trim()) params.set('market_cap_min', marketCapMin.trim());
+      if (debouncedPeMax.trim()) params.set('pe_max', debouncedPeMax.trim());
+      if (debouncedMarketCapMin.trim()) params.set('market_cap_min', debouncedMarketCapMin.trim());
 
       const res = await fetch(`/api/screener?${params}`, { signal: ac.signal });
       const json = await res.json() as ScreenerResponse & { error?: string };
@@ -162,7 +179,7 @@ export default function ScreenerPage() {
     } finally {
       if (abortRef.current === ac) setLoading(false);
     }
-  }, [industry, emaTrend, rsiFilter, peMax, marketCapMin, sortKey, sortDir]);
+  }, [industry, emaTrend, rsiFilter, debouncedPeMax, debouncedMarketCapMin, sortKey, sortDir]);
 
   useEffect(() => {
     fetchStocks();
