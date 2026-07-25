@@ -92,10 +92,13 @@ def _parse_screen_html(html: str, criterion_label: str) -> list[dict]:
 
 def _gnews_fallback() -> list[dict]:
     try:
+        import tools._gnews_timeout  # noqa: F401 — sets a socket default timeout for GNews calls below
+        from datetime import datetime, timezone
         from gnews import GNews
         from email.utils import parsedate_to_datetime
+        year = datetime.now(timezone.utc).year
         gn   = GNews(language="en", country="IN", period="14d", max_results=12)
-        arts = gn.get_news("screener.in fundamentally strong stock buy NSE India 2026")
+        arts = gn.get_news(f"screener.in fundamentally strong stock buy NSE India {year}")
         out: list[dict] = []
         for a in arts:
             pub_iso: str | None = None

@@ -6,7 +6,11 @@ Follows the same conventions as market_picks_tools.py:
   - each article has title, summary, url, published_at (ISO string | None)
 """
 
+from datetime import datetime, timezone
+
 from gnews import GNews
+
+import tools._gnews_timeout  # noqa: F401 — sets a socket default timeout for GNews calls below
 
 
 def _gnews(query: str, max_results: int = 10) -> list[dict]:
@@ -46,8 +50,9 @@ def fetch_hdfc_sec_fundamental() -> dict:
             max_results=10,
         )
     if not arts:
+        year = datetime.now(timezone.utc).year
         arts = _gnews(
-            '"HDFC Securities" model portfolio stock picks India 2026',
+            f'"HDFC Securities" model portfolio stock picks India {year}',
             max_results=8,
         )
     return {"source": "HDFC Securities Fundamental", "type": "brokerage", "articles": arts}
@@ -60,8 +65,9 @@ def fetch_hdfc_sec_technical() -> dict:
         max_results=10,
     )
     if not arts:
+        year = datetime.now(timezone.utc).year
         arts = _gnews(
-            '"HDFC Securities" technical picks buy recommendation Nifty stock 2026',
+            f'"HDFC Securities" technical picks buy recommendation Nifty stock {year}',
             max_results=8,
         )
     return {"source": "HDFC Securities Technical", "type": "brokerage", "articles": arts}

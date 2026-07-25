@@ -201,7 +201,7 @@ def fetch_bulk_block_deals_for_symbol(symbol: str) -> dict:
     here; most stocks simply won't have a recent deal, which is the expected
     common case, not an error. Returns {"symbol", "deals": []} (never
     raises)."""
-    sym = symbol.upper().strip()
+    sym = symbol.upper().strip() if isinstance(symbol, str) else ""
     sess = _nse_session()
     deals: list[dict] = []
     for endpoint, min_qty, deal_type in (

@@ -1,8 +1,15 @@
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from market_picks_pipeline import _SOURCE_CREDIBILITY
-from tools.market_picks_tools import SCRAPER_FNS, SOURCES
+from tools.market_picks_tools import (
+    SCRAPER_FNS,
+    SOURCES,
+    _current_year,
+    _parse_rss,
+    fetch_gnews_ms_jpm,
+)
 from tools.nse_insider_trades import _trade_to_article, fetch_insider_trades_for_symbol
 
 
@@ -36,6 +43,44 @@ class SourceRegistryTest(unittest.TestCase):
     def test_scraper_fn_names_match_registry(self) -> None:
         for name, _type, fn_name in SOURCES:
             self.assertEqual(SCRAPER_FNS[name].__name__, fn_name)
+
+
+class GnewsQueryYearTest(unittest.TestCase):
+    def test_brokerage_query_uses_current_year_not_a_hardcoded_one(self) -> None:
+        # Regression test: this query used to bake in a fixed literal year,
+        # which would silently degrade recall once real articles started
+        # saying the following year instead.
+        year = str(_current_year())
+        with patch("tools.market_picks_tools._gnews", return_value=[]) as mocked:
+            fetch_gnews_ms_jpm()
+        query = mocked.call_args[0][0]
+        self.assertIn(year, query)
+
+    def test_current_year_matches_utc_now(self) -> None:
+        self.assertEqual(_current_year(), datetime.now(timezone.utc).year)
+
+
+class ParseRssEncodingTest(unittest.TestCase):
+    def test_parses_from_raw_response_bytes_not_decoded_text(self) -> None:
+        # Regression test: feedparser used to be handed requests' text-
+        # decoded string, whose encoding guess can silently mojibake
+        # non-ASCII bytes before feedparser ever sees them. Parsing the
+        # raw bytes directly avoids that double-decoding.
+        rss_bytes = (
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b"<rss><channel><item><title>Sensex hits \xe2\x82\xb9 milestone</title>"
+            b"<link>https://example.com/a</link></item></channel></rss>"
+        )
+        fake_resp = MagicMock()
+        fake_resp.content = rss_bytes
+        fake_resp.text = rss_bytes.decode("latin-1")  # a plausible wrong guess
+        fake_resp.raise_for_status.return_value = None
+        fake_session = MagicMock()
+        fake_session.get.return_value = fake_resp
+        with patch("tools.market_picks_tools._session", return_value=fake_session):
+            articles = _parse_rss("https://example.com/feed")
+        self.assertEqual(len(articles), 1)
+        self.assertIn("₹", articles[0]["title"])
 
 
 class InsiderTradeArticleTest(unittest.TestCase):
@@ -145,6 +190,14 @@ class FetchInsiderTradesForSymbolTest(unittest.TestCase):
         with patch("tools.nse_insider_trades._nse_session", return_value=sess):
             result = fetch_insider_trades_for_symbol("TESTCO")
         self.assertEqual(result, {"symbol": "TESTCO", "trades": []})
+
+    def test_non_string_symbol_does_not_raise(self) -> None:
+        # Regression test: symbol.upper() used to be called unguarded —
+        # any non-string caller input raised AttributeError instead of
+        # degrading to an empty result.
+        with patch("tools.nse_insider_trades._nse_session", return_value=self._session([])):
+            result = fetch_insider_trades_for_symbol(None)
+        self.assertEqual(result, {"symbol": "", "trades": []})
 
 
 if __name__ == "__main__":

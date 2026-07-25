@@ -256,6 +256,69 @@ class PhaseExtractGuardrailTest(unittest.TestCase):
         self.assertEqual(picks, [])
 
 
+class PhaseExtractTickerAttributionTest(unittest.TestCase):
+    """A pick's url/article_title/article_date/syndicated are attributed to
+    whichever article in the batch actually contains its ticker — never
+    silently defaulted to the batch's first article, which used to
+    misattribute a pick to an unrelated story whenever the ticker didn't
+    literally appear in that first article's title.
+    """
+
+    def _raw_sources(self, articles: list[dict]) -> dict:
+        return {"Test Source": {"articles": articles}}
+
+    def _run_extract(self, articles: list[dict], llm_response: dict) -> list[dict]:
+        pipeline = MarketPicksPipeline()
+        with patch("market_picks_pipeline._llm_call", return_value=json.dumps(llm_response)), \
+             patch("market_picks_pipeline._extraction_cache_get", return_value=None), \
+             patch("market_picks_pipeline._extraction_cache_set"):
+            return pipeline._phase_extract(self._raw_sources(articles), emit=lambda p: None)
+
+    def test_ticker_absent_from_every_article_does_not_default_to_first(self) -> None:
+        articles = [
+            {"title": "Some unrelated market wrap", "summary": "general commentary",
+             "url": "https://example.com/wrap", "published_at": "2026-01-01T00:00:00+00:00"},
+            {"title": "Another unrelated piece", "summary": "more commentary",
+             "url": "https://example.com/other", "published_at": "2026-01-02T00:00:00+00:00"},
+        ]
+        picks = self._run_extract(articles, {"picks": [
+            {"company": "Reliance Industries", "ticker": "RELIANCE",
+             "reason": "Morgan Stanley Buy, target 3200", "direction": "BUY"},
+        ]})
+        self.assertEqual(len(picks), 1)
+        self.assertEqual(picks[0]["url"], "")
+        self.assertEqual(picks[0]["article_title"], "")
+        self.assertIsNone(picks[0]["article_date"])
+        self.assertFalse(picks[0]["syndicated"])
+
+    def test_ticker_found_in_second_article_attributes_to_that_one_not_first(self) -> None:
+        articles = [
+            {"title": "TCS wins large deal", "summary": "TCS deal news",
+             "url": "https://example.com/tcs", "published_at": "2026-01-01T00:00:00+00:00"},
+            {"title": "Reliance gets a Buy call", "summary": "RELIANCE rated buy",
+             "url": "https://example.com/reliance", "published_at": "2026-01-02T00:00:00+00:00"},
+        ]
+        picks = self._run_extract(articles, {"picks": [
+            {"company": "Reliance Industries", "ticker": "RELIANCE",
+             "reason": "Morgan Stanley Buy, target 3200", "direction": "BUY"},
+        ]})
+        self.assertEqual(len(picks), 1)
+        self.assertEqual(picks[0]["url"], "https://example.com/reliance")
+        self.assertEqual(picks[0]["article_title"], "Reliance gets a Buy call")
+
+    def test_ticker_only_in_summary_still_matches(self) -> None:
+        articles = [
+            {"title": "Brokerage roundup for the week", "summary": "RELIANCE rated buy by Morgan Stanley",
+             "url": "https://example.com/roundup", "published_at": "2026-01-01T00:00:00+00:00"},
+        ]
+        picks = self._run_extract(articles, {"picks": [
+            {"company": "Reliance Industries", "ticker": "RELIANCE",
+             "reason": "Morgan Stanley Buy, target 3200", "direction": "BUY"},
+        ]})
+        self.assertEqual(len(picks), 1)
+        self.assertEqual(picks[0]["url"], "https://example.com/roundup")
+
+
 class PruneExtractCacheTest(unittest.TestCase):
     """output/_extract_cache/ is content-hash-keyed, so every distinct batch of
     articles a source ever serves creates a new file — _extraction_cache_get()

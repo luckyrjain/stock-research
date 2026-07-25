@@ -202,7 +202,7 @@ def fetch_insider_trades_for_symbol(symbol: str, lookback_days: int = _SYMBOL_LO
     (never raises) if NSE has nothing, the request fails, or every row for
     this symbol was filtered out as noise — absent rather than guessed, same
     convention as every other tool in this codebase."""
-    sym = symbol.upper().strip()
+    sym = symbol.upper().strip() if isinstance(symbol, str) else ""
     sess = _nse_session()
     raw = _fetch_pit_rows(sess, lookback_days)
 
