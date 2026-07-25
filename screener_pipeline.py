@@ -33,6 +33,7 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 
 from db.models import get_engine, metadata, screener_stocks
+from error_tracking import init_error_tracking
 from observability import get_logger, log_event
 from tools.nifty500_tools import get_nifty500_constituents
 
@@ -190,6 +191,7 @@ def run(force: bool = False) -> bool:
 
 
 def main() -> None:
+    init_error_tracking()
     parser = argparse.ArgumentParser(description="Custom Stock Screener Pipeline")
     parser.add_argument("--setup-db", action="store_true",
                         help="Create DB tables and exit")

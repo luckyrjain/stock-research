@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
+from error_tracking import init_error_tracking
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -119,6 +120,7 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(title="AlphaPulse", lifespan=_lifespan)
 LOGGER = get_logger("api")
+init_error_tracking()
 
 # CORS: the browser only ever talks to this backend through the Next.js
 # proxy routes (server-to-server fetch, same-origin from the browser's
