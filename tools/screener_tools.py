@@ -180,6 +180,67 @@ def _extract_quarterly_trend(soup: BeautifulSoup, max_periods: int = 8) -> dict:
     return result
 
 
+def _extract_valuation_band(soup: BeautifulSoup, max_years: int = 5) -> dict:
+    """Yearly historical Price to Earning band from Screener's own Ratios table
+    (section#ratios, on the same company page get_fundamentals/get_peer_comparison
+    already fetch — no extra network round trip), the real published number
+    Screener computes per year, not a value derived/estimated here. Oldest-first,
+    capped to the most recent `max_years`, same "never guess a gap" alignment
+    convention as `_extract_quarterly_trend`: returns {} if the row is missing,
+    fewer than 3 years are available (too thin a sample for a meaningful band),
+    or any cell in the last-n window doesn't parse as a number.
+
+    **Disclosed limitation**: whether Screener.in actually renders a yearly
+    "Price to Earning" row inside section#ratios (vs. only exposing historical
+    P/E through its separate interactive chart, which this scraper does not
+    call) was not verified against a live response in this sandbox (no
+    outbound internet — same disclosure as the FII/DII/macro scrapers and the
+    sector-taxonomy assumption in signals/engine.py). If the row isn't there
+    under this id/label, this simply returns {} (same as "Screener doesn't
+    have this data" elsewhere in this module) rather than raising — worth
+    spot-checking against a live company page before relying on this in
+    production."""
+    section = soup.find("section", {"id": "ratios"})
+    if not section:
+        return {}
+    table = section.find("table")
+    if not table:
+        return {}
+
+    header_cells = table.select("thead tr th")
+    years = [_clean(th.get_text(" ", strip=True)) for th in header_cells[1:]]
+    if not years:
+        return {}
+
+    pe_values: list[float | None] | None = None
+    for row in table.select("tbody tr"):
+        cells = row.find_all(["th", "td"])
+        if len(cells) < 2:
+            continue
+        row_label = _clean(cells[0].get_text(" ", strip=True)).lower().replace(" ", "")
+        if "pricetoearning" not in row_label and row_label not in ("p/e", "pe"):
+            continue
+        values: list[float | None] = []
+        for cell in cells[1:]:
+            raw = _clean(cell.get_text(" ", strip=True)).replace("%", "")
+            try:
+                values.append(float(raw))
+            except ValueError:
+                values.append(None)
+        pe_values = values
+        break
+
+    if pe_values is None:
+        return {}
+
+    n = min(len(years), len(pe_values), max_years)
+    years_n, pe_n = years[-n:], pe_values[-n:]
+    if n < 3 or any(v is None for v in pe_n):
+        return {}
+
+    return {"years": years_n, "pe": pe_n}
+
+
 @tool("Get Screener.in Fundamentals")
 def get_fundamentals(symbol: str) -> str:
     """Scrape key financial ratios and fundamentals from Screener.in for an Indian stock.
@@ -274,6 +335,9 @@ def get_peer_comparison(symbol: str) -> str:
     company's own row, its sector peers, and Screener's own sector-median row
     when present, with whatever ratio columns Screener renders for that sector
     (typically P/E, Market Cap, Div Yield, ROCE %, and quarterly growth %).
+    Also carries an optional `valuation_band`: the company's own last 3-5 years
+    of Screener's yearly Price to Earning ratio, when that row is present —
+    see _extract_valuation_band for its "never guess a gap" rules.
     Input: NSE stock symbol, e.g. RELIANCE, TCS, INFY."""
     try:
         slug = _resolve_screener_slug(symbol)
@@ -294,12 +358,17 @@ def get_peer_comparison(symbol: str) -> str:
         # Screener orders peers by market cap; cap at 5 per the product spec (3-5 peers).
         peer_rows = peer_rows[:5]
 
-        return json.dumps({
+        payload = {
             "symbol": symbol.upper(),
             "self": self_row,
             "peers": peer_rows,
             "sector_median": median_row,
-        })
+        }
+        valuation_band = _extract_valuation_band(soup)
+        if valuation_band:
+            payload["valuation_band"] = valuation_band
+
+        return json.dumps(payload)
     except Exception as e:
         return json.dumps({"error": str(e), "symbol": symbol})
 

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import statistics
 import threading
 import time
 import uuid
@@ -1131,12 +1132,55 @@ def _compute_peer_percentiles(self_row: dict | None, peer_rows: list[dict]) -> d
     return percentiles
 
 
+def _compute_valuation_anchor(self_row: dict | None, valuation_band: dict) -> dict | None:
+    """Absolute valuation anchor: where the stock's current P/E sits within its
+    OWN last 3-5 years of Screener-published Price to Earning values — a real
+    band from real yearly data, not a sector benchmark this codebase has no
+    business inventing (config/analyst.json already forbids the LLM from doing
+    that; this closes the same gap for the peer-percentile card, which only
+    ever said "cheap/expensive vs. peers," never "cheap/expensive vs. its own
+    history"). None when `self_row` has no parseable current P/E, or
+    `valuation_band` has fewer than 3 years on record (see
+    tools/screener_tools.py::_extract_valuation_band) — never guessed."""
+    if not self_row or not valuation_band:
+        return None
+    pe_values = valuation_band.get("pe") or []
+    if len(pe_values) < 3:
+        return None
+
+    current_pe = None
+    for col, raw in self_row.get("values", {}).items():
+        normalized = col.lower().replace(" ", "")
+        if "p/e" in normalized or normalized == "pe":
+            current_pe = _parse_peer_numeric(raw)
+            break
+    if current_pe is None:
+        return None
+
+    below = sum(1 for v in pe_values if v < current_pe)
+    equal = sum(1 for v in pe_values if v == current_pe)
+    percentile = round((below + 0.5 * equal) / len(pe_values) * 100, 1)
+
+    return {
+        "current_pe": current_pe,
+        "years": valuation_band.get("years", []),
+        "pe_history": pe_values,
+        "low": min(pe_values),
+        "median": statistics.median(pe_values),
+        "high": max(pe_values),
+        "percentile": percentile,
+    }
+
+
 @app.get("/api/peers/{symbol}")
 async def get_peers(request: Request, symbol: str):
     """Peer comparison table scraped from Screener.in (the company plus 3-5 sector
     peers, and Screener's own sector-median row where present), with percentile
     badges for whichever ratio columns are present for both the company and its
-    peers. Cached like the six data slices (24 h TTL) but intentionally outside
+    peers, plus an `absolute_anchor` (see _compute_valuation_anchor) showing
+    where the stock's current P/E sits within its own last 3-5 years of
+    Screener-published P/E — null when that history isn't available. Cached
+    like the six data slices (24 h TTL) but intentionally outside
     ALL_DATA_TASKS — this is a standalone, on-demand comparison, not part of the
     six-task analysis pipeline.
     """
@@ -1156,14 +1200,18 @@ async def get_peers(request: Request, symbol: str):
 
         raw = json.loads(get_peer_comparison.run(symbol=sym))
         if raw.get("error"):
-            return {"symbol": sym, "self": None, "peers": [], "sector_median": None, "percentiles": {}}
+            return {
+                "symbol": sym, "self": None, "peers": [], "sector_median": None,
+                "percentiles": {}, "absolute_anchor": None,
+            }
 
         result = {
-            "symbol":        raw.get("symbol", sym),
-            "self":          raw.get("self"),
-            "peers":         raw.get("peers", []),
-            "sector_median": raw.get("sector_median"),
-            "percentiles":   _compute_peer_percentiles(raw.get("self"), raw.get("peers", [])),
+            "symbol":          raw.get("symbol", sym),
+            "self":            raw.get("self"),
+            "peers":           raw.get("peers", []),
+            "sector_median":   raw.get("sector_median"),
+            "percentiles":     _compute_peer_percentiles(raw.get("self"), raw.get("peers", [])),
+            "absolute_anchor": _compute_valuation_anchor(raw.get("self"), raw.get("valuation_band") or {}),
         }
         cache.save(sym, "peers", result)
         return result

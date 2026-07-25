@@ -385,12 +385,28 @@ export interface PeerRow {
   values: Record<string, string>;
 }
 
+// Where the stock's current P/E sits within its OWN last 3-5 years of
+// Screener-published yearly P/E — an absolute anchor alongside the
+// peer-relative `percentiles` above, never a sector benchmark this codebase
+// doesn't have real data for. `null` from the API when Screener doesn't
+// publish that history for this company (see api.py::_compute_valuation_anchor).
+export interface ValuationAnchor {
+  current_pe:  number;
+  years:       string[];
+  pe_history:  number[];
+  low:         number;
+  median:      number;
+  high:        number;
+  percentile:  number;  // 0–100, current_pe's rank within pe_history
+}
+
 export interface PeerComparison {
-  symbol:         string;
-  self:           PeerRow | null;
-  peers:          PeerRow[];          // up to 5, ordered as Screener presents them
-  sector_median:  PeerRow | null;
-  percentiles:    Record<string, number>;  // 0–100, keyed by the same column labels as `values`
+  symbol:           string;
+  self:             PeerRow | null;
+  peers:            PeerRow[];          // up to 5, ordered as Screener presents them
+  sector_median:    PeerRow | null;
+  percentiles:      Record<string, number>;  // 0–100, keyed by the same column labels as `values`
+  absolute_anchor:  ValuationAnchor | null;
 }
 
 // Programmatic API access (GET/POST/DELETE /api/api-keys). `key` is present

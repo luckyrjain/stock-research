@@ -791,6 +791,49 @@ class PeersEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["percentiles"], {})
 
+    def test_includes_absolute_anchor_when_valuation_band_present(self) -> None:
+        raw = json.dumps({
+            "symbol": "TCS",
+            "self": {"name": "TCS", "slug": "TCS", "values": {"P/E": "24"}},
+            "peers": [],
+            "sector_median": None,
+            "valuation_band": {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [20.0, 22.0, 26.0]},
+        })
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = raw
+        with patch("tools.screener_tools.get_peer_comparison", fake_tool):
+            resp = client.get("/api/peers/TCS")
+        self.assertEqual(resp.status_code, 200)
+        anchor = resp.json()["absolute_anchor"]
+        self.assertEqual(anchor["current_pe"], 24.0)
+        self.assertEqual(anchor["low"], 20.0)
+        self.assertEqual(anchor["high"], 26.0)
+        self.assertEqual(anchor["median"], 22.0)
+        # 24 beats [20, 22] and ties with nothing among [20, 22, 26] -> 2/3 * 100 = 66.7
+        self.assertEqual(anchor["percentile"], 66.7)
+
+    def test_absolute_anchor_null_when_valuation_band_absent(self) -> None:
+        raw = json.dumps({
+            "symbol": "TCS",
+            "self": {"name": "TCS", "slug": "TCS", "values": {"P/E": "24"}},
+            "peers": [],
+            "sector_median": None,
+        })
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = raw
+        with patch("tools.screener_tools.get_peer_comparison", fake_tool):
+            resp = client.get("/api/peers/TCS")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.json()["absolute_anchor"])
+
+    def test_absolute_anchor_null_on_tool_error(self) -> None:
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
+        with patch("tools.screener_tools.get_peer_comparison", fake_tool):
+            resp = client.get("/api/peers/TCS")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.json()["absolute_anchor"])
+
 
 class InsiderActivityEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -929,6 +972,36 @@ class PeerPercentileHelperTest(unittest.TestCase):
 
     def test_no_peers_returns_empty(self) -> None:
         self.assertEqual(api._compute_peer_percentiles({"values": {"P/E": "20"}}, []), {})
+
+
+class ValuationAnchorHelperTest(unittest.TestCase):
+    def test_computes_band_and_percentile(self) -> None:
+        self_row = {"values": {"P/E": "24"}}
+        band = {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [20.0, 22.0, 26.0]}
+        result = api._compute_valuation_anchor(self_row, band)
+        self.assertEqual(result["current_pe"], 24.0)
+        self.assertEqual(result["low"], 20.0)
+        self.assertEqual(result["high"], 26.0)
+        self.assertEqual(result["median"], 22.0)
+        self.assertEqual(result["percentile"], 66.7)
+
+    def test_no_self_row_returns_none(self) -> None:
+        band = {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [20.0, 22.0, 26.0]}
+        self.assertIsNone(api._compute_valuation_anchor(None, band))
+
+    def test_no_valuation_band_returns_none(self) -> None:
+        self_row = {"values": {"P/E": "24"}}
+        self.assertIsNone(api._compute_valuation_anchor(self_row, {}))
+
+    def test_fewer_than_three_years_returns_none(self) -> None:
+        self_row = {"values": {"P/E": "24"}}
+        band = {"years": ["Mar 2023", "Mar 2024"], "pe": [22.0, 26.0]}
+        self.assertIsNone(api._compute_valuation_anchor(self_row, band))
+
+    def test_no_pe_column_in_self_row_returns_none(self) -> None:
+        self_row = {"values": {"ROCE %": "52"}}
+        band = {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [20.0, 22.0, 26.0]}
+        self.assertIsNone(api._compute_valuation_anchor(self_row, band))
 
 
 class SmeSignalsEndpointTest(unittest.TestCase):
