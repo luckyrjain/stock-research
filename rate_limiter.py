@@ -121,13 +121,12 @@ local key = KEYS[1]
 local limit = tonumber(ARGV[1])
 local ttl = tonumber(ARGV[2])
 local count = redis.call('INCR', key)
-if count == 1 then
-    redis.call('EXPIRE', key, ttl)
-end
 if count > limit then
     redis.call('DECR', key)
+    redis.call('EXPIRE', key, ttl)
     return 0
 end
+redis.call('EXPIRE', key, ttl)
 return 1
 """
 
@@ -140,10 +139,14 @@ end
 return 1
 """
 
-# Crash-recovery safety net only, not expected to fire in normal operation —
-# a held slot whose owning request died before calling release_slot() would
+# Crash-recovery safety net, not expected to fire in normal operation — a
+# held slot whose owning request died before calling release_slot() would
 # otherwise stay claimed forever. Comfortably above how long any single
-# analyst/pipeline call in this app should ever take.
+# analyst/pipeline call in this app should ever take. Refreshed (EXPIRE) on
+# every acquire attempt — not just the first one that creates the key — so
+# a key under sustained traffic never expires out from under slots that are
+# still legitimately held, which would otherwise silently reset the counter
+# and let the ceiling be exceeded.
 _SLOT_TTL_SECONDS = 600
 
 _memory_slots: dict[str, int] = {}

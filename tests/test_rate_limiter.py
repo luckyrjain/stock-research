@@ -1,5 +1,6 @@
 import os
 import unittest
+import uuid
 from unittest.mock import MagicMock, patch
 
 import rate_limiter
@@ -67,10 +68,15 @@ class IsAllowedRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
         fake_client.eval.return_value = 1
-        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+        fixed_uuid = uuid.UUID(int=0)
+        with patch("rate_limiter._get_redis_client", return_value=fake_client), \
+             patch("time.time", return_value=1234.5), \
+             patch("uuid.uuid4", return_value=fixed_uuid):
             allowed = rate_limiter.is_allowed("k", max_calls=5, window_seconds=60)
         self.assertTrue(allowed)
-        fake_client.eval.assert_called_once()
+        fake_client.eval.assert_called_once_with(
+            rate_limiter._SLIDING_WINDOW_SCRIPT, 1, "ratelimit:k", 1234.5, 60, 5, f"1234.5:{fixed_uuid.hex}",
+        )
 
     def test_redis_rejection_returns_false(self) -> None:
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
@@ -119,7 +125,9 @@ class SlotConcurrencyRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         fake_client.eval.return_value = 1
         with patch("rate_limiter._get_redis_client", return_value=fake_client):
             self.assertTrue(rate_limiter.try_acquire_slot("llm", limit=4))
-        fake_client.eval.assert_called_once()
+        fake_client.eval.assert_called_once_with(
+            rate_limiter._ACQUIRE_SLOT_SCRIPT, 1, "slot:llm", 4, rate_limiter._SLOT_TTL_SECONDS,
+        )
 
     def test_acquire_rejected_by_redis(self) -> None:
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
@@ -133,7 +141,7 @@ class SlotConcurrencyRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         fake_client = MagicMock()
         with patch("rate_limiter._get_redis_client", return_value=fake_client):
             rate_limiter.release_slot("llm")
-        fake_client.eval.assert_called_once()
+        fake_client.eval.assert_called_once_with(rate_limiter._RELEASE_SLOT_SCRIPT, 1, "slot:llm")
 
     def test_acquire_falls_back_to_memory_on_redis_error(self) -> None:
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
@@ -151,6 +159,18 @@ class SlotConcurrencyRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         with patch("rate_limiter._get_redis_client", return_value=fake_client):
             rate_limiter.release_slot("llm")
         self.assertEqual(rate_limiter._memory_slots["llm"], 0)
+
+    def test_acquire_script_refreshes_ttl_on_every_call_not_just_the_first(self) -> None:
+        # Regression guard: an earlier version only called EXPIRE when
+        # count == 1 (i.e. only on the call that created the key), so a key
+        # under sustained traffic could expire out from under slots that
+        # were still legitimately held, silently resetting the counter and
+        # letting the concurrency ceiling be exceeded. EXPIRE must now fire
+        # unconditionally on both the accept and reject paths — not gated
+        # behind a "was this the very first acquire" check.
+        script = rate_limiter._ACQUIRE_SLOT_SCRIPT
+        self.assertNotIn("count == 1", script)
+        self.assertEqual(script.count("EXPIRE"), 2)  # once on reject, once on accept
 
 
 class LockMemoryTest(_MemoryStateResetMixin, unittest.TestCase):
