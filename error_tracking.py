@@ -53,6 +53,7 @@ def init_error_tracking() -> None:
 
         try:
             import sentry_sdk  # pylint: disable=import-outside-toplevel
+            from sentry_sdk.integrations.logging import LoggingIntegration
         except ImportError:
             _warn_missing_sdk()
             return
@@ -65,6 +66,16 @@ def init_error_tracking() -> None:
                 # one — no APM transaction sampling.
                 traces_sample_rate=0.0,
                 send_default_pii=False,
+                # The SDK's default LoggingIntegration auto-captures any
+                # stdlib logging.error()/.critical() call as its own event —
+                # including observability.log_event()'s own plain log line,
+                # which fires just before it explicitly calls capture_error()
+                # below. Without event_level=None that would double-report
+                # every error (one well-structured event from capture_error,
+                # one raw-JSON-message event from the auto-capture) —
+                # keep breadcrumbs (level=INFO, the default) but disable the
+                # redundant auto-capture-as-event.
+                integrations=[LoggingIntegration(event_level=None)],
             )
             _enabled = True
         except Exception:  # pylint: disable=broad-exception-caught
@@ -93,7 +104,7 @@ def capture_error(event: str, fields: dict[str, Any], exc: BaseException | None 
     try:
         import sentry_sdk  # pylint: disable=import-outside-toplevel
 
-        with sentry_sdk.push_scope() as scope:
+        with sentry_sdk.new_scope() as scope:
             scope.set_tag("event", event)
             for key, value in fields.items():
                 if key in _SKIP_CONTEXT_KEYS:

@@ -724,14 +724,28 @@ or grouped-by-stack-trace on a production error without grepping logs after the 
    Sentry "extra" context (skipping `error` itself — that string just duplicates what
    `capture_exception`'s own stack trace already conveys), and calls `capture_exception(exc)` when
    an exception object was passed, or `capture_message(event, level="error")` otherwise.
-6. **Disclosed limitation**: `sentry_sdk.init()`'s actual behavior — DSN parsing, event delivery,
-   what a captured event looks like in a live Sentry project — was not verified against a real
-   Sentry account in this sandbox (no outbound internet to sentry.io; same disclosure as the
-   FII/DII/RBI scrapers and the sector-taxonomy assumption elsewhere in this doc). `tests/
-   test_error_tracking.py` mocks `sentry_sdk` at the `sys.modules` level (the same
-   crewai-mocking pattern `tests/conftest.py` already documents) to verify this module's own
-   control flow — init/capture argument shapes, graceful degradation on a missing package or a
-   failed call — not that a live Sentry ingest endpoint actually accepts what's sent to it.
+6. `sentry_sdk.init()` is called with an explicit `integrations=[LoggingIntegration(event_level=None)]`
+   override — without it, the SDK's own default `LoggingIntegration` auto-captures *any*
+   `logger.error()`/`.critical()` call as its own event, including the plain log line
+   `log_event()` already emits immediately before it calls `capture_error()` — so every
+   error would otherwise ship as two separate, differently-shaped Sentry events (one
+   well-tagged, one a raw JSON-message duplicate with no `event` tag or exception attached).
+   `capture_error()` also uses `sentry_sdk.new_scope()`, not the older `push_scope()` — the
+   latter is deprecated as of `sentry-sdk` 2.x and logs a `DeprecationWarning` on every call.
+   Both were caught (and are regression-tested) by actually initializing the real, installed
+   `sentry-sdk` package against a custom in-memory `Transport` subclass and asserting exactly
+   one envelope is captured per error — most of `tests/test_error_tracking.py` mocks
+   `sentry_sdk` at the `sys.modules` level (the same crewai-mocking pattern `tests/conftest.py`
+   already documents), which verifies this module's own call shapes but can't catch a real SDK
+   behavior mismatch like these two; `RealSdkRegressionTest` exists specifically to close that
+   gap by running against the real package instead.
+7. **Disclosed limitation**: `sentry_sdk.init()`'s actual behavior against a live Sentry
+   project — DSN parsing, event delivery, what a captured event looks like once ingested —
+   was not verified against a real Sentry account in this sandbox (no outbound internet to
+   sentry.io; same disclosure as the FII/DII/RBI scrapers and the sector-taxonomy assumption
+   elsewhere in this doc). `RealSdkRegressionTest` (point 6 above) verifies the real SDK's
+   *client-side* behavior — what gets handed to its transport layer — not that a live ingest
+   endpoint actually accepts and stores it.
 
 ### SME golden cross flow
 
