@@ -320,6 +320,29 @@ class ExtractQuarterlyTrendTest(unittest.TestCase):
         self.assertNotIn("operating_margin", trend)
         self.assertEqual(trend["revenue"], [1000.0, 1100.0, 1200.0])
 
+    def test_omits_operating_margin_when_row_shorter_than_window(self) -> None:
+        # OPM % row present but with fewer cells than the Sales/EPS window
+        # (e.g. Screener only started reporting it partway through this
+        # stock's history) — must be omitted entirely rather than risk
+        # aligning the wrong quarters against periods_n/revenue_n/eps_n.
+        html = """
+        <section id="quarters">
+          <table>
+            <thead><tr><th></th><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th></tr></thead>
+            <tbody>
+              <tr><td>Sales</td><td>100</td><td>200</td><td>300</td><td>400</td></tr>
+              <tr><td>EPS in Rs</td><td>1</td><td>2</td><td>3</td><td>4</td></tr>
+              <tr><td>OPM %</td><td>14%</td><td>16%</td></tr>
+            </tbody>
+          </table>
+        </section>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        trend = _extract_quarterly_trend(soup)
+        self.assertNotIn("operating_margin", trend)
+        self.assertEqual(trend["revenue"], [100.0, 200.0, 300.0, 400.0])
+        self.assertEqual(trend["eps"], [1.0, 2.0, 3.0, 4.0])
+
     def test_operating_margin_capped_to_max_periods_window(self) -> None:
         html = """
         <section id="quarters">
