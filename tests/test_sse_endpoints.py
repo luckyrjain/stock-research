@@ -97,17 +97,20 @@ class AnalyseSuccessPathTest(unittest.TestCase):
         # must never leak into the report the frontend receives.
         self.assertNotIn("_degraded", done["report"]["analysis"])
 
-    def test_llm_slot_count_returns_to_zero_after_completion(self) -> None:
+    def test_llm_slot_released_exactly_once_on_success(self) -> None:
         # Regression test: _release_llm_slot() used to be tied to the SSE
         # consumer's own wait-loop finally block rather than to when the
         # background analyst call actually finished, so a client disconnect
         # could release the slot while the LLM call kept running — allowing
         # more concurrent calls than _LLM_CONCURRENCY_LIMIT. The fix moved
         # the release into the background task's own finally, with the
-        # outer safety-net release stood down right after handoff. Checking
-        # the real in-memory slot counter (not a mocked call count) so a
-        # double-release (net negative) from an incorrectly-still-active
-        # safety net, or a leaked slot (net positive), both fail this test.
+        # outer safety-net release stood down right after handoff so it
+        # can't fire a second time once responsibility is handed off.
+        #
+        # Asserts the real call count via a wraps= mock, not the in-memory
+        # slot counter — rate_limiter._release_slot_memory() clamps at 0
+        # (max(0, count - 1)), so a double-release would be silently
+        # absorbed and a counter-based assertion wouldn't catch it.
         def _fake_fetch_task(task_name, symbol, run_id, max_attempts=3):
             return {"symbol": symbol, "task": task_name}
 
@@ -116,10 +119,12 @@ class AnalyseSuccessPathTest(unittest.TestCase):
              patch("schemas.validate", return_value=(True, "")), \
              patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")), \
              patch("signals.store.save_signal"), \
-             patch("crew.run_analysis_with_fallback", return_value=_fake_analysis("TCS")):
+             patch("crew.run_analysis_with_fallback", return_value=_fake_analysis("TCS")), \
+             patch("api._release_llm_slot", wraps=api._release_llm_slot) as mock_release:
             resp = client.get("/api/analyse/TCS")
 
         self.assertEqual(resp.status_code, 200)
+        self.assertEqual(mock_release.call_count, 1)
         self.assertEqual(rate_limiter._memory_slots.get(api._LLM_SLOT_NAME, 0), 0)
 
     def test_llm_capacity_rejection_emits_error_event(self) -> None:

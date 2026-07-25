@@ -783,51 +783,71 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
             })
             return
 
-        loop = asyncio.get_running_loop()
-        q: asyncio.Queue = asyncio.Queue()
+        # Everything from here through asyncio.create_task(_launch()) below is
+        # synchronous, non-blocking setup with no await/yield point — but if
+        # any of it did unexpectedly raise, run_pipeline() (the sole owner of
+        # the slot/lock release from this point on) would never launch to
+        # release them. Guard the setup itself so a failure here can't leak
+        # either, same defensive posture analyse()'s stream() already takes
+        # with its own top-level try/except/finally.
+        try:
+            loop = asyncio.get_running_loop()
+            q: asyncio.Queue = asyncio.Queue()
 
-        def on_event(payload: dict):
-            loop.call_soon_threadsafe(q.put_nowait, payload)
+            def on_event(payload: dict):
+                loop.call_soon_threadsafe(q.put_nowait, payload)
 
-        def run_pipeline():
-            try:
-                from market_picks_pipeline import MarketPicksPipeline
-                pipeline = MarketPicksPipeline()
-                picks = pipeline.run(on_event=on_event)
-                generated_at = datetime.now(timezone.utc).isoformat()
-                # A pipeline run that completes without raising but yields zero picks, or
-                # that pipeline.healthy flags as substantially degraded (e.g. most scrape
-                # sources failed simultaneously), must not be cached — caching it would
-                # serve that broken result as "fresh" for 6h and mask the outage from
-                # every subsequent visitor.
-                if picks and pipeline.healthy:
-                    _save_picks_cache(picks, generated_at)
-                else:
-                    log_event(
-                        LOGGER, "market_picks_degraded_result_not_cached", level="warning",
-                        run_id=run_id, picks=len(picks), healthy=pipeline.healthy,
-                    )
-                loop.call_soon_threadsafe(q.put_nowait, {
-                    "event":        "done",
-                    "picks":        picks,
-                    "generated_at": generated_at,
-                    "total_picks":  len(picks),
-                    "from_cache":   False,
-                })
-            except Exception as exc:
-                log_event(LOGGER, "market_picks_failed", level="error", run_id=run_id, error=str(exc))
-                loop.call_soon_threadsafe(q.put_nowait, {"event": "error", "message": str(exc)})
-            finally:
-                _release_llm_slot()
-                if lock_acquired:
-                    rate_limiter.release_lock(_MARKET_PICKS_REFRESH_LOCK_NAME)
+            def run_pipeline():
+                try:
+                    from market_picks_pipeline import MarketPicksPipeline
+                    pipeline = MarketPicksPipeline()
+                    picks = pipeline.run(on_event=on_event)
+                    generated_at = datetime.now(timezone.utc).isoformat()
+                    # A pipeline run that completes without raising but yields zero picks, or
+                    # that pipeline.healthy flags as substantially degraded (e.g. most scrape
+                    # sources failed simultaneously), must not be cached — caching it would
+                    # serve that broken result as "fresh" for 6h and mask the outage from
+                    # every subsequent visitor.
+                    if picks and pipeline.healthy:
+                        _save_picks_cache(picks, generated_at)
+                    else:
+                        log_event(
+                            LOGGER, "market_picks_degraded_result_not_cached", level="warning",
+                            run_id=run_id, picks=len(picks), healthy=pipeline.healthy,
+                        )
+                    loop.call_soon_threadsafe(q.put_nowait, {
+                        "event":        "done",
+                        "picks":        picks,
+                        "generated_at": generated_at,
+                        "total_picks":  len(picks),
+                        "from_cache":   False,
+                    })
+                except Exception as exc:
+                    log_event(LOGGER, "market_picks_failed", level="error", run_id=run_id, error=str(exc))
+                    loop.call_soon_threadsafe(q.put_nowait, {"event": "error", "message": str(exc)})
+                finally:
+                    _release_llm_slot()
+                    if lock_acquired:
+                        rate_limiter.release_lock(_MARKET_PICKS_REFRESH_LOCK_NAME)
 
-        log_event(LOGGER, "market_picks_started", run_id=run_id)
+            log_event(LOGGER, "market_picks_started", run_id=run_id)
 
-        async def _launch():
-            await loop.run_in_executor(None, run_pipeline)
+            async def _launch():
+                await loop.run_in_executor(None, run_pipeline)
 
-        asyncio.create_task(_launch())
+            asyncio.create_task(_launch())
+        except Exception as exc:
+            # Setup itself failed before run_pipeline() could ever launch to
+            # release the slot/lock via its own finally — release them here
+            # instead so a currently-unreachable-in-practice failure (no
+            # await/yield point exists in this block today, but a future
+            # edit could add one) can't leak either.
+            log_event(LOGGER, "market_picks_setup_failed", level="error", run_id=run_id, error=str(exc))
+            _release_llm_slot()
+            if lock_acquired:
+                rate_limiter.release_lock(_MARKET_PICKS_REFRESH_LOCK_NAME)
+            yield _sse({"event": "error", "message": str(exc)})
+            return
 
         while True:
             try:
