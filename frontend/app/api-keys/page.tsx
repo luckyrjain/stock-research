@@ -66,8 +66,13 @@ export default function ApiKeysPage() {
 
   async function handleRevoke(id: number) {
     if (!confirm('Revoke this key? Anything using it will stop working immediately.')) return;
-    await fetch(`/api/api-keys/${id}`, { method: 'DELETE' });
-    await loadKeys();
+    try {
+      const res = await fetch(`/api/api-keys/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Could not revoke key.');
+      await loadKeys();
+    } catch {
+      setError('Could not revoke key. Try again.');
+    }
   }
 
   async function copyKey() {

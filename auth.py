@@ -204,6 +204,11 @@ def create_api_key(user_id: int, label: str | None = None) -> dict:
         "key_prefix": key_prefix,
         "label": row["label"],
         "created_at": row["created_at"],
+        # A freshly-created key is never used or revoked yet — included
+        # explicitly (rather than omitted) so this return value has the same
+        # shape as list_api_keys()' rows, plus the one-time `key` field.
+        "last_used_at": None,
+        "revoked_at": None,
     }
 
 

@@ -249,6 +249,10 @@ class CreateApiKeyTest(unittest.TestCase):
         self.assertEqual(result["key_prefix"], result["key"][:12])
         self.assertEqual(result["id"], 3)
         self.assertEqual(result["label"], "my script")
+        # Present explicitly (not omitted) so the shape matches list_api_keys()'
+        # rows plus the one-time `key` field.
+        self.assertIsNone(result["last_used_at"])
+        self.assertIsNone(result["revoked_at"])
 
         args, _kwargs = conn.calls[0]
         _stmt, params = args
