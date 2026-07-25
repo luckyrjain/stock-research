@@ -1,7 +1,8 @@
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-from tools.trendlyne_agent import _gnews, fetch_trendlyne_consensus, fetch_trendlyne_consensus_for_symbol
+from tools.trendlyne_agent import _gnews, _queries, fetch_trendlyne_consensus, fetch_trendlyne_consensus_for_symbol
 
 
 def _article(title="t", desc="d", url="https://example.com/a", pub="Mon, 01 Jan 2026 10:00:00 GMT"):
@@ -51,6 +52,16 @@ class FetchTrendlyneConsensusTest(unittest.TestCase):
         self.assertEqual(mocked.call_count, 3)
 
 
+class QueriesYearTest(unittest.TestCase):
+    def test_queries_use_the_current_year_not_a_hardcoded_one(self) -> None:
+        # Regression test: these queries used to bake in a fixed literal
+        # year, which would silently degrade recall once real articles
+        # started saying the following year instead.
+        year = str(datetime.now(timezone.utc).year)
+        for query in _queries():
+            self.assertIn(year, query)
+
+
 class FetchTrendlyneConsensusForSymbolTest(unittest.TestCase):
     def test_returns_symbol_and_articles(self) -> None:
         art = {"title": "TCS gets Trendlyne buy upgrade", "url": "https://example.com/a", "summary": "", "published_at": None}
@@ -86,6 +97,14 @@ class FetchTrendlyneConsensusForSymbolTest(unittest.TestCase):
         with patch("tools.trendlyne_agent._gnews", return_value=[]):
             result = fetch_trendlyne_consensus_for_symbol("NOSUCHSTOCK")
         self.assertEqual(result, {"symbol": "NOSUCHSTOCK", "articles": []})
+
+    def test_non_string_symbol_does_not_raise(self) -> None:
+        # Regression test: symbol.upper() used to be called unguarded —
+        # any non-string caller input (e.g. None, an int) raised
+        # AttributeError instead of degrading to an empty result.
+        with patch("tools.trendlyne_agent._gnews", return_value=[]):
+            result = fetch_trendlyne_consensus_for_symbol(None)
+        self.assertEqual(result, {"symbol": "", "articles": []})
 
     def test_underlying_gnews_import_or_network_failure_yields_empty_list(self) -> None:
         # _gnews() (see GnewsHelperTest above) already swallows import/network

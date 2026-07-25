@@ -229,6 +229,15 @@ class FetchBulkBlockDealsForSymbolTest(unittest.TestCase):
             result = fetch_bulk_block_deals_for_symbol("TCS")
         self.assertEqual(result, {"symbol": "TCS", "deals": []})
 
+    def test_non_string_symbol_does_not_raise(self) -> None:
+        # Regression test: symbol.upper() used to be called unguarded —
+        # any non-string caller input raised AttributeError instead of
+        # degrading to an empty result.
+        sess = self._session_pair([], [])
+        with patch("tools.nse_bulk_block_deals._nse_session", return_value=sess):
+            result = fetch_bulk_block_deals_for_symbol(None)
+        self.assertEqual(result, {"symbol": "", "deals": []})
+
 
 if __name__ == "__main__":
     unittest.main()

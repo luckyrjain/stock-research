@@ -14,11 +14,13 @@ already covered by other sources in market_picks_tools.py:
 Source type: brokerage — aggregated analyst consensus is institutional-grade.
 """
 
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 
 def _gnews(query: str, max_results: int = 12) -> list[dict]:
     try:
+        import tools._gnews_timeout  # noqa: F401 — sets a socket default timeout for GNews calls below
         from gnews import GNews
         gn   = GNews(language="en", country="IN", period="14d", max_results=max_results)
         arts = gn.get_news(query)
@@ -42,14 +44,19 @@ def _gnews(query: str, max_results: int = 12) -> list[dict]:
         return []
 
 
-_QUERIES = [
-    # Trendlyne-cited analyst upgrades and fresh BUY initiations
-    '"Trendlyne" ("upgrades to buy" OR "initiates with buy" OR "initiates coverage") India NSE stock 2026',
-    # Trendlyne-cited consensus target price raises
-    '"Trendlyne" ("target price raised" OR "target raised" OR "price target increased") India NSE 2026',
-    # Trendlyne-cited picks in financial media
-    '"Trendlyne" buy recommendation analyst India NSE stock 2026',
-]
+def _queries() -> list[str]:
+    # Computed per-call (not a module constant) so the query stays accurate
+    # if this long-running process happens to cross a year boundary,
+    # instead of baking in whatever year it started in.
+    year = datetime.now(timezone.utc).year
+    return [
+        # Trendlyne-cited analyst upgrades and fresh BUY initiations
+        f'"Trendlyne" ("upgrades to buy" OR "initiates with buy" OR "initiates coverage") India NSE stock {year}',
+        # Trendlyne-cited consensus target price raises
+        f'"Trendlyne" ("target price raised" OR "target raised" OR "price target increased") India NSE {year}',
+        # Trendlyne-cited picks in financial media
+        f'"Trendlyne" buy recommendation analyst India NSE stock {year}',
+    ]
 
 
 def fetch_trendlyne_consensus() -> dict:
@@ -57,7 +64,7 @@ def fetch_trendlyne_consensus() -> dict:
     seen_urls: set[str] = set()
     articles:  list[dict] = []
 
-    for query in _QUERIES:
+    for query in _queries():
         for art in _gnews(query, max_results=10):
             url = art.get("url", "")
             if url and url in seen_urls:
@@ -80,7 +87,7 @@ def fetch_trendlyne_consensus_for_symbol(symbol: str, max_results: int = 10) -> 
     would violate this codebase's "never invent" convention just as much as
     guessing a missing scraped field would.
     """
-    sym = symbol.upper().strip()
+    sym = symbol.upper().strip() if isinstance(symbol, str) else ""
     query = f'"Trendlyne" "{sym}" (buy OR upgrade OR "target price") NSE stock'
 
     seen_urls: set[str] = set()

@@ -8,6 +8,7 @@ def get_latest_news(query: str) -> str:
     Input: search query string, e.g. 'Reliance Industries NSE India' or 'TCS earnings Q4'.
     Returns articles with title, description, source, published date, and URL."""
     try:
+        import tools._gnews_timeout  # noqa: F401 — sets a socket default timeout for GNews calls below
         from gnews import GNews
         gn = GNews(language="en", country="IN", period="7d", max_results=5)
         articles = gn.get_news(query)

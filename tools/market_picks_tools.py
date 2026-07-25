@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 import feedparser
 import requests
 
+import tools._gnews_timeout  # noqa: F401 — sets a socket default timeout for GNews calls below
+
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -16,11 +18,11 @@ _HEADERS = {
 }
 _CUTOFF_DAYS = 14  # look back 2 weeks to capture more articles
 
-from tools.hdfc_sec_agent import HDFC_SEC_SOURCES
-from tools.nse_bulk_block_deals import NSE_BULK_SOURCES
-from tools.nse_insider_trades import INSIDER_SOURCES
-from tools.screener_scanner import SCREENER_SCAN_SOURCES
-from tools.trendlyne_agent import TRENDLYNE_SOURCES
+from tools.hdfc_sec_agent import HDFC_SEC_SOURCES, HDFC_SEC_SCRAPERS
+from tools.nse_bulk_block_deals import NSE_BULK_SOURCES, NSE_BULK_SCRAPERS
+from tools.nse_insider_trades import INSIDER_SOURCES, INSIDER_SCRAPERS
+from tools.screener_scanner import SCREENER_SCAN_SOURCES, SCREENER_SCAN_SCRAPERS
+from tools.trendlyne_agent import TRENDLYNE_SOURCES, TRENDLYNE_SCRAPERS
 
 # Registry used by the pipeline to run all scrapers
 SOURCES = [
@@ -50,6 +52,13 @@ def _session() -> requests.Session:
     return s
 
 
+def _current_year() -> int:
+    """Computed per-call (not a module constant) so a long-running process
+    that happens to cross a year boundary picks up the new year on its next
+    scrape, rather than baking in whatever year the process started in."""
+    return datetime.now(timezone.utc).year
+
+
 def _parse_rss(url: str, max_articles: int = 20, delay: float = 0.0) -> list[dict]:
     """Fetch and parse an RSS feed, returning articles within the cutoff window."""
     if delay:
@@ -57,7 +66,13 @@ def _parse_rss(url: str, max_articles: int = 20, delay: float = 0.0) -> list[dic
     try:
         r = _session().get(url, timeout=12)
         r.raise_for_status()
-        feed = feedparser.parse(r.text)
+        # Parse the raw response bytes, not requests' text-decoded string —
+        # requests' encoding guess (from headers/chardet) can silently
+        # mis-decode non-ASCII bytes into mojibake before feedparser ever
+        # sees them; feedparser.parse() does its own encoding detection
+        # directly from the raw bytes/declared XML encoding, which is more
+        # reliable for RSS/Atom feeds.
+        feed = feedparser.parse(r.content)
         cutoff = datetime.now(timezone.utc) - timedelta(days=_CUTOFF_DAYS)
         articles: list[dict] = []
         for entry in feed.entries:
@@ -158,32 +173,38 @@ def fetch_gnews_moneycontrol() -> dict:
 
 
 def fetch_gnews_ms_jpm() -> dict:
-    arts = _gnews('"Morgan Stanley" OR "JPMorgan" India stock buy overweight target 2026', max_results=15)
+    year = _current_year()
+    arts = _gnews(f'"Morgan Stanley" OR "JPMorgan" India stock buy overweight target {year}', max_results=15)
     return {"source": "Morgan Stanley / JPMorgan", "type": "brokerage", "articles": arts}
 
 
 def fetch_gnews_jefferies_mac_citi() -> dict:
-    arts = _gnews('"Jefferies" OR "Macquarie" OR "Citi" India stock buy outperform target 2026', max_results=15)
+    year = _current_year()
+    arts = _gnews(f'"Jefferies" OR "Macquarie" OR "Citi" India stock buy outperform target {year}', max_results=15)
     return {"source": "Jefferies / Macquarie / Citi", "type": "brokerage", "articles": arts}
 
 
 def fetch_gnews_intl_banks() -> dict:
-    arts = _gnews('"HSBC" OR "Bank of America" OR "Bernstein" OR "Investec" India stock buy outperform 2026', max_results=15)
+    year = _current_year()
+    arts = _gnews(f'"HSBC" OR "Bank of America" OR "Bernstein" OR "Investec" India stock buy outperform {year}', max_results=15)
     return {"source": "HSBC / BofA / Bernstein / Investec", "type": "brokerage", "articles": arts}
 
 
 def fetch_gnews_sharekhan_mirae() -> dict:
-    arts = _gnews('"ShareKhan" OR "Mirae Asset" India stock buy recommendation NSE target 2026', max_results=15)
+    year = _current_year()
+    arts = _gnews(f'"ShareKhan" OR "Mirae Asset" India stock buy recommendation NSE target {year}', max_results=15)
     return {"source": "ShareKhan / Mirae Asset", "type": "brokerage", "articles": arts}
 
 
 def fetch_gnews_india_brokers() -> dict:
-    arts = _gnews('"SMIFS" OR "IDBI Capital" OR "Geojit" OR "Deven Choksey" India stock buy recommendation 2026', max_results=15)
+    year = _current_year()
+    arts = _gnews(f'"SMIFS" OR "IDBI Capital" OR "Geojit" OR "Deven Choksey" India stock buy recommendation {year}', max_results=15)
     return {"source": "SMIFS / IDBI Capital / Geojit / Deven Choksey", "type": "brokerage", "articles": arts}
 
 
 def fetch_gnews_motilal_icici_axis() -> dict:
-    arts = _gnews('"Motilal Oswal" OR "ICICI Direct" OR "Axis Securities" India stock buy recommendation target 2026', max_results=15)
+    year = _current_year()
+    arts = _gnews(f'"Motilal Oswal" OR "ICICI Direct" OR "Axis Securities" India stock buy recommendation target {year}', max_results=15)
     return {"source": "Motilal Oswal / ICICI Direct / Axis Securities", "type": "brokerage", "articles": arts}
 
 
@@ -198,12 +219,6 @@ def fetch_gnews_financial_express() -> dict:
     arts = _gnews("financial express India stock buy recommendation target price", max_results=15)
     return {"source": "GNews — Financial Express", "type": "news", "articles": arts}
 
-
-from tools.hdfc_sec_agent import HDFC_SEC_SOURCES, HDFC_SEC_SCRAPERS
-from tools.nse_bulk_block_deals import NSE_BULK_SCRAPERS
-from tools.nse_insider_trades import INSIDER_SCRAPERS
-from tools.screener_scanner import SCREENER_SCAN_SCRAPERS
-from tools.trendlyne_agent import TRENDLYNE_SCRAPERS
 
 # Map source name → function (used by pipeline)
 SCRAPER_FNS: dict = {

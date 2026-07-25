@@ -879,7 +879,11 @@ For each qualified stock, set "direction":
 Rules:
 - Indian listed stocks ONLY.
 - Include the exact NSE ticker if you know it; leave blank if unsure.
-- In "reason" capture: firm name + rating + target (e.g. "Morgan Stanley Buy, target ₹3200").
+- In "reason" capture: firm name + rating + target (e.g. "Morgan Stanley Buy, target ₹3200") —
+  only what the article text itself states. Never invent a specific numeric detail (a target
+  price, an analyst count, a consensus rating) that isn't literally present in the article,
+  even if it sounds plausible from what you know about the firm — that is fabrication, not
+  extraction, and would be indistinguishable downstream from a real reported figure.
 - Return up to 15 stocks. If none qualify, return an empty picks list.
 
 Articles from {source_name}:
@@ -933,12 +937,33 @@ Return ONLY this JSON (no markdown, no extra text):
                         continue
                     tick = (pick.get("ticker") or "").upper().strip()[:15]
                     company = (pick.get("company") or "").strip()[:120]
+                    # Match on title OR summary — the LLM may have pulled the
+                    # ticker from body text the summary carries but the
+                    # (shorter) title doesn't. When the ticker genuinely
+                    # doesn't appear verbatim in any article in this batch
+                    # (e.g. the LLM inferred it from context), don't silently
+                    # default to articles[0] — that used to misattribute this
+                    # pick's url/article_date/syndicated flag to an unrelated
+                    # article in the same source's batch, which could falsely
+                    # mark/unmark syndication (a real scoring input) and point
+                    # url/article_date at the wrong story entirely. "Never
+                    # invent" applies here too: attribute to no specific
+                    # article rather than guessing the wrong one.
                     match_idx, match_art = next(
                         ((i, a) for i, a in enumerate(articles)
-                         if tick and tick in a["title"].upper()),
-                        (0, articles[0]),
+                         if tick and (tick in a["title"].upper() or tick in a["summary"].upper())),
+                        (None, None),
                     )
-                    is_synd = (src_name, match_idx) in syndicated_keys
+                    if match_art is not None:
+                        is_synd = (src_name, match_idx) in syndicated_keys
+                        url = match_art.get("url", "")
+                        article_title = match_art.get("title", "")
+                        article_date = match_art.get("published_at")
+                    else:
+                        is_synd = False
+                        url = ""
+                        article_title = ""
+                        article_date = None
                     picks.append({
                         **pick,
                         "ticker":        tick,
@@ -947,9 +972,9 @@ Return ONLY this JSON (no markdown, no extra text):
                         "source":        src_name,
                         "source_type":   _source_type.get(src_name, "news"),
                         "direction":     (pick.get("direction") or "BUY").upper(),
-                        "url":           match_art.get("url", ""),
-                        "article_title": match_art.get("title", ""),
-                        "article_date":  match_art.get("published_at"),
+                        "url":           url,
+                        "article_title": article_title,
+                        "article_date":  article_date,
                         "syndicated":    is_synd,
                     })
             except Exception:
