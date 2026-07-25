@@ -1058,6 +1058,25 @@ async def get_market_picks_history(request: Request, date: str | None = Query(No
     return await loop.run_in_executor(None, _load_sync)
 
 
+def _fetch_live_price_sync(sym: str) -> dict:
+    """LTP + day change% for one NSE/BSE symbol via yfinance, trying the .NS
+    then .BO suffix. Returns {} (never raises) if neither resolves — shared by
+    GET /api/prices (bulk) and GET /api/verdict-history/{symbol} (single-symbol,
+    for scoring past verdicts against today's price)."""
+    try:
+        import yfinance as yf
+        for suffix in (".NS", ".BO"):
+            fi = yf.Ticker(sym + suffix).fast_info
+            price = getattr(fi, "last_price", None)
+            prev  = getattr(fi, "previous_close", None)
+            if price and price > 0:
+                chg = round((price - prev) / prev * 100, 2) if prev else 0.0
+                return {"price": round(price, 2), "change_pct": chg}
+    except Exception:
+        pass
+    return {}
+
+
 @app.get("/api/prices")
 async def get_prices(request: Request, symbols: str = Query(...)):
     """Return LTP + day change% for a comma-separated list of NSE/BSE symbols."""
@@ -1068,18 +1087,7 @@ async def get_prices(request: Request, symbols: str = Query(...)):
     loop = asyncio.get_running_loop()
 
     def _fetch_one(sym: str) -> tuple[str, dict]:
-        try:
-            import yfinance as yf
-            for suffix in (".NS", ".BO"):
-                fi = yf.Ticker(sym + suffix).fast_info
-                price = getattr(fi, "last_price", None)
-                prev  = getattr(fi, "previous_close", None)
-                if price and price > 0:
-                    chg = round((price - prev) / prev * 100, 2) if prev else 0.0
-                    return sym, {"price": round(price, 2), "change_pct": chg}
-        except Exception:
-            pass
-        return sym, {}
+        return sym, _fetch_live_price_sync(sym)
 
     results = await asyncio.gather(
         *[loop.run_in_executor(None, _fetch_one, s) for s in sym_list]
@@ -1202,6 +1210,40 @@ async def get_peers(request: Request, symbol: str):
     return await loop.run_in_executor(None, _fetch_sync)
 
 
+def _score_verdict_history(history: list[dict], live_price: float | None) -> list[dict]:
+    """Attaches return_since_pct/outcome to each stored verdict, scored against
+    today's live price — "how has AlphaPulse's own call on this stock done so
+    far", the single-stock analogue of what /api/market-picks/history already
+    computes for the weekly picks list.
+
+    Only BUY/SELL entries are scored: a HOLD makes no directional claim, so
+    grading it against a price move would be inventing a judgment the verdict
+    itself never made — same "never invent" instinct as the rest of this
+    codebase, just applied to a derived field instead of a scraped one.
+    `return_since_pct` is still populated for every entry with a stored price,
+    regardless of recommendation, since that's an observed fact, not a
+    verdict-dependent judgment."""
+    scored = []
+    for entry in history:
+        entry_price = entry.get("current_price")
+        return_pct = None
+        if entry_price and live_price:
+            return_pct = round((live_price - entry_price) / entry_price * 100, 2)
+
+        outcome = None
+        rec = entry.get("recommendation")
+        if return_pct is not None and rec in ("BUY", "SELL"):
+            if return_pct == 0:
+                outcome = None  # perfectly flat — no directional signal to grade
+            elif rec == "BUY":
+                outcome = "win" if return_pct > 0 else "loss"
+            else:  # SELL
+                outcome = "win" if return_pct < 0 else "loss"
+
+        scored.append({**entry, "return_since_pct": return_pct, "outcome": outcome})
+    return scored
+
+
 @app.get("/api/verdict-history/{symbol}")
 async def get_verdict_history(request: Request, symbol: str):
     """The per-day verdict/price snapshots verdict_history.save_snapshot() writes
@@ -1212,6 +1254,13 @@ async def get_verdict_history(request: Request, symbol: str):
     hiccup) degrades to an empty list rather than a 500/503 — the hero's
     timeline strip just doesn't render, the same as peers/price-history when
     their own data isn't available yet.
+
+    Each entry is additionally scored against today's live price
+    (return_since_pct/outcome — see _score_verdict_history) so the timeline
+    shows not just what AlphaPulse called, but whether it was right so far.
+    A live-price fetch failure degrades those two fields to null on every
+    entry rather than failing the whole response — the un-scored history is
+    still useful on its own.
     """
     _rate_limit(request, "verdict_history", max_calls=60, window_seconds=60)
     sym = symbol.upper().strip()
@@ -1222,7 +1271,23 @@ async def get_verdict_history(request: Request, symbol: str):
 
     loop = asyncio.get_running_loop()
     history = await loop.run_in_executor(None, load_history, sym)
-    return {"symbol": sym, "history": history}
+    # The frontend's VerdictTimeline needs at least 2 entries to render at
+    # all — skip the extra yfinance round trip entirely below that, since
+    # nothing would consume the scored fields anyway.
+    live_price = None
+    if len(history) >= 2:
+        live = await loop.run_in_executor(None, _fetch_live_price_sync, sym)
+        live_price = live.get("price")
+    scored = _score_verdict_history(history, live_price)
+    win_count = sum(1 for e in scored if e["outcome"] == "win")
+    scored_count = sum(1 for e in scored if e["outcome"] is not None)
+    win_rate = round(win_count / scored_count * 100, 1) if scored_count else None
+    return {
+        "symbol": sym,
+        "history": scored,
+        "win_rate": win_rate,
+        "scored_count": scored_count,
+    }
 
 
 _HIT_RATE_LOOKBACK_DAYS       = 90   # window of golden crosses considered

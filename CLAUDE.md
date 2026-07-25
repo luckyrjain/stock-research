@@ -684,15 +684,30 @@ file never left disk, and `api.py`'s SSE endpoint didn't write anything comparab
    the existing row instead of adding a duplicate, so "one row per day" holds regardless of how
    many times the pipeline actually ran that day.
 3. `GET /api/verdict-history/{symbol}` is pure read-aggregation over `load_history()` — no LLM
-   calls, no scraping. Degrades to `{"symbol": ..., "history": []}` (200, not 503) when
-   `DATABASE_URL` is unset or the query fails, matching `/api/consolidated`'s "a missing section
-   isn't an error" philosophy, since this is a supplementary strip on top of a report that has
-   already loaded successfully — a DB hiccup here must not look like the whole analysis failed.
-4. `ResultsDashboard`'s hero renders a `VerdictTimeline` strip (fetched independently, same
+   calls, no scraping. Degrades to `{"symbol": ..., "history": [], "win_rate": null,
+   "scored_count": 0}` (200, not 503) when `DATABASE_URL` is unset or the query fails, matching
+   `/api/consolidated`'s "a missing section isn't an error" philosophy, since this is a
+   supplementary strip on top of a report that has already loaded successfully — a DB hiccup
+   here must not look like the whole analysis failed.
+4. **Outcome scoring** — the single-stock analogue of the win-rate `GET /api/market-picks/history`
+   already tracks for the weekly picks list: each stored verdict is additionally scored against
+   *today's* live price (one extra `yfinance` call via `_fetch_live_price_sync()`, the same
+   helper `GET /api/prices` uses, extracted out so both endpoints share it). `_score_verdict_history()`
+   computes `return_since_pct` (an observed fact, populated whenever both the stored and live
+   price are known) and `outcome` (`'win' | 'loss' | null`) per entry — but only for `BUY`/`SELL`
+   calls; a `HOLD` makes no directional claim, so grading it against a price move would be
+   inventing a judgment the verdict itself never made, the same "never invent" instinct applied
+   to a derived field instead of a scraped one. A live-price fetch failure (including this
+   sandbox's lack of outbound internet) degrades `return_since_pct`/`outcome` to `null` on every
+   entry rather than failing the whole response. The response also carries a per-symbol
+   `win_rate` (% of scored BUY/SELL entries that were a win) and `scored_count`.
+5. `ResultsDashboard`'s hero renders a `VerdictTimeline` strip (fetched independently, same
    pattern as `PriceSparkline`/`usePeerComparison`) showing each stored day as a small
-   recommendation badge with its date, chained left-to-right, latest one ring-highlighted. Needs
-   at least 2 stored days to render at all — a symbol analysed for the first time today has
-   nothing to compare against yet.
+   recommendation badge with its date and a ✓/✗ win/loss mark (green/red, independent of the
+   badge's own BUY/HOLD/SELL color), chained left-to-right, latest one ring-highlighted, with a
+   "`X`% right so far (`N` scored)" summary next to the strip's label when at least one entry has
+   been scored. Needs at least 2 stored days to render at all — a symbol analysed for the first
+   time today has nothing to compare against yet.
 
 ### PWA installability
 

@@ -110,16 +110,23 @@ export interface PriceHistory {
 // "verdict timeline" strip — fetched separately from the main report, same
 // pattern as PriceHistory.
 export interface VerdictHistoryEntry {
-  date:            string;   // 'YYYY-MM-DD'
-  recommendation:  string | null;
-  confidence:      string | null;
-  current_price:   number | null;
-  signal_score:    number | null;
+  date:              string;   // 'YYYY-MM-DD'
+  recommendation:    string | null;
+  confidence:        string | null;
+  current_price:     number | null;
+  signal_score:      number | null;
+  // Scored against today's live price. return_since_pct is an observed fact
+  // (populated whenever both prices are known); outcome is only set for
+  // BUY/SELL — a HOLD makes no directional claim, so it's never graded.
+  return_since_pct:  number | null;
+  outcome:           'win' | 'loss' | null;
 }
 
 export interface VerdictHistoryResponse {
-  symbol:  string;
-  history: VerdictHistoryEntry[];   // oldest first
+  symbol:        string;
+  history:       VerdictHistoryEntry[];   // oldest first
+  win_rate:      number | null;           // % of scored (BUY/SELL) entries that were a win
+  scored_count:  number;
 }
 
 export type TaskName = 'stock_info' | 'research' | 'news' | 'shareholding' | 'mf_holdings';
