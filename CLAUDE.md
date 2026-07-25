@@ -441,6 +441,43 @@ shows regardless of whether a fresh scan has run) polls the *existing* `GET /api
 each position's stored entry, flagging "At target" / "At stop-loss" when the live price clears either
 level.
 
+### Shared-state rate limiting (`rate_limiter.py`)
+
+Three pieces of backend guard state were previously **single-process, in-memory, by design** —
+each backend worker/replica held its own counter, so the documented per-IP rate limits, the LLM
+concurrency ceiling, and the SME refresh guard all silently became *per-worker* the moment the
+backend ran with more than one worker (see `docs/deployment.md`'s "Scaling" section, which
+flagged this as the blocker to scaling past a single process).
+
+1. `rate_limiter.py` (repo root, alongside `cache.py`) is a small shared module with three
+   primitives — `is_allowed(key, max_calls, window_seconds)` (sliding-window rate limit),
+   `try_acquire_slot(name, limit)` / `release_slot(name)` (named concurrency ceiling), and
+   `try_acquire_lock(name, ttl_seconds)` / `release_lock(name)` / `is_locked(name)` (single-run
+   lock) — each backed by a small Lua script (rate limit, slot) or `SET NX EX` (lock) for atomic
+   check-and-set against Redis, so two workers hitting the same key at the same instant can't
+   both succeed.
+2. **Graceful degradation, not a hard dependency**: every primitive falls back to the exact same
+   in-memory implementation this app had before Redis support existed whenever `REDIS_URL` is
+   unset, or a Redis call raises (network blip, Redis down) — logged as a warning
+   (`redis_rate_limit_failed` etc.) and swallowed, the same "missing optional infra degrades
+   rather than breaks" convention as `DATABASE_URL`/`SMTP_HOST` elsewhere in this codebase. A
+   single-process deployment behaves identically with or without `REDIS_URL` set.
+3. `api.py`'s `_check_rate_limit()`, `_acquire_llm_slot()`/`_release_llm_slot()`, and the
+   `/api/sme-signals/refresh` endpoint's run-guard are now thin wrappers over these three
+   primitives — same call sites, same `429`/capacity-rejection/`409` response shapes as before,
+   just backed by shared state instead of a module-level dict/counter/bool. The SME refresh
+   endpoint's lock-then-rate-limit ordering was preserved exactly (a `try_acquire_lock()` success
+   followed by a rate-limit rejection releases the lock before returning 429), matching the
+   original code's "409 takes priority over 429 when both would apply" behavior.
+4. **Crash recovery**: a Redis-held slot or lock carries a TTL (`_SLOT_TTL_SECONDS` = 600s for
+   slots; the SME refresh lock uses its own 3600s, matching how long one pipeline run can
+   reasonably take) so a worker that crashes mid-hold — skipping its `release_*()` call — doesn't
+   permanently strand that slot/lock. The in-memory fallback has no TTL, since a process crash
+   there already resets all in-memory state, making one redundant.
+5. Docker Compose gained a `redis` service (`redis:7-alpine`, persisted via a named volume) and
+   wires `REDIS_URL` into the `backend` service automatically — a manual/non-Compose deployment
+   only needs to set `REDIS_URL` once it scales past one worker (see `docs/deployment.md`).
+
 ### SME golden cross flow
 
 `sme_ema_pipeline.py` is a standalone batch job (PostgreSQL, `DATABASE_URL` env var):
@@ -903,7 +940,7 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
 - **`signals_data/<SYMBOL>/<date>.json`** (written by `signals/store.save_signal`) is a write-only audit trail — nothing reads it back. Pruned to a 90-day retention window per symbol on every write (`signals/store._prune_old_signals`).
 - **Source credibility weights** in `_SOURCE_CREDIBILITY` determine how much each source contributes to confidence scoring. Adding a new source requires adding a credibility entry; missing sources default to 0.50.
 - **HDFC Securities sources** live in `tools/hdfc_sec_agent.py` and are merged into `SOURCES` / `SCRAPER_FNS` at import time in `tools/market_picks_tools.py`. Adding a new brokerage source follows the same pattern: define scrapers in a separate module, export `*_SOURCES` and `*_SCRAPERS`, merge in `market_picks_tools.py`.
-- **Rate limiting** is a single-process, in-memory sliding window (`api.py`'s `_rate_limit()`), applied only to expensive/abusable routes: `/api/analyse/{symbol}` (20 req / 5 min per IP), `/api/market-picks?force=true` (3 req / hour per IP), `/api/sme-signals/refresh` (3 req / hour per IP, on top of the existing single-run guard). It does not survive a multi-worker deployment — that would need a shared store (e.g. Redis) instead.
+- **Rate limiting** is a sliding window (`api.py`'s `_rate_limit()` → `rate_limiter.is_allowed()`), applied only to expensive/abusable routes: `/api/analyse/{symbol}` (20 req / 5 min per IP), `/api/market-picks?force=true` (3 req / hour per IP), `/api/sme-signals/refresh` (3 req / hour per IP, on top of the existing single-run guard). Backed by Redis (shared across workers) when `REDIS_URL` is set, an in-memory per-process counter otherwise — see "Shared-state rate limiting" below.
 - **`output/_history/<date>.json` snapshot schema** (`symbol`, `confidence`, `effective_signal`, `mention_count`, `current_price`, `recommendation`) is read by two independent consumers: the in-pipeline `_load_trend()` (confidence trend) and `GET /api/market-picks/history` (price track record, `/market-picks/history` page). Snapshots written before `current_price`/`recommendation` were added won't have them — the history endpoint handles this by returning `change_pct: null` rather than guessing. Keep both consumers in mind if the snapshot shape changes.
 - **`GET /api/market-picks/history`** also computes an overall `win_rate` (share of tracked picks with `change_pct > 0`), a `tier_stats` breakdown keyed by `recommendation_then` (count/avg change/win rate per BUY/WATCHLIST/HOLD/SELL), and per-symbol `nifty_change_pct`/`alpha_pct` benchmarked against `^NSEI` over the same `first_seen` → `last_seen` window (`avg_alpha_pct` at the top level). The Nifty series is fetched once per request-range via `yfinance.Ticker("^NSEI").history()` — not once per snapshot date — and cached through `cache.py` using `"NSEI"` as a pseudo-symbol (`index_history`, 24 h TTL, re-fetched whenever a new snapshot date widens the needed range). A closed-market snapshot date (weekend/holiday) falls back to the nearest earlier trading day's close, never a later one. A yfinance outage degrades to `null` alpha fields, not a failed request.
 - **CORS** is restricted via `CORSMiddleware` to origins in `ALLOWED_ORIGINS` (comma-separated env var, defaults to `http://localhost:3000`). This is defense in depth, not something normal operation relies on — the Next.js proxy routes talk to the backend server-to-server, which CORS doesn't apply to. Add your production frontend's origin to `ALLOWED_ORIGINS` before deploying, or direct browser calls to the backend will be rejected.

@@ -52,24 +52,35 @@ Put both behind a reverse proxy (nginx, Caddy, a cloud load balancer) for TLS te
 
 ## Scaling: read this before adding workers or replicas
 
-Several pieces of backend state are **single-process, in-memory, by design** (documented in `CLAUDE.md`):
+`rate_limiter.py` backs three pieces of guard state — the sliding-window rate limiter, the LLM
+concurrency ceiling, and the SME refresh lock — with Redis when `REDIS_URL` is set, falling back to
+the same in-memory-per-process behavior this app had before Redis support existed when it's unset:
 
-| State | Where | What breaks with >1 worker/replica |
+| State | What it does | Without `REDIS_URL` (>1 worker/replica) |
 |---|---|---|
-| Rate limiter (`_RATE_LIMIT_CALLS`) | `api.py` | Each worker gets its own counter — the documented per-IP limits (20 req/5min on `/api/analyse`, etc.) become *per-worker*, silently multiplying the effective limit |
-| SME refresh guard (`_SME_REFRESHING`) | `api.py` | Two workers can both accept a `/api/sme-signals/refresh` POST and run the pipeline concurrently — wasteful (duplicate NSE/yfinance calls), not corrupting (upserts are idempotent) |
-| Cached DB engine (`_SME_ENGINE`) | `api.py` | Harmless — each worker just gets its own connection pool, not a bug, just not shared |
+| Rate limiter | Per-IP sliding window (20 req/5min on `/api/analyse`, etc.) | Each worker gets its own counter — the documented limits become *per-worker*, silently multiplying the effective limit |
+| LLM concurrency ceiling | Caps concurrent analyst/market-picks LLM pipelines across all callers | Each worker gets its own ceiling — `N` workers × the configured limit can run concurrently instead of the limit as a whole |
+| SME refresh lock | One `/api/sme-signals/refresh` run at a time | Two workers can both accept the POST and run the pipeline concurrently — wasteful (duplicate NSE/yfinance calls), not corrupting (upserts are idempotent) |
+| Cached DB engine (`_DB_ENGINE`) | Reused SQLAlchemy engine | Harmless either way — each worker just gets its own connection pool, not a bug, just not shared |
 
-If you need to scale past one backend process, migrate the rate limiter and refresh guard to a shared
-store (Redis is the natural fit) first. Until then, keep the backend at a single worker/replica — the
-default `CMD` in `Dockerfile` intentionally omits `--workers`. The frontend has no such constraint; scale
-it however you like.
+**Set `REDIS_URL`** (Docker Compose does this automatically via its `redis` service) before scaling
+the backend past one worker/replica — with it set, all three guards above are correctly shared across
+workers, and the default `CMD` in `Dockerfile` (which currently omits `--workers`) can safely gain one.
+Without `REDIS_URL`, keep the backend at a single worker/replica — the gaps in the table still apply.
+The frontend has no such constraint; scale it however you like.
+
+A Redis outage mid-flight degrades gracefully, not fatally: every `rate_limiter.py` call falls back to
+its in-memory equivalent for that one call and logs a warning (`redis_rate_limit_failed`, etc.) — the
+backend keeps serving requests with per-worker-only guards until Redis is reachable again, the same
+"missing optional infra degrades rather than breaks" convention as `DATABASE_URL`/`SMTP_HOST`.
 
 ## Environment variable checklist
 
 Beyond an LLM provider key (see [Setup](setup.md)), production deployments should set:
 
 - `DATABASE_URL` — required for SME signals and the watchlist; Docker Compose sets this automatically
+- `REDIS_URL` — required only if you scale the backend past one worker/replica (see "Scaling" above);
+  Docker Compose sets this automatically
 - `ALLOWED_ORIGINS` — add your real frontend origin (comma-separated for multiple), or direct browser
   calls to the backend get CORS-rejected; defaults to `http://localhost:3000` (see `api.py`)
 - `API_URL` (frontend) — point at your backend's real address if not using Docker Compose's automatic wiring
