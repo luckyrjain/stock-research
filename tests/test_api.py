@@ -183,13 +183,31 @@ class ClientIpTrustedProxyTest(unittest.TestCase):
         with patch("api._TRUSTED_PROXY_SECRET", "s3cr3t"):
             self.assertEqual(api._client_ip(req), "10.0.0.5")
 
-    def test_trusted_caller_uses_first_ip_in_forwarded_chain(self) -> None:
+    def test_trusted_caller_with_multi_value_chain_falls_back(self) -> None:
+        # A single-hop reverse proxy in "replace" mode (the only configuration
+        # this feature documents/supports — see docs/deployment.md) always
+        # produces exactly one IP here. More than one usually means an
+        # "append" mode misconfiguration (e.g. nginx's
+        # $proxy_add_x_forwarded_for) that lets a caller-supplied
+        # X-Forwarded-For survive alongside the real one — and since a caller
+        # can set this header directly on a request to the reverse proxy, the
+        # leftmost entry in that case would be the attacker's own claimed
+        # value, not the one the proxy actually observed. Refuse to trust an
+        # ambiguous chain rather than blindly take the first entry.
         req = self._make_request("10.0.0.5", {
             "x-forwarded-for": "203.0.113.5, 10.0.0.1",
             "x-internal-proxy-secret": "s3cr3t",
         })
         with patch("api._TRUSTED_PROXY_SECRET", "s3cr3t"):
-            self.assertEqual(api._client_ip(req), "203.0.113.5")
+            self.assertEqual(api._client_ip(req), "10.0.0.5")
+
+    def test_trusted_caller_with_blank_forwarded_header_falls_back(self) -> None:
+        req = self._make_request("10.0.0.5", {
+            "x-forwarded-for": ", 203.0.113.5",
+            "x-internal-proxy-secret": "s3cr3t",
+        })
+        with patch("api._TRUSTED_PROXY_SECRET", "s3cr3t"):
+            self.assertEqual(api._client_ip(req), "10.0.0.5")
 
     def test_trusted_caller_without_forwarded_header_falls_back(self) -> None:
         req = self._make_request("10.0.0.5", {"x-internal-proxy-secret": "s3cr3t"})

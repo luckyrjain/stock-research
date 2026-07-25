@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import json
 import os
 import statistics
@@ -108,10 +109,23 @@ _TRUSTED_PROXY_SECRET = os.getenv("TRUSTED_PROXY_SECRET")
 
 
 def _client_ip(request: Request) -> str:
-    if _TRUSTED_PROXY_SECRET and request.headers.get("x-internal-proxy-secret") == _TRUSTED_PROXY_SECRET:
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded and forwarded.strip():
-            return forwarded.split(",")[0].strip()
+    secret = request.headers.get("x-internal-proxy-secret", "")
+    if _TRUSTED_PROXY_SECRET and hmac.compare_digest(secret, _TRUSTED_PROXY_SECRET):
+        forwarded = request.headers.get("x-forwarded-for", "")
+        parts = [p.strip() for p in forwarded.split(",")] if forwarded else []
+        # A correctly configured single-hop reverse proxy in "replace" mode
+        # (see docs/deployment.md) always produces exactly one IP here. More
+        # than one usually means an "append" mode misconfiguration (e.g.
+        # nginx's $proxy_add_x_forwarded_for) letting a client-supplied
+        # X-Forwarded-For survive alongside the real one — and since a
+        # browser/curl can set this header directly on a request to the
+        # reverse proxy, the leftmost entry in that case would be the
+        # attacker's own claimed value, not the one the proxy actually
+        # observed. Refuse to trust an ambiguous chain rather than guess
+        # which entry is real; this also naturally handles an empty/blank
+        # header the same way.
+        if len(parts) == 1 and parts[0]:
+            return parts[0]
     return request.client.host if request.client else "unknown"
 
 

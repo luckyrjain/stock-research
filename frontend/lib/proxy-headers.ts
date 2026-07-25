@@ -21,7 +21,18 @@ export function clientIpHeaders(req: Request): Record<string, string> {
   const headers: Record<string, string> = {};
 
   const forwarded = req.headers.get('x-forwarded-for');
-  const clientIp = forwarded?.split(',')[0]?.trim() || req.headers.get('x-real-ip')?.trim();
+  // A correctly configured single-hop reverse proxy in "replace" mode (see
+  // docs/deployment.md) always produces exactly one IP here. More than one
+  // usually means an "append" mode misconfiguration (e.g. nginx's
+  // $proxy_add_x_forwarded_for) letting a client-supplied X-Forwarded-For
+  // survive alongside the real one — and since a browser/curl can set this
+  // header directly on a request to the reverse proxy, the leftmost entry
+  // in that case would be the attacker's own claimed value, not the one the
+  // proxy actually observed. Refuse to trust an ambiguous chain rather than
+  // guess which entry is real; fall back to X-Real-Ip (set by some proxies
+  // instead) in that case.
+  const parts = forwarded ? forwarded.split(',').map(p => p.trim()) : [];
+  const clientIp = (parts.length === 1 && parts[0]) ? parts[0] : req.headers.get('x-real-ip')?.trim();
   if (clientIp) headers['X-Forwarded-For'] = clientIp;
 
   const secret = process.env.TRUSTED_PROXY_SECRET;

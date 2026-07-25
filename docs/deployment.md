@@ -55,9 +55,19 @@ server-to-server (see "Proxy routes" in CLAUDE.md) — without anything further,
 `api.py`'s per-IP rate limiters sees only the Next.js server's own IP for every request, collapsing
 them into one shared bucket for the whole site. Once a reverse proxy sits in front of the frontend,
 two things need to line up:
-1. The reverse proxy must set `X-Forwarded-For` to the real client IP on requests it forwards to
-   Next.js — nginx (`proxy_set_header X-Forwarded-For $remote_addr;`) and Caddy do this out of the
-   box; check your load balancer's equivalent if using a cloud one.
+1. The reverse proxy must **replace** `X-Forwarded-For` with the real client IP on requests it
+   forwards to Next.js — use `proxy_set_header X-Forwarded-For $remote_addr;` on nginx. Caddy does
+   this by default. **Do not** use nginx's more commonly copy-pasted
+   `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` — that *appends* to whatever
+   `X-Forwarded-For` value the request already carried instead of replacing it, and since
+   `X-Forwarded-For` isn't a browser-forbidden header, any caller can set it directly on a request
+   to your reverse proxy. Under append mode, a spoofed value from the caller ends up as the
+   *leftmost* entry ahead of the proxy's own real observation — exactly what `clientIpHeaders()`
+   (`frontend/lib/proxy-headers.ts`) and `api.py::_client_ip()` are watching for: both refuse to
+   trust the header at all once it contains more than one entry, falling back to the same
+   pre-this-feature behavior rather than guessing which entry is real. Getting the proxy directive
+   right is still what makes the real client IP actually reach the rate limiter, though — the
+   multi-value refusal is a safety net, not a substitute for the correct config.
 2. Set `TRUSTED_PROXY_SECRET` to the same random value on **both** the backend and frontend
    processes (see `.env.example`) — the frontend's proxy routes forward the client IP they read off
    that header alongside this shared secret, and `api.py` only trusts the forwarded IP when the
