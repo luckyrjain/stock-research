@@ -57,6 +57,14 @@ def _norm_company_name(name: str | None) -> str:
 _NSE_EMERGE_CACHE = Path("output/_nse_emerge_master.json")
 _BSE_SME_CACHE    = Path("output/_bse_sme_master.json")
 _CACHE_TTL_HOURS  = 24
+# A truncated-but-nonempty response (partial download, rate-limited/paginated
+# reply) is otherwise silently cached and treated as complete — worse than
+# the already-handled zero-rows case, since downstream code has no way to
+# tell "the real universe is this small" apart from "the fetch got cut off."
+# Set well below each list's real size (this module's own docstring cites
+# ~539 for NSE Emerge) to tolerate genuine listing/delisting drift.
+_NSE_EMERGE_MIN_COUNT = 150
+_BSE_SME_MIN_COUNT    = 30
 
 _NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -95,6 +103,7 @@ def _enrich_names(stocks: list[dict]) -> list[dict]:
     if not to_fetch:
         return stocks
 
+    failures = 0
     for s in to_fetch:
         try:
             r = requests.get(
@@ -106,9 +115,21 @@ def _enrich_names(stocks: list[dict]) -> list[dict]:
             results = r.json() if r.ok else []
             if results:
                 s["name"] = results[0].get("name") or None
+            else:
+                failures += 1
         except Exception:
-            pass
+            failures += 1
         time.sleep(0.1)
+
+    if failures:
+        # Not fatal (the ISIN-dedup fallback in get_all_sme_stocks() degrades
+        # gracefully to a name-less record), but silent per-stock failures
+        # would otherwise weaken that fallback with no way to notice —
+        # matching this codebase's "no silent caps" convention.
+        logger.warning(
+            "SME name enrichment: %d/%d lookups failed or returned nothing",
+            failures, len(to_fetch),
+        )
 
     return stocks
 
@@ -145,17 +166,27 @@ def fetch_nse_emerge_stocks(force: bool = False) -> list[dict]:
             for row in rows
             if row.get("symbol", "").strip()
         ]
-        if stocks:
+        if len(stocks) >= _NSE_EMERGE_MIN_COUNT:
             logger.info("NSE Emerge: fetched %d stocks, enriching names…", len(stocks))
             stocks = _enrich_names(stocks)
             _save_cache(_NSE_EMERGE_CACHE, stocks)
             logger.info("NSE Emerge: cached %d stocks with names", len(stocks))
-        return stocks
+            return stocks
+        if stocks:
+            logger.warning(
+                "NSE Emerge: fetch returned suspiciously few rows (%d, expected at least %d) — "
+                "treating as a failed fetch rather than caching a truncated universe",
+                len(stocks), _NSE_EMERGE_MIN_COUNT,
+            )
+        else:
+            logger.warning("NSE Emerge: fetch returned no usable rows")
     except Exception as exc:
         logger.warning("NSE Emerge fetch failed: %s", exc)
-        if _NSE_EMERGE_CACHE.exists():
-            return json.loads(_NSE_EMERGE_CACHE.read_text())
-        return []
+
+    if _NSE_EMERGE_CACHE.exists():
+        logger.warning("NSE Emerge: using stale cache")
+        return json.loads(_NSE_EMERGE_CACHE.read_text())
+    return []
 
 
 def fetch_bse_sme_stocks(force: bool = False) -> list[dict]:
@@ -176,26 +207,43 @@ def fetch_bse_sme_stocks(force: bool = False) -> list[dict]:
             rows = r.json()
             if not isinstance(rows, list):
                 rows = rows.get("Table", []) if isinstance(rows, dict) else []
+            skipped = 0
             for item in rows:
-                code = str(item.get("SCRIP_CD", "")).strip()
-                if not code or code in seen_codes:
-                    continue
-                seen_codes.add(code)
-                stocks.append({
-                    "symbol":   code,
-                    "name":     str(item.get("Scrip_Name", "")).strip() or None,
-                    "isin":     str(item.get("ISIN_NUMBER", "")).strip() or None,
-                    "series":   group,
-                    "exchange": "BSE",
-                })
+                # A single malformed row (not a dict, or missing fields) must
+                # not abort the rest of this group's rows — it used to raise
+                # out of this loop entirely, discarding every remaining row
+                # in the group via the outer except, reported only as an
+                # indistinguishable "group fetch failed" warning.
+                try:
+                    code = str(item.get("SCRIP_CD", "")).strip()
+                    if not code or code in seen_codes:
+                        continue
+                    seen_codes.add(code)
+                    stocks.append({
+                        "symbol":   code,
+                        "name":     str(item.get("Scrip_Name", "")).strip() or None,
+                        "isin":     str(item.get("ISIN_NUMBER", "")).strip() or None,
+                        "series":   group,
+                        "exchange": "BSE",
+                    })
+                except Exception:
+                    skipped += 1
+            if skipped:
+                logger.warning("BSE SME Group=%s: skipped %d malformed row(s)", group, skipped)
             logger.info("BSE SME Group=%s: %d stocks", group, len(rows) if isinstance(rows, list) else 0)
         except Exception as exc:
             logger.warning("BSE SME Group=%s fetch failed: %s", group, exc)
 
-    if stocks:
+    if len(stocks) >= _BSE_SME_MIN_COUNT:
         _save_cache(_BSE_SME_CACHE, stocks)
         logger.info("BSE SME: fetched %d total stocks", len(stocks))
         return stocks
+    if stocks:
+        logger.warning(
+            "BSE SME: fetch returned suspiciously few rows (%d, expected at least %d) — "
+            "treating as a failed fetch rather than caching a truncated universe",
+            len(stocks), _BSE_SME_MIN_COUNT,
+        )
 
     if _BSE_SME_CACHE.exists():
         logger.warning("BSE SME: using stale cache")

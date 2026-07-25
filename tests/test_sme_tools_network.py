@@ -55,6 +55,7 @@ class FetchNseEmergeStocksTest(SmeToolsNetworkTestBase):
             return _FakeResponse(json_data={})  # session-priming GET
 
         with patch("requests.Session.get", _session_get), \
+             patch.object(sme_tools, "_NSE_EMERGE_MIN_COUNT", 1), \
              patch.object(sme_tools, "_enrich_names", side_effect=lambda stocks: stocks):
             result = sme_tools.fetch_nse_emerge_stocks(force=True)
 
@@ -75,6 +76,24 @@ class FetchNseEmergeStocksTest(SmeToolsNetworkTestBase):
             result = sme_tools.fetch_nse_emerge_stocks(force=True)
         self.assertEqual(result, [])
 
+    def test_truncated_response_falls_back_to_stale_cache_rather_than_caching_it(self) -> None:
+        # Regression test: a nonempty-but-suspiciously-small response (a
+        # partial download, a rate-limited reply) used to be treated as a
+        # complete, cacheable universe — silently truncating the SME
+        # screener's coverage instead of degrading like any other failure.
+        stale = [{"symbol": "OLD", "name": None, "isin": None, "series": "SM", "exchange": "NSE"}]
+        self.nse_cache.write_text(json.dumps(stale))
+        api_response = _FakeResponse(json_data={"data": [{"symbol": "abc"}]})
+
+        def _session_get(self_, url, **kwargs):
+            if "live-analysis-emerge" in url:
+                return api_response
+            return _FakeResponse(json_data={})
+
+        with patch("requests.Session.get", _session_get):
+            result = sme_tools.fetch_nse_emerge_stocks(force=True)
+        self.assertEqual(result, stale)
+
 
 class FetchBseSmeStocksTest(SmeToolsNetworkTestBase):
     def _group_response(self, rows):
@@ -88,7 +107,8 @@ class FetchBseSmeStocksTest(SmeToolsNetworkTestBase):
             {"SCRIP_CD": "543210", "Scrip_Name": "ABC Ltd (dup)", "ISIN_NUMBER": "INE000A01001"},
             {"SCRIP_CD": "543211", "Scrip_Name": "XYZ Ltd", "ISIN_NUMBER": "INE000B01002"},
         ])
-        with patch("requests.get", side_effect=[group_m, group_ms]):
+        with patch("requests.get", side_effect=[group_m, group_ms]), \
+             patch.object(sme_tools, "_BSE_SME_MIN_COUNT", 1):
             result = sme_tools.fetch_bse_sme_stocks(force=True)
 
         codes = [s["symbol"] for s in result]
@@ -96,9 +116,35 @@ class FetchBseSmeStocksTest(SmeToolsNetworkTestBase):
 
     def test_one_group_failing_still_returns_the_other(self) -> None:
         group_m = self._group_response([{"SCRIP_CD": "1", "Scrip_Name": "A", "ISIN_NUMBER": "X"}])
-        with patch("requests.get", side_effect=[group_m, ConnectionError("boom")]):
+        with patch("requests.get", side_effect=[group_m, ConnectionError("boom")]), \
+             patch.object(sme_tools, "_BSE_SME_MIN_COUNT", 1):
             result = sme_tools.fetch_bse_sme_stocks(force=True)
         self.assertEqual(len(result), 1)
+
+    def test_malformed_row_is_skipped_not_fatal_to_the_rest_of_the_group(self) -> None:
+        # Regression test: a single row that doesn't behave like a dict
+        # (e.g. a bare string) used to raise out of the per-row loop,
+        # silently discarding every remaining row in that group via the
+        # outer except — reported only as an indistinguishable "group fetch
+        # failed" warning, with no row-index or partial-completion signal.
+        group_m = self._group_response([
+            {"SCRIP_CD": "1", "Scrip_Name": "Good Row", "ISIN_NUMBER": "X"},
+            "not-a-dict",
+            {"SCRIP_CD": "2", "Scrip_Name": "Also Good", "ISIN_NUMBER": "Y"},
+        ])
+        with patch("requests.get", side_effect=[group_m, self._group_response([])]), \
+             patch.object(sme_tools, "_BSE_SME_MIN_COUNT", 1):
+            result = sme_tools.fetch_bse_sme_stocks(force=True)
+        codes = {s["symbol"] for s in result}
+        self.assertEqual(codes, {"1", "2"})
+
+    def test_truncated_response_falls_back_to_stale_cache_rather_than_caching_it(self) -> None:
+        stale = [{"symbol": "999", "name": "Stale Co", "isin": None, "series": "M", "exchange": "BSE"}]
+        self.bse_cache.write_text(json.dumps(stale))
+        group_m = self._group_response([{"SCRIP_CD": "1", "Scrip_Name": "A", "ISIN_NUMBER": "X"}])
+        with patch("requests.get", side_effect=[group_m, self._group_response([])]):
+            result = sme_tools.fetch_bse_sme_stocks(force=True)
+        self.assertEqual(result, stale)
 
     def test_total_failure_falls_back_to_stale_cache(self) -> None:
         stale = [{"symbol": "999", "name": "Stale Co", "isin": None, "series": "M", "exchange": "BSE"}]

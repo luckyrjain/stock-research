@@ -34,6 +34,13 @@ logger = logging.getLogger(__name__)
 
 _CACHE_PATH = Path("output/_nifty500_master.json")
 _CACHE_TTL_HOURS = 24
+# NIFTY 500 has ~500 constituents by construction. A truncated-but-nonempty
+# response (a partial download, a paginated/rate-limited NSE response) would
+# otherwise be silently cached and treated as complete — worse than the
+# already-handled zero-rows case, since a screener built on a truncated
+# universe looks correct while quietly missing most of the market. Set well
+# below 500 to tolerate real index-reconstitution drift.
+_MIN_PLAUSIBLE_COUNT = 400
 
 _NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -86,11 +93,18 @@ def get_nifty500_constituents(force: bool = False) -> list[dict]:
                 "isin":         (row.get("ISIN Code") or "").strip() or None,
             })
 
-        if stocks:
+        if len(stocks) >= _MIN_PLAUSIBLE_COUNT:
             _save_cache(stocks)
             logger.info("NIFTY 500: fetched %d constituents", len(stocks))
             return stocks
-        logger.warning("NIFTY 500: fetch returned no usable rows")
+        if stocks:
+            logger.warning(
+                "NIFTY 500: fetch returned suspiciously few rows (%d, expected at least %d) — "
+                "treating as a failed fetch rather than caching a truncated universe",
+                len(stocks), _MIN_PLAUSIBLE_COUNT,
+            )
+        else:
+            logger.warning("NIFTY 500: fetch returned no usable rows")
     except Exception as exc:
         logger.warning("NIFTY 500 fetch failed: %s", exc)
 
