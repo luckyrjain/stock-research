@@ -68,9 +68,18 @@ class WeightsForSectorTest(unittest.TestCase):
                 weights = _weights_for_sector(sector)
                 self.assertEqual(weights["technical"], 0.3)
                 self.assertEqual(weights["volume"], 0.3)
+                # valuation/growth are weighted down to offset technical/volume
+                # being weighted up, so the group's weight sum stays at the
+                # 1.55 baseline rather than inflating.
+                self.assertEqual(weights["valuation"], 0.3)
+                self.assertEqual(weights["growth"], 0.3)
                 # Untouched weights carry over from the default unchanged.
-                self.assertEqual(weights["valuation"], _DEFAULT_WEIGHTS["valuation"])
-                self.assertEqual(weights["growth"], _DEFAULT_WEIGHTS["growth"])
+                self.assertEqual(weights["filings"], _DEFAULT_WEIGHTS["filings"])
+                self.assertEqual(weights["macro"], _DEFAULT_WEIGHTS["macro"])
+
+    def test_cyclical_sector_weight_sum_matches_default_baseline(self) -> None:
+        weights = _weights_for_sector("Energy")
+        self.assertAlmostEqual(sum(weights.values()), sum(_DEFAULT_WEIGHTS.values()), places=6)
 
     def test_never_mutates_the_shared_default_dict(self) -> None:
         _weights_for_sector("Financial Services")
