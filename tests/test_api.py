@@ -846,6 +846,21 @@ class InsiderActivityEndpointTest(unittest.TestCase):
         self.assertEqual(body["insider_trades"], [])
         self.assertEqual(body["bulk_block_deals"], [])
 
+    def test_one_source_failing_does_not_take_down_the_other(self) -> None:
+        # Both underlying tool functions are documented to never raise, but
+        # this endpoint has its own defensive try/except around each — a
+        # future violation of that contract in one source must not 500 the
+        # whole response when the other source is fine.
+        fake_bulk = {"symbol": "TCS", "deals": [{"client": "Big Fund", "action": "SELL"}]}
+        with patch("tools.nse_insider_trades.fetch_insider_trades_for_symbol",
+                   side_effect=RuntimeError("NSE schema drifted")), \
+             patch("tools.nse_bulk_block_deals.fetch_bulk_block_deals_for_symbol", return_value=fake_bulk):
+            resp = client.get("/api/insider-activity/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["insider_trades"], [])
+        self.assertEqual(body["bulk_block_deals"], fake_bulk["deals"])
+
 
 class PeerPercentileHelperTest(unittest.TestCase):
     def test_tie_is_split_evenly(self) -> None:

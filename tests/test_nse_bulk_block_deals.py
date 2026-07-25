@@ -203,6 +203,19 @@ class FetchBulkBlockDealsForSymbolTest(unittest.TestCase):
         self.assertEqual(result["deals"][0]["client"], "Later")
         self.assertEqual(result["deals"][1]["client"], "Earlier")
 
+    def test_unparseable_date_sorts_without_crashing(self) -> None:
+        sess = self._session_pair(
+            [self._deal(date="garbage-date", clientName="Unparseable"),
+             self._deal(date="24-Jul-2026", clientName="Parseable")],
+            [],
+        )
+        with patch("tools.nse_bulk_block_deals._nse_session", return_value=sess):
+            result = fetch_bulk_block_deals_for_symbol("TCS")
+        self.assertEqual(len(result["deals"]), 2)
+        self.assertEqual(result["deals"][0]["client"], "Parseable")
+        self.assertEqual(result["deals"][1]["client"], "Unparseable")
+        self.assertIsNone(result["deals"][1]["date_iso"])
+
     def test_no_rows_returns_empty_deals_not_error(self) -> None:
         sess = self._session_pair([], [])
         with patch("tools.nse_bulk_block_deals._nse_session", return_value=sess):

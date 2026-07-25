@@ -118,6 +118,22 @@ class FetchInsiderTradesForSymbolTest(unittest.TestCase):
         self.assertEqual(result["trades"][0]["person"], "Later")
         self.assertEqual(result["trades"][1]["person"], "Earlier")
 
+    def test_unparseable_date_sorts_without_crashing(self) -> None:
+        # A row whose date NSE sent in a format _parse_pit_date() doesn't
+        # recognize gets date_iso=None — the sort key must tolerate a mix of
+        # None and real ISO strings without raising, and a None entry should
+        # land predictably (last, since "" is the minimum under reverse=True).
+        rows = [
+            _pit_row(intimDt="garbage-date", acqName="Unparseable"),
+            _pit_row(intimDt="24-Jul-2026", acqName="Parseable"),
+        ]
+        with patch("tools.nse_insider_trades._nse_session", return_value=self._session(rows)):
+            result = fetch_insider_trades_for_symbol("TESTCO")
+        self.assertEqual(len(result["trades"]), 2)
+        self.assertEqual(result["trades"][0]["person"], "Parseable")
+        self.assertEqual(result["trades"][1]["person"], "Unparseable")
+        self.assertIsNone(result["trades"][1]["date_iso"])
+
     def test_no_rows_returns_empty_trades_not_error(self) -> None:
         with patch("tools.nse_insider_trades._nse_session", return_value=self._session([])):
             result = fetch_insider_trades_for_symbol("TESTCO")

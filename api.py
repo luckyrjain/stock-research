@@ -1241,14 +1241,26 @@ async def get_insider_activity(request: Request, symbol: str):
         return cached
 
     def _fetch_insider() -> list[dict]:
-        from tools.nse_insider_trades import fetch_insider_trades_for_symbol
+        # Both underlying tool functions are documented to never raise, but
+        # this endpoint doesn't lean on that alone — a future change to
+        # either one shouldn't be able to take down the *other* section, the
+        # same per-section isolation _consolidated_payload uses.
+        try:
+            from tools.nse_insider_trades import fetch_insider_trades_for_symbol
 
-        return fetch_insider_trades_for_symbol(sym).get("trades", [])
+            return fetch_insider_trades_for_symbol(sym).get("trades", [])
+        except Exception as exc:
+            log_event(LOGGER, "insider_trades_fetch_failed", level="warning", symbol=sym, error=str(exc))
+            return []
 
     def _fetch_bulk_block() -> list[dict]:
-        from tools.nse_bulk_block_deals import fetch_bulk_block_deals_for_symbol
+        try:
+            from tools.nse_bulk_block_deals import fetch_bulk_block_deals_for_symbol
 
-        return fetch_bulk_block_deals_for_symbol(sym).get("deals", [])
+            return fetch_bulk_block_deals_for_symbol(sym).get("deals", [])
+        except Exception as exc:
+            log_event(LOGGER, "bulk_block_deals_fetch_failed", level="warning", symbol=sym, error=str(exc))
+            return []
 
     # Two independent NSE endpoints — fetch concurrently rather than one
     # after the other, same spirit as _consolidated_payload's parallel lookups.
