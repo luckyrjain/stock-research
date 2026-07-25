@@ -81,6 +81,32 @@ class ExtractGrowthMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["Profit growth 3Y"], "30%")
         self.assertEqual(metrics["Profit growth 5Y"], "25%")
 
+    def test_flat_sibling_rows_sharing_one_table_are_not_mislabeled(self) -> None:
+        # Regression test: when Sales and Profit growth rows are flat
+        # siblings inside one shared <table> (no per-block wrapper at all,
+        # not even a shared outer div), that table is simultaneously the
+        # ONLY candidate satisfying "contains the label + a period marker"
+        # for BOTH block labels — the shortest-container heuristic alone
+        # can't tell them apart, and a regex search over that shared text
+        # would return whichever period appears first for both labels,
+        # silently mislabeling Profit growth with Sales growth's values.
+        html = """
+        <table class="ranges-table">
+          <tr><td>Compounded Sales Growth</td><td>10 Years:</td><td>15%</td></tr>
+          <tr><td></td><td>5 Years:</td><td>18%</td></tr>
+          <tr><td></td><td>3 Years:</td><td>22%</td></tr>
+          <tr><td>Compounded Profit Growth</td><td>10 Years:</td><td>20%</td></tr>
+          <tr><td></td><td>5 Years:</td><td>25%</td></tr>
+          <tr><td></td><td>3 Years:</td><td>30%</td></tr>
+        </table>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        metrics = _extract_growth_metrics(soup)
+        self.assertEqual(metrics["Sales growth 3Y"], "22%")
+        self.assertEqual(metrics["Sales growth 5Y"], "18%")
+        self.assertEqual(metrics["Profit growth 3Y"], "30%")
+        self.assertEqual(metrics["Profit growth 5Y"], "25%")
+
 
 class ExtractLatestMetricFromTablesTest(unittest.TestCase):
     def test_returns_last_nonempty_value_in_row(self) -> None:

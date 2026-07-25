@@ -67,6 +67,7 @@ def _extract_growth_metrics(soup: BeautifulSoup) -> dict[str, str]:
 
     for block_label, output_prefix in block_map.items():
         block_text = ""
+        other_labels_lower = [lbl.lower() for lbl in block_map if lbl != block_label]
         # Pick the SHORTEST matching container, not the first one in
         # document order. find_all() visits ancestors before their
         # children, so a wrapping div/section around both the Sales-growth
@@ -88,6 +89,18 @@ def _extract_growth_metrics(soup: BeautifulSoup) -> dict[str, str]:
             # non-empty but un-extractable, silently skipping this block
             # instead of falling through to the full-text-scan fallback.
             if "3 years" not in text_lower and "5 years" not in text_lower:
+                continue
+            # A candidate that ALSO contains a sibling block's own label is
+            # a shared container spanning multiple growth blocks (e.g. every
+            # growth metric laid out as flat sibling rows inside one table,
+            # with no per-block wrapper) — the "shortest" one here can still
+            # be the only candidate for both labels, and a later regex
+            # search over it would grab whichever period appears first,
+            # mislabeling one block with another's values. Skip it and let
+            # this block fall through to the label-anchored full-text regex
+            # fallback below, whose pattern only starts matching after this
+            # exact block's own label and so isn't fooled by a shared table.
+            if any(other in text_lower for other in other_labels_lower):
                 continue
             if not block_text or len(text) < len(block_text):
                 block_text = text
