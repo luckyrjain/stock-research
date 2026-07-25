@@ -19,6 +19,7 @@ import cache
 from crew import ALL_DATA_TASKS, parse_json_object, run_analysis_with_fallback
 from error_tracking import init_error_tracking
 from observability import get_logger, log_event
+from schema_drift import log_drift_if_any
 from schemas import normalize as schema_normalize
 from schemas import validate as schema_validate
 from signals.engine import run_signal_engine
@@ -92,6 +93,7 @@ def _fetch_task(task_name: str, symbol: str, run_id: str, max_attempts: int = 3)
                     latency_ms=elapsed_ms,
                     payload_type="dict",
                 )
+                log_drift_if_any(task_name, raw, run_id=run_id, symbol=symbol)
                 return raw
 
             parsed = parse_json_object(str(raw))
@@ -108,6 +110,7 @@ def _fetch_task(task_name: str, symbol: str, run_id: str, max_attempts: int = 3)
                     latency_ms=elapsed_ms,
                     payload_type="json_text",
                 )
+                log_drift_if_any(task_name, parsed, run_id=run_id, symbol=symbol)
                 return parsed
 
             last_error = "tool returned an unparseable payload"
