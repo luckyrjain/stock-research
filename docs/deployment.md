@@ -50,6 +50,33 @@ npm run start   # or: node .next/standalone/server.js if you built with output: 
 Put both behind a reverse proxy (nginx, Caddy, a cloud load balancer) for TLS termination — neither
 `uvicorn` nor `next start` handles HTTPS itself in this setup.
 
+**Real client IPs for per-IP rate limiting**: the Next.js frontend talks to the FastAPI backend
+server-to-server (see "Proxy routes" in CLAUDE.md) — without anything further, every one of
+`api.py`'s per-IP rate limiters sees only the Next.js server's own IP for every request, collapsing
+them into one shared bucket for the whole site. Once a reverse proxy sits in front of the frontend,
+two things need to line up:
+1. The reverse proxy must **replace** `X-Forwarded-For` with the real client IP on requests it
+   forwards to Next.js — use `proxy_set_header X-Forwarded-For $remote_addr;` on nginx. Caddy does
+   this by default. **Do not** use nginx's more commonly copy-pasted
+   `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` — that *appends* to whatever
+   `X-Forwarded-For` value the request already carried instead of replacing it, and since
+   `X-Forwarded-For` isn't a browser-forbidden header, any caller can set it directly on a request
+   to your reverse proxy. Under append mode, a spoofed value from the caller ends up as the
+   *leftmost* entry ahead of the proxy's own real observation — exactly what `clientIpHeaders()`
+   (`frontend/lib/proxy-headers.ts`) and `api.py::_client_ip()` are watching for: both refuse to
+   trust the header at all once it contains more than one entry, falling back to the same
+   pre-this-feature behavior rather than guessing which entry is real. Getting the proxy directive
+   right is still what makes the real client IP actually reach the rate limiter, though — the
+   multi-value refusal is a safety net, not a substitute for the correct config.
+2. Set `TRUSTED_PROXY_SECRET` to the same random value on **both** the backend and frontend
+   processes (see `.env.example`) — the frontend's proxy routes forward the client IP they read off
+   that header alongside this shared secret, and `api.py` only trusts the forwarded IP when the
+   secret matches, so a caller that reaches the backend directly (bypassing the reverse proxy and
+   Next.js) can't spoof `X-Forwarded-For` to dodge its own rate limit or frame another IP.
+
+Leaving `TRUSTED_PROXY_SECRET` unset is safe — every per-IP limiter just keys off whatever IP the
+backend actually sees, exactly as before this existed.
+
 ## Scaling: read this before adding workers or replicas
 
 `rate_limiter.py` backs three pieces of guard state — the sliding-window rate limiter, the LLM

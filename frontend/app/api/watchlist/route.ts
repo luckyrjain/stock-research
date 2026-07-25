@@ -1,4 +1,5 @@
 import { getSessionTokenFromRequest } from '@/lib/auth-cookie';
+import { clientIpHeaders } from '@/lib/proxy-headers';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
@@ -27,7 +28,7 @@ export async function GET(req: Request) {
   let upstream: Response;
   try {
     upstream = await fetch(`${API}/api/watchlist${qs ? `?${qs}` : ''}`, {
-      headers: authHeaders(req),
+      headers: { ...clientIpHeaders(req), ...authHeaders(req) },
       cache: 'no-store',
     });
   } catch {
@@ -45,7 +46,7 @@ export async function POST(req: Request) {
   try {
     upstream = await fetch(`${API}/api/watchlist`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders(req) },
+      headers: { 'Content-Type': 'application/json', ...clientIpHeaders(req), ...authHeaders(req) },
       body,
       cache: 'no-store',
     });

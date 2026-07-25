@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+import { clientIpHeaders } from '@/lib/proxy-headers';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
@@ -8,7 +9,7 @@ export async function GET(req: NextRequest) {
 
   let upstream: Response;
   try {
-    upstream = await fetch(`${API}/api/market-picks/history${qs}`, { cache: 'no-store' });
+    upstream = await fetch(`${API}/api/market-picks/history${qs}`, { headers: clientIpHeaders(req), cache: 'no-store' });
   } catch {
     return Response.json(
       { error: 'Backend unavailable. Make sure the analysis service is running.' },
