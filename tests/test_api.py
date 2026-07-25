@@ -1539,23 +1539,92 @@ class VerdictHistoryEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 429)
 
     def test_returns_empty_history_when_nothing_stored(self) -> None:
-        with patch("verdict_history.load_history", return_value=[]):
+        with patch("verdict_history.load_history", return_value=[]), \
+             patch.object(api, "_fetch_live_price_sync", return_value={}):
             resp = client.get("/api/verdict-history/TCS")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {"symbol": "TCS", "history": []})
+        self.assertEqual(
+            resp.json(),
+            {"symbol": "TCS", "history": [], "win_rate": None, "scored_count": 0},
+        )
 
-    def test_returns_history_with_mocked_load(self) -> None:
+    def test_returns_history_scored_against_live_price(self) -> None:
         fake_history = [
             {"date": "2026-07-01", "recommendation": "HOLD", "confidence": "MEDIUM", "current_price": 100.0, "signal_score": 2.0},
+            {"date": "2026-07-10", "recommendation": "SELL", "confidence": "HIGH", "current_price": 120.0, "signal_score": -4.0},
             {"date": "2026-07-24", "recommendation": "BUY", "confidence": "HIGH", "current_price": 110.5, "signal_score": 6.0},
         ]
-        with patch("verdict_history.load_history", return_value=fake_history):
+        # Live price is up from every stored snapshot: BUY should score a win,
+        # SELL a loss, HOLD stays unscored (no directional claim to grade).
+        with patch("verdict_history.load_history", return_value=fake_history), \
+             patch.object(api, "_fetch_live_price_sync", return_value={"price": 121.0, "change_pct": 0.5}):
             resp = client.get("/api/verdict-history/tcs")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body["symbol"], "TCS")
-        self.assertEqual(len(body["history"]), 2)
-        self.assertEqual(body["history"][1]["recommendation"], "BUY")
+        self.assertEqual(len(body["history"]), 3)
+
+        hold, sell, buy = body["history"]
+        self.assertIsNone(hold["outcome"])
+        self.assertIsNotNone(hold["return_since_pct"])  # observed fact, scored or not
+
+        self.assertEqual(sell["outcome"], "loss")   # price rose past a SELL call
+        self.assertEqual(buy["outcome"], "win")      # price rose past a BUY call
+
+        self.assertEqual(body["scored_count"], 2)
+        self.assertEqual(body["win_rate"], 50.0)
+
+    def test_returns_history_unscored_when_live_price_unavailable(self) -> None:
+        fake_history = [
+            {"date": "2026-07-24", "recommendation": "BUY", "confidence": "HIGH", "current_price": 110.5, "signal_score": 6.0},
+        ]
+        with patch("verdict_history.load_history", return_value=fake_history), \
+             patch.object(api, "_fetch_live_price_sync", return_value={}):
+            resp = client.get("/api/verdict-history/TCS")
+        body = resp.json()
+        self.assertIsNone(body["history"][0]["return_since_pct"])
+        self.assertIsNone(body["history"][0]["outcome"])
+        self.assertIsNone(body["win_rate"])
+        self.assertEqual(body["scored_count"], 0)
+
+
+class ScoreVerdictHistoryTest(unittest.TestCase):
+    """Pure-function coverage for the win/loss scoring logic, independent of
+    the HTTP layer."""
+
+    def test_buy_win_and_loss(self) -> None:
+        history = [{"recommendation": "BUY", "current_price": 100.0}]
+        up = api._score_verdict_history(history, 110.0)
+        down = api._score_verdict_history(history, 90.0)
+        self.assertEqual(up[0]["outcome"], "win")
+        self.assertEqual(down[0]["outcome"], "loss")
+
+    def test_sell_win_and_loss(self) -> None:
+        history = [{"recommendation": "SELL", "current_price": 100.0}]
+        down = api._score_verdict_history(history, 90.0)
+        up = api._score_verdict_history(history, 110.0)
+        self.assertEqual(down[0]["outcome"], "win")
+        self.assertEqual(up[0]["outcome"], "loss")
+
+    def test_hold_is_never_scored(self) -> None:
+        history = [{"recommendation": "HOLD", "current_price": 100.0}]
+        scored = api._score_verdict_history(history, 150.0)
+        self.assertIsNone(scored[0]["outcome"])
+        self.assertIsNotNone(scored[0]["return_since_pct"])
+
+    def test_missing_prices_yield_null_fields(self) -> None:
+        no_entry_price = api._score_verdict_history([{"recommendation": "BUY", "current_price": None}], 100.0)
+        no_live_price = api._score_verdict_history([{"recommendation": "BUY", "current_price": 100.0}], None)
+        self.assertIsNone(no_entry_price[0]["return_since_pct"])
+        self.assertIsNone(no_entry_price[0]["outcome"])
+        self.assertIsNone(no_live_price[0]["return_since_pct"])
+        self.assertIsNone(no_live_price[0]["outcome"])
+
+    def test_exactly_flat_is_unscored(self) -> None:
+        history = [{"recommendation": "BUY", "current_price": 100.0}]
+        scored = api._score_verdict_history(history, 100.0)
+        self.assertEqual(scored[0]["return_since_pct"], 0)
+        self.assertIsNone(scored[0]["outcome"])
 
 
 class ConsolidatedEndpointTest(unittest.TestCase):

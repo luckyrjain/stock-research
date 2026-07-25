@@ -10,13 +10,13 @@ export async function GET(
   try {
     upstream = await fetch(`${API}/api/verdict-history/${encodeURIComponent(symbol)}`, { cache: 'no-store' });
   } catch {
-    return Response.json({ symbol, history: [] }, { status: 503 });
+    return Response.json({ symbol, history: [], win_rate: null, scored_count: 0 }, { status: 503 });
   }
 
   try {
     const data = await upstream.json();
     return Response.json(data, { status: upstream.status });
   } catch {
-    return Response.json({ symbol, history: [] }, { status: 502 });
+    return Response.json({ symbol, history: [], win_rate: null, scored_count: 0 }, { status: 502 });
   }
 }
