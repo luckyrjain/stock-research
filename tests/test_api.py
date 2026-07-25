@@ -1884,6 +1884,16 @@ class ApiKeyManagementEndpointTest(unittest.TestCase):
         self.assertEqual(resp.json(), created)
         create_key.assert_called_once_with(7, "my script")
 
+    def test_create_db_error_returns_503(self) -> None:
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
+             patch("auth.create_api_key", side_effect=RuntimeError("connection refused")):
+            resp = client.post(
+                "/api/api-keys",
+                json={"label": "x"},
+                headers={"Authorization": "Bearer sometoken"},
+            )
+        self.assertEqual(resp.status_code, 503)
+
     def test_create_strips_and_caps_label(self) -> None:
         with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
              patch("auth.create_api_key", return_value={
@@ -1912,6 +1922,12 @@ class ApiKeyManagementEndpointTest(unittest.TestCase):
         self.assertEqual(resp.json(), {"keys": keys})
         list_keys.assert_called_once_with(7)
 
+    def test_list_db_error_returns_503(self) -> None:
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
+             patch("auth.list_api_keys", side_effect=RuntimeError("connection refused")):
+            resp = client.get("/api/api-keys", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 503)
+
     def test_revoke_requires_session(self) -> None:
         resp = client.delete("/api/api-keys/1")
         self.assertEqual(resp.status_code, 401)
@@ -1939,6 +1955,12 @@ class ApiKeyManagementEndpointTest(unittest.TestCase):
              patch("auth.revoke_api_key", return_value=False) as revoke_key:
             client.delete("/api/api-keys/5", headers={"Authorization": "Bearer sometoken"})
         revoke_key.assert_called_once_with(7, 5)
+
+    def test_revoke_db_error_returns_503(self) -> None:
+        with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \
+             patch("auth.revoke_api_key", side_effect=RuntimeError("connection refused")):
+            resp = client.delete("/api/api-keys/5", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 503)
 
 
 class ConsolidatedV1EndpointTest(unittest.TestCase):
@@ -1986,9 +2008,11 @@ class ConsolidatedV1EndpointTest(unittest.TestCase):
 
     def test_rate_limit_is_keyed_by_user_not_ip(self) -> None:
         api._RATE_LIMIT_CALLS["api_v1:7"] = [api.time.monotonic()] * 100
-        with patch("auth.get_user_for_api_key", return_value={"user_id": 7}):
+        with patch("auth.get_user_for_api_key", return_value={"user_id": 7}), \
+             patch.object(api, "_consolidated_payload") as payload_fn:
             resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "apk_x"})
         self.assertEqual(resp.status_code, 429)
+        payload_fn.assert_not_called()
 
 
 if __name__ == "__main__":

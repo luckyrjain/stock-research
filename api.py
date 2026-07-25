@@ -1943,7 +1943,11 @@ async def list_api_keys(request: Request):
     import auth as _auth
 
     loop = asyncio.get_running_loop()
-    keys = await loop.run_in_executor(None, _auth.list_api_keys, user["id"])
+    try:
+        keys = await loop.run_in_executor(None, _auth.list_api_keys, user["id"])
+    except Exception as exc:
+        log_event(LOGGER, "api_key_list_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Could not list API keys. See server logs.")
     return {"keys": keys}
 
 
@@ -1954,7 +1958,11 @@ async def revoke_api_key(request: Request, key_id: int):
     import auth as _auth
 
     loop = asyncio.get_running_loop()
-    revoked = await loop.run_in_executor(None, _auth.revoke_api_key, user["id"], key_id)
+    try:
+        revoked = await loop.run_in_executor(None, _auth.revoke_api_key, user["id"], key_id)
+    except Exception as exc:
+        log_event(LOGGER, "api_key_revoke_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Could not revoke API key. See server logs.")
     if not revoked:
         raise HTTPException(status_code=404, detail="No such API key.")
     return {"ok": True}

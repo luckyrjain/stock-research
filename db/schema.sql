@@ -168,5 +168,3 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
-
-CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
