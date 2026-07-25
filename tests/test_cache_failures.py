@@ -102,6 +102,30 @@ class CacheFailureHandlingTest(unittest.TestCase):
             self.assertIsNone(cache.load("TCS", "news"))
             self.assertFalse(cache.is_fresh("TCS", "news"))
 
+    def test_save_writes_atomically_leaving_no_temp_files_behind(self) -> None:
+        # save() writes via a tempfile + os.replace rather than a direct
+        # write_text — this matters for the market-wide "_MACRO" pseudo-symbol
+        # (see signals/macro.py), where several ThreadPoolExecutor workers can
+        # race to fill the same cache entry; a direct write_text's interleaved
+        # writes could otherwise leave invalid JSON on disk for the next reader.
+        with patch.object(cache, "CACHE_DIR", self.cache_dir):
+            cache.save("TCS", "news", {"symbol": "TCS", "articles": []})
+
+            symbol_dir = self.cache_dir / "TCS"
+            leftover_temp_files = [p for p in symbol_dir.iterdir() if p.name.endswith(".tmp")]
+            self.assertEqual(leftover_temp_files, [])
+            self.assertTrue(cache.cache_path("TCS", "news").exists())
+
+    def test_save_cleans_up_temp_file_on_write_failure(self) -> None:
+        with patch.object(cache, "CACHE_DIR", self.cache_dir), \
+             patch("os.replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                cache.save("TCS", "news", {"symbol": "TCS", "articles": []})
+
+            symbol_dir = self.cache_dir / "TCS"
+            leftover_temp_files = list(symbol_dir.iterdir()) if symbol_dir.exists() else []
+            self.assertEqual(leftover_temp_files, [])
+
     def test_normalize_preserves_error_payloads_for_cache_guard(self) -> None:
         payload = {"error": "temporary upstream failure", "symbol": "TCS"}
 

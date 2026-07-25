@@ -346,11 +346,12 @@ weight (0.15), since it says nothing about the specific company.
    rate changes at most every MPC meeting and CPI is a monthly release, so daily refresh is purely
    a ceiling, not a real cadence match).
 3. `signals/macro.py::macro_signal()` combines both inputs into one `Signal`: net FII+DII flow
-   (₹ Cr) contributes up to ±0.6 (weighted 0.6 within the signal) at ±3000 Cr thresholds; CPI
-   above 6% (above RBI's inflation-target upper bound) or below 4% contributes ∓0.4/+0.2
-   (weighted 0.4 within the signal) — repo rate is carried in `meta` for context but doesn't
-   independently move the score (CPI already captures the same tightening/easing direction more
-   directly). `UNKNOWN` (score 0) only when every one of the four underlying fields is `None`.
+   (₹ Cr) hits a raw component capped at ±0.6 at ±3000 Cr thresholds, sub-weighted ×0.6 → up to
+   ±0.36 contribution to the signal's own score; CPI above 6% (above RBI's inflation-target upper
+   bound) or below 4% hits a raw component of ∓0.4/+0.2, sub-weighted ×0.4 → up to ∓0.16/+0.08 —
+   repo rate is carried in `meta` for context but doesn't independently move the score (CPI
+   already captures the same tightening/easing direction more directly). `UNKNOWN` (score 0) only
+   when every one of the four underlying fields is `None`.
 4. `run_signal_engine()` calls `macro_signal()` unconditionally alongside `technical_signal()` —
    both are the signals in this package that do their own I/O, so both are subject to the same
    "callers on an asyncio event loop must invoke this via an executor" rule `api.py`'s
@@ -946,7 +947,7 @@ with `next`, normally used for Open Graph images):
 
 - **No shared in-memory state** between requests. Each request runs its own pipeline instance.
 - **Inter-phase communication** within the market picks pipeline uses direct function return values (not queues). The `asyncio.Queue` is only used to bridge the blocking thread back to the async SSE loop.
-- **Cache** (`output/`) is the persistent shared state for stock analysis and market picks; concurrent writes to different symbols are safe (each symbol has its own subdirectory). SME signals persist to PostgreSQL instead (idempotent upserts keyed on symbol + trade_date).
+- **Cache** (`output/`) is the persistent shared state for stock analysis and market picks; concurrent writes to different symbols are safe (each symbol has its own subdirectory) — the one exception is the `"_MACRO"` pseudo-symbol (see "Macro overlay signal" above), where several `market_picks_pipeline.py` worker threads researching different real stocks can all miss the same `fii_dii_flow`/`macro_context` cache entry at once and race to fill it; `cache.save()` writes atomically (tempfile + `os.replace`) so a race there produces at most a few redundant NSE/RBI fetches, never a corrupt cache file. SME signals persist to PostgreSQL instead (idempotent upserts keyed on symbol + trade_date).
 
 ### SSE bridge pattern (critical)
 
