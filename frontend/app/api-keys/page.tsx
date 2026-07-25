@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useAuth } from '@/lib/auth';
 import HeaderSearch from '@/components/header-search';
 import AuthWidget from '@/components/auth-widget';
-import type { ApiKey, ApiUsage, CreatedApiKey } from '@/types';
+import type { ApiKey, ApiKeysResponse, ApiUsage, CreatedApiKey } from '@/types';
 
 function fmtDate(iso: string | null): string {
   if (!iso) return '—';
@@ -29,7 +29,7 @@ export default function ApiKeysPage() {
     try {
       const res = await fetch('/api/api-keys', { cache: 'no-store' });
       if (!res.ok) { setKeys([]); setUsage(null); return; }
-      const data = await res.json() as { keys: ApiKey[]; tier?: 'free' | 'pro'; usage?: ApiUsage };
+      const data = await res.json() as Partial<ApiKeysResponse>;
       setKeys(data.keys ?? []);
       setTier(data.tier ?? 'free');
       setUsage(data.usage ?? null);

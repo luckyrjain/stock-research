@@ -107,6 +107,13 @@ class TableSchemaTest(unittest.TestCase):
         self.assertTrue(users.columns["id"].primary_key)
         self.assertFalse(users.columns["email"].nullable)
         self.assertTrue(users.columns["email"].unique)
+        self.assertFalse(users.columns["tier"].nullable)
+
+        check_constraints = [
+            c for c in users.constraints if c.__class__.__name__ == "CheckConstraint"
+        ]
+        self.assertEqual(len(check_constraints), 1)
+        self.assertEqual(str(check_constraints[0].sqltext), "tier IN ('free', 'pro')")
 
     def test_magic_links_columns_and_constraints(self) -> None:
         cols = set(magic_links.columns.keys())

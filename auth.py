@@ -78,10 +78,15 @@ def create_magic_link(email: str) -> str:
 
 def verify_magic_link(token: str) -> dict | None:
     """Atomically consumes a magic-link token: marks it used, then
-    get-or-creates the `users` row for its email. Returns {"id":, "email":}
-    on success, or None if the token is missing, expired, or already used
-    (an UPDATE ... WHERE used_at IS NULL ... RETURNING is inherently
-    race-safe — two concurrent clicks of the same link can't both win)."""
+    get-or-creates the `users` row for its email. Returns
+    {"id":, "email":, "tier":} on success, or None if the token is missing,
+    expired, or already used (an UPDATE ... WHERE used_at IS NULL ...
+    RETURNING is inherently race-safe — two concurrent clicks of the same
+    link can't both win). Includes `tier` for the same reason
+    get_user_for_session()/get_user_for_api_key() do — this dict flows out
+    through GET /api/auth/verify as the same {"user": {...}} shape
+    GET /api/auth/me returns, and frontend/lib/auth.ts's AuthUser type
+    declares tier as required."""
     from sqlalchemy import text
 
     engine = _get_engine()
@@ -101,9 +106,9 @@ def verify_magic_link(token: str) -> dict | None:
         user = conn.execute(text("""
             INSERT INTO users (email) VALUES (:email)
             ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
-            RETURNING id, email
+            RETURNING id, email, tier
         """), {"email": email}).mappings().first()
-    return {"id": user["id"], "email": user["email"]}
+    return {"id": user["id"], "email": user["email"], "tier": user["tier"]}
 
 
 def create_session(user_id: int) -> str:

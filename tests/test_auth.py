@@ -105,7 +105,7 @@ class VerifyMagicLinkTest(unittest.TestCase):
         update_result = MagicMock()
         update_result.mappings.return_value.first.return_value = {"email": "user@example.com"}
         user_result = MagicMock()
-        user_result.mappings.return_value.first.return_value = {"id": 42, "email": "user@example.com"}
+        user_result.mappings.return_value.first.return_value = {"id": 42, "email": "user@example.com", "tier": "free"}
         conn = _FakeConn([update_result, user_result])
         fake_engine = MagicMock()
         fake_engine.begin.return_value = conn
@@ -113,7 +113,7 @@ class VerifyMagicLinkTest(unittest.TestCase):
         with patch("auth._get_engine", return_value=fake_engine):
             result = auth.verify_magic_link("good-token")
 
-        self.assertEqual(result, {"id": 42, "email": "user@example.com"})
+        self.assertEqual(result, {"id": 42, "email": "user@example.com", "tier": "free"})
         # First call marks the token used; second gets-or-creates the user.
         self.assertEqual(len(conn.calls), 2)
 

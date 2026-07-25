@@ -128,6 +128,7 @@ users = Table(
     # (created before this column existed) a well-defined 'free' rather than
     # NULL, which api._TIER_LIMITS would otherwise have to guess a fallback for.
     Column("tier",        String(10), nullable=False, server_default=text("'free'")),
+    CheckConstraint("tier IN ('free', 'pro')", name="ck_users_tier"),
 )
 
 # Single-use, short-lived tokens emailed to a user to sign in. Only a SHA-256

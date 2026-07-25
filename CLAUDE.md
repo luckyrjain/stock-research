@@ -1008,7 +1008,7 @@ Picks pipeline docs), so there's nothing for an account to link there.
 ### Programmatic API access flow
 
 A signed-in user can mint long-lived API keys for scripts/integrations, separate from the
-session-cookie identity the frontend itself uses. Two independent pieces:
+session-cookie identity the frontend itself uses. Three independent pieces:
 
 1. **Key management** (session-authenticated, same identity as everything else under "Account
    & magic-link auth flow" above) — `POST /api/api-keys` (`{label?}`, 201, returns the row
