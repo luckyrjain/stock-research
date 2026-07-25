@@ -1,0 +1,50 @@
+name: Watchlist Recommendation Alerts
+
+on:
+  schedule:
+    # 19:00 IST (UTC+5:30) on weekdays = 13:30 UTC — after the SME cron
+    # (13:00 UTC) so that pipeline's own Postgres writes have settled, and
+    # after NSE's 15:30 IST close. Keep in sync with the schedule documented
+    # in CLAUDE.md.
+    - cron: '30 13 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run-alerts:
+    name: Run watchlist alert pipeline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check required secrets are configured
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL secret is not set. Add a network-reachable Postgres connection string in repo Settings > Secrets and variables > Actions > New repository secret (name: DATABASE_URL) before this workflow can run."
+            exit 1
+          fi
+
+      - name: Run watchlist alerts pipeline
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
+          ANALYST_MODEL: ${{ secrets.ANALYST_MODEL }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+        run: python watchlist_alerts.py

@@ -18,7 +18,7 @@ A second mode — **Market Picks** — runs a multi-agent pipeline that scrapes 
 
 A third mode — **SME Signals** — is a PostgreSQL-backed batch pipeline (`sme_ema_pipeline.py`) that screens all NSE Emerge + BSE SME stocks for EMA20/EMA50 **golden cross** and **death cross** events, served at `/sme-signals` via `GET /api/sme-signals`.
 
-A **Watchlist** ties the three modes together: a star button in each dashboard adds/removes a stock from a PostgreSQL-backed `watchlist_items` table, and `/watchlist` lists everything starred with live prices. Each row is owned by either an anonymous per-browser `client_id` (a UUID in `localStorage`) or, once signed in, an account (`user_id`) — see "Watchlist flow" below for how a request's identity is resolved, and "Account & magic-link auth flow" for the account system itself. Signing in never migrates an existing `client_id`'s rows onto the account.
+A **Watchlist** ties the three modes together: a star button in each dashboard adds/removes a stock from a PostgreSQL-backed `watchlist_items` table, and `/watchlist` lists everything starred with live prices. Each row is owned by either an anonymous per-browser `client_id` (a UUID in `localStorage`) or, once signed in, an account (`user_id`) — see "Watchlist flow" below for how a request's identity is resolved, and "Account & magic-link auth flow" for the account system itself. Signing in never migrates an existing `client_id`'s rows onto the account. A daily batch job (`watchlist_alerts.py`, see "Watchlist alert emails" below) re-analyses every account-owned watchlist symbol and emails a digest to any user whose stock's recommendation changed since the prior stored verdict — anonymous `client_id` rows have no email to notify and are excluded.
 
 A minimal **account system** (magic-link email, no passwords) exists via `POST /api/auth/request-link` + `GET /api/auth/verify` — a `Sign in` link appears in every page's nav bar (`AuthWidget`). The watchlist (above) is account-aware; "I bought this" positions tracking (`frontend/lib/positions.ts`) remains purely anonymous/`localStorage`-only for now, with no backend of its own to link to an account.
 
@@ -39,7 +39,8 @@ stock-research/
 ├── sme_ema_pipeline.py     SME golden/death cross batch pipeline (PostgreSQL)
 ├── verdict_history.py      Daily verdict/price snapshots (PostgreSQL) — powers the hero's timeline strip
 ├── auth.py                 Magic-link auth: token/session issuance + validation (PostgreSQL)
-├── email_sender.py         Sends the magic-link sign-in email over generic SMTP
+├── email_sender.py         Sends the magic-link sign-in + watchlist-alert emails over generic SMTP
+├── watchlist_alerts.py     Daily batch job: emails signed-in users on a watched stock's recommendation change
 ├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
 ├── observability.py        Structured JSON logging via log_event()
 ├── requirements.txt
@@ -564,6 +565,54 @@ identity to one row per symbol).
    (sanitized — no raw exception text in the response), 422 on invalid `client_id`/`symbol`/
    missing identity, rate-limited via `_rate_limit()`, capped at 200 items per identity
    (`_MAX_WATCHLIST_ITEMS_PER_CLIENT`, same cap for both client_id- and user_id-owned rows)
+
+### Watchlist alert emails
+
+A standalone daily batch job, `watchlist_alerts.py` (repo root) — same standalone-script shape
+as `sme_ema_pipeline.py` (PostgreSQL, a `run()`/`main()` split, `--force` CLI flag, a
+`_MAX_ACCEPTABLE_ERROR_RATE`-style health gate so a bad run fails its GitHub Actions job loudly
+instead of "succeeding" silently) — but wired to the existing single-stock analysis pipeline
+(`main._fetch_task` + `signals.engine` + `crew.run_analysis_with_fallback`) instead of the SME
+OHLCV fetch. Only **account-owned** (`user_id`) watchlist rows are ever considered — an
+anonymous `client_id` row has no email to notify and is excluded at the query level.
+
+1. `_get_watched_symbols()` runs one query joining `watchlist_items` to `users` (`WHERE
+   user_id IS NOT NULL`) and groups the rows by symbol, since several users can watch the same
+   stock and each should only trigger one re-analysis of it, not one per watcher.
+2. `_analyze_symbol(symbol, run_id, force=False)` re-runs the same fetch → signal-engine →
+   analyst flow `main.py`'s CLI path runs for one symbol — respecting the existing per-task
+   cache TTLs (so a symbol some other visitor already refreshed today via the website isn't
+   double-fetched or double-billed) — and calls `verdict_history.save_snapshot()` on every path,
+   including the "everything was already fresh" cache-hit path, mirroring `main.py`'s own
+   early-return branch so a day is never silently missing a snapshot just because nobody
+   re-triggered the LLM that day. Any exception is caught and logged per-symbol (returns `None`)
+   so one bad fetch can't sink the whole run, the same isolation convention
+   `_consolidated_payload()` and `get_insider_activity()` use for their independent sub-fetches.
+3. `_detect_change(symbol)` compares `verdict_history.load_history(symbol, limit=2)`'s two most
+   recent rows — today's just-saved snapshot against the one immediately before it — and returns
+   `{"symbol", "old_recommendation", "new_recommendation", "confidence"}` only when the
+   recommendation actually differs and both rows exist (a symbol analysed for the first time
+   today, like `VerdictTimeline`'s own 2-day minimum, has nothing to compare against yet).
+4. This job runs the full paid LLM analyst call per distinct watched symbol, so an unbounded
+   watchlist fan-in would mean an unbounded daily bill — the same cost-control instinct as
+   `market_picks_pipeline.py`'s `_MAX_STOCKS`. `_MAX_ALERT_SYMBOLS` (50) caps how many distinct
+   symbols one run analyses; symbols beyond the cap are skipped for that day (logged, not
+   silently dropped — no-silent-caps convention) rather than letting the bound grow unbounded.
+5. `email_sender.py` gained a second message builder/sender pair —
+   `send_watchlist_alert_email(to_email, alerts)` — alongside the existing magic-link one; both
+   now share one `_send_via_smtp()` helper (extracted, not duplicated) for the connect/STARTTLS/
+   login/send sequence. One digest email per user per run lists every changed symbol, not one
+   email per symbol, so a user watching several stocks that all moved the same day gets a single
+   message. Same best-effort convention as `send_magic_link_email`: returns `True`/`False`,
+   never raises, and a missing `SMTP_HOST` just means the email never arrives.
+6. **Daily auto-run**: `.github/workflows/watchlist-alerts-cron.yml` runs at 13:30 UTC (19:00
+   IST) on weekdays — after `sme-cron.yml` (13:00 UTC) so that pipeline's own writes have
+   settled, and well after NSE's 15:30 IST close. Requires the same `DATABASE_URL` secret as
+   `sme-cron.yml`, plus whichever LLM provider key and `SMTP_*` secrets the deployment already
+   uses for the live site (the batch job is unattended, so it can't fall back to "no key
+   configured" the way the interactive CLI does — `run()` returns `False` immediately if neither
+   is set, failing the job loudly). `python watchlist_alerts.py --force` is available for a
+   manual re-run that bypasses cache freshness entirely.
 
 ### Account & magic-link auth flow
 
