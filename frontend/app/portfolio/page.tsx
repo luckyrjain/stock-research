@@ -111,6 +111,7 @@ export default function PortfolioPage() {
   const priced = rows.filter(r => r.pnl != null);
   const winners = priced.filter(r => (r.pnl ?? 0) > 0);
   const losers = priced.filter(r => (r.pnl ?? 0) < 0);
+  const flat = priced.length - winners.length - losers.length;
   const winRate = priced.length > 0 ? (winners.length / priced.length) * 100 : null;
   const avgPnl = priced.length > 0
     ? priced.reduce((sum, r) => sum + (r.pnl ?? 0), 0) / priced.length
@@ -134,7 +135,23 @@ export default function PortfolioPage() {
             Market Picks
           </Link>
           <span className="text-border-hi">|</span>
+          <Link href="/sme-signals" className="text-sm text-muted hover:text-tx transition-colors">
+            SME Signals
+          </Link>
+          <span className="text-border-hi">|</span>
+          <Link href="/screener" className="text-sm text-muted hover:text-tx transition-colors">
+            Screener
+          </Link>
+          <span className="text-border-hi">|</span>
+          <Link href="/watchlist" className="text-sm text-muted hover:text-tx transition-colors">
+            Watchlist
+          </Link>
+          <span className="text-border-hi">|</span>
           <span className="text-sm font-semibold text-accent">Portfolio</span>
+          <span className="text-border-hi">|</span>
+          <Link href="/compare" className="text-sm text-muted hover:text-tx transition-colors">
+            Compare
+          </Link>
           <div className="ml-auto flex items-center gap-3">
             <HeaderSearch />
             <AuthWidget />
@@ -179,7 +196,9 @@ export default function PortfolioPage() {
                 <div className={`text-xl font-black ${winRate == null ? 'text-muted' : winRate >= 50 ? 'text-buy' : 'text-sell'}`}>
                   {winRate != null ? `${winRate.toFixed(0)}%` : '—'}
                 </div>
-                <div className="text-[10px] text-muted/70">{winners.length}W / {losers.length}L</div>
+                <div className="text-[10px] text-muted/70">
+                  {winners.length}W / {losers.length}L{flat > 0 ? ` / ${flat} flat` : ''}
+                </div>
               </div>
               <div className="rounded-xl border border-border bg-card px-4 py-3">
                 <div className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1">Avg P&amp;L</div>
@@ -222,7 +241,10 @@ export default function PortfolioPage() {
                       <th className="text-left px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Symbol</th>
                       <th className="text-right px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Entry</th>
                       <th className="text-right px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Current</th>
-                      <th className="text-right px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">
+                      <th
+                        aria-sort={sortDesc ? 'descending' : 'ascending'}
+                        className="text-right px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider"
+                      >
                         <button
                           type="button"
                           onClick={() => setSortDesc(d => !d)}

@@ -607,11 +607,15 @@ real capital-weighted portfolio value (₹ invested, ₹ current) isn't data thi
 computing one would mean silently assuming "1 share per position," which would violate this
 codebase's "never invent" convention the same way guessing a missing scraped field would. The
 aggregate stats shown are therefore explicitly equal-weighted across positions and labeled as such:
-win rate (share of priced positions currently above entry), average P&L% (a plain mean of each
-position's own % move, not a capital-weighted return), best/worst performer, and counts at
-target/stop-loss. `PositionsStrip` gained a "View full portfolio →" link; `/market-picks`'s nav bar
-gained a "Portfolio" link alongside "Watchlist" (no other page links to it, since positions are only
-ever created from the Market Picks flow).
+win rate (share of priced positions currently above entry — the adjacent "W/L" breakdown also
+surfaces a "flat" count for exactly-0%-P&L positions, so the two numbers always reconcile), average
+P&L% (a plain mean of each position's own % move, not a capital-weighted return), best/worst
+performer, and counts at target/stop-loss. `PositionsStrip` gained a "View full portfolio →" link;
+`/market-picks`'s nav bar gained a "Portfolio" link alongside "Watchlist"; `/portfolio`'s own nav bar
+links to every sibling section (same full set every other page's nav bar carries), even though no
+*other* page links back to it — positions are only ever created from the Market Picks flow, so that
+one entry point (plus `PositionsStrip`'s link) is enough for discoverability without adding a seventh
+item to every other page's already-long nav bar.
 
 ### Shared-state rate limiting (`rate_limiter.py`)
 
