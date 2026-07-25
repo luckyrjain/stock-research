@@ -283,6 +283,18 @@ class AnalyseEndpointRateLimitTest(unittest.TestCase):
         resp = client.get("/api/analyse/TCS")
         self.assertEqual(resp.status_code, 429)
 
+    def test_invalid_symbol_returns_422(self) -> None:
+        # Regression test: this endpoint used to skip the _TICKER_RE check
+        # every sibling symbol-taking endpoint enforces — a ".." symbol could
+        # reach cache.save("..", "news"/"price_history", ...) and write
+        # outside the intended output/ tree. %2e%2e (not a literal "..") is
+        # used so the test client's own URL-resolution logic doesn't collapse
+        # the dot-segment before the request is even sent — Starlette's
+        # router percent-decodes it back to ".." for the symbol param, same
+        # as a real request through a non-normalizing intermediary would.
+        resp = client.get("/api/analyse/%2e%2e")
+        self.assertEqual(resp.status_code, 422)
+
 
 class MarketPicksForceRateLimitTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -713,6 +725,18 @@ class PriceHistoryEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 422)
         resp2 = client.get("/api/prices/history/TCS?days=1")
         self.assertEqual(resp2.status_code, 422)
+
+    def test_invalid_symbol_returns_422(self) -> None:
+        # Regression test: this endpoint used to pass the raw path segment
+        # straight to get_price_series() with no _TICKER_RE check, unlike
+        # every sibling symbol-taking endpoint — a ".." symbol could reach
+        # cache.save(sym, ...) and write outside the intended output/ tree.
+        # %2e%2e (not a literal "..") is used so the test client's own
+        # URL-resolution logic doesn't collapse the dot-segment before the
+        # request is even sent — see AnalyseEndpointRateLimitTest's identical
+        # test for the full rationale.
+        resp = client.get("/api/prices/history/%2e%2e")
+        self.assertEqual(resp.status_code, 422)
 
 
 class PeersEndpointTest(unittest.TestCase):

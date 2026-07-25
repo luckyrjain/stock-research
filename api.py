@@ -532,6 +532,8 @@ async def validate_symbol(symbol: str, request: Request, exchange: str = ""):
 async def analyse(symbol: str, request: Request, force: bool = False):
     _rate_limit(request, "analyse", max_calls=20, window_seconds=300)
     sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
     run_id = uuid.uuid4().hex[:12]
 
     async def stream():
@@ -1092,10 +1094,13 @@ async def get_price_history(request: Request, symbol: str, days: int = Query(180
     standalone, on-demand series, not part of the six-task analysis pipeline.
     """
     _rate_limit(request, "prices_history", max_calls=60, window_seconds=60)
+    sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
     from tools.price_history_tools import get_price_series
 
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, get_price_series, symbol, days)
+    return await loop.run_in_executor(None, get_price_series, sym, days)
 
 
 def _parse_peer_numeric(value) -> float | None:
