@@ -156,6 +156,50 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("regulatory risk", message)
 
+    def test_validate_analysis_payload_accepts_regulatory_risk_grounded_in_filings(self) -> None:
+        # Regression test: config/analyst.json's filings instruction tells the
+        # analyst to cite material filings (including regulatory action) as
+        # risk evidence, but crew._source_text() used to only look at
+        # stock_info/research/news — never all_data["filings"] — so a claim
+        # grounded entirely in real filings data would be wrongly flagged as
+        # "unsupported" by this same guardrail. This exercises the same
+        # regulatory-risk wording as the rejection test above, but with a
+        # filings entry that actually supports it.
+        all_data_with_filings = {
+            **self.all_data,
+            "filings": {
+                "filings": [
+                    {
+                        "title": "USFDA issues Form 483 observations",
+                        "desc": "The company received regulatory observations following a USFDA inspection.",
+                        "date": "2026-07-20",
+                        "category": "Regulatory",
+                    }
+                ]
+            },
+        }
+        payload = {
+            "symbol": "SAILIFE",
+            "recommendation": "HOLD",
+            "confidence": "LOW",
+            "summary": "Sentence one. Sentence two. Sentence three. Sentence four.",
+            "valuation": {"verdict": "Fairly Valued", "comment": "P/E 64.8, P/B 9.4, ROCE 14.1, ROE 11.0."},
+            "business_quality": "ROCE is 14.1 and ROE is 11.0.",
+            "bull_factors": ["P/E is 64.8.", "ROCE is 14.1.", "DIIs hold 31.54%."],
+            "bear_factors": ["P/B is 9.4.", "Promoters hold 34.61%."],
+            "key_risks": [
+                "Regulatory risk from a recent USFDA Form 483 observation.",
+                "The stock trades at 64.8 times earnings.",
+                "News flow is limited to one recent article.",
+            ],
+            "news_highlights": "One RSI-based headline was available.",
+            "institutional_trend": "Promoters hold 34.61%, FIIs 21.17%, and DIIs 31.54%; trend data is unavailable from this snapshot.",
+            "news_sentiment": "Neutral",
+        }
+
+        ok, result = crew._validate_analysis_payload(payload, all_data_with_filings)
+        self.assertTrue(ok, result)
+
     def test_parse_json_object_extracts_balanced_payload_from_wrapper_text(self) -> None:
         raw = """
         tool log: starting analysis

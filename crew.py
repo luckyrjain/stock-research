@@ -118,6 +118,7 @@ def _source_text(all_data: dict[str, dict]) -> str:
     stock_info = all_data.get("stock_info", {}) or {}
     research = all_data.get("research", {}) or {}
     news = all_data.get("news", {}) or {}
+    filings = all_data.get("filings", {}) or {}
 
     text_parts = [
         str(stock_info.get("about", "")),
@@ -131,6 +132,19 @@ def _source_text(all_data: dict[str, dict]) -> str:
             continue
         text_parts.append(str(article.get("title", "")))
         text_parts.append(str(article.get("description", "")))
+
+    # Filings are now part of the analyst prompt (see ANALYST_SECTIONS in
+    # config/analyst.json) and its instructions explicitly tell the analyst
+    # to cite material filings (regulatory action, litigation, etc.) as risk
+    # evidence — without this, a legitimate filings-grounded claim would be
+    # flagged as an unsupported benchmark/regulatory/competition claim below,
+    # since this function is what "supported by source data" checks against.
+    for filing in filings.get("filings", []) or []:
+        if not isinstance(filing, dict):
+            continue
+        text_parts.append(str(filing.get("title", "")))
+        text_parts.append(str(filing.get("desc", "")))
+        text_parts.append(str(filing.get("category", "")))
 
     return " ".join(part for part in text_parts if part).lower()
 
