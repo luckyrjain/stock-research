@@ -863,6 +863,51 @@ class InsiderActivityEndpointTest(unittest.TestCase):
         self.assertEqual(body["bulk_block_deals"], fake_bulk["deals"])
 
 
+class StreetConsensusEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-street-consensus-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
+        self._cache_patch.start()
+        self.addCleanup(self._cache_patch.stop)
+        rate_limiter._memory_calls.clear()
+
+    def tearDown(self) -> None:
+        rate_limiter._memory_calls.clear()
+
+    def test_invalid_symbol_returns_422(self) -> None:
+        resp = client.get("/api/street-consensus/bad symbol")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_rate_limited_returns_429(self) -> None:
+        rate_limiter._memory_calls["street_consensus:testclient"] = [api.time.monotonic()] * 30
+        resp = client.get("/api/street-consensus/TCS")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_fetches_and_caches(self) -> None:
+        fake = {"symbol": "TCS", "articles": [{"title": "TCS gets Trendlyne buy upgrade", "url": "https://x/a"}]}
+        with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol", return_value=fake) as fn:
+            resp = client.get("/api/street-consensus/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body, fake)
+        fn.assert_called_once_with("TCS")
+
+        # Second call must be served from cache — the scraper doesn't rerun.
+        with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol") as should_not_run:
+            resp2 = client.get("/api/street-consensus/TCS")
+        self.assertEqual(resp2.status_code, 200)
+        self.assertEqual(resp2.json(), fake)
+        should_not_run.assert_not_called()
+
+    def test_no_articles_returns_empty_list_not_error(self) -> None:
+        with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol",
+                   return_value={"symbol": "TCS", "articles": []}):
+            resp = client.get("/api/street-consensus/TCS")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["articles"], [])
+
+
 class PeerPercentileHelperTest(unittest.TestCase):
     def test_tie_is_split_evenly(self) -> None:
         self_row = {"values": {"P/E": "25"}}

@@ -417,6 +417,40 @@ weekly picks list. This endpoint surfaces the same underlying data directly, per
    nothing when both lists are empty, and otherwise lists each trade/deal with a BUY/SELL
    badge, counterparty name, value, and date — right after the Peer Comparison card.
 
+### Street consensus flow (`GET /api/street-consensus/{symbol}`)
+
+`tools/trendlyne_agent.py::fetch_trendlyne_consensus()` already searches GNews for
+Trendlyne-cited analyst commentary — but only market-wide, as Market Picks scoring input.
+A researcher looking up one specific stock had no "N analysts rate this BUY" anchor
+anywhere in the single-stock report. This surfaces the same search, scoped per symbol —
+the same per-stock-endpoint pattern as insider activity above, but with one important
+difference in what it can honestly return:
+
+1. `fetch_trendlyne_consensus_for_symbol(symbol)` runs one GNews query ANDing the exact
+   ticker, `"Trendlyne"`, and a buy/upgrade/target-price phrase (vs. the market-wide
+   function's three broader queries), returning `{"symbol", "articles": [...]}` — real
+   article title/summary/url/published_at, deduped by URL the same way
+   `fetch_trendlyne_consensus()` already dedupes. The bare ticker is what `get_latest_news`
+   already searches by elsewhere in this codebase, but stacked under three more required
+   terms here recall is lower still — many tickers (`HDFCBANK`, `M&M`) rarely appear
+   literally in prose the way journalists write company names, so this returns real
+   coverage when Trendlyne got cited by name, not a guarantee of finding every article a
+   human researcher would.
+2. **Deliberately never a numeric consensus rating or target price.** This module has never
+   scraped trendlyne.com's own aggregated numbers — only GNews articles that happen to
+   mention Trendlyne — so a "12 analysts rate BUY, target ₹X" figure isn't data this module
+   actually has. Returning one would violate this codebase's "never invent" convention the
+   same way guessing a missing scraped field would; the UI surfaces real article headlines
+   ("TCS gets Trendlyne buy upgrade") instead of a synthesized number.
+3. `GET /api/street-consensus/{symbol}` is cached (24 h TTL) but intentionally outside
+   `ALL_DATA_TASKS` — standalone and on-demand, same pattern as `peers`/`insider_activity`.
+   An empty `articles` list (never an error) is the expected common case for most stocks on
+   most days — both because most companies simply don't have recent Trendlyne-cited
+   coverage, and because of the query's own recall limits noted in point 1.
+4. `results-dashboard.tsx`'s `StreetConsensusCard` (via `useStreetConsensus()`) renders
+   nothing when `articles` is empty, and otherwise lists up to 6 recent article
+   titles/dates as external links — placed after `InsiderActivityCard` in the card grid.
+
 ### Symbol validation flow (`GET /api/validate/{symbol}`)
 
 Handles three input forms:

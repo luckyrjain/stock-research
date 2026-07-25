@@ -1241,6 +1241,41 @@ async def get_insider_activity(request: Request, symbol: str):
     return result
 
 
+@app.get("/api/street-consensus/{symbol}")
+async def get_street_consensus(request: Request, symbol: str):
+    """Recent Trendlyne-cited analyst commentary for one symbol —
+    tools/trendlyne_agent.py already scrapes this (via targeted GNews
+    queries, not trendlyne.com directly) for the Market Picks pipeline;
+    this is the same per-stock, on-demand pattern as
+    GET /api/insider-activity/{symbol}. Deliberately a list of real
+    article titles/links/dates, never a fabricated consensus rating or
+    target price number — this module doesn't have that data, only
+    articles that mention it. Cached (24 h TTL) but intentionally outside
+    ALL_DATA_TASKS. Empty articles list (never an error) is the expected
+    common case for most stocks on most days.
+    """
+    _rate_limit(request, "street_consensus", max_calls=30, window_seconds=60)
+    sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+
+    def _fetch_sync() -> dict:
+        import cache
+
+        cached = cache.load(sym, "street_consensus")
+        if cached is not None:
+            return {k: v for k, v in cached.items() if k != "_meta"}
+
+        from tools.trendlyne_agent import fetch_trendlyne_consensus_for_symbol
+
+        result = fetch_trendlyne_consensus_for_symbol(sym)
+        cache.save(sym, "street_consensus", result)
+        return result
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _fetch_sync)
+
+
 def _score_verdict_history(history: list[dict], live_price: float | None) -> list[dict]:
     """Attaches return_since_pct/outcome to each stored verdict, scored against
     today's live price — "how has AlphaPulse's own call on this stock done so

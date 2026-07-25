@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import type { InsiderActivity, PeerComparison, PriceHistory, QuarterlyTrend, Report, StockInfo, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
+import type { InsiderActivity, PeerComparison, PriceHistory, QuarterlyTrend, Report, StockInfo, StreetConsensus, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
 import InfoTooltip from './info-tooltip';
 import Sparkline from './sparkline';
 import WatchlistButton from './watchlist-button';
@@ -202,6 +202,68 @@ function InsiderActivityCard({ symbol }: { symbol: string }) {
           </div>
         </div>
       )}
+    </Card>
+  );
+}
+
+function fmtConsensusDate(publishedAt: string | null): string | null {
+  if (!publishedAt) return null;
+  const d = new Date(publishedAt);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+function useStreetConsensus(symbol: string): StreetConsensus | null {
+  const [consensus, setConsensus] = useState<StreetConsensus | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setConsensus(null);
+    fetch(`/api/street-consensus/${encodeURIComponent(symbol)}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then((data: StreetConsensus | null) => { if (!cancelled) setConsensus(data); })
+      .catch(() => { if (!cancelled) setConsensus(null); });
+    return () => { cancelled = true; };
+  }, [symbol]);
+
+  return consensus;
+}
+
+// Recent Trendlyne-cited analyst commentary for this stock — real article
+// titles/links/dates, deliberately never a fabricated consensus rating or
+// target price number (this module searches GNews for articles that cite
+// Trendlyne, it doesn't scrape trendlyne.com's own numeric estimates).
+// Renders nothing when there's no recent coverage — the expected common
+// case for most stocks on most days, not missing data.
+function StreetConsensusCard({ symbol }: { symbol: string }) {
+  const consensus = useStreetConsensus(symbol);
+  if (!consensus || consensus.articles.length === 0) return null;
+
+  return (
+    <Card title={<>
+      Street Consensus
+      <InfoTooltip title="Street Consensus" align="left">
+        <p>Recent news coverage that cites Trendlyne&apos;s aggregated analyst consensus for this stock — upgrades, initiations, and target-price moves.</p>
+        <p>This is real article coverage, not a scraped numeric rating or target price — AlphaPulse never invents a benchmark it doesn&apos;t actually have.</p>
+      </InfoTooltip>
+    </>}>
+      <div className="space-y-2.5">
+        {consensus.articles.slice(0, 6).map((a, i) => {
+          const date = fmtConsensusDate(a.published_at);
+          return (
+            <a
+              key={i}
+              href={a.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block text-xs hover:bg-card-hi/60 rounded-lg px-2 py-1.5 -mx-2 transition-colors"
+            >
+              <p className="text-tx line-clamp-2">{a.title}</p>
+              {date && <p className="text-muted/60 mt-0.5">{date}</p>}
+            </a>
+          );
+        })}
+      </div>
     </Card>
   );
 }
@@ -743,6 +805,8 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
           <PeerTable peers={peers} />
 
           <InsiderActivityCard symbol={report.symbol} />
+
+          <StreetConsensusCard symbol={report.symbol} />
 
           {a?.valuation && (
             <Card title="Valuation">
