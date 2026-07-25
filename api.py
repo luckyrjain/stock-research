@@ -1713,6 +1713,173 @@ async def refresh_sme_signals(request: Request):
     return {"started": True}
 
 
+# ── Custom screener ───────────────────────────────────────────────────────────
+# Stored-metrics table over the NIFTY 500 universe (screener_pipeline.py,
+# see CLAUDE.md's "Custom screener flow"), generalizing SME Signals' filter-
+# chip pattern to the main NSE/BSE market instead of SME/Emerge stocks.
+
+_SCREENER_REFRESH_LOCK_NAME = "screener_refresh"
+_SCREENER_REFRESH_LOCK_TTL_SECONDS = 3600  # generous upper bound on one pipeline run
+
+# Whitelisted sort columns — interpolated into the SQL ORDER BY clause below,
+# since column names can't be bind parameters; validated against this set
+# before interpolation, same "closed enum, not raw user text" safety as
+# `direction`/`view` on /api/sme-signals.
+_SCREENER_SORT_COLUMNS = {
+    "symbol", "current_price", "pe_ratio", "market_cap_cr", "avg_volume_10d", "rsi14",
+}
+
+
+@app.get("/api/screener")
+async def get_screener(
+    request: Request,
+    industry:       str = Query("all", description="NSE industry filter (from the NIFTY 500 constituent list), or 'all'"),
+    ema_trend:      str = Query("all", description="all | bullish | bearish"),
+    pe_max:         float | None = Query(None, ge=0, description="Max P/E ratio"),
+    market_cap_min: float | None = Query(None, ge=0, description="Min market cap, in ₹ Cr"),
+    rsi_min:        float | None = Query(None, ge=0, le=100),
+    rsi_max:        float | None = Query(None, ge=0, le=100),
+    sort:           str = Query("market_cap_cr"),
+    order:          str = Query("desc", description="asc | desc"),
+    limit:          int = Query(100, ge=1, le=500),
+    offset:         int = Query(0, ge=0),
+):
+    """Filterable/sortable view over the NIFTY 500 screener_stocks table
+    (screener_pipeline.py). Every numeric filter is optional and additive
+    (AND-ed together); a filter Screener/yfinance didn't have for a stock
+    (NULL in the DB) excludes that stock from that filter rather than
+    guessing a value for it. `industries` in the response is the real,
+    currently-populated set of nse_industry values — the frontend's filter
+    chips are built from this, not a hardcoded/guessed list.
+    """
+    _rate_limit(request, "screener", max_calls=60, window_seconds=60)
+
+    if ema_trend not in ("all", "bullish", "bearish"):
+        raise HTTPException(status_code=422, detail="ema_trend must be one of: all, bullish, bearish")
+    if sort not in _SCREENER_SORT_COLUMNS:
+        raise HTTPException(status_code=422, detail=f"sort must be one of: {', '.join(sorted(_SCREENER_SORT_COLUMNS))}")
+    if order not in ("asc", "desc"):
+        raise HTTPException(status_code=422, detail="order must be asc or desc")
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the screener pipeline first.")
+
+    def _query_sync() -> dict:
+        from sqlalchemy import text as _text
+
+        engine = _get_db_engine()
+
+        where_clauses = []
+        params: dict = {}
+        if industry != "all":
+            where_clauses.append("nse_industry = :industry")
+            params["industry"] = industry
+        if ema_trend != "all":
+            where_clauses.append("ema_trend = :ema_trend")
+            params["ema_trend"] = ema_trend
+        if pe_max is not None:
+            where_clauses.append("pe_ratio IS NOT NULL AND pe_ratio <= :pe_max")
+            params["pe_max"] = pe_max
+        if market_cap_min is not None:
+            where_clauses.append("market_cap_cr IS NOT NULL AND market_cap_cr >= :market_cap_min")
+            params["market_cap_min"] = market_cap_min
+        if rsi_min is not None:
+            where_clauses.append("rsi14 IS NOT NULL AND rsi14 >= :rsi_min")
+            params["rsi_min"] = rsi_min
+        if rsi_max is not None:
+            where_clauses.append("rsi14 IS NOT NULL AND rsi14 <= :rsi_max")
+            params["rsi_max"] = rsi_max
+
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        order_sql = "ASC" if order == "asc" else "DESC"
+
+        with engine.connect() as conn:
+            rows = conn.execute(_text(f"""
+                SELECT
+                    symbol, company_name, exchange, nse_industry, sector,
+                    current_price::float  AS current_price,
+                    pe_ratio::float       AS pe_ratio,
+                    market_cap_cr::float  AS market_cap_cr,
+                    avg_volume_10d::float AS avg_volume_10d,
+                    rsi14::float          AS rsi14,
+                    ema_trend,
+                    fetched_at::text      AS fetched_at
+                FROM screener_stocks
+                {where_sql}
+                ORDER BY {sort} {order_sql} NULLS LAST, symbol ASC
+                LIMIT :limit OFFSET :offset
+            """), {**params, "limit": limit, "offset": offset}).mappings().fetchall()
+
+            total = conn.execute(
+                _text(f"SELECT COUNT(*) FROM screener_stocks {where_sql}"), params
+            ).scalar() or 0
+            total_monitored = conn.execute(
+                _text("SELECT COUNT(*) FROM screener_stocks")
+            ).scalar() or 0
+            industries = conn.execute(_text("""
+                SELECT DISTINCT nse_industry FROM screener_stocks
+                WHERE nse_industry IS NOT NULL ORDER BY nse_industry
+            """)).scalars().all()
+            last_run = conn.execute(
+                _text("SELECT MAX(fetched_at)::text FROM screener_stocks")
+            ).scalar()
+
+        return {
+            "stocks":           [dict(r) for r in rows],
+            "total":            int(total),
+            "total_monitored":  int(total_monitored),
+            "industries":       list(industries),
+            "last_run":         last_run,
+            "refreshing":       rate_limiter.is_locked(_SCREENER_REFRESH_LOCK_NAME),
+        }
+
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, _query_sync)
+    except Exception as exc:
+        log_event(LOGGER, "screener_query_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+
+
+@app.post("/api/screener/refresh", status_code=202)
+async def refresh_screener(request: Request):
+    """Run the custom screener pipeline in the background. 409 if a run is
+    already in progress — same lock-then-rate-limit pattern (and ordering)
+    as /api/sme-signals/refresh."""
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+    if not rate_limiter.try_acquire_lock(_SCREENER_REFRESH_LOCK_NAME, _SCREENER_REFRESH_LOCK_TTL_SECONDS):
+        raise HTTPException(status_code=409, detail="A refresh is already running.")
+    try:
+        _rate_limit(request, "screener_refresh", max_calls=3, window_seconds=3600)
+    except HTTPException:
+        rate_limiter.release_lock(_SCREENER_REFRESH_LOCK_NAME)
+        raise
+
+    loop = asyncio.get_running_loop()
+
+    def _run_pipeline():
+        try:
+            from screener_pipeline import run as run_screener_pipeline
+            healthy = run_screener_pipeline()
+            if not healthy:
+                log_event(
+                    LOGGER, "screener_refresh_unhealthy", level="warning",
+                    detail="Pipeline ran but reported an unhealthy result (empty constituent "
+                           "list or too high a metrics-fetch error rate) — see screener_pipeline logs above.",
+                )
+        except Exception as exc:
+            log_event(LOGGER, "screener_refresh_failed", level="error", error=str(exc))
+        finally:
+            rate_limiter.release_lock(_SCREENER_REFRESH_LOCK_NAME)
+
+    async def _launch():
+        await loop.run_in_executor(None, _run_pipeline)
+
+    asyncio.create_task(_launch())
+    log_event(LOGGER, "screener_refresh_started")
+    return {"started": True}
+
+
 # ── Watchlist ─────────────────────────────────────────────────────────────────
 # Every row is owned by exactly one identity: either the anonymous per-browser
 # client_id (a UUID the frontend generates on first use and keeps in

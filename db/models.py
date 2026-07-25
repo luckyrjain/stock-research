@@ -177,6 +177,41 @@ api_keys = Table(
 )
 
 
+# Custom stock screener (see screener_pipeline.py) — a stored-metrics table
+# for the NIFTY 500 universe, mirroring sme_stocks' "fetch once, filter/sort
+# many" shape so GET /api/screener never needs a live yfinance call per
+# request. nse_industry comes from NSE's own published NIFTY 500 constituent
+# list (tools/nifty500_tools.py) — used for filter chips in preference to
+# `sector` (yfinance's own field), whose GICS-vs-Indian-market taxonomy for
+# NSE/BSE symbols is an explicitly disclosed unverified assumption elsewhere
+# in this codebase (see signals/engine.py's sector-weight-override comment).
+# `sector` is kept alongside it for reference/future use, not as the primary
+# filter dimension.
+screener_stocks = Table(
+    "screener_stocks",
+    metadata,
+    Column("symbol",         String(20), primary_key=True),
+    Column("company_name",   String(200)),
+    Column("exchange",       String(5)),
+    Column("nse_industry",   String(100)),
+    Column("sector",         String(100)),
+    Column("current_price",  Numeric(14, 4)),
+    Column("pe_ratio",       Numeric(10, 2)),
+    Column("market_cap_cr",  Numeric(16, 2)),
+    Column("avg_volume_10d", Numeric(16, 2)),
+    # RSI(14) + EMA20/EMA50 trend posture, from the same shared computation
+    # signals/technical.py already does for the main stock-analysis flow
+    # (same Wilder-style RSI formula as sme_ema_pipeline._compute_rsi) — not
+    # recomputed here, just persisted for filtering/sorting without a live
+    # fetch per screener request.
+    Column("rsi14",          Numeric(6, 2)),
+    Column("ema_trend",      String(10)),   # 'bullish' | 'bearish' | NULL (unknown/insufficient history)
+    Column("fetched_at",     DateTime(timezone=True), server_default=text("NOW()")),
+    Index("idx_screener_stocks_industry", "nse_industry"),
+    Index("idx_screener_stocks_sector", "sector"),
+)
+
+
 def get_engine(database_url: str | None = None):
     url = database_url or os.environ["DATABASE_URL"]
     return _create_engine(url)

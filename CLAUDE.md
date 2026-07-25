@@ -18,6 +18,8 @@ A second mode — **Market Picks** — runs a multi-agent pipeline that scrapes 
 
 A third mode — **SME Signals** — is a PostgreSQL-backed batch pipeline (`sme_ema_pipeline.py`) that screens all NSE Emerge + BSE SME stocks for EMA20/EMA50 **golden cross** and **death cross** events, served at `/sme-signals` via `GET /api/sme-signals`.
 
+A fourth mode — **Screener** — is a PostgreSQL-backed batch pipeline (`screener_pipeline.py`) over the NIFTY 500 universe, filterable/sortable by industry, P/E, market cap, and RSI/EMA trend, served at `/screener` via `GET /api/screener`.
+
 A **Watchlist** ties the three modes together: a star button in each dashboard adds/removes a stock from a PostgreSQL-backed `watchlist_items` table, and `/watchlist` lists everything starred with live prices. Each row is owned by either an anonymous per-browser `client_id` (a UUID in `localStorage`) or, once signed in, an account (`user_id`) — see "Watchlist flow" below for how a request's identity is resolved, and "Account & magic-link auth flow" for the account system itself. Signing in never migrates an existing `client_id`'s rows onto the account. A daily batch job (`watchlist_alerts.py`, see "Watchlist alert emails" below) re-analyses every account-owned watchlist symbol and emails a digest to any user whose stock's recommendation changed since the prior stored verdict — anonymous `client_id` rows have no email to notify and are excluded.
 
 A minimal **account system** (magic-link email, no passwords) exists via `POST /api/auth/request-link` + `GET /api/auth/verify` — a `Sign in` link appears in every page's nav bar (`AuthWidget`). The watchlist (above) is account-aware; "I bought this" positions tracking (`frontend/lib/positions.ts`) remains purely anonymous/`localStorage`-only for now, with no backend of its own to link to an account.
@@ -37,6 +39,7 @@ stock-research/
 ├── schemas.py              Normalization contracts: raw tool output → canonical dicts
 ├── market_picks_pipeline.py  Multi-agent weekly picks pipeline (6 phases)
 ├── sme_ema_pipeline.py     SME golden/death cross batch pipeline (PostgreSQL)
+├── screener_pipeline.py    NIFTY 500 custom screener batch pipeline (PostgreSQL)
 ├── verdict_history.py      Daily verdict/price snapshots (PostgreSQL) — powers the hero's timeline strip
 ├── auth.py                 Magic-link auth: token/session issuance + validation (PostgreSQL)
 ├── email_sender.py         Sends the magic-link sign-in + watchlist-alert emails over generic SMTP
@@ -52,6 +55,7 @@ stock-research/
 │   ├── market_picks_tools.py  RSS + GNews scrapers for 14 sources; exports SOURCES + SCRAPER_FNS
 │   │                          (merges in hdfc_sec_agent.py + 4 others below → 20 sources total)
 │   ├── sme_tools.py           NSE Emerge + BSE SME stock-list fetchers
+│   ├── nifty500_tools.py      NIFTY 500 constituent list fetcher (screener_pipeline.py's universe)
 │   ├── hdfc_sec_agent.py      HDFC Securities Fundamental + Technical scrapers (GNews-based)
 │   └── ...                    Other data-fetching functions (yfinance, Screener.in, gnews, NSE API)
 ├── signals/                Quantitative signal engine (features → signal scores → verdict)
@@ -60,6 +64,7 @@ stock-research/
 │   ├── app/page.tsx              Stock analysis page (supports ?symbol= deep links)
 │   ├── app/market-picks/page.tsx Weekly picks page
 │   ├── app/sme-signals/page.tsx  SME golden cross screener
+│   ├── app/screener/page.tsx     NIFTY 500 custom screener
 │   ├── app/watchlist/page.tsx    Cross-mode watchlist page
 │   ├── app/compare/page.tsx      Two stock analysis reports side by side (?symbols=TCS,INFY)
 │   ├── components/               Dashboard, search, progress tracker, market picks dashboard
@@ -745,6 +750,61 @@ than genuinely bad symbols) — so a bad run fails the GitHub Actions job instea
 For a local/self-hosted alternative, a crontab entry works too:
 
     30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
+
+### Custom screener flow
+
+Generalizes SME Signals' filter-chip pattern to the main NSE/BSE market (the gap the
+Product-lens gap analysis called out: "no custom screener" for the primary large/mid-cap
+flow this product is centered on) — a stored-metrics batch pipeline, `screener_pipeline.py`,
+mirroring `sme_ema_pipeline.py`'s shape, served at `/screener` via `GET /api/screener`.
+
+1. **Universe**: NIFTY 500 (NSE's own published index membership,
+   `tools/nifty500_tools.py::get_nifty500_constituents()`, 24 h cache) rather than the full
+   NSE equity master (`_nse_master.txt`, ~2000 symbols) — a daily per-stock yfinance `.info`
+   scrape (this codebase's heaviest documented per-symbol call; see `sme_ema_pipeline.py`'s
+   own note on why it deliberately avoids that call for "hundreds of SME stocks") is only
+   reasonable at a bounded, curated scale, and NIFTY 500 already covers the vast majority of
+   stocks anyone would realistically screen for. **Disclosed limitation**: the exact NSE
+   archive URL and CSV column layout for the NIFTY 500 list was not verified against a live
+   response in this sandbox (no outbound internet — same disclosure pattern as the other
+   NSE/BSE scrapers in this codebase) — defensive parsing degrades to an empty list (never a
+   partial/guessed universe) rather than raising.
+2. **No new scraping/OHLCV logic** — `screener_pipeline.py` reuses the exact same
+   already-cached fetch functions the rest of this codebase already has for each stock:
+   `tools.nse_tools.get_stock_quote` (price, P/E, market cap, sector/industry — one yfinance
+   `.info` call, same as the main analysis flow) and `signals.technical.technical_signal`
+   (RSI14 + EMA20/EMA50 trend posture, off the already-6h-cached `price_history` series — see
+   "Technical signal" above). Both results are upserted into a new stored-metrics table,
+   `screener_stocks`, so `GET /api/screener` never needs a live fetch per request — the same
+   "fetch once, filter/sort many" shape `sme_stocks`/`ema_signals` already established.
+3. **Industry vs. sector**: `nse_industry` (from the NIFTY 500 list itself, a real
+   NSE-published classification) is the primary filter-chip dimension, in preference to
+   `sector` (yfinance's own field, kept on the table for reference) — `sector`'s GICS-vs-
+   Indian-market taxonomy for NSE/BSE symbols is an explicitly disclosed unverified assumption
+   elsewhere in this codebase (see "Sector-aware signal weights" above), so this screener
+   doesn't lean on it as the primary, user-facing filter.
+4. `GET /api/screener` (rate-limited 60/min) accepts `industry`, `ema_trend`
+   (`all`/`bullish`/`bearish`), `pe_max`, `market_cap_min`, `rsi_min`/`rsi_max`, `sort`
+   (whitelisted column set — interpolated into `ORDER BY` since column names can't be bind
+   parameters, validated against the whitelist first, same "closed enum, not raw user text"
+   safety as `/api/sme-signals`'s `direction`/`view`), `order`, and `limit`/`offset`. Every
+   numeric filter is optional and AND-ed together; a `NULL` value for a stock (yfinance/
+   Screener didn't have it) excludes that stock from that filter rather than guessing a value
+   for it. The response's `industries` field is the real, currently-populated set of
+   `nse_industry` values in the table — the frontend's filter chips are built from this, not a
+   hardcoded/guessed list, the same "no static list, ask the data" instinct as
+   `GET /api/market-picks/history`'s `available_dates`.
+5. `POST /api/screener/refresh` runs the pipeline in the background — same
+   lock-then-rate-limit pattern (409 takes priority over 429) as `/api/sme-signals/refresh`.
+6. `frontend/app/screener/page.tsx` renders a filterable/sortable table (trend/RSI/industry
+   filter chips, P/E and market-cap numeric inputs, click-to-sort column headers) — a "Screener"
+   nav link was added alongside "SME Signals" across every page's nav bar. Each row carries a
+   `WatchlistButton`, tying this mode into the same cross-mode watchlist as the other three.
+7. **Daily auto-run**: `.github/workflows/screener-cron.yml` runs at 13:30 UTC (19:00 IST) on
+   weekdays — after `sme-cron.yml` (13:00 UTC) so that pipeline's own writes have settled, and
+   after NSE's 15:30 IST close. Same `DATABASE_URL`-secret-required, fail-fast-with-a-clear-
+   message pattern as `sme-cron.yml`. `screener_pipeline.py` also has a `--setup-db`/`--reset-db`/
+   `--force` CLI, same shape as `sme_ema_pipeline.py`.
 
 ### Watchlist flow
 

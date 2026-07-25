@@ -368,6 +368,11 @@ export default function MarketPicksPage() {
           <Link href="/sme-signals" className="text-sm text-muted hover:text-tx transition-colors">
             SME Signals
           </Link>
+          <span className="text-border-hi">|</span>
+          <Link href="/screener" className="text-sm text-muted hover:text-tx transition-colors">
+            Screener
+          </Link>
+          <span className="text-border-hi">|</span>
           <Link href="/market-picks/history" className="text-sm text-muted hover:text-tx transition-colors">
             Track Record
           </Link>

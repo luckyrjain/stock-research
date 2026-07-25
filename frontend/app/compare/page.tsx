@@ -109,6 +109,10 @@ function ComparePageInner() {
             SME Signals
           </Link>
           <span className="text-border-hi">|</span>
+          <Link href="/screener" className="text-sm text-muted hover:text-tx transition-colors">
+            Screener
+          </Link>
+          <span className="text-border-hi">|</span>
           <Link href="/watchlist" className="text-sm text-muted hover:text-tx transition-colors">
             Watchlist
           </Link>
