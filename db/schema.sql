@@ -48,6 +48,29 @@ CREATE TABLE IF NOT EXISTS ema_signals (
 CREATE INDEX IF NOT EXISTS idx_ema_signals_date  ON ema_signals(trade_date);
 CREATE INDEX IF NOT EXISTS idx_ema_signals_cross ON ema_signals(cross_type);
 
+-- ADD COLUMN IF NOT EXISTS for a live database from before these columns
+-- existed — the CREATE TABLE IF NOT EXISTS statements above are no-ops on an
+-- existing table, so a column added to the CREATE TABLE body alone (as these
+-- were, historically) never actually reaches a database whose sme_stocks/
+-- ema_signals tables predate it. Same guarded pattern as users.tier further
+-- down this file.
+ALTER TABLE sme_stocks   ADD COLUMN IF NOT EXISTS avg_volume_20d   NUMERIC(16, 2);
+ALTER TABLE sme_stocks   ADD COLUMN IF NOT EXISTS avg_turnover_20d NUMERIC(16, 2);
+ALTER TABLE sme_stocks   ADD COLUMN IF NOT EXISTS market_cap_cr    NUMERIC(16, 2);
+ALTER TABLE ema_signals  ADD COLUMN IF NOT EXISTS rsi14            NUMERIC(6, 2);
+ALTER TABLE ema_signals  ADD COLUMN IF NOT EXISTS volume_spike     BOOLEAN;
+-- ema_signals.cross_type itself replaced the original crossed_ema20/
+-- crossed_ema50/cross_direction columns with no migration at all (see git
+-- history) — a database created before that rename would be missing
+-- cross_type entirely and every pipeline upsert would fail outright, not
+-- just show stale NULLs. The old columns are deliberately left in place
+-- rather than dropped: ema_signals only retains ~100 days of rows and every
+-- row is upserted on `(symbol, trade_date)`, so the next pipeline run
+-- naturally repopulates cross_type correctly (see CLAUDE.md's "data is
+-- fully regenerable" note on this pipeline's own tables) — no value
+-- migration from the old columns is attempted.
+ALTER TABLE ema_signals  ADD COLUMN IF NOT EXISTS cross_type       VARCHAR(10);
+
 -- Cross-mode watchlist. Each row is owned by exactly one identity: the
 -- anonymous per-browser client_id (a UUID the frontend keeps in
 -- localStorage) or, once accounts exist below, user_id — never both, never
