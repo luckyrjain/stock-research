@@ -426,10 +426,16 @@ anywhere in the single-stock report. This surfaces the same search, scoped per s
 the same per-stock-endpoint pattern as insider activity above, but with one important
 difference in what it can honestly return:
 
-1. `fetch_trendlyne_consensus_for_symbol(symbol)` runs one GNews query naming both the
-   symbol and "Trendlyne" (vs. the market-wide function's three broader queries), returning
-   `{"symbol", "articles": [...]}` — real article title/summary/url/published_at, deduped by
-   URL the same way `fetch_trendlyne_consensus()` already dedupes.
+1. `fetch_trendlyne_consensus_for_symbol(symbol)` runs one GNews query ANDing the exact
+   ticker, `"Trendlyne"`, and a buy/upgrade/target-price phrase (vs. the market-wide
+   function's three broader queries), returning `{"symbol", "articles": [...]}` — real
+   article title/summary/url/published_at, deduped by URL the same way
+   `fetch_trendlyne_consensus()` already dedupes. The bare ticker is what `get_latest_news`
+   already searches by elsewhere in this codebase, but stacked under three more required
+   terms here recall is lower still — many tickers (`HDFCBANK`, `M&M`) rarely appear
+   literally in prose the way journalists write company names, so this returns real
+   coverage when Trendlyne got cited by name, not a guarantee of finding every article a
+   human researcher would.
 2. **Deliberately never a numeric consensus rating or target price.** This module has never
    scraped trendlyne.com's own aggregated numbers — only GNews articles that happen to
    mention Trendlyne — so a "12 analysts rate BUY, target ₹X" figure isn't data this module
@@ -439,7 +445,8 @@ difference in what it can honestly return:
 3. `GET /api/street-consensus/{symbol}` is cached (24 h TTL) but intentionally outside
    `ALL_DATA_TASKS` — standalone and on-demand, same pattern as `peers`/`insider_activity`.
    An empty `articles` list (never an error) is the expected common case for most stocks on
-   most days — most companies simply don't have recent Trendlyne-cited coverage.
+   most days — both because most companies simply don't have recent Trendlyne-cited
+   coverage, and because of the query's own recall limits noted in point 1.
 4. `results-dashboard.tsx`'s `StreetConsensusCard` (via `useStreetConsensus()`) renders
    nothing when `articles` is empty, and otherwise lists up to 6 recent article
    titles/dates as external links — placed after `InsiderActivityCard` in the card grid.
