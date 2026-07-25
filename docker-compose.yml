@@ -54,6 +54,14 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-stockresearch}:${POSTGRES_PASSWORD:-stockresearch}@postgres:5432/${POSTGRES_DB:-stockresearch}
       REDIS_URL: redis://redis:6379/0
       ALLOWED_ORIGINS: http://localhost:3000
+      # Only load-bearing once a reverse proxy sits in front of the frontend
+      # container (see docs/deployment.md) and sets X-Forwarded-For on
+      # requests reaching it — this compose file's default single-host setup
+      # exposes the frontend directly, so there's no real forwarded IP for
+      # either service to trust without one. Set TRUSTED_PROXY_SECRET in .env
+      # to the same value here and on the frontend service once that's in
+      # place; empty (the default) is a safe no-op on both sides.
+      TRUSTED_PROXY_SECRET: ${TRUSTED_PROXY_SECRET:-}
     ports:
       - "8000:8000"
     depends_on:
@@ -71,6 +79,7 @@ services:
       dockerfile: Dockerfile
     environment:
       API_URL: http://backend:8000
+      TRUSTED_PROXY_SECRET: ${TRUSTED_PROXY_SECRET:-}
     ports:
       - "3000:3000"
     depends_on:

@@ -1,3 +1,5 @@
+import { clientIpHeaders } from '@/lib/proxy-headers';
+
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
 export async function GET(
@@ -10,7 +12,7 @@ export async function GET(
     ? `${API}/api/validate/${symbol}?exchange=${encodeURIComponent(exchange)}`
     : `${API}/api/validate/${symbol}`;
   try {
-    const res = await fetch(upstreamUrl, { cache: 'no-store' });
+    const res = await fetch(upstreamUrl, { headers: clientIpHeaders(req), cache: 'no-store' });
     const data = await res.json();
     return Response.json(data);
   } catch {

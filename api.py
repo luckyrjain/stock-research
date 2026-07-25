@@ -91,6 +91,29 @@ def _get_db_engine():
 # pipeline runs). Backed by rate_limiter.py — Redis-shared across workers when
 # REDIS_URL is set, an in-memory per-process counter otherwise.
 
+# Every browser request reaches this backend via the Next.js proxy routes,
+# server-to-server (see "Proxy routes" in CLAUDE.md) — so request.client.host
+# is always the Next.js server's own IP, never the real visitor's. Left
+# unfixed, every one of the per-IP limiters below collapses into one shared
+# bucket for the whole site, the opposite of what they're for: one abusive
+# visitor throttles everyone, and there's no per-visitor signal at all.
+# TRUSTED_PROXY_SECRET (also set on the frontend — see
+# frontend/lib/proxy-headers.ts) lets a request prove it really came through
+# the Next.js proxy layer via X-Internal-Proxy-Secret, in which case the
+# X-Forwarded-For value it forwarded is trusted as the real client IP.
+# Without a configured secret (the default), or without a match, the header
+# is ignored — an untrusted caller could otherwise spoof X-Forwarded-For to
+# dodge its own rate limit or frame someone else's IP into being blocked.
+_TRUSTED_PROXY_SECRET = os.getenv("TRUSTED_PROXY_SECRET")
+
+
+def _client_ip(request: Request) -> str:
+    if _TRUSTED_PROXY_SECRET and request.headers.get("x-internal-proxy-secret") == _TRUSTED_PROXY_SECRET:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded and forwarded.strip():
+            return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
 
 def _check_rate_limit(key: str, max_calls: int, window_seconds: float) -> None:
     if not rate_limiter.is_allowed(key, max_calls, window_seconds):
@@ -101,7 +124,7 @@ def _check_rate_limit(key: str, max_calls: int, window_seconds: float) -> None:
 
 
 def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: float) -> None:
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = _client_ip(request)
     _check_rate_limit(f"{bucket}:{client_ip}", max_calls, window_seconds)
 
 

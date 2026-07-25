@@ -1,4 +1,5 @@
 import { setSessionCookieHeader } from '@/lib/auth-cookie';
+import { clientIpHeaders } from '@/lib/proxy-headers';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
@@ -19,7 +20,7 @@ export async function GET(req: Request) {
 
   let upstream: Response;
   try {
-    upstream = await fetch(`${API}/api/auth/verify${qs ? `?${qs}` : ''}`, { cache: 'no-store' });
+    upstream = await fetch(`${API}/api/auth/verify${qs ? `?${qs}` : ''}`, { headers: clientIpHeaders(req), cache: 'no-store' });
   } catch {
     return unavailable();
   }

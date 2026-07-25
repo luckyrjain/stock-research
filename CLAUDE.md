@@ -290,12 +290,14 @@ Provider is auto-detected from whichever key is present (checked in the order ab
 | `SMTP_USE_TLS` | `true` | Set to `false` only for a local/dev relay that doesn't speak STARTTLS |
 | `SENTRY_DSN` | unset | Forwards every error-level `observability.log_event()` call to a Sentry-compatible ingest endpoint (see "Error tracking / APM hook" below). No-op without it — `sentry-sdk` is a hard dependency but does nothing until this is set |
 | `SENTRY_ENVIRONMENT` | `production` | Tag attached to every event sent to Sentry when `SENTRY_DSN` is set (e.g. `staging`) |
+| `TRUSTED_PROXY_SECRET` | unset | Shared secret proving a request's `X-Forwarded-For` header genuinely came through the Next.js proxy routes (see "Trusted client IP for per-IP rate limiting" below) — set to the same value on both this backend and the frontend process. Without it, every per-IP rate limiter keys off `request.client.host`, which is always the Next.js server's own IP |
 
 ### Frontend
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `API_URL` | `http://localhost:8000` | FastAPI backend URL (set in Next.js env) |
+| `TRUSTED_PROXY_SECRET` | unset | Same value as the backend's env var of the same name — see "Trusted client IP for per-IP rate limiting" below. Server-only (never exposed to the browser) |
 
 ---
 
@@ -679,6 +681,43 @@ flagged this as the blocker to scaling past a single process).
 5. Docker Compose gained a `redis` service (`redis:7-alpine`, persisted via a named volume) and
    wires `REDIS_URL` into the `backend` service automatically — a manual/non-Compose deployment
    only needs to set `REDIS_URL` once it scales past one worker (see `docs/deployment.md`).
+
+### Trusted client IP for per-IP rate limiting
+
+The Redis-shared limiter above fixed rate-limit state being *per-worker* — but every one of
+`api.py`'s per-IP buckets was still being keyed off `request.client.host`, and every request
+reaches this backend via the Next.js proxy routes, server-to-server (see "Proxy routes" below).
+That means `request.client.host` is always the Next.js server's own IP, never the real visitor's
+— collapsing every per-IP limiter (`/api/analyse`'s 20/5min, `/api/auth/request-link`'s 5/15min,
+etc.) into one shared bucket for the entire site regardless of how many distinct visitors are
+actually calling it, the opposite of what a *per-IP* limit is for.
+
+1. `api.py::_client_ip(request)` only trusts a caller-supplied client IP when the request also
+   presents a matching shared secret — `TRUSTED_PROXY_SECRET` (env var, unset by default) —  via
+   the `X-Internal-Proxy-Secret` header. When it matches, the first address in `X-Forwarded-For`
+   is used as the client IP; otherwise (no secret configured, or a mismatch) it falls straight
+   back to `request.client.host`, i.e. today's behavior. `_rate_limit()` now calls this instead of
+   reading `request.client.host` directly — its only call site.
+2. `frontend/lib/proxy-headers.ts::clientIpHeaders(req)` is the frontend half: every one of the
+   ~25 Next.js proxy routes under `frontend/app/api/*` now merges this into the headers on its
+   `fetch()` call to the backend. It reads the real client IP off whatever's in front of the
+   Next.js server in production (a reverse proxy/CDN/load balancer — see `docs/deployment.md`)
+   via the standard `X-Forwarded-For` header the request arrived with, and forwards it — plus
+   `TRUSTED_PROXY_SECRET` from `process.env` — to the backend. Both env var and header are
+   optional; a route with neither set sends no extra headers and the backend behaves exactly as
+   before.
+3. **Why a shared secret, not just trusting `X-Forwarded-For` outright**: the backend's port isn't
+   inherently unreachable except through the Next.js proxy — without the secret check, any direct
+   caller could set an arbitrary `X-Forwarded-For` value to dodge its own rate limit, or to frame
+   an innocent IP into being blocked. The secret proves the forwarded value really came from this
+   deployment's own Next.js server, which is the only thing that knows it.
+4. Deliberately scoped to rate limiting only — this does *not* change what IP address ends up in
+   any log line or stored record; `observability.log_event()` call sites are unaffected.
+5. Local Docker Compose exposes the frontend container directly (no reverse proxy in front of it),
+   so `TRUSTED_PROXY_SECRET` is a documented no-op there by default — both the `backend` and
+   `frontend` services pass it through from the host's `.env` (`${TRUSTED_PROXY_SECRET:-}`) so a
+   self-hosted deployment that does add a reverse proxy in front of the frontend container can set
+   one value in `.env` and have it reach both services unchanged.
 
 ### Error tracking / APM hook (`error_tracking.py`)
 
@@ -1346,7 +1385,7 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
 - **`signals_data/<SYMBOL>/<date>.json`** (written by `signals/store.save_signal`) is a write-only audit trail — nothing reads it back. Pruned to a 90-day retention window per symbol on every write (`signals/store._prune_old_signals`).
 - **Source credibility weights** in `_SOURCE_CREDIBILITY` determine how much each source contributes to confidence scoring. Adding a new source requires adding a credibility entry; missing sources default to 0.50.
 - **HDFC Securities sources** live in `tools/hdfc_sec_agent.py` and are merged into `SOURCES` / `SCRAPER_FNS` at import time in `tools/market_picks_tools.py`. Adding a new brokerage source follows the same pattern: define scrapers in a separate module, export `*_SOURCES` and `*_SCRAPERS`, merge in `market_picks_tools.py`.
-- **Rate limiting** is a sliding window (`api.py`'s `_rate_limit()` → `rate_limiter.is_allowed()`), applied only to expensive/abusable routes: `/api/analyse/{symbol}` (20 req / 5 min per IP), `/api/market-picks?force=true` (3 req / hour per IP), `/api/sme-signals/refresh` (3 req / hour per IP, on top of the existing single-run guard). Backed by Redis (shared across workers) when `REDIS_URL` is set, an in-memory per-process counter otherwise — see "Shared-state rate limiting" below.
+- **Rate limiting** is a sliding window (`api.py`'s `_rate_limit()` → `rate_limiter.is_allowed()`), applied only to expensive/abusable routes: `/api/analyse/{symbol}` (20 req / 5 min per IP), `/api/market-picks?force=true` (3 req / hour per IP), `/api/sme-signals/refresh` (3 req / hour per IP, on top of the existing single-run guard). Backed by Redis (shared across workers) when `REDIS_URL` is set, an in-memory per-process counter otherwise — see "Shared-state rate limiting" below. The "per IP" is `api.py::_client_ip()`, not raw `request.client.host` — see "Trusted client IP for per-IP rate limiting" below for why that distinction matters given every request arrives via the Next.js proxy routes.
 - **`output/_history/<date>.json` snapshot schema** (`symbol`, `confidence`, `effective_signal`, `mention_count`, `current_price`, `recommendation`) is read by two independent consumers: the in-pipeline `_load_trend()` (confidence trend) and `GET /api/market-picks/history` (price track record, `/market-picks/history` page). Snapshots written before `current_price`/`recommendation` were added won't have them — the history endpoint handles this by returning `change_pct: null` rather than guessing. Keep both consumers in mind if the snapshot shape changes.
 - **`GET /api/market-picks/history`** also computes an overall `win_rate` (share of tracked picks with `change_pct > 0`), a `tier_stats` breakdown keyed by `recommendation_then` (count/avg change/win rate per BUY/WATCHLIST/HOLD/SELL), and per-symbol `nifty_change_pct`/`alpha_pct` benchmarked against `^NSEI` over the same `first_seen` → `last_seen` window (`avg_alpha_pct` at the top level). The Nifty series is fetched once per request-range via `yfinance.Ticker("^NSEI").history()` — not once per snapshot date — and cached through `cache.py` using `"NSEI"` as a pseudo-symbol (`index_history`, 24 h TTL, re-fetched whenever a new snapshot date widens the needed range). A closed-market snapshot date (weekend/holiday) falls back to the nearest earlier trading day's close, never a later one. A yfinance outage degrades to `null` alpha fields, not a failed request.
 - **CORS** is restricted via `CORSMiddleware` to origins in `ALLOWED_ORIGINS` (comma-separated env var, defaults to `http://localhost:3000`). This is defense in depth, not something normal operation relies on — the Next.js proxy routes talk to the backend server-to-server, which CORS doesn't apply to. Add your production frontend's origin to `ALLOWED_ORIGINS` before deploying, or direct browser calls to the backend will be rejected.

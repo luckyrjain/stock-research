@@ -146,6 +146,77 @@ class RateLimitHelperTest(unittest.TestCase):
                 api._rate_limit(req_a, "bucket_c", max_calls=1, window_seconds=60)
 
 
+class ClientIpTrustedProxyTest(unittest.TestCase):
+    # Every browser request reaches this backend via the Next.js proxy
+    # routes, server-to-server — request.client.host is always the Next.js
+    # server's own IP, never the real visitor's, which would otherwise
+    # collapse every per-IP rate limiter into one shared bucket for the
+    # whole site. _client_ip() only trusts X-Forwarded-For when the caller
+    # also presents the matching X-Internal-Proxy-Secret — these tests cover
+    # both the trust and (more importantly) the distrust paths, since an
+    # untrusted caller must not be able to spoof its way around its own
+    # rate limit or frame another IP into being blocked.
+    def _make_request(self, client_host: str, headers: dict) -> MagicMock:
+        req = MagicMock()
+        req.client.host = client_host
+        req.headers.get.side_effect = lambda key, default=None: headers.get(key.lower(), default)
+        return req
+
+    def test_no_secret_configured_ignores_forwarded_for(self) -> None:
+        req = self._make_request("10.0.0.5", {"x-forwarded-for": "203.0.113.5"})
+        with patch("api._TRUSTED_PROXY_SECRET", None):
+            self.assertEqual(api._client_ip(req), "10.0.0.5")
+
+    def test_matching_secret_trusts_forwarded_for(self) -> None:
+        req = self._make_request("10.0.0.5", {
+            "x-forwarded-for": "203.0.113.5",
+            "x-internal-proxy-secret": "s3cr3t",
+        })
+        with patch("api._TRUSTED_PROXY_SECRET", "s3cr3t"):
+            self.assertEqual(api._client_ip(req), "203.0.113.5")
+
+    def test_mismatched_secret_falls_back_to_client_host(self) -> None:
+        req = self._make_request("10.0.0.5", {
+            "x-forwarded-for": "203.0.113.5",
+            "x-internal-proxy-secret": "wrong-value",
+        })
+        with patch("api._TRUSTED_PROXY_SECRET", "s3cr3t"):
+            self.assertEqual(api._client_ip(req), "10.0.0.5")
+
+    def test_trusted_caller_uses_first_ip_in_forwarded_chain(self) -> None:
+        req = self._make_request("10.0.0.5", {
+            "x-forwarded-for": "203.0.113.5, 10.0.0.1",
+            "x-internal-proxy-secret": "s3cr3t",
+        })
+        with patch("api._TRUSTED_PROXY_SECRET", "s3cr3t"):
+            self.assertEqual(api._client_ip(req), "203.0.113.5")
+
+    def test_trusted_caller_without_forwarded_header_falls_back(self) -> None:
+        req = self._make_request("10.0.0.5", {"x-internal-proxy-secret": "s3cr3t"})
+        with patch("api._TRUSTED_PROXY_SECRET", "s3cr3t"):
+            self.assertEqual(api._client_ip(req), "10.0.0.5")
+
+    def test_rate_limit_buckets_by_trusted_forwarded_ip_not_proxy_ip(self) -> None:
+        # The end-to-end payoff of the above: two different real visitors
+        # behind the same Next.js proxy (same client.host) must get
+        # independent rate-limit buckets when their forwarded IPs differ.
+        rate_limiter._memory_calls.clear()
+        req_a = self._make_request("10.0.0.5", {
+            "x-forwarded-for": "203.0.113.1",
+            "x-internal-proxy-secret": "s3cr3t",
+        })
+        req_b = self._make_request("10.0.0.5", {
+            "x-forwarded-for": "203.0.113.2",
+            "x-internal-proxy-secret": "s3cr3t",
+        })
+        with patch("api._TRUSTED_PROXY_SECRET", "s3cr3t"), patch("api.time.monotonic", return_value=500.0):
+            api._rate_limit(req_a, "bucket_trusted", max_calls=1, window_seconds=60)
+            # Same proxy IP, different real visitor — must not be blocked.
+            api._rate_limit(req_b, "bucket_trusted", max_calls=1, window_seconds=60)
+            with self.assertRaises(Exception):
+                api._rate_limit(req_a, "bucket_trusted", max_calls=1, window_seconds=60)
+
+
 class ValidateSymbolEndpointTest(unittest.TestCase):
     """Covers validate_symbol's branch-heavy paths: ISIN resolution (CSV hit and
     yfinance fallback), the BSE-forced path, and the NSE/BSE/Screener fallback chain.

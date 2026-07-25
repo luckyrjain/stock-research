@@ -50,6 +50,23 @@ npm run start   # or: node .next/standalone/server.js if you built with output: 
 Put both behind a reverse proxy (nginx, Caddy, a cloud load balancer) for TLS termination — neither
 `uvicorn` nor `next start` handles HTTPS itself in this setup.
 
+**Real client IPs for per-IP rate limiting**: the Next.js frontend talks to the FastAPI backend
+server-to-server (see "Proxy routes" in CLAUDE.md) — without anything further, every one of
+`api.py`'s per-IP rate limiters sees only the Next.js server's own IP for every request, collapsing
+them into one shared bucket for the whole site. Once a reverse proxy sits in front of the frontend,
+two things need to line up:
+1. The reverse proxy must set `X-Forwarded-For` to the real client IP on requests it forwards to
+   Next.js — nginx (`proxy_set_header X-Forwarded-For $remote_addr;`) and Caddy do this out of the
+   box; check your load balancer's equivalent if using a cloud one.
+2. Set `TRUSTED_PROXY_SECRET` to the same random value on **both** the backend and frontend
+   processes (see `.env.example`) — the frontend's proxy routes forward the client IP they read off
+   that header alongside this shared secret, and `api.py` only trusts the forwarded IP when the
+   secret matches, so a caller that reaches the backend directly (bypassing the reverse proxy and
+   Next.js) can't spoof `X-Forwarded-For` to dodge its own rate limit or frame another IP.
+
+Leaving `TRUSTED_PROXY_SECRET` unset is safe — every per-IP limiter just keys off whatever IP the
+backend actually sees, exactly as before this existed.
+
 ## Scaling: read this before adding workers or replicas
 
 `rate_limiter.py` backs three pieces of guard state — the sliding-window rate limiter, the LLM

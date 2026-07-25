@@ -1,9 +1,11 @@
+import { clientIpHeaders } from '@/lib/proxy-headers';
+
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
-export async function POST() {
+export async function POST(req: Request) {
   let upstream: Response;
   try {
-    upstream = await fetch(`${API}/api/sme-signals/refresh`, { method: 'POST', cache: 'no-store' });
+    upstream = await fetch(`${API}/api/sme-signals/refresh`, { method: 'POST', headers: clientIpHeaders(req), cache: 'no-store' });
   } catch {
     return Response.json(
       { error: 'Backend unavailable. Make sure the analysis service is running.' },

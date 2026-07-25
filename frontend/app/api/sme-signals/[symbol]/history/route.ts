@@ -1,14 +1,16 @@
+import { clientIpHeaders } from '@/lib/proxy-headers';
+
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ symbol: string }> },
 ) {
   const { symbol } = await params;
 
   let upstream: Response;
   try {
-    upstream = await fetch(`${API}/api/sme-signals/${symbol}/history`, { cache: 'no-store' });
+    upstream = await fetch(`${API}/api/sme-signals/${symbol}/history`, { headers: clientIpHeaders(req), cache: 'no-store' });
   } catch {
     return Response.json(
       { error: 'Backend unavailable. Make sure the analysis service is running.' },

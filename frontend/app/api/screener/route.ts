@@ -1,3 +1,5 @@
+import { clientIpHeaders } from '@/lib/proxy-headers';
+
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
 export async function GET(req: Request) {
@@ -7,7 +9,7 @@ export async function GET(req: Request) {
 
   let upstream: Response;
   try {
-    upstream = await fetch(url, { cache: 'no-store' });
+    upstream = await fetch(url, { headers: clientIpHeaders(req), cache: 'no-store' });
   } catch {
     return Response.json(
       { error: 'Backend unavailable. Make sure the analysis service is running.' },

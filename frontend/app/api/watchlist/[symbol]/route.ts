@@ -1,4 +1,5 @@
 import { getSessionTokenFromRequest } from '@/lib/auth-cookie';
+import { clientIpHeaders } from '@/lib/proxy-headers';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
@@ -15,7 +16,7 @@ export async function DELETE(
   try {
     upstream = await fetch(`${API}/api/watchlist/${encodeURIComponent(symbol)}${qs ? `?${qs}` : ''}`, {
       method: 'DELETE',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      headers: { ...clientIpHeaders(req), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       cache: 'no-store',
     });
   } catch {

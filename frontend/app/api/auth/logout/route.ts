@@ -1,4 +1,5 @@
 import { clearSessionCookieHeader, getSessionTokenFromRequest } from '@/lib/auth-cookie';
+import { clientIpHeaders } from '@/lib/proxy-headers';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
@@ -8,7 +9,7 @@ export async function POST(req: Request) {
     try {
       await fetch(`${API}/api/auth/logout`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { ...clientIpHeaders(req), Authorization: `Bearer ${token}` },
         cache: 'no-store',
       });
     } catch {

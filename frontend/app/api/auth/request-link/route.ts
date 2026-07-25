@@ -1,3 +1,5 @@
+import { clientIpHeaders } from '@/lib/proxy-headers';
+
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
 function unavailable() {
@@ -14,7 +16,7 @@ export async function POST(req: Request) {
   try {
     upstream = await fetch(`${API}/api/auth/request-link`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...clientIpHeaders(req) },
       body,
       cache: 'no-store',
     });
