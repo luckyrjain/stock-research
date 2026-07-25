@@ -358,6 +358,52 @@ weight (0.15), since it says nothing about the specific company.
    `/api/analyse/{symbol}` SSE endpoint already satisfies (see the "Technical signal" section
    above — no further change to that call site was needed for `macro`).
 
+### Sector-aware signal weights
+
+Previously the same `.4/.4/.2/.2/.2/.15` weight split applied to every stock regardless of
+sector — a capital-intensive bank and an asset-light IT services company got identical
+valuation/growth logic. `signals/engine.py::_weights_for_sector()` now layers a documented tilt
+on top of `_DEFAULT_WEIGHTS` for three economically-similar sector groups, keyed off yfinance's
+own `sector` field (`tools/nse_tools.py::get_stock_quote` → `info.get("sector")`, assumed to be a
+GICS-like taxonomy — see the disclosed limitation below):
+
+- **Rate-sensitive** (`Financial Services`, `Real Estate`, `Utilities`): valuation and the macro
+  overlay (FII/DII flow + RBI rate/inflation, see above) weighted up; growth weighted down —
+  these are typically mature, income-oriented businesses, not high-growth compounders.
+- **Growth** (`Technology`, `Communication Services`, `Healthcare`): growth weighted up; the
+  macro overlay weighted down — export-oriented, globally-priced businesses are less exposed to
+  domestic rate/inflation than the FII/DII-heavy sectors above.
+- **Cyclical** (`Basic Materials`, `Energy`, `Industrials`, `Consumer Cyclical`): technical and
+  volume weighted up, offset by valuation and growth weighted down — price/volume momentum is
+  more informative for a cyclical business than for a steady compounder, and a cyclical's
+  steady-state fundamentals matter less than a compounder's.
+- Any sector outside those three groups (including `None` when yfinance didn't report one) uses
+  the unchanged default weights this engine always used.
+
+Every override reallocates weight from other signals rather than just adding to the total, so
+each group's weights sum to the same 1.55 baseline as `_DEFAULT_WEIGHTS` — a pure add-without-
+offset would otherwise inflate that sector's `final_score` magnitude against the shared,
+sector-independent verdict thresholds.
+
+**Explicitly not a back-tested calibration** — three grouped buckets rather than one override
+per individual GICS sector, since with only six signals and no realized-return backtest behind
+any of this, splitting further would read as more empirical precision than the underlying
+judgment actually has. This closes the "identical weights regardless of sector" gap; it does not
+claim the specific override numbers are empirically optimal.
+
+**Disclosed limitation**: whether yfinance actually reports GICS-like sector names (e.g.
+`"Technology"`, `"Financial Services"`) for NSE/BSE symbols, rather than a different taxonomy,
+was not verified against a live response in this sandbox (no outbound internet — same disclosure
+as the FII/DII and macro-context scrapers above). There's real in-repo counter-evidence worth
+noting: other pre-existing test fixtures in this codebase (`tests/test_signal_engine.py`'s own
+`ExtractFeaturesTest`, `tests/test_market_picks_scoring.py`) use short Indian-market-style labels
+like `"IT"`/`"Banking"` for this same field, rather than GICS names. If the real taxonomy differs,
+every sector silently falls through to `_DEFAULT_WEIGHTS` — safe (identical to this engine's
+pre-existing behavior) but a no-op for NSE/BSE stocks in production. `_log_unmatched_sector_once()`
+logs a one-time-per-process debug event (`sector_weight_override_unmatched`) for each distinct
+non-matching sector value seen, so this can be validated against real production traffic
+post-merge without adding a new metrics dependency.
+
 ### Peer comparison flow (`GET /api/peers/{symbol}`)
 
 Answers "is this ratio actually cheap/expensive for its sector" — something the
