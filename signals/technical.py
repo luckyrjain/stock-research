@@ -13,11 +13,13 @@ from signals.models import Signal
 from tools.price_history_tools import get_price_series
 
 _RSI_PERIOD = 14
-# EMA50 needs a reasonably converged series before its posture (above/below
-# EMA20) means anything — a stock with less history than this is UNKNOWN,
-# never guessed (e.g. a recent IPO), matching sme_ema_pipeline's own
-# _MIN_HISTORY_DAYS convention for the same reason.
-_MIN_CLOSES = 55
+# With adjust=False, an "EMA50" computed on too few bars is really just a
+# recency-weighted average of all of them, not a converged 50-day EMA — a
+# stock with less history than this is UNKNOWN, never guessed (e.g. a
+# recent IPO). Set to the same value as sme_ema_pipeline._MIN_HISTORY_DAYS
+# (75) for the same reason: a healthy margin above the 50-span, not merely
+# past it.
+_MIN_CLOSES = 75
 
 
 def _compute_rsi(close: pd.Series) -> pd.Series:

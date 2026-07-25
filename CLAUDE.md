@@ -296,8 +296,13 @@ flow this whole product is centered on.
    from `features`, already-fetched data with no network calls of its own. It computes RSI(14)
    (same Wilder-style `ewm` formula as `sme_ema_pipeline._compute_rsi`) and EMA20/EMA50 trend
    posture over the cached close series, returning `UNKNOWN` (score 0, never guessed) when fewer
-   than 55 closes are available — not enough history for EMA50 to have converged (e.g. a recent
-   IPO), mirroring `sme_ema_pipeline`'s own `_MIN_HISTORY_DAYS` convention.
+   than `_MIN_CLOSES` (75, same value as `sme_ema_pipeline._MIN_HISTORY_DAYS`) closes are
+   available — not enough history for EMA50 to have meaningfully converged (e.g. a recent IPO).
+   The `price_history` cache this reads (see point 1) is on its own 6 h TTL, independent of the
+   six-task caches — a `?force=true` re-analysis bypasses `ALL_DATA_TASKS` but not this cache, so
+   the technical signal can lag up to 6 h behind a forced refresh of everything else. Acceptable
+   for a momentum-confirmation signal on daily-close data (a 6 h-old RSI/EMA reading rarely
+   flips), but worth knowing if it's ever surprising in a support ticket.
 3. `run_signal_engine(symbol, all_data)` calls `technical_signal(symbol)` directly (it already
    received `symbol`, no signature change needed) and blends it in at weight 0.2 — the same tier
    as `volume`/`filings` (confirmation signals), below `valuation`/`growth` (0.4, the primary

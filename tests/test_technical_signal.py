@@ -40,6 +40,12 @@ class TechnicalSignalTest(unittest.TestCase):
         self.assertEqual(sig.score, 0)
         self.assertEqual(sig.meta["closes_available"], 54)
 
+    def test_one_below_threshold_is_unknown_one_at_threshold_is_not(self) -> None:
+        from signals.technical import _MIN_CLOSES
+
+        self.assertEqual(self._run(_flat(_MIN_CLOSES - 1)).value, "UNKNOWN")
+        self.assertNotEqual(self._run(_flat(_MIN_CLOSES)).value, "UNKNOWN")
+
     def test_empty_series_returns_unknown_not_crash(self) -> None:
         sig = self._run([])
         self.assertEqual(sig.value, "UNKNOWN")
