@@ -1,12 +1,14 @@
 'use client';
 
-import { useEffect, useRef, useState, Suspense } from 'react';
+import { useCallback, useEffect, useRef, useState, Suspense } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import ProgressTracker  from '@/components/progress-tracker';
-import ResultsDashboard from '@/components/results-dashboard';
-import SiteNav          from '@/components/site-nav';
+import ProgressTracker    from '@/components/progress-tracker';
+import ResultsDashboard   from '@/components/results-dashboard';
+import SiteNav            from '@/components/site-nav';
+import CompareDiffTable   from '@/components/compare-diff-table';
 import { useStockAnalysis } from '@/lib/useStockAnalysis';
+import type { Report } from '@/types';
 
 const MAX_SYMBOLS = 2;
 
@@ -24,7 +26,7 @@ function parseSymbols(raw: string): string[] {
   return symbols;
 }
 
-function CompareColumn({ symbol }: { symbol: string }) {
+function CompareColumn({ symbol, onReport }: { symbol: string; onReport: (symbol: string, report: Report | null) => void }) {
   const {
     phase, taskStatus, report, error,
     handleAnalyse, handleHardRefresh,
@@ -36,6 +38,13 @@ function CompareColumn({ symbol }: { symbol: string }) {
     started.current = true;
     handleAnalyse(symbol);
   }, [symbol, handleAnalyse]);
+
+  // Lifts the finished report up to the parent for the head-to-head diff
+  // table — this column still owns its own SSE fetch/progress state
+  // entirely; the parent never re-fetches anything, it just reads the result.
+  useEffect(() => {
+    onReport(symbol, report);
+  }, [symbol, report, onReport]);
 
   return (
     <div className="w-full 2xl:flex-1 2xl:min-w-0 min-w-0">
@@ -78,11 +87,23 @@ function ComparePageInner() {
   const urlSymbols = parseSymbols(searchParams.get('symbols') ?? '');
 
   const [inputValue, setInputValue] = useState(urlSymbols.join(', '));
+  const [reports, setReports] = useState<Record<string, Report | null>>({});
 
   useEffect(() => {
     setInputValue(urlSymbols.join(', '));
+    setReports({});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams.get('symbols')]);
+
+  // Guards against an update loop: CompareColumn's effect re-fires whenever
+  // its `onReport` prop identity changes (which happens on every parent
+  // re-render, since this closure is recreated each time) — without the
+  // Object.is bail-out below, that would mean "report unchanged" still
+  // produces a new `reports` object every render, which re-renders the
+  // parent, which recreates the closure again.
+  const handleReport = useCallback((symbol: string, report: Report | null) => {
+    setReports(prev => (prev[symbol] === report ? prev : { ...prev, [symbol]: report }));
+  }, []);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -133,11 +154,16 @@ function ComparePageInner() {
             </p>
           </div>
         ) : (
-          <div className="flex flex-col 2xl:flex-row gap-8 items-start">
-            {urlSymbols.map(sym => (
-              <CompareColumn key={sym} symbol={sym} />
-            ))}
-          </div>
+          <>
+            {urlSymbols.length === MAX_SYMBOLS && reports[urlSymbols[0]] && reports[urlSymbols[1]] && (
+              <CompareDiffTable reportA={reports[urlSymbols[0]]!} reportB={reports[urlSymbols[1]]!} />
+            )}
+            <div className="flex flex-col 2xl:flex-row gap-8 items-start">
+              {urlSymbols.map(sym => (
+                <CompareColumn key={sym} symbol={sym} onReport={handleReport} />
+              ))}
+            </div>
+          </>
         )}
       </div>
     </main>

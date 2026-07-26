@@ -22,6 +22,7 @@ TTL_HOURS: dict[str, float] = {
     "analysis":         24,   # re-analyse daily (or when any input changes)
     "price_history":    6,    # daily-close series for sparklines — doesn't move fast
     "peers":            24,   # peer comparison table — fundamentals-like, doesn't move fast
+    "financials":       24,   # multi-year P&L/balance sheet/cash flow + DCF — fundamentals-like
     "index_history":    24,   # ^NSEI daily closes for the picks-history alpha stat
     "insider_activity": 24,   # insider trades + bulk/block deals — disclosed with lag anyway
     "fii_dii_flow":     24,   # market-wide, published once per trading day

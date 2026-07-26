@@ -131,6 +131,39 @@ class SendWatchlistAlertEmailTest(unittest.TestCase):
             result = email_sender.send_watchlist_alert_email("user@example.com", [self._alert()])
         self.assertFalse(result)
 
+    def test_price_move_alert_renders_distinctly(self) -> None:
+        os.environ["SMTP_HOST"] = "smtp.example.com"
+        fake_server = MagicMock()
+        fake_smtp_cls = MagicMock()
+        fake_smtp_cls.return_value.__enter__.return_value = fake_server
+
+        move = {
+            "kind": "price_move", "symbol": "TCS",
+            "old_price": 100.0, "new_price": 115.0, "change_pct": 15.0,
+        }
+        with patch("smtplib.SMTP", fake_smtp_cls):
+            result = email_sender.send_watchlist_alert_email("user@example.com", [move])
+
+        self.assertTrue(result)
+        body = fake_server.send_message.call_args[0][0].get_content()
+        self.assertIn("TCS: price moved up 15.0%", body)
+        self.assertIn("₹100.0 -> ₹115.0", body)
+
+    def test_mixed_alert_kinds_in_one_digest(self) -> None:
+        os.environ["SMTP_HOST"] = "smtp.example.com"
+        fake_server = MagicMock()
+        fake_smtp_cls = MagicMock()
+        fake_smtp_cls.return_value.__enter__.return_value = fake_server
+
+        move = {"kind": "price_move", "symbol": "INFY", "old_price": 100.0, "new_price": 80.0, "change_pct": -20.0}
+        with patch("smtplib.SMTP", fake_smtp_cls):
+            result = email_sender.send_watchlist_alert_email("user@example.com", [self._alert(), move])
+
+        self.assertTrue(result)
+        body = fake_server.send_message.call_args[0][0].get_content()
+        self.assertIn("TCS: HOLD -> BUY", body)
+        self.assertIn("INFY: price moved down 20.0%", body)
+
 
 if __name__ == "__main__":
     unittest.main()

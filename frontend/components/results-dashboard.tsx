@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import type { InsiderActivity, PeerComparison, PriceHistory, QuarterlyTrend, Report, StockInfo, StreetConsensus, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
+import Link from 'next/link';
+import type { FinancialStatement, FinancialStatementsResponse, InsiderActivity, PeerComparison, PriceHistory, QuarterlyTrend, Report, StockInfo, StreetConsensus, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
 import InfoTooltip from './info-tooltip';
 import Sparkline from './sparkline';
 import WatchlistButton from './watchlist-button';
@@ -28,6 +29,90 @@ function usePeerComparison(symbol: string): PeerComparison | null {
   }, [symbol]);
 
   return peers;
+}
+
+function useFinancials(symbol: string): FinancialStatementsResponse | null {
+  const [data, setData] = useState<FinancialStatementsResponse | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setData(null);
+    fetch(`/api/financials/${encodeURIComponent(symbol)}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then((d: FinancialStatementsResponse | null) => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData(null); });
+    return () => { cancelled = true; };
+  }, [symbol]);
+
+  return data;
+}
+
+// One collapsible <details> table per statement — up to 10 years x however
+// many rows Screener renders for this company, so this stays collapsed by
+// default rather than dumping a wide, dense table into the page unasked.
+function StatementTable({ title, statement }: { title: string; statement: FinancialStatement | null }) {
+  if (!statement || statement.rows.length === 0) return null;
+  return (
+    <details className="group/stmt py-2">
+      <summary className="cursor-pointer select-none list-none flex items-center justify-between
+                           text-sm font-semibold text-tx [&::-webkit-details-marker]:hidden">
+        <span className="flex items-center gap-1.5">
+          <span className="text-muted text-xs transition-transform group-open/stmt:rotate-90">›</span>
+          {title}
+        </span>
+        <span className="text-[11px] font-normal text-muted">{statement.years.length} years</span>
+      </summary>
+      <div className="overflow-x-auto mt-2 -mx-1">
+        <table className="text-xs w-full">
+          <thead>
+            <tr className="border-b border-border">
+              <th className="text-left px-1.5 py-1.5 text-muted font-semibold whitespace-nowrap">₹ Cr</th>
+              {statement.years.map(y => (
+                <th key={y} className="text-right px-2 py-1.5 text-muted font-semibold whitespace-nowrap">{y}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {statement.rows.map(row => (
+              <tr key={row.label} className="border-b border-border/60 last:border-0">
+                <td className="px-1.5 py-1.5 whitespace-nowrap text-tx">{row.label}</td>
+                {row.values.map((v, i) => (
+                  <td key={i} className="text-right px-2 py-1.5 font-mono text-tx whitespace-nowrap">
+                    {v != null ? fmt(v, 0) : '—'}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  );
+}
+
+// Up to 10 years of Screener's own yearly P&L / Balance Sheet / Cash Flow
+// tables — previously this app only ever showed current-year ratios
+// (Fundamentals card) and a short quarterly trend, never full statement
+// history, the single biggest gap the frontend design review found versus
+// Screener.in itself. `data` is lifted from ResultsDashboard (shared with
+// the DCF block in the Valuation card below) rather than fetched again here.
+function FinancialStatementsCard({ data }: { data: FinancialStatementsResponse | null }) {
+  if (!data || (!data.profit_loss && !data.balance_sheet && !data.cash_flow)) return null;
+  return (
+    <Card title={<>
+      Financial Statements
+      <InfoTooltip title="Financial Statements" align="left">
+        <p>Up to 10 years of Screener.in&apos;s own yearly Profit &amp; Loss, Balance Sheet, and Cash Flow tables, in ₹ Cr.</p>
+        <p>A blank cell is a genuine gap in that year&apos;s reporting for this company (e.g. before IPO), not a missing scrape.</p>
+      </InfoTooltip>
+    </>}>
+      <div className="divide-y divide-border">
+        <StatementTable title="Profit & Loss" statement={data.profit_loss} />
+        <StatementTable title="Balance Sheet" statement={data.balance_sheet} />
+        <StatementTable title="Cash Flow" statement={data.cash_flow} />
+      </div>
+    </Card>
+  );
 }
 
 function PercentileBadge({ value }: { value: number }) {
@@ -124,6 +209,33 @@ function PeerTable({ peers }: { peers: PeerComparison | null }) {
         </p>
       )}
       <ValuationAnchorBadge anchor={peers.absolute_anchor} />
+    </Card>
+  );
+}
+
+// Lightweight "you might also look at" rail off the same peer list the Peer
+// Comparison table already fetches — no new data source. Screener's own peer
+// `slug` is usually the NSE ticker itself, but that's not guaranteed for
+// every listing (a few Screener slugs diverge from the tradable symbol) — a
+// bad deep link degrades to this app's existing "couldn't resolve/analyse
+// that symbol" error state on the destination page, the same as a mistyped
+// manual search, rather than silently failing here.
+function SimilarStocksRail({ peers }: { peers: PeerComparison | null }) {
+  if (!peers || peers.peers.length === 0) return null;
+  return (
+    <Card title="Similar Stocks">
+      <div className="flex flex-wrap gap-2">
+        {peers.peers.map(p => (
+          <Link
+            key={p.slug || p.name}
+            href={`/?symbol=${encodeURIComponent(p.slug || p.name)}`}
+            className="text-xs font-medium px-2.5 py-1 rounded-full border border-border bg-surface
+                       text-tx hover:border-accent/40 hover:text-accent transition-colors"
+          >
+            {p.name}
+          </Link>
+        ))}
+      </div>
     </Card>
   );
 }
@@ -311,7 +423,7 @@ function PriceSparkline({ symbol }: { symbol: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/prices/history/${encodeURIComponent(symbol)}?days=180`)
+    fetch(`/api/prices/history/${encodeURIComponent(symbol)}?days=180&benchmark=true`)
       .then(res => (res.ok ? res.json() : null))
       .then((data: PriceHistory | null) => { if (!cancelled) setHistory(data); })
       .catch(() => { if (!cancelled) setHistory(null); });
@@ -319,11 +431,26 @@ function PriceSparkline({ symbol }: { symbol: string }) {
   }, [symbol]);
 
   if (!history || history.closes.length < 2) return null;
+  const bench = history.benchmark;
 
   return (
     <div className="flex flex-col items-end gap-1 shrink-0">
       <span className="text-[9px] font-semibold text-muted uppercase tracking-wider">6M trend</span>
-      <Sparkline closes={history.closes} width={110} height={30} />
+      <Sparkline
+        closes={history.closes}
+        dates={history.dates}
+        width={110}
+        height={30}
+        formatValue={v => `₹${fmt(v, 2)}`}
+      />
+      {bench && (
+        <span
+          className={`text-[10px] font-mono ${bench.alpha_pct >= 0 ? 'text-buy' : 'text-sell'}`}
+          title={`Stock ${bench.stock_change_pct >= 0 ? '+' : ''}${bench.stock_change_pct}% vs. Nifty ${bench.nifty_change_pct >= 0 ? '+' : ''}${bench.nifty_change_pct}% over the same window`}
+        >
+          {bench.alpha_pct >= 0 ? '+' : ''}{bench.alpha_pct}% vs Nifty
+        </span>
+      )}
     </div>
   );
 }
@@ -438,9 +565,11 @@ function QuarterlyTrendCard({ trend }: { trend: QuarterlyTrend | undefined }) {
           </div>
           <Sparkline
             closes={trend.revenue}
+            dates={trend.quarters}
             width={220}
             height={32}
             ariaLabel={`Quarterly revenue trend over the last ${trend.quarters.length} quarters`}
+            formatValue={v => `₹${fmt(v, 0)} Cr`}
           />
         </div>
         <div>
@@ -452,9 +581,11 @@ function QuarterlyTrendCard({ trend }: { trend: QuarterlyTrend | undefined }) {
           </div>
           <Sparkline
             closes={trend.eps}
+            dates={trend.quarters}
             width={220}
             height={32}
             ariaLabel={`Quarterly EPS trend over the last ${trend.quarters.length} quarters`}
+            formatValue={v => `₹${fmt(v, 2)}`}
           />
         </div>
         {trend.operating_margin && trend.operating_margin.length === trend.quarters.length && (
@@ -467,9 +598,11 @@ function QuarterlyTrendCard({ trend }: { trend: QuarterlyTrend | undefined }) {
             </div>
             <Sparkline
               closes={trend.operating_margin}
+              dates={trend.quarters}
               width={220}
               height={32}
               ariaLabel={`Quarterly operating margin trend over the last ${trend.quarters.length} quarters`}
+              formatValue={v => `${fmt(v, 1)}%`}
             />
           </div>
         )}
@@ -693,6 +826,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
   const { analysis: a, signals: sig, stock_info: s, research: r, news, holdings: h, filings, filings_summary: fs, mf_holdings_trend: mfTrend } = report;
 
   const peers = usePeerComparison(report.symbol);
+  const financials = useFinancials(report.symbol);
   const percentileByNormalizedKey = useMemo(() => {
     const map: Record<string, number> = {};
     for (const [key, value] of Object.entries(peers?.percentiles ?? {})) {
@@ -906,7 +1040,11 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
 
           <QuarterlyTrendCard trend={r?.quarterly_trend} />
 
+          <FinancialStatementsCard data={financials} />
+
           <PeerTable peers={peers} />
+
+          <SimilarStocksRail peers={peers} />
 
           <InsiderActivityCard symbol={report.symbol} />
 
@@ -919,6 +1057,26 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                 a.valuation.verdict === 'Overvalued'  ? 'text-sell' : 'text-hold'
               }`}>{a.valuation.verdict}</p>
               <p className="text-sm text-muted leading-relaxed">{a.valuation.comment}</p>
+              {financials?.dcf && (
+                <div className={`mt-3 pt-3 border-t border-border text-xs ${
+                  financials.dcf.verdict === 'Undervalued' ? 'text-buy' :
+                  financials.dcf.verdict === 'Overvalued'  ? 'text-sell' : 'text-hold'
+                }`}>
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <span className="font-semibold">DCF Estimate: {financials.dcf.verdict}</span>
+                    <InfoTooltip title="DCF Estimate" align="left">
+                      <p>A simple two-stage discounted-cash-flow model off the Cash Flow statement&apos;s Operating Activity row — a different lens from the peer/history views above: &quot;cheap vs. what its cash flows are worth&quot;, not &quot;cheap vs. peers&quot;.</p>
+                      <p>Assumes {financials.dcf.discount_rate}% discount rate, {financials.dcf.terminal_growth}% terminal growth, and projects at {financials.dcf.growth_rate_used}% (clamped historical OCF growth). Operating Cash Flow is used as a Free-Cash-Flow proxy since Screener&apos;s cash-flow table doesn&apos;t cleanly separate Capex — a simplification, not a full DCF.</p>
+                      <p>Deterministic, computed — not LLM-generated. Not investment advice.</p>
+                    </InfoTooltip>
+                  </div>
+                  <p className="text-tx">
+                    Fair value ≈ <span className="font-mono font-semibold">₹{fmt(financials.dcf.fair_value_per_share, 2)}</span>
+                    {' '}vs. current <span className="font-mono">₹{fmt(financials.dcf.current_price, 2)}</span>
+                    {' '}({financials.dcf.upside_pct >= 0 ? '+' : ''}{fmt(financials.dcf.upside_pct, 1)}%)
+                  </p>
+                </div>
+              )}
             </Card>
           )}
 

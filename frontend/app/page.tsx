@@ -24,15 +24,22 @@ function HomePageInner() {
   } = useStockAnalysis();
 
   const searchParams = useSearchParams();
-  const deepLinkDone = useRef(false);
+  // Tracks the last `?symbol=` value this effect actually acted on — not a
+  // one-shot boolean, since that would only ever fire for the very first
+  // deep link on mount. A report page stays mounted at `/` and several
+  // in-app links point at a *new* `/?symbol=` while it's already showing a
+  // report (Similar Stocks rail, ConsolidatedCard's "View full analysis",
+  // SME/screener deep links) — each of those needs to re-trigger analysis,
+  // not be silently ignored because *some* symbol was already deep-linked.
+  const lastDeepLinkedSymbol = useRef<string | null>(null);
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
 
   // Deep link: /?symbol=TCS auto-starts analysis (used by SME signals page links)
   useEffect(() => {
     const sym = searchParams.get('symbol')?.toUpperCase();
-    if (!sym || deepLinkDone.current) return;
-    deepLinkDone.current = true;
+    if (!sym || sym === lastDeepLinkedSymbol.current) return;
+    lastDeepLinkedSymbol.current = sym;
 
     if (!ISIN_RE.test(sym)) {
       handleAnalyse(sym);

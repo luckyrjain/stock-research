@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useWatchlist } from '@/lib/watchlist';
 import SiteNav from '@/components/site-nav';
+import type { WatchlistCalendarEntry } from '@/types';
 
 interface LivePrice {
   // GET /api/prices returns an entry for every requested symbol, but it's
@@ -18,10 +19,76 @@ function Skeleton({ className }: { className: string }) {
   return <div className={`bg-border/60 rounded animate-pulse ${className}`} />;
 }
 
+// Pure read-aggregation over each watched symbol's already-cached filings
+// (see GET /api/watchlist/calendar) — no new scrape, so a symbol that
+// hasn't been analysed recently (or ever) just contributes nothing, not an
+// error. Watchlist-wide, so this hook is local to this page, not shared
+// with useWatchlist()'s module-level cache.
+function useWatchlistCalendar(symbols: string[]): WatchlistCalendarEntry[] {
+  const [entries, setEntries] = useState<WatchlistCalendarEntry[]>([]);
+  const key = symbols.join(',');
+
+  useEffect(() => {
+    if (!key) { setEntries([]); return; }
+    let cancelled = false;
+    fetch(`/api/watchlist/calendar?symbols=${encodeURIComponent(key)}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then((data: { entries: WatchlistCalendarEntry[] } | null) => {
+        if (!cancelled) setEntries(data?.entries ?? []);
+      })
+      .catch(() => { if (!cancelled) setEntries([]); });
+    return () => { cancelled = true; };
+  }, [key]);
+
+  return entries;
+}
+
+function CalendarStrip({ entries }: { entries: WatchlistCalendarEntry[] }) {
+  if (entries.length === 0) return null;
+  return (
+    <div className="mb-6 rounded-xl border border-border bg-card p-4">
+      <p className="text-[11px] font-semibold text-muted tracking-[1px] uppercase mb-3">
+        Upcoming — from your watchlist&apos;s cached filings
+      </p>
+      <div className="space-y-2">
+        {entries.map(e => (
+          <div key={e.symbol} className="flex items-center gap-2 flex-wrap text-xs">
+            <Link href={`/?symbol=${e.symbol}`} className="font-mono font-semibold text-tx hover:text-accent transition-colors shrink-0">
+              {e.symbol}
+            </Link>
+            {e.next_results_date && (
+              <span className="px-2 py-0.5 rounded-full bg-surface border border-border text-tx">
+                Next results: {e.next_results_date}
+              </span>
+            )}
+            {e.rating_action && (
+              <span className={`px-2 py-0.5 rounded-full border capitalize ${
+                e.rating_action.action === 'upgrade'
+                  ? 'text-buy border-buy/40 bg-buy/10'
+                  : e.rating_action.action === 'downgrade'
+                  ? 'text-sell border-sell/40 bg-sell/10'
+                  : 'text-hold border-hold/40 bg-hold/10'
+              }`}>
+                {e.rating_action.agency} {e.rating_action.action}
+              </span>
+            )}
+            {e.corporate_actions.slice(0, 2).map((ca, i) => (
+              <span key={i} className="px-2 py-0.5 rounded-full bg-surface border border-border text-tx capitalize">
+                {ca.type}{ca.date ? ` · ${ca.date}` : ''}
+              </span>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function WatchlistPage() {
   const { items, loading, remove } = useWatchlist();
   const [prices, setPrices] = useState<Record<string, LivePrice>>({});
   const [pricesLoading, setPricesLoading] = useState(true);
+  const calendarEntries = useWatchlistCalendar(items.map(i => i.symbol));
 
   useEffect(() => {
     if (items.length === 0) { setPricesLoading(false); return; }
@@ -62,6 +129,8 @@ export default function WatchlistPage() {
             place. Tied to this browser only — it won&apos;t follow you to another device yet.
           </p>
         </div>
+
+        <CalendarStrip entries={calendarEntries} />
 
         {loading || (pricesLoading && items.length > 0) ? (
           <div className="rounded-xl border border-border overflow-hidden">

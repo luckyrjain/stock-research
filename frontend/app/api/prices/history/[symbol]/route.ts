@@ -7,8 +7,13 @@ export async function GET(
   { params }: { params: Promise<{ symbol: string }> },
 ) {
   const { symbol } = await params;
-  const days = new URL(req.url).searchParams.get('days');
-  const qs = days ? `?days=${encodeURIComponent(days)}` : '';
+  const reqUrl = new URL(req.url);
+  const days = reqUrl.searchParams.get('days');
+  const benchmark = reqUrl.searchParams.get('benchmark');
+  const forwarded = new URLSearchParams();
+  if (days) forwarded.set('days', days);
+  if (benchmark) forwarded.set('benchmark', benchmark);
+  const qs = forwarded.toString() ? `?${forwarded.toString()}` : '';
 
   let upstream: Response;
   try {

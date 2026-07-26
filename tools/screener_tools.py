@@ -280,6 +280,107 @@ def _extract_valuation_band(soup: BeautifulSoup, max_years: int = 5) -> dict:
     return {"years": years_n, "pe": pe_n}
 
 
+def _extract_yearly_statement(soup: BeautifulSoup, section_id: str, max_years: int = 10) -> dict:
+    """Generic yearly-table extractor for Screener's Profit & Loss
+    (section#profit-loss), Balance Sheet (section#balance-sheet), and Cash
+    Flow (section#cash-flow) tables — the three multi-year statement views
+    this codebase didn't have at all before (only a short quarterly
+    Sales/EPS/OPM window via _extract_quarterly_trend, and a P/E-only yearly
+    band via _extract_valuation_band). Deliberately generic rather than a
+    hardcoded row schema, same "whatever Screener renders is what gets
+    returned" instinct as _parse_peer_table — each statement's row set
+    genuinely differs (a bank's balance sheet looks nothing like an FMCG
+    company's), so hardcoding row labels here would silently drop real data
+    for entire sectors.
+
+    Unlike _extract_quarterly_trend's strict "every cell must parse or the
+    whole row is dropped" alignment, a row here keeps a `None` for any year
+    it doesn't have a clean number for (e.g. a business segment or line item
+    that didn't exist yet at IPO) — across up to a decade of history that's
+    an expected, real gap in the data, not a misalignment to guard against
+    the way a handful of recent quarters would be.
+
+    **Disclosed limitation**: Screener.in's exact section ids/row labels for
+    these three tables were not verified against a live response in this
+    sandbox (no outbound internet — same disclosure pattern as every other
+    Screener/NSE scraper in this codebase). If a section id doesn't match a
+    live page's actual markup, this returns {} (never guessed/fabricated
+    figures) exactly like "Screener doesn't have this data" elsewhere in
+    this module — worth spot-checking against a live company page before
+    relying on this in production.
+    """
+    section = soup.find("section", {"id": section_id})
+    if not section:
+        return {}
+    table = section.find("table")
+    if not table:
+        return {}
+
+    header_cells = table.select("thead tr th")
+    years = [_clean(th.get_text(" ", strip=True)) for th in header_cells[1:]]
+    if not years:
+        return {}
+    n = min(len(years), max_years)
+    years_n = years[-n:]
+
+    rows = []
+    for row in table.select("tbody tr"):
+        cells = row.find_all(["th", "td"])
+        if len(cells) < 2:
+            continue
+        label = cells[0].get_text(" ", strip=True).rstrip("+").strip()
+        if not label:
+            continue
+        raw_values = [_clean(c.get_text(" ", strip=True)).replace("%", "") for c in cells[1:]]
+        if len(raw_values) != len(years):
+            # Row/header cell counts disagree (e.g. a trailing summary column
+            # only one of the two carries) — skip rather than misalign a
+            # value to the wrong year, same rule _extract_valuation_band uses.
+            continue
+        values: list[float | None] = []
+        for raw in raw_values[-n:]:
+            try:
+                values.append(float(raw))
+            except ValueError:
+                values.append(None)
+        if any(v is not None for v in values):
+            rows.append({"label": label, "values": values})
+
+    if not rows:
+        return {}
+    return {"years": years_n, "rows": rows}
+
+
+@tool("Get Screener.in Multi-Year Financial Statements")
+def get_financial_statements(symbol: str) -> str:
+    """Scrape Screener.in's multi-year Profit & Loss, Balance Sheet, and Cash
+    Flow statement tables (up to the last 10 years each) for an Indian stock —
+    the fuller financial-history view get_fundamentals' current-ratios-only
+    payload and get_peer_comparison's P/E-only valuation_band don't cover.
+    Each of profit_loss/balance_sheet/cash_flow is independently optional and
+    absent (not guessed) when Screener doesn't have that table for this
+    company. Input: NSE stock symbol, e.g. RELIANCE, TCS, INFY."""
+    try:
+        soup = _fetch_soup(symbol)
+        payload: dict = {"symbol": symbol.upper()}
+
+        profit_loss = _extract_yearly_statement(soup, "profit-loss")
+        if profit_loss:
+            payload["profit_loss"] = profit_loss
+
+        balance_sheet = _extract_yearly_statement(soup, "balance-sheet")
+        if balance_sheet:
+            payload["balance_sheet"] = balance_sheet
+
+        cash_flow = _extract_yearly_statement(soup, "cash-flow")
+        if cash_flow:
+            payload["cash_flow"] = cash_flow
+
+        return json.dumps(payload)
+    except Exception as e:
+        return json.dumps({"error": str(e), "symbol": symbol})
+
+
 @tool("Get Screener.in Fundamentals")
 def get_fundamentals(symbol: str) -> str:
     """Scrape key financial ratios and fundamentals from Screener.in for an Indian stock.
