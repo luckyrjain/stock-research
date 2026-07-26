@@ -152,6 +152,17 @@ function ActionBadge({ action }: { action: 'BUY' | 'SELL' }) {
   );
 }
 
+// Neutral, always-visible tag — distinct from ActionBadge's buy/sell tone —
+// for a plain classification (insider category, Bulk vs. Block deal type)
+// that previously only ever surfaced on hover via the row's `title` attribute.
+function TagBadge({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded border border-border text-muted whitespace-nowrap">
+      {children}
+    </span>
+  );
+}
+
 function useInsiderActivity(symbol: string): InsiderActivity | null {
   const [activity, setActivity] = useState<InsiderActivity | null>(null);
 
@@ -196,7 +207,8 @@ function InsiderActivityCard({ symbol }: { symbol: string }) {
               <div key={i} className="flex items-center justify-between gap-2 text-xs">
                 <div className="min-w-0 flex items-center gap-1.5">
                   <ActionBadge action={t.action} />
-                  <span className="text-tx truncate" title={`${t.person} (${t.category})`}>{t.person}</span>
+                  {t.category && <TagBadge>{t.category}</TagBadge>}
+                  <span className="text-tx truncate">{t.person}</span>
                 </div>
                 <div className="flex items-center gap-2 shrink-0 font-mono text-muted">
                   <span>{fmtInr(t.value)}</span>
@@ -216,7 +228,8 @@ function InsiderActivityCard({ symbol }: { symbol: string }) {
               <div key={i} className="flex items-center justify-between gap-2 text-xs">
                 <div className="min-w-0 flex items-center gap-1.5">
                   <ActionBadge action={d.action} />
-                  <span className="text-tx truncate" title={`${d.client} (${d.deal_type})`}>{d.client}</span>
+                  <TagBadge>{d.deal_type === 'Block Deal' ? 'Block' : 'Bulk'}</TagBadge>
+                  <span className="text-tx truncate">{d.client}</span>
                 </div>
                 <div className="flex items-center gap-2 shrink-0 font-mono text-muted">
                   <span>{fmtInr(d.price * d.quantity)}</span>
@@ -485,6 +498,11 @@ function fmtCr(n: number | null | undefined) {
   return `₹${fmt(n)} Cr`;
 }
 
+function fmtVolume(n: number | null | undefined) {
+  if (n == null) return '—';
+  return n.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+}
+
 const REC_CONFIG = {
   BUY:  { bg: 'bg-buy/10',  border: 'border-buy/30',  text: 'text-buy',  badge: 'bg-buy  text-white', strip: 'bg-buy'  },
   SELL: { bg: 'bg-sell/10', border: 'border-sell/30', text: 'text-sell', badge: 'bg-sell text-white', strip: 'bg-sell' },
@@ -509,11 +527,11 @@ function Card({ title, children, className = '' }: { title: React.ReactNode; chi
 }
 
 function MetricRow({ label, value, colorClass = 'text-tx', percentile }: {
-  label: string; value: string; colorClass?: string; percentile?: number;
+  label: React.ReactNode; value: string; colorClass?: string; percentile?: number;
 }) {
   return (
     <div className="flex items-center justify-between py-1.5 border-b border-border last:border-0">
-      <span className="text-sm text-muted">{label}</span>
+      <span className="text-sm text-muted flex items-center gap-1">{label}</span>
       <span className="flex items-center">
         <span className={`text-sm font-semibold font-mono ${colorClass}`}>{value}</span>
         {percentile != null && <PercentileBadge value={percentile} />}
@@ -636,11 +654,24 @@ function RangeBar({ low, current, high }: { low: number; current: number; high: 
       </div>
       <div className="flex justify-between text-[10px] text-muted/60 mt-1">
         <span>₹{fmt(low, 0)}</span>
-        <span>52W Range</span>
+        <span>52W Range · {Math.round(pct)}%</span>
         <span>₹{fmt(high, 0)}</span>
       </div>
     </div>
   );
+}
+
+// Humanizes a SignalItem.meta key ("fii_dii_flow_cr" -> "Fii Dii Flow Cr") for
+// the per-signal tooltip below — this is diagnostic context (why a signal
+// scored the way it did: RSI value, FII/DII flow, repo rate, CPI, ...) that
+// was previously fetched but never surfaced anywhere in the UI.
+function humanizeMetaKey(key: string): string {
+  return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function formatMetaValue(value: number | string | null): string {
+  if (value == null) return '—';
+  return typeof value === 'number' ? fmt(value, Number.isInteger(value) ? 0 : 2) : value;
 }
 
 function fmtRatio(raw: string): string {
@@ -825,6 +856,21 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
             </div>
             <MetricRow label="Market Cap" value={fmtCr(s?.market_cap_cr)} />
             <MetricRow label="Book Value" value={s?.book_value != null ? `₹${fmt(s.book_value)}` : '—'} />
+            {s?.volume != null && (
+              <MetricRow
+                label="Volume"
+                value={
+                  s.avg_volume_10d != null
+                    ? `${fmtVolume(s.volume)} (avg ${fmtVolume(s.avg_volume_10d)})`
+                    : fmtVolume(s.volume)
+                }
+                colorClass={
+                  s.avg_volume_10d != null && s.avg_volume_10d > 0
+                    ? (s.volume > s.avg_volume_10d * 1.5 ? 'text-accent' : 'text-tx')
+                    : 'text-tx'
+                }
+              />
+            )}
             {s?.beta != null && <MetricRow label="Beta" value={fmt(s.beta, 2)} />}
             {s?.dividend_yield_pct != null && (
               <MetricRow label="Div Yield" value={`${fmt(s.dividend_yield_pct, 2)}%`} />
@@ -894,14 +940,29 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
               {sig.verdict && (
                 <MetricRow label="Signal Verdict" value={sig.verdict} />
               )}
-              {Object.entries(sig.signals).map(([name, signal]) => (
-                <MetricRow
-                  key={name}
-                  label={`${name} (${signal.value})`}
-                  value={fmt(signal.score, 2)}
-                  colorClass={signal.score > 0 ? 'text-buy' : signal.score < 0 ? 'text-sell' : 'text-muted'}
-                />
-              ))}
+              {Object.entries(sig.signals).map(([name, signal]) => {
+                const metaEntries = Object.entries(signal.meta ?? {}).filter(([, v]) => v != null);
+                return (
+                  <MetricRow
+                    key={name}
+                    label={<>
+                      {name} ({signal.value})
+                      {metaEntries.length > 0 && (
+                        <InfoTooltip title={`${name} — details`} align="left">
+                          {metaEntries.map(([k, v]) => (
+                            <p key={k} className="flex justify-between gap-3">
+                              <span>{humanizeMetaKey(k)}</span>
+                              <span className="font-mono text-tx">{formatMetaValue(v)}</span>
+                            </p>
+                          ))}
+                        </InfoTooltip>
+                      )}
+                    </>}
+                    value={fmt(signal.score, 2)}
+                    colorClass={signal.score > 0 ? 'text-buy' : signal.score < 0 ? 'text-sell' : 'text-muted'}
+                  />
+                );
+              })}
             </Card>
           )}
         </div>
@@ -1054,7 +1115,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
           <div className="divide-y divide-border">
             {filings.slice(0, 5).map((f, i) => {
               const meta = [f.category, f.date].filter(Boolean).join(' · ');
-              const body = (
+              const titleRow = (
                 <>
                   <span className="text-sm text-tx group-hover:text-accent transition-colors leading-snug">
                     {f.title ?? 'Untitled filing'}
@@ -1064,15 +1125,25 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                   )}
                 </>
               );
-              return f.attachment ? (
-                <a key={i} href={f.attachment} target="_blank" rel="noopener noreferrer"
-                  className="flex flex-col gap-1 py-3 first:pt-0 last:pb-0 group"
-                >
-                  {body}
-                </a>
-              ) : (
-                <div key={i} className="flex flex-col gap-1 py-3 first:pt-0 last:pb-0">
-                  {body}
+              return (
+                <div key={i} className="py-3 first:pt-0 last:pb-0">
+                  {f.attachment ? (
+                    <a href={f.attachment} target="_blank" rel="noopener noreferrer" className="flex flex-col gap-1 group">
+                      {titleRow}
+                    </a>
+                  ) : (
+                    <div className="flex flex-col gap-1">{titleRow}</div>
+                  )}
+                  {f.desc && (
+                    <details className="mt-1.5 group/desc">
+                      <summary className="text-[11px] text-accent cursor-pointer select-none list-none
+                                           [&::-webkit-details-marker]:hidden">
+                        <span className="group-open/desc:hidden">Show details</span>
+                        <span className="hidden group-open/desc:inline">Hide details</span>
+                      </summary>
+                      <p className="text-xs text-muted leading-relaxed mt-1.5">{f.desc}</p>
+                    </details>
+                  )}
                 </div>
               );
             })}

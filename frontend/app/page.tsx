@@ -6,8 +6,7 @@ import { useSearchParams } from 'next/navigation';
 import TickerSearch     from '@/components/ticker-search';
 import ProgressTracker  from '@/components/progress-tracker';
 import ResultsDashboard from '@/components/results-dashboard';
-import HeaderSearch     from '@/components/header-search';
-import AuthWidget       from '@/components/auth-widget';
+import SiteNav          from '@/components/site-nav';
 import { useStockAnalysis } from '@/lib/useStockAnalysis';
 
 // Matches api.py's _is_isin(). A deep-linked ISIN (used for BSE SME stocks,
@@ -102,45 +101,7 @@ function HomePageInner() {
           </div>
         ) : (
           <>
-            <div className="flex items-center gap-4 mb-5 pb-4 border-b border-border">
-              <span className="text-base font-black tracking-tight text-tx">
-                Alpha<span className="text-accent">Pulse</span>
-              </span>
-              <Link
-                href="/market-picks"
-                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
-              >
-                Market Picks →
-              </Link>
-              <Link
-                href="/sme-signals"
-                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
-              >
-                SME Signals →
-              </Link>
-              <Link
-                href="/screener"
-                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
-              >
-                Screener →
-              </Link>
-              <Link
-                href="/watchlist"
-                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
-              >
-                Watchlist →
-              </Link>
-              <Link
-                href="/compare"
-                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
-              >
-                Compare →
-              </Link>
-              <div className="ml-auto flex items-center gap-3">
-                <HeaderSearch />
-                <AuthWidget />
-              </div>
-            </div>
+            <SiteNav />
 
             <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} compact />
 

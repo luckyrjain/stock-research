@@ -5,8 +5,7 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import ProgressTracker  from '@/components/progress-tracker';
 import ResultsDashboard from '@/components/results-dashboard';
-import HeaderSearch     from '@/components/header-search';
-import AuthWidget       from '@/components/auth-widget';
+import SiteNav          from '@/components/site-nav';
 import { useStockAnalysis } from '@/lib/useStockAnalysis';
 
 const MAX_SYMBOLS = 2;
@@ -95,34 +94,7 @@ function ComparePageInner() {
     <main className="min-h-screen bg-bg text-tx">
       <div className="max-w-[1600px] mx-auto px-4 pt-8 pb-16">
 
-        {/* Nav */}
-        <div className="flex items-center gap-4 mb-8 pb-4 border-b border-border flex-wrap">
-          <Link href="/" className="text-base font-black tracking-tight text-tx">
-            Alpha<span className="text-accent">Pulse</span>
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/market-picks" className="text-sm text-muted hover:text-tx transition-colors">
-            Market Picks
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/sme-signals" className="text-sm text-muted hover:text-tx transition-colors">
-            SME Signals
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/screener" className="text-sm text-muted hover:text-tx transition-colors">
-            Screener
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/watchlist" className="text-sm text-muted hover:text-tx transition-colors">
-            Watchlist
-          </Link>
-          <span className="text-border-hi">|</span>
-          <span className="text-sm font-semibold text-accent">Compare</span>
-          <div className="ml-auto flex items-center gap-3">
-            <HeaderSearch />
-            <AuthWidget />
-          </div>
-        </div>
+        <SiteNav active="compare" wrap />
 
         <div className="mb-6">
           <h1 className="text-xl font-black tracking-tight text-tx mb-1.5">Compare Stocks</h1>

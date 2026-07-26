@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
-import Link from 'next/link';
 import type {
   MarketPicksPhase,
   MarketPicksSSEMessage,
@@ -10,8 +9,7 @@ import type {
 } from '@/types';
 import MarketPicksDashboard from '@/components/market-picks-dashboard';
 import PositionsStrip from '@/components/positions-strip';
-import HeaderSearch from '@/components/header-search';
-import AuthWidget from '@/components/auth-widget';
+import SiteNav from '@/components/site-nav';
 
 interface SourceState {
   name: string;
@@ -357,50 +355,17 @@ export default function MarketPicksPage() {
     <main className="min-h-screen bg-bg text-tx">
       <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
 
-        {/* Nav */}
-        <div className="flex items-center gap-4 mb-8 pb-4 border-b border-border">
-          <Link href="/" className="text-base font-black tracking-tight text-tx">
-            Alpha<span className="text-accent">Pulse</span>
-          </Link>
-          <span className="text-border-hi">|</span>
-          <span className="text-sm font-semibold text-accent">Market Picks</span>
-          <span className="text-border-hi">|</span>
-          <Link href="/sme-signals" className="text-sm text-muted hover:text-tx transition-colors">
-            SME Signals
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/screener" className="text-sm text-muted hover:text-tx transition-colors">
-            Screener
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/market-picks/history" className="text-sm text-muted hover:text-tx transition-colors">
-            Track Record
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/watchlist" className="text-sm text-muted hover:text-tx transition-colors">
-            Watchlist
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/portfolio" className="text-sm text-muted hover:text-tx transition-colors">
-            Portfolio
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/compare" className="text-sm text-muted hover:text-tx transition-colors">
-            Compare
-          </Link>
-          <div className="ml-auto flex items-center gap-3">
-            {isRunning && (
-              <button
-                onClick={() => { esRef.current?.close(); setPhase('idle'); }}
-                className="text-xs text-muted hover:text-tx transition-colors"
-              >
-                Cancel
-              </button>
-            )}
-            <HeaderSearch />
-            <AuthWidget />
-          </div>
-        </div>
+        <SiteNav
+          active="market-picks"
+          right={isRunning && (
+            <button
+              onClick={() => { esRef.current?.close(); setPhase('idle'); }}
+              className="text-xs text-muted hover:text-tx transition-colors"
+            >
+              Cancel
+            </button>
+          )}
+        />
 
         <PositionsStrip />
 

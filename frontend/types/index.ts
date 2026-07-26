@@ -184,7 +184,7 @@ export interface VerdictHistoryResponse {
   scored_count:  number;
 }
 
-export type TaskName = 'stock_info' | 'research' | 'news' | 'shareholding' | 'mf_holdings';
+export type TaskName = 'stock_info' | 'research' | 'news' | 'shareholding' | 'mf_holdings' | 'filings';
 export type TaskStatus = 'idle' | 'running' | 'ok' | 'fail' | 'cached';
 export type Phase = 'idle' | 'fetching' | 'analysing' | 'done' | 'error';
 
