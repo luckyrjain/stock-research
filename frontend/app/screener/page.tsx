@@ -5,6 +5,7 @@ import Link from 'next/link';
 import type { ScreenerResponse, ScreenerStock } from '@/types';
 import SiteNav from '@/components/site-nav';
 import WatchlistButton from '@/components/watchlist-button';
+import SectorHeatmap from '@/components/sector-heatmap';
 import { Skeleton, FilterChip, SortableTh, fmtMarketCap } from '@/components/data-table-ui';
 
 type EmaTrendFilter = 'all' | 'bullish' | 'bearish';
@@ -207,6 +208,19 @@ export default function ScreenerPage() {
     }
   }, []);
 
+  // The heatmap needs every monitored stock across every industry to compare
+  // sectors against each other — the main `data.stocks` above is scoped to
+  // whatever the Industry filter chip currently selects, which would collapse
+  // the heatmap to one tile the moment a user picks a specific industry. So
+  // this is a separate, filter-independent fetch, made once on mount.
+  const [heatmapStocks, setHeatmapStocks] = useState<ScreenerStock[]>([]);
+  useEffect(() => {
+    fetch('/api/screener?industry=all&ema_trend=all&sort=market_cap_cr&order=desc&limit=500')
+      .then(res => (res.ok ? res.json() : null))
+      .then((json: ScreenerResponse | null) => { if (json) setHeatmapStocks(json.stocks); })
+      .catch(() => { /* heatmap just doesn't render — the table below is unaffected */ });
+  }, []);
+
   const toggleSort = useCallback((k: SortKey) => {
     setSortKey(prevKey => {
       if (prevKey === k) {
@@ -268,6 +282,8 @@ export default function ScreenerPage() {
             {lastRunLabel && <span>· Last refreshed {lastRunLabel}</span>}
           </div>
         </div>
+
+        <SectorHeatmap stocks={heatmapStocks} activeIndustry={industry} onSelectIndustry={setIndustry} />
 
         {/* Filters */}
         <div className="mb-6 space-y-3">
