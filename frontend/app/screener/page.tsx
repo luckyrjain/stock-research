@@ -8,9 +8,43 @@ import WatchlistButton from '@/components/watchlist-button';
 
 type EmaTrendFilter = 'all' | 'bullish' | 'bearish';
 type SortKey = 'symbol' | 'current_price' | 'pe_ratio' | 'market_cap_cr' | 'avg_volume_10d' | 'rsi14';
+type RsiFilter = 'all' | 'oversold' | 'overbought';
+type SortDir = 'asc' | 'desc';
 
 const _RSI_OVERSOLD = 30;
 const _RSI_OVERBOUGHT = 70;
+
+// Filters reset to defaults on every reload otherwise — a screen this
+// configurable (7 independent filter/sort dimensions) is worth remembering
+// across visits, same instinct as useWatchlist's client_id persistence.
+// Client-only (guarded by typeof window checks below), so this never runs
+// during Next.js's server render pass.
+const _FILTERS_STORAGE_KEY = 'alphapulse_screener_filters';
+
+interface PersistedFilters {
+  industry?: string;
+  emaTrend?: EmaTrendFilter;
+  rsiFilter?: RsiFilter;
+  peMax?: string;
+  marketCapMin?: string;
+  sortKey?: SortKey;
+  sortDir?: SortDir;
+}
+
+const _EMA_TREND_VALUES: EmaTrendFilter[] = ['all', 'bullish', 'bearish'];
+const _RSI_FILTER_VALUES: RsiFilter[] = ['all', 'oversold', 'overbought'];
+const _SORT_KEY_VALUES: SortKey[] = ['symbol', 'current_price', 'pe_ratio', 'market_cap_cr', 'avg_volume_10d', 'rsi14'];
+const _SORT_DIR_VALUES: SortDir[] = ['asc', 'desc'];
+
+function loadPersistedFilters(): PersistedFilters {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(_FILTERS_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as PersistedFilters) : {};
+  } catch {
+    return {};
+  }
+}
 
 function Skeleton({ className }: { className: string }) {
   return <div className={`bg-border/60 rounded animate-pulse ${className}`} />;
@@ -121,7 +155,7 @@ export default function ScreenerPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [industry,   setIndustry]   = useState('all');
   const [emaTrend,   setEmaTrend]   = useState<EmaTrendFilter>('all');
-  const [rsiFilter,  setRsiFilter]  = useState<'all' | 'oversold' | 'overbought'>('all');
+  const [rsiFilter,  setRsiFilter]  = useState<RsiFilter>('all');
   const [peMax,      setPeMax]      = useState('');
   const [marketCapMin, setMarketCapMin] = useState('');
   // fetchStocks fires on every change to these — debounce the text inputs
@@ -132,8 +166,32 @@ export default function ScreenerPage() {
   const [debouncedPeMax, setDebouncedPeMax] = useState('');
   const [debouncedMarketCapMin, setDebouncedMarketCapMin] = useState('');
   const [sortKey,    setSortKey]    = useState<SortKey>('market_cap_cr');
-  const [sortDir,    setSortDir]    = useState<'asc' | 'desc'>('desc');
+  const [sortDir,    setSortDir]    = useState<SortDir>('desc');
+  // Defaults above render identically on the server and on first client
+  // paint (avoiding a hydration mismatch); the persisted values, if any,
+  // are then applied in one batch right after mount — see the hydration
+  // effect below, which also gates the very first fetch until this runs so
+  // a restored filter set doesn't cause two requests back to back.
+  const [hydrated, setHydrated] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const saved = loadPersistedFilters();
+    if (saved.industry !== undefined) setIndustry(saved.industry);
+    if (saved.emaTrend && _EMA_TREND_VALUES.includes(saved.emaTrend)) setEmaTrend(saved.emaTrend);
+    if (saved.rsiFilter && _RSI_FILTER_VALUES.includes(saved.rsiFilter)) setRsiFilter(saved.rsiFilter);
+    if (saved.peMax !== undefined) { setPeMax(saved.peMax); setDebouncedPeMax(saved.peMax); }
+    if (saved.marketCapMin !== undefined) { setMarketCapMin(saved.marketCapMin); setDebouncedMarketCapMin(saved.marketCapMin); }
+    if (saved.sortKey && _SORT_KEY_VALUES.includes(saved.sortKey)) setSortKey(saved.sortKey);
+    if (saved.sortDir && _SORT_DIR_VALUES.includes(saved.sortDir)) setSortDir(saved.sortDir);
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated || typeof window === 'undefined') return;
+    const filters: PersistedFilters = { industry, emaTrend, rsiFilter, peMax, marketCapMin, sortKey, sortDir };
+    try { window.localStorage.setItem(_FILTERS_STORAGE_KEY, JSON.stringify(filters)); } catch { /* private browsing, etc. */ }
+  }, [hydrated, industry, emaTrend, rsiFilter, peMax, marketCapMin, sortKey, sortDir]);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedPeMax(peMax), 420);
@@ -182,8 +240,9 @@ export default function ScreenerPage() {
   }, [industry, emaTrend, rsiFilter, debouncedPeMax, debouncedMarketCapMin, sortKey, sortDir]);
 
   useEffect(() => {
+    if (!hydrated) return;
     fetchStocks();
-  }, [fetchStocks]);
+  }, [fetchStocks, hydrated]);
 
   useEffect(() => {
     if (data) setRefreshing(data.refreshing);
