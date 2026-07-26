@@ -9,18 +9,13 @@ plain-language article so the extraction LLM can assign BUY/SELL direction.
 """
 
 import logging
-import time
 from datetime import datetime, timezone
 
 import requests
 
-logger = logging.getLogger(__name__)
+from tools._nse_session import get_nse_session
 
-_NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-    "Referer": "https://www.nseindia.com",
-}
+logger = logging.getLogger(__name__)
 
 _MIN_BULK_QTY  = 50_000   # 50K shares
 _MIN_BLOCK_QTY = 100_000  # 1L shares
@@ -56,14 +51,7 @@ def _to_int(value: object) -> int:
 
 
 def _nse_session() -> requests.Session:
-    sess = requests.Session()
-    sess.headers.update(_NSE_HEADERS)
-    try:
-        sess.get("https://www.nseindia.com", timeout=8)
-        time.sleep(0.5)
-    except Exception:
-        pass
-    return sess
+    return get_nse_session(timeout=8)
 
 
 def _fmt_qty(n: int) -> str:

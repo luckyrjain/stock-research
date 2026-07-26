@@ -841,6 +841,15 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
             </Card>
           )}
 
+          {(!r?.ratios || Object.keys(r.ratios).length === 0) && r?.nse_fallback_ratios && (
+            <Card title="Fundamentals">
+              <p className="text-xs text-muted mb-2">
+                Screener.in had no ratios for this stock — showing EPS from NSE&apos;s own filings instead.
+              </p>
+              <MetricRow label="EPS" value={`₹${fmt(r.nse_fallback_ratios.eps, 2)}`} />
+            </Card>
+          )}
+
           <QuarterlyTrendCard trend={r?.quarterly_trend} />
 
           <PeerTable peers={peers} />

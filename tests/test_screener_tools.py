@@ -204,6 +204,48 @@ class GetFundamentalsTest(unittest.TestCase):
         result = json.loads(result_str)
         self.assertNotIn("quarterly_trend", result)
 
+    def test_empty_ratios_triggers_nse_fallback(self) -> None:
+        html = "<html><body><ul id='top-ratios'></ul></body></html>"
+        with patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup(html, "lxml")), \
+             patch("tools.nse_tools.get_nse_basic_ratios", return_value={"eps": 12.5, "source": "nse_xbrl"}):
+            result_str = get_fundamentals.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertEqual(result["ratios"], {})
+        self.assertEqual(result["nse_fallback_ratios"], {"eps": 12.5, "source": "nse_xbrl"})
+
+    def test_nonempty_ratios_never_triggers_nse_fallback(self) -> None:
+        html = """
+        <html><body>
+          <ul id="top-ratios">
+            <li><span class="name">P/E</span><span class="number">28.5</span></li>
+          </ul>
+        </body></html>
+        """
+        with patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup(html, "lxml")), \
+             patch("tools.nse_tools.get_nse_basic_ratios") as mock_fallback:
+            result_str = get_fundamentals.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertNotIn("nse_fallback_ratios", result)
+        mock_fallback.assert_not_called()
+
+    def test_nse_fallback_returning_nothing_leaves_payload_unchanged(self) -> None:
+        html = "<html><body><ul id='top-ratios'></ul></body></html>"
+        with patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup(html, "lxml")), \
+             patch("tools.nse_tools.get_nse_basic_ratios", return_value={}):
+            result_str = get_fundamentals.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertNotIn("nse_fallback_ratios", result)
+
+    def test_nse_fallback_failure_does_not_break_the_primary_payload(self) -> None:
+        html = "<html><body><ul id='top-ratios'></ul></body></html>"
+        with patch("tools.screener_tools._fetch_soup", return_value=BeautifulSoup(html, "lxml")), \
+             patch("tools.nse_tools.get_nse_basic_ratios", side_effect=RuntimeError("boom")):
+            result_str = get_fundamentals.run(symbol="TCS")
+        result = json.loads(result_str)
+        self.assertEqual(result["symbol"], "TCS")
+        self.assertNotIn("error", result)
+        self.assertNotIn("nse_fallback_ratios", result)
+
 
 class GetHoldingsTest(unittest.TestCase):
     def test_parses_latest_quarter_shareholding(self) -> None:

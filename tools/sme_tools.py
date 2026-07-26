@@ -25,6 +25,8 @@ from pathlib import Path
 import requests
 from rapidfuzz import fuzz, process
 
+from tools._nse_session import get_nse_session
+
 logger = logging.getLogger(__name__)
 
 # Deliberately narrower than market_picks_pipeline.py's _norm_company (which
@@ -66,11 +68,6 @@ _CACHE_TTL_HOURS  = 24
 _NSE_EMERGE_MIN_COUNT = 150
 _BSE_SME_MIN_COUNT    = 30
 
-_NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Referer":    "https://www.nseindia.com",
-    "Accept":     "application/json",
-}
 _SCREENER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 }
@@ -81,6 +78,10 @@ _BSE_HEADERS = {
     "Accept":          "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+
+def _nse_session() -> requests.Session:
+    return get_nse_session(timeout=6)
 
 
 def _is_fresh(path: Path) -> bool:
@@ -139,13 +140,7 @@ def fetch_nse_emerge_stocks(force: bool = False) -> list[dict]:
     if not force and _is_fresh(_NSE_EMERGE_CACHE):
         return json.loads(_NSE_EMERGE_CACHE.read_text())
 
-    sess = requests.Session()
-    sess.headers.update(_NSE_HEADERS)
-    # Prime NSE session cookie
-    try:
-        sess.get("https://www.nseindia.com", timeout=6)
-    except Exception:
-        pass
+    sess = _nse_session()
 
     try:
         r = sess.get(

@@ -67,12 +67,20 @@ def _norm_stock_info(d: dict) -> dict:
 
 
 def _norm_research(d: dict) -> dict:
-    return {
+    normalized = {
         "symbol": d.get("symbol", ""),
         "ratios": d.get("ratios", {}),
         "about":  d.get("about", ""),
         "quarterly_trend": d.get("quarterly_trend", {}),
     }
+    # Only present when Screener's own ratios table came back empty and
+    # tools/nse_tools.py::get_nse_basic_ratios() found a usable EPS via NSE's
+    # XBRL results filings — absent (not a guessed/null value), matching
+    # every other independently-optional research field's convention.
+    nse_fallback_ratios = d.get("nse_fallback_ratios")
+    if nse_fallback_ratios:
+        normalized["nse_fallback_ratios"] = nse_fallback_ratios
+    return normalized
 
 
 def _norm_news(d: dict) -> dict:
@@ -135,7 +143,7 @@ CONTRACTS: dict[str, dict] = {
     },
     "research": {
         "required":  ["symbol", "ratios"],
-        "types":     {"ratios": dict, "quarterly_trend": dict},
+        "types":     {"ratios": dict, "quarterly_trend": dict, "nse_fallback_ratios": dict},
         "normalize": _norm_research,
     },
     "news": {

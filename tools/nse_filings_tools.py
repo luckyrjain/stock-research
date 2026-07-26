@@ -4,29 +4,15 @@ import requests
 from datetime import datetime, timedelta
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
-import time
+
+from tools._nse_session import get_nse_session
 
 BASE_URL = "https://www.nseindia.com/api/corporate-announcements"
 _IST = ZoneInfo("Asia/Kolkata")
 
 
 def _get_session():
-    session = requests.Session()
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-        "Accept": "application/json",
-        "Referer": "https://www.nseindia.com",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-
-    session.headers.update(headers)
-
-    # 🔥 mandatory cookie init
-    session.get("https://www.nseindia.com", timeout=5)
-    time.sleep(0.5)
-
-    return session
+    return get_nse_session(timeout=5, extra_headers={"Accept-Language": "en-US,en;q=0.9"})
 
 
 def get_nse_filings(symbol: str, issuer: str = "", days: int = 30) -> dict:

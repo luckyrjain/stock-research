@@ -20,7 +20,7 @@ class GetNifty500ConstituentsTest(unittest.TestCase):
         session = MagicMock()
         session.get.return_value = self._csv_response(csv_text)
         with patch("tools.nifty500_tools._is_fresh", return_value=False), \
-             patch("tools.nifty500_tools.requests.Session", return_value=session), \
+             patch("tools.nifty500_tools._nse_session", return_value=session), \
              patch("tools.nifty500_tools._MIN_PLAUSIBLE_COUNT", 1), \
              patch("tools.nifty500_tools._save_cache"):
             stocks = get_nifty500_constituents(force=True)
@@ -43,7 +43,7 @@ class GetNifty500ConstituentsTest(unittest.TestCase):
         session = MagicMock()
         session.get.return_value = self._csv_response(csv_text)
         with patch("tools.nifty500_tools._is_fresh", return_value=False), \
-             patch("tools.nifty500_tools.requests.Session", return_value=session), \
+             patch("tools.nifty500_tools._nse_session", return_value=session), \
              patch("tools.nifty500_tools._MIN_PLAUSIBLE_COUNT", 1), \
              patch("tools.nifty500_tools._save_cache"):
             stocks = get_nifty500_constituents(force=True)
@@ -52,7 +52,7 @@ class GetNifty500ConstituentsTest(unittest.TestCase):
 
     def test_fetch_failure_falls_back_to_stale_cache(self) -> None:
         with patch("tools.nifty500_tools._is_fresh", return_value=False), \
-             patch("tools.nifty500_tools.requests.Session", side_effect=ConnectionError("boom")), \
+             patch("tools.nifty500_tools._nse_session", side_effect=ConnectionError("boom")), \
              patch("tools.nifty500_tools._CACHE_PATH") as fake_path:
             fake_path.exists.return_value = True
             fake_path.read_text.return_value = '[{"symbol": "STALE"}]'
@@ -61,7 +61,7 @@ class GetNifty500ConstituentsTest(unittest.TestCase):
 
     def test_fetch_failure_with_no_cache_returns_empty_list(self) -> None:
         with patch("tools.nifty500_tools._is_fresh", return_value=False), \
-             patch("tools.nifty500_tools.requests.Session", side_effect=ConnectionError("boom")), \
+             patch("tools.nifty500_tools._nse_session", side_effect=ConnectionError("boom")), \
              patch("tools.nifty500_tools._CACHE_PATH") as fake_path:
             fake_path.exists.return_value = False
             stocks = get_nifty500_constituents(force=True)
@@ -70,18 +70,18 @@ class GetNifty500ConstituentsTest(unittest.TestCase):
     def test_fresh_cache_is_used_without_a_network_call(self) -> None:
         with patch("tools.nifty500_tools._is_fresh", return_value=True), \
              patch("tools.nifty500_tools._CACHE_PATH") as fake_path, \
-             patch("tools.nifty500_tools.requests.Session") as session_cls:
+             patch("tools.nifty500_tools._nse_session") as session_fn:
             fake_path.read_text.return_value = '[{"symbol": "CACHED"}]'
             stocks = get_nifty500_constituents()
         self.assertEqual(stocks, [{"symbol": "CACHED"}])
-        session_cls.assert_not_called()
+        session_fn.assert_not_called()
 
     def test_empty_csv_body_falls_back_to_stale_cache(self) -> None:
         csv_text = "Company Name,Industry,Symbol,Series,ISIN Code\n"
         session = MagicMock()
         session.get.return_value = self._csv_response(csv_text)
         with patch("tools.nifty500_tools._is_fresh", return_value=False), \
-             patch("tools.nifty500_tools.requests.Session", return_value=session), \
+             patch("tools.nifty500_tools._nse_session", return_value=session), \
              patch("tools.nifty500_tools._CACHE_PATH") as fake_path:
             fake_path.exists.return_value = True
             fake_path.read_text.return_value = '[{"symbol": "STALE"}]'
@@ -102,7 +102,7 @@ class GetNifty500ConstituentsTest(unittest.TestCase):
         session = MagicMock()
         session.get.return_value = self._csv_response(csv_text)
         with patch("tools.nifty500_tools._is_fresh", return_value=False), \
-             patch("tools.nifty500_tools.requests.Session", return_value=session), \
+             patch("tools.nifty500_tools._nse_session", return_value=session), \
              patch("tools.nifty500_tools._save_cache") as mock_save, \
              patch("tools.nifty500_tools._CACHE_PATH") as fake_path:
             fake_path.exists.return_value = True
@@ -119,7 +119,7 @@ class GetNifty500ConstituentsTest(unittest.TestCase):
         session = MagicMock()
         session.get.return_value = self._csv_response(csv_text)
         with patch("tools.nifty500_tools._is_fresh", return_value=False), \
-             patch("tools.nifty500_tools.requests.Session", return_value=session), \
+             patch("tools.nifty500_tools._nse_session", return_value=session), \
              patch("tools.nifty500_tools._save_cache") as mock_save, \
              patch("tools.nifty500_tools._CACHE_PATH") as fake_path:
             fake_path.exists.return_value = False
@@ -133,7 +133,7 @@ class GetNifty500ConstituentsTest(unittest.TestCase):
         session = MagicMock()
         session.get.return_value = self._csv_response(csv_text)
         with patch("tools.nifty500_tools._is_fresh", return_value=False), \
-             patch("tools.nifty500_tools.requests.Session", return_value=session), \
+             patch("tools.nifty500_tools._nse_session", return_value=session), \
              patch("tools.nifty500_tools._save_cache") as mock_save:
             stocks = get_nifty500_constituents(force=True)
         self.assertEqual(len(stocks), 450)

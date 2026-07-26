@@ -12,18 +12,13 @@ Filters applied to cut ESOP/pledge noise:
 """
 
 import logging
-import time
 from datetime import date, datetime, timedelta, timezone
 
 import requests
 
-logger = logging.getLogger(__name__)
+from tools._nse_session import get_nse_session
 
-_NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-    "Referer": "https://www.nseindia.com",
-}
+logger = logging.getLogger(__name__)
 
 _MIN_VALUE_INR = 2_500_000  # ₹25L — drops small ESOP-style trades
 _LOOKBACK_DAYS = 14
@@ -33,14 +28,7 @@ _EXCLUDED_MODES = ("esop", "pledge", "gift", "bonus", "rights", "inter-se")
 
 
 def _nse_session() -> requests.Session:
-    sess = requests.Session()
-    sess.headers.update(_NSE_HEADERS)
-    try:
-        sess.get("https://www.nseindia.com", timeout=8)
-        time.sleep(0.5)
-    except Exception:
-        pass
-    return sess
+    return get_nse_session(timeout=8)
 
 
 def _fmt_value(v: float) -> str:
