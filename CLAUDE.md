@@ -1892,8 +1892,8 @@ session-cookie identity the frontend itself uses. Three independent pieces:
    a 403, so the endpoint doesn't confirm/deny another user's key IDs exist). A key has no fixed
    TTL, unlike a session — it's valid until explicitly revoked, since a script can't "re-sign-in"
    through a magic link the way a browser redirects through one. `frontend/app/api-keys/page.tsx`
-   (linked from `AuthWidget`'s dropdown) is the management UI: the create form shows the raw key
-   exactly once, in a copy-to-clipboard box, with an explicit "won't be shown again" warning;
+   (in the primary nav — see point 4 below) is the management UI: the create form shows the raw
+   key exactly once, in a copy-to-clipboard box, with an explicit "won't be shown again" warning;
    the list table shows every key including revoked ones (badged), never re-displaying the secret.
 2. **The gated surface itself** — `GET /api/v1/consolidated/{symbol}`, deliberately the *only*
    `/api/v1/*` route today: a thin auth/rate-limit wrapper around the exact same
@@ -1925,6 +1925,21 @@ session-cookie identity the frontend itself uses. Three independent pieces:
    management, not a separate endpoint, since a user managing their keys is exactly who wants to
    see this. `frontend/app/api-keys/page.tsx` renders it as a tier badge + a progress bar (red
    past the limit) above the key-creation form.
+4. **Discoverability + pricing** — a product-lens review flagged two gaps directly: "a
+   signed-out visitor has no navigational path to discover the API exists at all" (it was only
+   ever reachable through the signed-in account dropdown), and "no pricing page, no upgrade
+   button, no checkout anywhere." Both closed without fabricating a payment flow that doesn't
+   exist:
+   - `components/site-nav.tsx`'s `LINKS` gained an `api-keys` entry, visible in the primary nav
+     to every visitor regardless of sign-in state — the page itself already has its own
+     signed-out prompt, so there's no dead end. `components/auth-widget.tsx`'s account dropdown
+     dropped its now-redundant "API keys" menu item since the primary nav covers it.
+   - `frontend/app/pricing/page.tsx` is a genuinely informational page, not a marketing page for
+     a checkout that doesn't exist: it lists the Free (100 calls/hour) and Pro (1,000 calls/hour)
+     tiers and what each unlocks, then states plainly — matching this point's own "no real
+     payment processing exists" disclosure above — that there's no self-serve checkout and Pro
+     access is granted by whoever operates this deployment. `frontend/app/api-keys/page.tsx`'s
+     usage card links to it for free-tier accounts.
 
 ### Consolidated view flow
 

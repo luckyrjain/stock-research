@@ -14,6 +14,7 @@ test.describe('Home page', () => {
     await expect(page.getByRole('link', { name: /SME golden cross screener/ })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Screener' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Watchlist' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'API Keys' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Sign in' })).toBeVisible();
   });
 
