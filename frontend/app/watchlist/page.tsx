@@ -97,18 +97,26 @@ function CalendarStrip({ entries }: { entries: WatchlistCalendarEntry[] }) {
               </span>
             )}
             {e.rating_action && (
-              <span className={`px-2 py-0.5 rounded-full border capitalize ${
-                e.rating_action.action === 'upgrade'
-                  ? 'text-buy border-buy/40 bg-buy/10'
-                  : e.rating_action.action === 'downgrade'
-                  ? 'text-sell border-sell/40 bg-sell/10'
-                  : 'text-hold border-hold/40 bg-hold/10'
-              }`}>
+              <span
+                className={`px-2 py-0.5 rounded-full border capitalize ${
+                  e.rating_action.action === 'upgrade'
+                    ? 'text-buy border-buy/40 bg-buy/10'
+                    : e.rating_action.action === 'downgrade'
+                    ? 'text-sell border-sell/40 bg-sell/10'
+                    : 'text-hold border-hold/40 bg-hold/10'
+                }`}
+                title={e.rating_action.title ?? undefined}
+              >
                 {e.rating_action.agency} {e.rating_action.action}
+                {e.rating_action.date ? ` · ${e.rating_action.date}` : ''}
               </span>
             )}
             {e.corporate_actions.slice(0, 2).map((ca, i) => (
-              <span key={i} className="px-2 py-0.5 rounded-full bg-surface border border-border text-tx capitalize">
+              <span
+                key={i}
+                className="px-2 py-0.5 rounded-full bg-surface border border-border text-tx capitalize"
+                title={ca.title ?? undefined}
+              >
                 {ca.type}{ca.date ? ` · ${ca.date}` : ''}
               </span>
             ))}

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import type { FinancialStatement, FinancialStatementsResponse, InsiderActivity, PeerComparison, PriceHistory, QuarterlyTrend, Report, StockInfo, StreetConsensus, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
+import type { FinancialStatement, FinancialStatementsResponse, InsiderActivity, MfHoldingsStakeDelta, PeerComparison, PriceHistory, QuarterlyTrend, Report, StockInfo, StreetConsensus, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
 import InfoTooltip from './info-tooltip';
 import Sparkline from './sparkline';
 import WatchlistButton from './watchlist-button';
@@ -567,6 +567,7 @@ function VerdictTimeline({ symbol }: { symbol: string }) {
               h.date,
               h.current_price != null ? `₹${fmt(h.current_price)}` : null,
               h.confidence ? `${h.confidence} confidence` : null,
+              h.signal_score != null ? `signal score ${fmt(h.signal_score, 2)}` : null,
               h.return_since_pct != null
                 ? `${h.return_since_pct >= 0 ? '+' : ''}${h.return_since_pct}% since`
                 : null,
@@ -786,7 +787,10 @@ function ExchangeTable({
     const changeCls = change > 0 ? 'text-buy' : change < 0 ? 'text-sell' : 'text-muted';
     return (
       <div className="text-right shrink-0">
-        <p className="text-2xl font-bold font-mono text-tx">
+        <p
+          className="text-2xl font-bold font-mono text-tx"
+          title={q?.previous_close != null ? `Previous close: ₹${fmt(q.previous_close)}` : undefined}
+        >
           {q?.current_price != null ? `₹${fmt(q.current_price)}` : '—'}
         </p>
         <p className={`text-sm font-mono ${changeCls}`}>
@@ -817,7 +821,10 @@ function ExchangeTable({
               )}
             </div>
             <div className="text-right">
-              <span className="font-mono font-bold text-tx">
+              <span
+                className="font-mono font-bold text-tx"
+                title={q?.previous_close != null ? `Previous close: ₹${fmt(q.previous_close)}` : undefined}
+              >
                 {q?.current_price != null ? `₹${fmt(q.current_price)}` : '—'}
               </span>
               <span className={`ml-3 font-mono text-xs ${changeCls}`}>
@@ -893,9 +900,9 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
   }, [peers]);
 
   const mfDeltaByFund = useMemo(() => {
-    const map: Record<string, number> = {};
+    const map: Record<string, MfHoldingsStakeDelta> = {};
     for (const d of mfTrend ?? []) {
-      if (d.delta_pct != null) map[d.fund] = d.delta_pct;
+      if (d.delta_pct != null) map[d.fund] = d;
     }
     return map;
   }, [mfTrend]);
@@ -1136,6 +1143,9 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                     {' '}vs. current <span className="font-mono">₹{fmt(financials.dcf.current_price, 2)}</span>
                     {' '}({financials.dcf.upside_pct >= 0 ? '+' : ''}{fmt(financials.dcf.upside_pct, 1)}%)
                   </p>
+                  <p className="text-muted mt-0.5">
+                    Projected off ₹{fmt(financials.dcf.latest_ocf_cr, 0)} Cr latest operating cash flow
+                  </p>
                 </div>
               )}
             </Card>
@@ -1267,10 +1277,13 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                     <span className="flex items-center gap-1.5">
                       <span className="text-sm font-mono font-semibold text-accent">{fmt(mf.holding_pct, 2)}%</span>
                       {delta != null && (
-                        <span className={`text-[11px] font-mono ${
-                          delta > 0 ? 'text-buy' : delta < 0 ? 'text-sell' : 'text-muted'
-                        }`}>
-                          {delta > 0 ? '▲' : delta < 0 ? '▼' : '–'} {Math.abs(delta).toFixed(2)}%
+                        <span
+                          className={`text-[11px] font-mono ${
+                            delta.delta_pct! > 0 ? 'text-buy' : delta.delta_pct! < 0 ? 'text-sell' : 'text-muted'
+                          }`}
+                          title={delta.prior_as_of_date ? `vs. ${delta.prior_as_of_date} → ${delta.as_of_date}` : undefined}
+                        >
+                          {delta.delta_pct! > 0 ? '▲' : delta.delta_pct! < 0 ? '▼' : '–'} {Math.abs(delta.delta_pct!).toFixed(2)}%
                         </span>
                       )}
                     </span>
@@ -1306,22 +1319,30 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
           {fs && (fs.corporate_actions.length > 0 || fs.rating_action || fs.next_results_date) && (
             <div className="flex flex-wrap gap-2 mb-3">
               {fs.corporate_actions.slice(0, 3).map((ca, i) => (
-                <span key={i} className="text-[11px] px-2 py-1 rounded-full bg-surface border border-border text-tx capitalize">
+                <span
+                  key={i}
+                  className="text-[11px] px-2 py-1 rounded-full bg-surface border border-border text-tx capitalize"
+                  title={ca.title ?? undefined}
+                >
                   {ca.type}{ca.date ? ` · ${ca.date}` : ''}
                 </span>
               ))}
               {fs.rating_action && (
-                <span className={`text-[11px] px-2 py-1 rounded-full border capitalize ${
-                  fs.rating_action.action === 'upgrade'
-                    ? 'text-buy border-buy/40 bg-buy/10'
-                    : fs.rating_action.action === 'downgrade'
-                    ? 'text-sell border-sell/40 bg-sell/10'
-                    : 'text-hold border-hold/40 bg-hold/10'
-                }`}>
+                <span
+                  className={`text-[11px] px-2 py-1 rounded-full border capitalize ${
+                    fs.rating_action.action === 'upgrade'
+                      ? 'text-buy border-buy/40 bg-buy/10'
+                      : fs.rating_action.action === 'downgrade'
+                      ? 'text-sell border-sell/40 bg-sell/10'
+                      : 'text-hold border-hold/40 bg-hold/10'
+                  }`}
+                  title={fs.rating_action.title ?? undefined}
+                >
                   {fs.rating_action.agency} {fs.rating_action.action}
                   {fs.rating_action.from_rating && fs.rating_action.to_rating
                     ? ` (${fs.rating_action.from_rating} → ${fs.rating_action.to_rating})`
                     : ''}
+                  {fs.rating_action.date ? ` · ${fs.rating_action.date}` : ''}
                 </span>
               )}
               {fs.next_results_date && (
