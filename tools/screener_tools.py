@@ -351,14 +351,81 @@ def _extract_yearly_statement(soup: BeautifulSoup, section_id: str, max_years: i
     return {"years": years_n, "rows": rows}
 
 
+def _extract_concalls(soup: BeautifulSoup, max_entries: int = 8) -> list[dict]:
+    """Screener's own "Concalls" section (section#concalls) — one entry per
+    quarterly earnings call, with whichever of Transcript / PPT (investor
+    presentation) / Notes (Screener's own concall notes) / REC (audio
+    recording) links Screener has published for it. The same company page
+    get_financial_statements already fetches, so this is free (no extra
+    round trip) — same pattern as _extract_valuation_band riding along on
+    get_peer_comparison's fetch. Real, static links scraped off the page; an
+    entry missing one of the four link types simply omits that key rather
+    than backfilling a guessed URL, and a call date this parser can't
+    confidently read is dropped rather than kept with a null date.
+
+    Closes a gap the design review flagged directly: management commentary
+    (what the company actually said on its own earnings calls) was entirely
+    absent from this app — only third-party news coverage and Screener's own
+    numeric ratios were ever surfaced, never the primary-source calls
+    themselves.
+
+    **Disclosed limitation**: Screener.in's exact section id/label/markup for
+    this feature was not verified against a live response in this sandbox
+    (no outbound internet — same disclosure pattern as every other Screener
+    extractor in this module, e.g. _extract_valuation_band/
+    _extract_yearly_statement immediately above). If the page's real markup
+    doesn't match what's parsed here, this returns [] (never a fabricated
+    call date or link) exactly like "Screener doesn't have this data"
+    elsewhere in this module — worth spot-checking against a live company
+    page before relying on this in production.
+    """
+    section = soup.find("section", {"id": "concalls"})
+    if not section:
+        return []
+
+    entries: list[dict] = []
+    for li in section.select("li")[:max_entries]:
+        text = _clean(li.get_text(" ", strip=True))
+        # The call date is the leading "<Mon> <YYYY>" chunk of the row's text,
+        # before any link labels ("Transcript", "PPT", ...) get concatenated
+        # into the same get_text() call.
+        date_match = re.match(r"^([A-Za-z]{3,9}\s+\d{4})", text)
+        if not date_match:
+            continue
+        date = date_match.group(1)
+
+        links: dict[str, str] = {}
+        for a in li.find_all("a", href=True):
+            label = _clean(a.get_text(" ", strip=True)).lower()
+            href = a["href"]
+            if not href.startswith("http"):
+                continue
+            if "transcript" in label:
+                links["transcript_url"] = href
+            elif "ppt" in label or "presentation" in label:
+                links["ppt_url"] = href
+            elif "notes" in label:
+                links["notes_url"] = href
+            elif "rec" in label or "audio" in label:
+                links["audio_url"] = href
+
+        if links:
+            entries.append({"date": date, **links})
+
+    return entries
+
+
 @tool("Get Screener.in Multi-Year Financial Statements")
 def get_financial_statements(symbol: str) -> str:
     """Scrape Screener.in's multi-year Profit & Loss, Balance Sheet, and Cash
     Flow statement tables (up to the last 10 years each) for an Indian stock —
     the fuller financial-history view get_fundamentals' current-ratios-only
     payload and get_peer_comparison's P/E-only valuation_band don't cover.
-    Each of profit_loss/balance_sheet/cash_flow is independently optional and
-    absent (not guessed) when Screener doesn't have that table for this
+    Also carries `concalls` — Screener's own list of quarterly earnings-call
+    Transcript/PPT/Notes/REC links (see _extract_concalls), the primary-source
+    management commentary this app otherwise never surfaced. Each of
+    profit_loss/balance_sheet/cash_flow/concalls is independently optional and
+    absent (not guessed) when Screener doesn't have that data for this
     company. Input: NSE stock symbol, e.g. RELIANCE, TCS, INFY."""
     try:
         soup = _fetch_soup(symbol)
@@ -375,6 +442,10 @@ def get_financial_statements(symbol: str) -> str:
         cash_flow = _extract_yearly_statement(soup, "cash-flow")
         if cash_flow:
             payload["cash_flow"] = cash_flow
+
+        concalls = _extract_concalls(soup)
+        if concalls:
+            payload["concalls"] = concalls
 
         return json.dumps(payload)
     except Exception as e:

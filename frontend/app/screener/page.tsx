@@ -5,15 +5,47 @@ import Link from 'next/link';
 import type { ScreenerResponse, ScreenerStock } from '@/types';
 import SiteNav from '@/components/site-nav';
 import WatchlistButton from '@/components/watchlist-button';
+import SectorHeatmap from '@/components/sector-heatmap';
+import { Skeleton, FilterChip, SortableTh, fmtMarketCap } from '@/components/data-table-ui';
 
 type EmaTrendFilter = 'all' | 'bullish' | 'bearish';
 type SortKey = 'symbol' | 'current_price' | 'pe_ratio' | 'market_cap_cr' | 'avg_volume_10d' | 'rsi14';
+type RsiFilter = 'all' | 'oversold' | 'overbought';
+type SortDir = 'asc' | 'desc';
 
 const _RSI_OVERSOLD = 30;
 const _RSI_OVERBOUGHT = 70;
 
-function Skeleton({ className }: { className: string }) {
-  return <div className={`bg-border/60 rounded animate-pulse ${className}`} />;
+// Filters reset to defaults on every reload otherwise — a screen this
+// configurable (7 independent filter/sort dimensions) is worth remembering
+// across visits, same instinct as useWatchlist's client_id persistence.
+// Client-only (guarded by typeof window checks below), so this never runs
+// during Next.js's server render pass.
+const _FILTERS_STORAGE_KEY = 'alphapulse_screener_filters';
+
+interface PersistedFilters {
+  industry?: string;
+  emaTrend?: EmaTrendFilter;
+  rsiFilter?: RsiFilter;
+  peMax?: string;
+  marketCapMin?: string;
+  sortKey?: SortKey;
+  sortDir?: SortDir;
+}
+
+const _EMA_TREND_VALUES: EmaTrendFilter[] = ['all', 'bullish', 'bearish'];
+const _RSI_FILTER_VALUES: RsiFilter[] = ['all', 'oversold', 'overbought'];
+const _SORT_KEY_VALUES: SortKey[] = ['symbol', 'current_price', 'pe_ratio', 'market_cap_cr', 'avg_volume_10d', 'rsi14'];
+const _SORT_DIR_VALUES: SortDir[] = ['asc', 'desc'];
+
+function loadPersistedFilters(): PersistedFilters {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(_FILTERS_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as PersistedFilters) : {};
+  } catch {
+    return {};
+  }
 }
 
 function TrendBadge({ trend }: { trend: 'bullish' | 'bearish' | null }) {
@@ -36,61 +68,8 @@ function rsiColor(v: number | null): string {
   return 'text-tx';
 }
 
-function fmtMarketCap(v: number | null): string {
-  if (v == null) return '—';
-  if (v >= 1_000) return `₹${(v / 1_000).toFixed(2)}k Cr`;
-  return `₹${v.toFixed(0)} Cr`;
-}
-
 function fmtNum(v: number | null, digits = 1): string {
   return v == null ? '—' : v.toFixed(digits);
-}
-
-function FilterChip<T extends string>({
-  value, active, onClick, label,
-}: { value: T; active: boolean; onClick: (v: T) => void; label: string }) {
-  return (
-    <button
-      onClick={() => onClick(value)}
-      aria-pressed={active}
-      className={`px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-colors
-        ${active
-          ? 'bg-accent/15 border-accent/40 text-accent'
-          : 'bg-surface border-border text-muted hover:text-tx hover:border-border-hi'}`}
-    >
-      {label}
-    </button>
-  );
-}
-
-function SortableTh({ label, sortK, currentKey, currentDir, onSort, align = 'left' }: {
-  label: string;
-  sortK: SortKey;
-  currentKey: SortKey;
-  currentDir: 'asc' | 'desc';
-  onSort: (k: SortKey) => void;
-  align?: 'left' | 'right';
-}) {
-  const active = currentKey === sortK;
-  return (
-    <th
-      aria-sort={active ? (currentDir === 'desc' ? 'descending' : 'ascending') : 'none'}
-      className={`p-0 text-[10px] font-bold text-muted uppercase tracking-wider whitespace-nowrap ${align === 'right' ? 'text-right' : 'text-left'}`}
-    >
-      <button
-        type="button"
-        onClick={() => onSort(sortK)}
-        className={`inline-flex items-center gap-1 px-4 py-3 uppercase tracking-wider
-                   cursor-pointer hover:text-tx transition-colors select-none group
-                   ${align === 'right' ? 'flex-row-reverse' : ''}`}
-      >
-        {label}
-        <span className={`text-[9px] transition-colors ${active ? 'text-accent' : 'text-muted/25 group-hover:text-muted/60'}`}>
-          {active ? (currentDir === 'desc' ? '↓' : '↑') : '↕'}
-        </span>
-      </button>
-    </th>
-  );
 }
 
 function SkeletonRows() {
@@ -121,7 +100,7 @@ export default function ScreenerPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [industry,   setIndustry]   = useState('all');
   const [emaTrend,   setEmaTrend]   = useState<EmaTrendFilter>('all');
-  const [rsiFilter,  setRsiFilter]  = useState<'all' | 'oversold' | 'overbought'>('all');
+  const [rsiFilter,  setRsiFilter]  = useState<RsiFilter>('all');
   const [peMax,      setPeMax]      = useState('');
   const [marketCapMin, setMarketCapMin] = useState('');
   // fetchStocks fires on every change to these — debounce the text inputs
@@ -132,8 +111,32 @@ export default function ScreenerPage() {
   const [debouncedPeMax, setDebouncedPeMax] = useState('');
   const [debouncedMarketCapMin, setDebouncedMarketCapMin] = useState('');
   const [sortKey,    setSortKey]    = useState<SortKey>('market_cap_cr');
-  const [sortDir,    setSortDir]    = useState<'asc' | 'desc'>('desc');
+  const [sortDir,    setSortDir]    = useState<SortDir>('desc');
+  // Defaults above render identically on the server and on first client
+  // paint (avoiding a hydration mismatch); the persisted values, if any,
+  // are then applied in one batch right after mount — see the hydration
+  // effect below, which also gates the very first fetch until this runs so
+  // a restored filter set doesn't cause two requests back to back.
+  const [hydrated, setHydrated] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const saved = loadPersistedFilters();
+    if (saved.industry !== undefined) setIndustry(saved.industry);
+    if (saved.emaTrend && _EMA_TREND_VALUES.includes(saved.emaTrend)) setEmaTrend(saved.emaTrend);
+    if (saved.rsiFilter && _RSI_FILTER_VALUES.includes(saved.rsiFilter)) setRsiFilter(saved.rsiFilter);
+    if (saved.peMax !== undefined) { setPeMax(saved.peMax); setDebouncedPeMax(saved.peMax); }
+    if (saved.marketCapMin !== undefined) { setMarketCapMin(saved.marketCapMin); setDebouncedMarketCapMin(saved.marketCapMin); }
+    if (saved.sortKey && _SORT_KEY_VALUES.includes(saved.sortKey)) setSortKey(saved.sortKey);
+    if (saved.sortDir && _SORT_DIR_VALUES.includes(saved.sortDir)) setSortDir(saved.sortDir);
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated || typeof window === 'undefined') return;
+    const filters: PersistedFilters = { industry, emaTrend, rsiFilter, peMax, marketCapMin, sortKey, sortDir };
+    try { window.localStorage.setItem(_FILTERS_STORAGE_KEY, JSON.stringify(filters)); } catch { /* private browsing, etc. */ }
+  }, [hydrated, industry, emaTrend, rsiFilter, peMax, marketCapMin, sortKey, sortDir]);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedPeMax(peMax), 420);
@@ -182,8 +185,9 @@ export default function ScreenerPage() {
   }, [industry, emaTrend, rsiFilter, debouncedPeMax, debouncedMarketCapMin, sortKey, sortDir]);
 
   useEffect(() => {
+    if (!hydrated) return;
     fetchStocks();
-  }, [fetchStocks]);
+  }, [fetchStocks, hydrated]);
 
   useEffect(() => {
     if (data) setRefreshing(data.refreshing);
@@ -202,6 +206,19 @@ export default function ScreenerPage() {
     } catch {
       setError('Could not reach the backend. Is the server running?');
     }
+  }, []);
+
+  // The heatmap needs every monitored stock across every industry to compare
+  // sectors against each other — the main `data.stocks` above is scoped to
+  // whatever the Industry filter chip currently selects, which would collapse
+  // the heatmap to one tile the moment a user picks a specific industry. So
+  // this is a separate, filter-independent fetch, made once on mount.
+  const [heatmapStocks, setHeatmapStocks] = useState<ScreenerStock[]>([]);
+  useEffect(() => {
+    fetch('/api/screener?industry=all&ema_trend=all&sort=market_cap_cr&order=desc&limit=500')
+      .then(res => (res.ok ? res.json() : null))
+      .then((json: ScreenerResponse | null) => { if (json) setHeatmapStocks(json.stocks); })
+      .catch(() => { /* heatmap just doesn't render — the table below is unaffected */ });
   }, []);
 
   const toggleSort = useCallback((k: SortKey) => {
@@ -265,6 +282,8 @@ export default function ScreenerPage() {
             {lastRunLabel && <span>· Last refreshed {lastRunLabel}</span>}
           </div>
         </div>
+
+        <SectorHeatmap stocks={heatmapStocks} activeIndustry={industry} onSelectIndustry={setIndustry} />
 
         {/* Filters */}
         <div className="mb-6 space-y-3">

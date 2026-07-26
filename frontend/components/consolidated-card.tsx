@@ -196,6 +196,9 @@ export default function ConsolidatedCard({ symbol, onClose }: Props) {
                 <p className="text-[10px] font-bold text-muted uppercase tracking-wider mb-2">SME Signals</p>
                 {data.sme ? (
                   <>
+                    {data.sme.name && (
+                      <p className="text-sm font-semibold text-tx mb-1">{data.sme.name}</p>
+                    )}
                     <div className="flex items-center gap-2 mb-1.5 flex-wrap">
                       <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border tracking-wide
                         ${data.sme.in_golden_cross ? 'bg-buy/12 text-buy border-buy/25' : 'bg-sell/12 text-sell border-sell/25'}`}>

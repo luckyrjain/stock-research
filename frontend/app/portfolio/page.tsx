@@ -41,6 +41,18 @@ interface Row {
   pnl: number | null;
   atTarget: boolean;
   atStop: boolean;
+  // shares is user-entered (see lib/positions.ts) — invested/currentValue are
+  // only ever computed when the user has actually filled it in for this
+  // position, never assumed to be 1.
+  shares: number | null;
+  invested: number | null;
+  currentValue: number | null;
+}
+
+function fmtInr(n: number): string {
+  if (Math.abs(n) >= 1_00_00_000) return `₹${(n / 1_00_00_000).toFixed(2)} Cr`;
+  if (Math.abs(n) >= 1_00_000) return `₹${(n / 1_00_000).toFixed(2)} L`;
+  return `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 }
 
 /** Aggregate view over every "I bought this" position (frontend/lib/positions.ts,
@@ -48,16 +60,17 @@ interface Row {
  * strip this generalizes). Purely client-side: reuses the same GET /api/prices
  * poll the Market Picks page already uses for live LTP, no new backend work.
  *
- * Positions carry no share-count/quantity field (only entry/target/stop per
- * symbol), so a real capital-weighted portfolio value (₹ invested, ₹ current)
- * isn't data this page actually has — computing one would mean silently
- * assuming "1 share each," which is worse than not showing a number at all.
- * The aggregate stats here are therefore equal-weighted across positions
- * (win rate, average P&L%, best/worst performer) — a portfolio *return*
- * summary, not a portfolio *value* summary — and labeled as such.
+ * Positions carry an optional, user-entered share count (filled in via the
+ * "Shares" column below, not asked for at "I bought this" click-time — that's
+ * meant to stay a frictionless one-click action). A capital-weighted ₹
+ * invested/current/P&L is only ever computed from positions where the user
+ * has actually filled it in — never assumed to be "1 share each," which
+ * would be inventing a number this app doesn't have. The equal-weighted
+ * stats (win rate, average P&L%, best/worst) still cover every priced
+ * position regardless of share count, since those don't need one.
  */
 export default function PortfolioPage() {
-  const { positions, removePosition } = usePositions();
+  const { positions, removePosition, updateShares } = usePositions();
   const [prices, setPrices] = useState<Record<string, LivePrice>>({});
   const [sortDesc, setSortDesc] = useState(true);
 
@@ -88,12 +101,19 @@ export default function PortfolioPage() {
       const live = prices[position.symbol];
       const current = live?.price ?? null;
       const pnl = pnlPct(position.entry_price, current);
+      // Legacy positions created before shares tracking existed have no
+      // `shares` key at all in their stored JSON (undefined, not null) —
+      // normalize both to null here rather than trusting the stored shape.
+      const shares = position.shares ?? null;
       return {
         position,
         current,
         pnl,
         atTarget: position.target_price != null && current != null && current >= position.target_price,
         atStop: position.stop_loss != null && current != null && current <= position.stop_loss,
+        shares,
+        invested: shares != null && position.entry_price != null ? shares * position.entry_price : null,
+        currentValue: shares != null && current != null ? shares * current : null,
       };
     });
   }, [positions, prices]);
@@ -120,6 +140,16 @@ export default function PortfolioPage() {
   const best = priced.length > 0 ? priced.reduce((a, b) => ((a.pnl ?? -Infinity) >= (b.pnl ?? -Infinity) ? a : b)) : null;
   const worst = priced.length > 0 ? priced.reduce((a, b) => ((a.pnl ?? Infinity) <= (b.pnl ?? Infinity) ? a : b)) : null;
 
+  // Capital-weighted view — only over rows where the user has actually
+  // entered a share count (see the Row/updateShares plumbing above). A
+  // position with no share count contributes nothing here, not a guessed
+  // "1 share" fallback.
+  const withShares = rows.filter(r => r.invested != null && r.currentValue != null);
+  const totalInvested = withShares.reduce((sum, r) => sum + (r.invested ?? 0), 0);
+  const totalCurrentValue = withShares.reduce((sum, r) => sum + (r.currentValue ?? 0), 0);
+  const totalPnl = totalCurrentValue - totalInvested;
+  const totalPnlPct = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : null;
+
   return (
     <main className="min-h-screen bg-bg text-tx">
       <div className="max-w-4xl mx-auto px-4 pt-8 pb-16">
@@ -136,8 +166,9 @@ export default function PortfolioPage() {
             Portfolio <span className="text-accent">Summary</span>
           </h1>
           <p className="text-muted text-sm max-w-2xl leading-relaxed">
-            An equal-weighted return summary across every &quot;I bought this&quot; position — not a
-            capital-weighted portfolio value, since no share count is tracked per position.
+            An equal-weighted return summary across every &quot;I bought this&quot; position, plus a real
+            ₹ invested/current value for whichever positions you&apos;ve added a share count to below
+            (never assumed — a position with no share count just isn&apos;t counted in that total).
             Purely local to this browser; nothing here is sent to a server.
           </p>
         </div>
@@ -200,6 +231,40 @@ export default function PortfolioPage() {
               </div>
             )}
 
+            {/* Capital-weighted value — only ever computed from positions the
+                user has actually added a share count to (see the Shares
+                column in the table below). Absent entirely rather than
+                showing a zeroed-out ₹0 when nobody has filled one in yet. */}
+            {withShares.length > 0 && (
+              <div className="mb-6">
+                <div className="flex items-center gap-2 mb-2.5">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Capital-Weighted Value
+                  </p>
+                  <span className="text-[10px] text-muted/60">
+                    {withShares.length} of {positions.length} position{positions.length === 1 ? '' : 's'} have a share count
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  <div className="rounded-xl border border-border bg-card px-4 py-3">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1">Invested</div>
+                    <div className="text-xl font-black text-tx font-mono">{fmtInr(totalInvested)}</div>
+                  </div>
+                  <div className="rounded-xl border border-border bg-card px-4 py-3">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1">Current Value</div>
+                    <div className="text-xl font-black text-tx font-mono">{fmtInr(totalCurrentValue)}</div>
+                  </div>
+                  <div className="rounded-xl border border-border bg-card px-4 py-3">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1">P&amp;L</div>
+                    <div className={`text-xl font-black font-mono ${pnlColor(totalPnl)}`}>
+                      {totalPnl >= 0 ? '+' : ''}{fmtInr(totalPnl)}
+                    </div>
+                    <div className={`text-[10px] ${pnlColor(totalPnlPct)}`}>{fmtPct(totalPnlPct)}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Table */}
             <div className="rounded-xl border border-border bg-card overflow-hidden">
               <div className="overflow-x-auto">
@@ -207,8 +272,10 @@ export default function PortfolioPage() {
                   <thead>
                     <tr className="border-b border-border bg-surface/60">
                       <th className="text-left px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Symbol</th>
+                      <th className="text-right px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Shares</th>
                       <th className="text-right px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Entry</th>
                       <th className="text-right px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Current</th>
+                      <th className="text-right px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Value</th>
                       <th
                         aria-sort={sortDesc ? 'descending' : 'ascending'}
                         className="text-right px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider"
@@ -235,8 +302,31 @@ export default function PortfolioPage() {
                           </Link>
                           <div className="text-[10px] text-muted/70 truncate max-w-[10rem]">{row.position.company}</div>
                         </td>
+                        <td className="px-4 py-3 text-right">
+                          <input
+                            type="number"
+                            min={0}
+                            step="any"
+                            value={row.shares ?? ''}
+                            onChange={e => {
+                              const raw = e.target.value.trim();
+                              if (raw === '') { updateShares(row.position.symbol, null); return; }
+                              const parsed = Number(raw);
+                              // min={0} on the input only affects the spinner/validity state, not
+                              // typed input — a negative value would otherwise silently flow into
+                              // invested/currentValue and distort the capital-weighted totals.
+                              if (!Number.isNaN(parsed) && parsed >= 0) updateShares(row.position.symbol, parsed);
+                            }}
+                            placeholder="—"
+                            aria-label={`Shares held of ${row.position.symbol}`}
+                            className="w-16 px-1.5 py-1 rounded-md border border-border bg-surface text-tx text-xs text-right font-mono"
+                          />
+                        </td>
                         <td className="px-4 py-3 text-right font-mono">{fmtPrice(row.position.entry_price)}</td>
                         <td className="px-4 py-3 text-right font-mono">{fmtPrice(row.current)}</td>
+                        <td className="px-4 py-3 text-right font-mono text-muted">
+                          {row.currentValue != null ? fmtInr(row.currentValue) : '—'}
+                        </td>
                         <td className={`px-4 py-3 text-right font-mono font-semibold ${pnlColor(row.pnl)}`}>{fmtPct(row.pnl)}</td>
                         <td className="px-4 py-3 text-right font-mono text-muted">{daysHeld(row.position.bought_at)}d</td>
                         <td className="px-4 py-3">

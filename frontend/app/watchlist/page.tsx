@@ -43,12 +43,46 @@ function useWatchlistCalendar(symbols: string[]): WatchlistCalendarEntry[] {
   return entries;
 }
 
+const REC_TONE: Record<string, string> = {
+  BUY:  'text-buy border-buy/40 bg-buy/10',
+  SELL: 'text-sell border-sell/40 bg-sell/10',
+  HOLD: 'text-hold border-hold/40 bg-hold/10',
+};
+
+// The headline fix this section exists for: watchlist_alerts.py's daily
+// digest already computes a same-day recommendation-change / price-move
+// flag and emails it once a day — previously that was the ONLY way to learn
+// about it. This badge surfaces the exact same data in-app instead of
+// leaving it to arrive (or not) as an email that may not even be
+// configured (no SMTP_HOST = the email silently never sends).
+function AlertBadges({ entry }: { entry: WatchlistCalendarEntry }) {
+  return (
+    <>
+      {entry.price_move && (
+        <span
+          className={`px-2 py-0.5 rounded-full border font-mono font-semibold ${
+            entry.price_move.change_pct >= 0 ? 'text-buy border-buy/40 bg-buy/10' : 'text-sell border-sell/40 bg-sell/10'
+          }`}
+          title={`₹${entry.price_move.old_price} → ₹${entry.price_move.new_price} since the last stored verdict`}
+        >
+          🔔 {entry.price_move.change_pct >= 0 ? '+' : ''}{entry.price_move.change_pct}% since last check
+        </span>
+      )}
+      {entry.recommendation_change && (
+        <span className={`px-2 py-0.5 rounded-full border font-semibold ${REC_TONE[entry.recommendation_change.new_recommendation] ?? 'text-tx border-border bg-surface'}`}>
+          🔔 {entry.recommendation_change.old_recommendation ?? '—'} → {entry.recommendation_change.new_recommendation}
+        </span>
+      )}
+    </>
+  );
+}
+
 function CalendarStrip({ entries }: { entries: WatchlistCalendarEntry[] }) {
   if (entries.length === 0) return null;
   return (
     <div className="mb-6 rounded-xl border border-border bg-card p-4">
       <p className="text-[11px] font-semibold text-muted tracking-[1px] uppercase mb-3">
-        Upcoming — from your watchlist&apos;s cached filings
+        Upcoming &amp; notable — from your watchlist&apos;s cached filings and latest verdicts
       </p>
       <div className="space-y-2">
         {entries.map(e => (
@@ -56,24 +90,33 @@ function CalendarStrip({ entries }: { entries: WatchlistCalendarEntry[] }) {
             <Link href={`/?symbol=${e.symbol}`} className="font-mono font-semibold text-tx hover:text-accent transition-colors shrink-0">
               {e.symbol}
             </Link>
+            <AlertBadges entry={e} />
             {e.next_results_date && (
               <span className="px-2 py-0.5 rounded-full bg-surface border border-border text-tx">
                 Next results: {e.next_results_date}
               </span>
             )}
             {e.rating_action && (
-              <span className={`px-2 py-0.5 rounded-full border capitalize ${
-                e.rating_action.action === 'upgrade'
-                  ? 'text-buy border-buy/40 bg-buy/10'
-                  : e.rating_action.action === 'downgrade'
-                  ? 'text-sell border-sell/40 bg-sell/10'
-                  : 'text-hold border-hold/40 bg-hold/10'
-              }`}>
+              <span
+                className={`px-2 py-0.5 rounded-full border capitalize ${
+                  e.rating_action.action === 'upgrade'
+                    ? 'text-buy border-buy/40 bg-buy/10'
+                    : e.rating_action.action === 'downgrade'
+                    ? 'text-sell border-sell/40 bg-sell/10'
+                    : 'text-hold border-hold/40 bg-hold/10'
+                }`}
+                title={e.rating_action.title ?? undefined}
+              >
                 {e.rating_action.agency} {e.rating_action.action}
+                {e.rating_action.date ? ` · ${e.rating_action.date}` : ''}
               </span>
             )}
             {e.corporate_actions.slice(0, 2).map((ca, i) => (
-              <span key={i} className="px-2 py-0.5 rounded-full bg-surface border border-border text-tx capitalize">
+              <span
+                key={i}
+                className="px-2 py-0.5 rounded-full bg-surface border border-border text-tx capitalize"
+                title={ca.title ?? undefined}
+              >
                 {ca.type}{ca.date ? ` · ${ca.date}` : ''}
               </span>
             ))}

@@ -1336,15 +1336,23 @@ async def get_financials(request: Request, symbol: str):
     dcf_valuation.py) — a second, independent valuation lens alongside the
     existing peer-percentile and absolute P/E-anchor views, answering "cheap
     vs. what its cash flows are worth" rather than "cheap vs. peers/its own
-    trading history".
+    trading history". Also carries `concalls` — Screener's own list of
+    quarterly earnings-call Transcript/PPT/Notes/REC links (see
+    tools/screener_tools.py::_extract_concalls), the primary-source
+    management commentary this app otherwise never surfaced — only
+    third-party news coverage and Screener's own numeric ratios were ever
+    shown before this.
 
     Each of profit_loss/balance_sheet/cash_flow/dcf is independently
     optional (null, never guessed) — a company Screener doesn't have one of
     these tables for, or whose cash flow doesn't support a DCF (see
     dcf_valuation.py's own preconditions), just has that field come back
-    null rather than a fabricated number. Cached like peers/insider-activity
-    (24h TTL) but intentionally outside ALL_DATA_TASKS — standalone and
-    on-demand, not part of the six-task analysis pipeline.
+    null rather than a fabricated number. `concalls` is `[]` (never null)
+    when Screener has no calls on record for this company, matching how
+    every other empty-but-not-missing list in this app is represented.
+    Cached like peers/insider-activity (24h TTL) but intentionally outside
+    ALL_DATA_TASKS — standalone and on-demand, not part of the six-task
+    analysis pipeline.
     """
     _rate_limit(request, "financials", max_calls=30, window_seconds=60)
     sym = symbol.upper().strip()
@@ -1366,7 +1374,7 @@ async def get_financials(request: Request, symbol: str):
             # transient scrape failure should be retried on the next
             # request, not locked in as "this company has no financials"
             # for a full 24h TTL.
-            return {"symbol": sym, "profit_loss": None, "balance_sheet": None, "cash_flow": None, "dcf": None}
+            return {"symbol": sym, "profit_loss": None, "balance_sheet": None, "cash_flow": None, "dcf": None, "concalls": []}
 
         stock_info = cache.load(sym, "stock_info") or {}
         from dcf_valuation import compute_dcf_estimate
@@ -1383,6 +1391,7 @@ async def get_financials(request: Request, symbol: str):
             "balance_sheet": raw.get("balance_sheet"),
             "cash_flow":     raw.get("cash_flow"),
             "dcf":           dcf,
+            "concalls":      raw.get("concalls", []),
         }
         cache.save(sym, "financials", result)
         return result
@@ -2184,19 +2193,25 @@ async def get_watchlist(request: Request, client_id: str | None = Query(None)):
 
 @app.get("/api/watchlist/calendar")
 async def get_watchlist_calendar(request: Request, symbols: str = Query(...)):
-    """Upcoming corporate-action calendar across a set of watched symbols —
-    pure read-aggregation over each symbol's already-cached `filings` data,
-    running the same classify_filings() classifier main._build_report()
-    already runs per-symbol for the single-stock report's "Corporate
-    Filings" card. No new scraping and no DATABASE_URL dependency: the
-    caller (the watchlist page, which already has its own symbol list from
-    GET /api/watchlist) passes the symbols directly rather than this
-    endpoint re-querying ownership itself.
+    """Upcoming-and-notable roll-up across a set of watched symbols — two
+    independent sources, each best-effort and each optional per symbol:
 
-    A symbol whose filings haven't been fetched (or have gone stale) simply
-    contributes nothing to the result — best-effort scoped to whatever's
-    already in cache, same as every other standalone aggregation endpoint
-    in this file, not an error.
+    1. A corporate-action calendar read straight off each symbol's
+       already-cached `filings` data, running the same classify_filings()
+       classifier main._build_report() already runs per-symbol for the
+       single-stock report's "Corporate Filings" card. No new scraping.
+    2. A same-day recommendation-change / price-move flag via
+       verdict_history.detect_recent_changes() — the same two conditions
+       watchlist_alerts.py's daily digest email already computes and sends,
+       now also reachable without waiting for that email to arrive. Degrades
+       to both `None` (not an error) when DATABASE_URL isn't set, same as
+       every other verdict_history-backed read in this app.
+
+    The caller (the watchlist page, which already has its own symbol list
+    from GET /api/watchlist) passes the symbols directly rather than this
+    endpoint re-querying ownership itself. A symbol contributes an entry
+    when it has *something* from either source — no cached filings and no
+    notable change means no entry, not an error.
     """
     _rate_limit(request, "watchlist_calendar", max_calls=30, window_seconds=60)
     sym_list = [s.strip().upper() for s in symbols.split(",") if _TICKER_RE.match(s.strip())][:_MAX_WATCHLIST_ITEMS_PER_CLIENT]
@@ -2205,26 +2220,40 @@ async def get_watchlist_calendar(request: Request, symbols: str = Query(...)):
 
     def _one(sym: str) -> dict | None:
         import cache
+        import verdict_history
         from signals.filings_classifier import classify_filings
 
         cached = cache.load(sym, "filings")
-        if not cached:
+        filings_list = cached.get("filings", []) if cached else []
+        summary = classify_filings(filings_list) if isinstance(filings_list, list) and filings_list else {
+            "corporate_actions": [], "rating_action": None, "next_results_date": None,
+        }
+
+        changes = verdict_history.detect_recent_changes(sym)
+
+        has_filings_content = bool(summary.get("next_results_date") or summary.get("corporate_actions"))
+        has_notable_change = bool(changes["recommendation_change"] or changes["price_move"])
+        if not has_filings_content and not has_notable_change:
             return None
-        filings_list = cached.get("filings", [])
-        if not isinstance(filings_list, list) or not filings_list:
-            return None
-        summary = classify_filings(filings_list)
-        if not summary.get("next_results_date") and not summary.get("corporate_actions"):
-            return None
-        return {"symbol": sym, **summary}
+        return {
+            "symbol": sym,
+            **summary,
+            "recommendation_change": changes["recommendation_change"],
+            "price_move": changes["price_move"],
+        }
 
     loop = asyncio.get_running_loop()
     results = await asyncio.gather(*[loop.run_in_executor(None, _one, s) for s in sym_list])
     entries = [r for r in results if r]
-    # Symbols with no next_results_date sort after ones that have it, rather
-    # than first — a corporate-action-only entry (e.g. a dividend filing with
-    # no upcoming results date) is still worth surfacing, just not up front.
-    entries.sort(key=lambda e: e.get("next_results_date") or "9999-99-99")
+    # A notable change (something to act on today) sorts first; within each
+    # group, symbols with no next_results_date sort after ones that have it
+    # rather than first — a corporate-action-only entry (e.g. a dividend
+    # filing with no upcoming results date) is still worth surfacing, just
+    # not ahead of an actual price move or recommendation flip.
+    entries.sort(key=lambda e: (
+        0 if (e["recommendation_change"] or e["price_move"]) else 1,
+        e.get("next_results_date") or "9999-99-99",
+    ))
     return {"entries": entries}
 
 

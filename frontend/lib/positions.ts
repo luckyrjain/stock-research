@@ -9,6 +9,11 @@ export interface Position {
   entry_price: number | null;
   target_price: number | null;
   stop_loss: number | null;
+  // User-entered, not scraped/computed — unlike every other "never invent" field
+  // in this codebase, there's no source of truth to guess this from at all, so
+  // it's simply left null until the user fills it in on the Portfolio page.
+  // null (not 0) means "unknown," never "zero shares held."
+  shares: number | null;
   bought_at: string;   // ISO timestamp, set when the user marks the pick as bought
 }
 
@@ -96,5 +101,13 @@ export function usePositions() {
     persist((cachedPositions ?? loadFromStorage()).filter(p => p.symbol !== upper));
   }, []);
 
-  return { positions, isPositioned, addPosition, removePosition };
+  // Filled in after the fact, typically from the Portfolio page — asking for
+  // a share count at "I bought this" click-time would add friction to what's
+  // meant to be a one-click action while browsing Market Picks.
+  const updateShares = useCallback((symbol: string, shares: number | null) => {
+    const upper = symbol.toUpperCase();
+    persist((cachedPositions ?? loadFromStorage()).map(p => (p.symbol === upper ? { ...p, shares } : p)));
+  }, []);
+
+  return { positions, isPositioned, addPosition, removePosition, updateShares };
 }

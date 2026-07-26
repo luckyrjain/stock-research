@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import type { FinancialStatement, FinancialStatementsResponse, InsiderActivity, PeerComparison, PriceHistory, QuarterlyTrend, Report, StockInfo, StreetConsensus, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
+import type { Concall, DcfEstimate, FinancialStatement, FinancialStatementsResponse, InsiderActivity, MfHoldingsStakeDelta, PeerComparison, PriceHistory, QuarterlyTrend, Report, StockInfo, StreetConsensus, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
 import InfoTooltip from './info-tooltip';
 import Sparkline from './sparkline';
 import WatchlistButton from './watchlist-button';
@@ -110,6 +110,57 @@ function FinancialStatementsCard({ data }: { data: FinancialStatementsResponse |
         <StatementTable title="Profit & Loss" statement={data.profit_loss} />
         <StatementTable title="Balance Sheet" statement={data.balance_sheet} />
         <StatementTable title="Cash Flow" statement={data.cash_flow} />
+      </div>
+    </Card>
+  );
+}
+
+const _CONCALL_LINK_LABELS: { key: keyof Concall; label: string }[] = [
+  { key: 'transcript_url', label: 'Transcript' },
+  { key: 'ppt_url',        label: 'PPT' },
+  { key: 'notes_url',      label: 'Notes' },
+  { key: 'audio_url',      label: 'REC' },
+];
+
+// Primary-source management commentary — what the company actually said on
+// its own quarterly earnings calls — scraped from Screener's own Concalls
+// section. Previously this app only ever surfaced third-party news coverage
+// and Screener's numeric ratios, never the calls themselves. `data` is
+// lifted from ResultsDashboard (same fetch as FinancialStatementsCard/the
+// DCF block, no second request) rather than fetched again here.
+function ConcallsCard({ concalls }: { concalls: Concall[] | undefined }) {
+  if (!concalls || concalls.length === 0) return null;
+  return (
+    <Card title={<>
+      Concalls
+      <InfoTooltip title="Concalls" align="left">
+        <p>Screener.in&apos;s own list of this company&apos;s quarterly earnings-call materials — transcript, investor presentation, Screener&apos;s own notes, and the audio recording, whichever of those Screener has published for each quarter.</p>
+        <p>Real, primary-source management commentary, not a third-party summary — every link is exactly what Screener links to.</p>
+      </InfoTooltip>
+    </>}>
+      <div className="divide-y divide-border">
+        {concalls.map((c, i) => (
+          <div key={i} className="flex items-center justify-between gap-2 py-2 first:pt-0 last:pb-0 text-sm">
+            <span className="text-tx font-medium">{c.date}</span>
+            <div className="flex items-center gap-2 flex-wrap justify-end">
+              {_CONCALL_LINK_LABELS.map(({ key, label }) => {
+                const url = c[key];
+                if (typeof url !== 'string') return null;
+                return (
+                  <a
+                    key={key}
+                    href={url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[11px] font-semibold px-2 py-0.5 rounded-full border border-border text-muted hover:text-accent hover:border-accent/40 transition-colors"
+                  >
+                    {label} ↗
+                  </a>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
     </Card>
   );
@@ -439,8 +490,7 @@ function NumericConsensusRow({ numeric }: { numeric: NonNullable<StreetConsensus
 // target price. Renders nothing when there's neither recent coverage nor a
 // resolvable numeric consensus — the expected common case for most stocks
 // on most days, not missing data.
-function StreetConsensusCard({ symbol }: { symbol: string }) {
-  const consensus = useStreetConsensus(symbol);
+function StreetConsensusCard({ consensus }: { consensus: StreetConsensus | null }) {
   const numeric = consensus?.numeric_consensus;
   const hasNumeric = numeric != null && (numeric.analyst_count != null || numeric.consensus_rating != null || numeric.mean_target_price != null || numeric.target_upside_pct != null);
   if (!consensus || (consensus.articles.length === 0 && !hasNumeric)) return null;
@@ -472,6 +522,102 @@ function StreetConsensusCard({ symbol }: { symbol: string }) {
         })}
       </div>
     </Card>
+  );
+}
+
+// A single "at a glance" reconciliation of every independent valuation lens
+// this app computes for the same stock — the AI analyst's own Undervalued/
+// Overvalued read, the deterministic DCF, where the P/E ranks against
+// Screener-listed sector peers, where it ranks against its own trading
+// history, and (when Trendlyne has one) the Street's mean target upside.
+// Previously each of these only ever appeared in its own separate card, so
+// seeing whether they agreed or disagreed meant scrolling and
+// cross-referencing four places by hand. Renders only the lenses actually
+// available for this stock — never a placeholder for a null/absent one —
+// and renders nothing at all when fewer than two lenses have data, since a
+// single value isn't something to "reconcile".
+function ValuationSummaryStrip({
+  llmVerdict,
+  dcf,
+  peerPePercentile,
+  absoluteAnchor,
+  streetUpsidePct,
+}: {
+  llmVerdict: string | undefined;
+  dcf: DcfEstimate | null | undefined;
+  peerPePercentile: number | undefined;
+  absoluteAnchor: PeerComparison['absolute_anchor'];
+  streetUpsidePct: number | null | undefined;
+}) {
+  const tone = (cheap: boolean | null): string =>
+    cheap === true ? 'text-buy border-buy/25 bg-buy/10' : cheap === false ? 'text-sell border-sell/25 bg-sell/10' : 'text-hold border-hold/25 bg-hold/10';
+
+  const items: { label: string; value: string; tone: string; title?: string }[] = [];
+
+  if (llmVerdict) {
+    items.push({
+      label: 'AI Analyst',
+      value: llmVerdict,
+      tone: tone(llmVerdict === 'Undervalued' ? true : llmVerdict === 'Overvalued' ? false : null),
+    });
+  }
+  if (dcf) {
+    items.push({
+      label: 'DCF',
+      value: `${dcf.verdict} (${dcf.upside_pct >= 0 ? '+' : ''}${fmt(dcf.upside_pct, 1)}%)`,
+      tone: tone(dcf.verdict === 'Undervalued' ? true : dcf.verdict === 'Overvalued' ? false : null),
+      title: 'Deterministic two-stage discounted cash flow estimate — not LLM-generated',
+    });
+  }
+  if (peerPePercentile != null) {
+    items.push({
+      label: 'vs. Peers',
+      value: `${Math.round(peerPePercentile)}th pct P/E`,
+      tone: tone(peerPePercentile <= 33 ? true : peerPePercentile >= 67 ? false : null),
+      title: "Where this stock's P/E ranks among its Screener-listed sector peers — lower percentile is cheaper",
+    });
+  }
+  if (absoluteAnchor) {
+    items.push({
+      label: 'vs. Own History',
+      value: `${Math.round(absoluteAnchor.percentile)}th pct P/E`,
+      tone: tone(absoluteAnchor.percentile <= 33 ? true : absoluteAnchor.percentile >= 67 ? false : null),
+      title: `Current P/E ${fmt(absoluteAnchor.current_pe, 1)} vs. its own ${absoluteAnchor.years[0]}–${absoluteAnchor.years[absoluteAnchor.years.length - 1]} range (${fmt(absoluteAnchor.low, 1)}–${fmt(absoluteAnchor.high, 1)})`,
+    });
+  }
+  if (streetUpsidePct != null) {
+    items.push({
+      label: 'Street Target',
+      value: `${streetUpsidePct >= 0 ? '+' : ''}${fmt(streetUpsidePct, 1)}%`,
+      tone: tone(streetUpsidePct >= 0),
+      title: "Upside/downside to Trendlyne's scraped mean analyst target price",
+    });
+  }
+
+  if (items.length < 2) return null;
+
+  return (
+    <div className="rounded-xl border border-border bg-card px-5 py-3.5 mb-5">
+      <div className="flex items-center gap-2 mb-2.5">
+        <p className="text-[10px] font-bold text-muted uppercase tracking-wider">Valuation, by lens</p>
+        <InfoTooltip title="Valuation, by lens" align="left">
+          <p>Every independent valuation read this app computes for this stock, side by side — the AI analyst&apos;s own read, a deterministic DCF, where its P/E ranks against sector peers, where its P/E ranks against its own trading history, and (when Trendlyne has one) the Street&apos;s mean target price.</p>
+          <p>These can legitimately disagree — a stock can be cheap vs. peers and expensive vs. its own history at the same time. None of these corrects the others.</p>
+        </InfoTooltip>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {items.map(item => (
+          <span
+            key={item.label}
+            title={item.title}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-semibold whitespace-nowrap ${item.tone}`}
+          >
+            <span className="opacity-70 font-normal">{item.label}</span>
+            {item.value}
+          </span>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -567,6 +713,7 @@ function VerdictTimeline({ symbol }: { symbol: string }) {
               h.date,
               h.current_price != null ? `₹${fmt(h.current_price)}` : null,
               h.confidence ? `${h.confidence} confidence` : null,
+              h.signal_score != null ? `signal score ${fmt(h.signal_score, 2)}` : null,
               h.return_since_pct != null
                 ? `${h.return_since_pct >= 0 ? '+' : ''}${h.return_since_pct}% since`
                 : null,
@@ -786,7 +933,10 @@ function ExchangeTable({
     const changeCls = change > 0 ? 'text-buy' : change < 0 ? 'text-sell' : 'text-muted';
     return (
       <div className="text-right shrink-0">
-        <p className="text-2xl font-bold font-mono text-tx">
+        <p
+          className="text-2xl font-bold font-mono text-tx"
+          title={q?.previous_close != null ? `Previous close: ₹${fmt(q.previous_close)}` : undefined}
+        >
           {q?.current_price != null ? `₹${fmt(q.current_price)}` : '—'}
         </p>
         <p className={`text-sm font-mono ${changeCls}`}>
@@ -817,7 +967,10 @@ function ExchangeTable({
               )}
             </div>
             <div className="text-right">
-              <span className="font-mono font-bold text-tx">
+              <span
+                className="font-mono font-bold text-tx"
+                title={q?.previous_close != null ? `Previous close: ₹${fmt(q.previous_close)}` : undefined}
+              >
                 {q?.current_price != null ? `₹${fmt(q.current_price)}` : '—'}
               </span>
               <span className={`ml-3 font-mono text-xs ${changeCls}`}>
@@ -884,6 +1037,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
 
   const peers = usePeerComparison(report.symbol);
   const financials = useFinancials(report.symbol);
+  const streetConsensus = useStreetConsensus(report.symbol);
   const percentileByNormalizedKey = useMemo(() => {
     const map: Record<string, number> = {};
     for (const [key, value] of Object.entries(peers?.percentiles ?? {})) {
@@ -893,9 +1047,9 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
   }, [peers]);
 
   const mfDeltaByFund = useMemo(() => {
-    const map: Record<string, number> = {};
+    const map: Record<string, MfHoldingsStakeDelta> = {};
     for (const d of mfTrend ?? []) {
-      if (d.delta_pct != null) map[d.fund] = d.delta_pct;
+      if (d.delta_pct != null) map[d.fund] = d;
     }
     return map;
   }, [mfTrend]);
@@ -979,6 +1133,14 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
         </div>
         <VerdictTimeline symbol={report.symbol} />
       </div>
+
+      <ValuationSummaryStrip
+        llmVerdict={a?.valuation?.verdict}
+        dcf={financials?.dcf}
+        peerPePercentile={percentileByNormalizedKey['pe']}
+        absoluteAnchor={peers?.absolute_anchor ?? null}
+        streetUpsidePct={streetConsensus?.numeric_consensus?.target_upside_pct}
+      />
 
       {/* ── 2. Main grid: thesis (60%) + metrics (40%) ── */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
@@ -1103,13 +1265,15 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
 
           <FinancialStatementsCard data={financials} />
 
+          <ConcallsCard concalls={financials?.concalls} />
+
           <PeerTable peers={peers} />
 
           <SimilarStocksRail peers={peers} />
 
           <InsiderActivityCard symbol={report.symbol} />
 
-          <StreetConsensusCard symbol={report.symbol} />
+          <StreetConsensusCard consensus={streetConsensus} />
 
           {a?.valuation && (
             <Card title="Valuation">
@@ -1135,6 +1299,9 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                     Fair value ≈ <span className="font-mono font-semibold">₹{fmt(financials.dcf.fair_value_per_share, 2)}</span>
                     {' '}vs. current <span className="font-mono">₹{fmt(financials.dcf.current_price, 2)}</span>
                     {' '}({financials.dcf.upside_pct >= 0 ? '+' : ''}{fmt(financials.dcf.upside_pct, 1)}%)
+                  </p>
+                  <p className="text-muted mt-0.5">
+                    Projected off ₹{fmt(financials.dcf.latest_ocf_cr, 0)} Cr latest operating cash flow
                   </p>
                 </div>
               )}
@@ -1267,10 +1434,13 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                     <span className="flex items-center gap-1.5">
                       <span className="text-sm font-mono font-semibold text-accent">{fmt(mf.holding_pct, 2)}%</span>
                       {delta != null && (
-                        <span className={`text-[11px] font-mono ${
-                          delta > 0 ? 'text-buy' : delta < 0 ? 'text-sell' : 'text-muted'
-                        }`}>
-                          {delta > 0 ? '▲' : delta < 0 ? '▼' : '–'} {Math.abs(delta).toFixed(2)}%
+                        <span
+                          className={`text-[11px] font-mono ${
+                            delta.delta_pct! > 0 ? 'text-buy' : delta.delta_pct! < 0 ? 'text-sell' : 'text-muted'
+                          }`}
+                          title={delta.prior_as_of_date ? `vs. ${delta.prior_as_of_date} → ${delta.as_of_date}` : undefined}
+                        >
+                          {delta.delta_pct! > 0 ? '▲' : delta.delta_pct! < 0 ? '▼' : '–'} {Math.abs(delta.delta_pct!).toFixed(2)}%
                         </span>
                       )}
                     </span>
@@ -1306,22 +1476,30 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
           {fs && (fs.corporate_actions.length > 0 || fs.rating_action || fs.next_results_date) && (
             <div className="flex flex-wrap gap-2 mb-3">
               {fs.corporate_actions.slice(0, 3).map((ca, i) => (
-                <span key={i} className="text-[11px] px-2 py-1 rounded-full bg-surface border border-border text-tx capitalize">
+                <span
+                  key={i}
+                  className="text-[11px] px-2 py-1 rounded-full bg-surface border border-border text-tx capitalize"
+                  title={ca.title ?? undefined}
+                >
                   {ca.type}{ca.date ? ` · ${ca.date}` : ''}
                 </span>
               ))}
               {fs.rating_action && (
-                <span className={`text-[11px] px-2 py-1 rounded-full border capitalize ${
-                  fs.rating_action.action === 'upgrade'
-                    ? 'text-buy border-buy/40 bg-buy/10'
-                    : fs.rating_action.action === 'downgrade'
-                    ? 'text-sell border-sell/40 bg-sell/10'
-                    : 'text-hold border-hold/40 bg-hold/10'
-                }`}>
+                <span
+                  className={`text-[11px] px-2 py-1 rounded-full border capitalize ${
+                    fs.rating_action.action === 'upgrade'
+                      ? 'text-buy border-buy/40 bg-buy/10'
+                      : fs.rating_action.action === 'downgrade'
+                      ? 'text-sell border-sell/40 bg-sell/10'
+                      : 'text-hold border-hold/40 bg-hold/10'
+                  }`}
+                  title={fs.rating_action.title ?? undefined}
+                >
                   {fs.rating_action.agency} {fs.rating_action.action}
                   {fs.rating_action.from_rating && fs.rating_action.to_rating
                     ? ` (${fs.rating_action.from_rating} → ${fs.rating_action.to_rating})`
                     : ''}
+                  {fs.rating_action.date ? ` · ${fs.rating_action.date}` : ''}
                 </span>
               )}
               {fs.next_results_date && (
