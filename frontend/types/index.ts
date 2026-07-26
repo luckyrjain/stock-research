@@ -640,7 +640,22 @@ export interface StreetConsensusArticle {
   published_at:  string | null;
 }
 
+// Real numeric analyst consensus scraped directly from Trendlyne's own
+// company page (see tools/trendlyne_scraper.py) — additive to
+// StreetConsensusArticle above, not a replacement for it. Every field is
+// independently null (never guessed) when Trendlyne's page can't be
+// resolved or doesn't cleanly present that value.
+export interface TrendlyneNumericConsensus {
+  symbol:              string;
+  analyst_count:       number | null;
+  consensus_rating:    string | null;
+  mean_target_price:   number | null;
+  target_upside_pct:   number | null;
+  source_url:          string | null;
+}
+
 export interface StreetConsensus {
-  symbol:    string;
-  articles:  StreetConsensusArticle[];
+  symbol:              string;
+  articles:            StreetConsensusArticle[];
+  numeric_consensus:   TrendlyneNumericConsensus | null;
 }
