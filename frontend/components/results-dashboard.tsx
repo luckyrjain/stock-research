@@ -266,14 +266,20 @@ function _consensusRatingTone(rating: string): string {
 // present it, so this renders only the fields it actually has.
 function NumericConsensusRow({ numeric }: { numeric: NonNullable<StreetConsensus['numeric_consensus']> }) {
   const { analyst_count, consensus_rating, mean_target_price, target_upside_pct, source_url } = numeric;
-  if (analyst_count == null && consensus_rating == null && mean_target_price == null) return null;
+  if (analyst_count == null && consensus_rating == null && mean_target_price == null && target_upside_pct == null) return null;
+
+  // Defense in depth, independent of the backend's own host validation in
+  // tools/trendlyne_scraper.py::_is_trendlyne_host — this component
+  // shouldn't rely on backend behavior it doesn't itself verify before
+  // rendering an external link.
+  const safeSourceUrl = source_url && source_url.startsWith('https://trendlyne.com/') ? source_url : undefined;
 
   return (
     <a
-      href={source_url ?? undefined}
-      target={source_url ? '_blank' : undefined}
-      rel={source_url ? 'noopener noreferrer' : undefined}
-      className={`flex flex-wrap items-center gap-2 mb-3 pb-3 border-b border-card-hi/60 text-xs ${source_url ? 'hover:opacity-80 transition-opacity' : ''}`}
+      href={safeSourceUrl}
+      target={safeSourceUrl ? '_blank' : undefined}
+      rel={safeSourceUrl ? 'noopener noreferrer' : undefined}
+      className={`flex flex-wrap items-center gap-2 mb-3 pb-3 border-b border-card-hi/60 text-xs ${safeSourceUrl ? 'hover:opacity-80 transition-opacity' : ''}`}
     >
       {consensus_rating && (
         <span className={`px-2 py-0.5 rounded-full border font-semibold ${_consensusRatingTone(consensus_rating)}`}>
@@ -283,7 +289,7 @@ function NumericConsensusRow({ numeric }: { numeric: NonNullable<StreetConsensus
       {analyst_count != null && (
         <span className="text-muted">{analyst_count} analyst{analyst_count === 1 ? '' : 's'}</span>
       )}
-      {mean_target_price != null && (
+      {mean_target_price != null ? (
         <span className="text-tx">
           Mean target ₹{mean_target_price.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
           {target_upside_pct != null && (
@@ -292,7 +298,11 @@ function NumericConsensusRow({ numeric }: { numeric: NonNullable<StreetConsensus
             </span>
           )}
         </span>
-      )}
+      ) : target_upside_pct != null ? (
+        <span className={target_upside_pct >= 0 ? 'text-buy' : 'text-sell'}>
+          {target_upside_pct >= 0 ? '+' : ''}{target_upside_pct.toFixed(1)}% {target_upside_pct >= 0 ? 'upside' : 'downside'}
+        </span>
+      ) : null}
     </a>
   );
 }
@@ -307,7 +317,7 @@ function NumericConsensusRow({ numeric }: { numeric: NonNullable<StreetConsensus
 function StreetConsensusCard({ symbol }: { symbol: string }) {
   const consensus = useStreetConsensus(symbol);
   const numeric = consensus?.numeric_consensus;
-  const hasNumeric = numeric != null && (numeric.analyst_count != null || numeric.consensus_rating != null || numeric.mean_target_price != null);
+  const hasNumeric = numeric != null && (numeric.analyst_count != null || numeric.consensus_rating != null || numeric.mean_target_price != null || numeric.target_upside_pct != null);
   if (!consensus || (consensus.articles.length === 0 && !hasNumeric)) return null;
 
   return (

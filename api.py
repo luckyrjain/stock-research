@@ -1362,11 +1362,20 @@ async def get_street_consensus(request: Request, symbol: str):
         return cached
 
     def _fetch_articles() -> list[dict]:
-        from tools.trendlyne_agent import fetch_trendlyne_consensus_for_symbol
+        # Isolated in its own try/except, symmetric with _fetch_numeric
+        # below — an articles-fetch failure must not take down a
+        # successful numeric_consensus result via asyncio.gather's
+        # first-exception-wins behavior, same per-section isolation as
+        # insider_activity's two independent sub-fetches.
+        try:
+            from tools.trendlyne_agent import fetch_trendlyne_consensus_for_symbol
 
-        return fetch_trendlyne_consensus_for_symbol(sym).get("articles", [])
+            return fetch_trendlyne_consensus_for_symbol(sym).get("articles", [])
+        except Exception as exc:
+            log_event(LOGGER, "trendlyne_articles_fetch_failed", level="warning", symbol=sym, error=str(exc))
+            return []
 
-    def _fetch_numeric() -> dict:
+    def _fetch_numeric() -> dict | None:
         # Isolated in its own try/except like insider_activity's two
         # sub-fetches — a numeric-scrape failure must not take down the
         # article list, and fetch_trendlyne_numeric_consensus is documented
@@ -1375,7 +1384,16 @@ async def get_street_consensus(request: Request, symbol: str):
         try:
             from tools.trendlyne_scraper import fetch_trendlyne_numeric_consensus
 
-            return fetch_trendlyne_numeric_consensus(sym)
+            result = fetch_trendlyne_numeric_consensus(sym)
+            # Never let a raw internal exception string reach the public
+            # response or get cached — cache._is_failed_payload() only
+            # inspects a top-level "error" key, so a nested one here would
+            # otherwise slip past it and get cached for the full 24h TTL,
+            # same "sanitized, no raw exception text" convention as every
+            # other endpoint that surfaces a failure state (e.g. the
+            # Watchlist flow's DB-unreachable 503 handling).
+            result.pop("error", None)
+            return result
         except Exception as exc:
             log_event(LOGGER, "trendlyne_numeric_consensus_fetch_failed", level="warning", symbol=sym, error=str(exc))
             return None

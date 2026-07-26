@@ -1124,6 +1124,49 @@ class StreetConsensusEndpointTest(unittest.TestCase):
         self.assertEqual(body["articles"], fake_articles["articles"])
         self.assertIsNone(body["numeric_consensus"])
 
+    def test_articles_fetch_failure_does_not_break_numeric_consensus(self) -> None:
+        # Symmetric with test_numeric_consensus_fetch_failure_does_not_break_articles
+        # above — an articles-fetch exception must not take down a
+        # successful numeric_consensus result via asyncio.gather's
+        # first-exception-wins behavior.
+        fake_numeric = {
+            "symbol": "TCS", "analyst_count": 10, "consensus_rating": "BUY",
+            "mean_target_price": 100.0, "target_upside_pct": 5.0,
+            "source_url": "https://trendlyne.com/equity/1/TCS/tcs/",
+        }
+        with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol", side_effect=RuntimeError("boom")), \
+             patch("tools.trendlyne_scraper.fetch_trendlyne_numeric_consensus", return_value=fake_numeric):
+            resp = client.get("/api/street-consensus/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["articles"], [])
+        self.assertEqual(body["numeric_consensus"], fake_numeric)
+
+    def test_numeric_consensus_error_key_is_not_leaked_into_response_or_cache(self) -> None:
+        # Regression test: fetch_trendlyne_numeric_consensus's own internal
+        # failure path adds an "error" key carrying a raw exception string
+        # to its result dict. cache._is_failed_payload() only inspects a
+        # top-level "error" key, not one nested inside numeric_consensus,
+        # so without api.py stripping it first this would both leak
+        # internal exception text to callers and get cached for 24h.
+        fake_articles = {"symbol": "TCS", "articles": []}
+        fake_numeric_with_error = {
+            "symbol": "TCS", "analyst_count": None, "consensus_rating": None,
+            "mean_target_price": None, "target_upside_pct": None, "source_url": None,
+            "error": "connection refused: internal-host-detail",
+        }
+        with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol", return_value=fake_articles), \
+             patch("tools.trendlyne_scraper.fetch_trendlyne_numeric_consensus", return_value=fake_numeric_with_error):
+            resp = client.get("/api/street-consensus/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertNotIn("error", body["numeric_consensus"])
+        self.assertNotIn("internal-host-detail", resp.text)
+
+        # And the sanitized (error-free) result is what gets cached.
+        cached = cache.load("TCS", "street_consensus")
+        self.assertNotIn("error", cached["numeric_consensus"])
+
 
 class PeerPercentileHelperTest(unittest.TestCase):
     def test_tie_is_split_evenly(self) -> None:

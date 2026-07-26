@@ -32,12 +32,23 @@ be — but this is still an unverified assumption, not a confirmed
 resilience property. A real-world mismatch on either point degrades every
 field to None, the same "wrong guess is worse than missing data" instinct
 this codebase applies everywhere else, never a wrong number.
+
+Further disclosed limitation: `_ANALYST_COUNT_RE` searches the whole
+page's flattened text for the first "N Analyst(s)" phrase, which is less
+label-specific than the other three regexes — a marketing blurb or a
+"similar stocks" widget quoting an unrelated count earlier in the DOM
+than the real consensus block could in principle produce a wrong-but-
+plausible number rather than a `None`. Not verified against a live page
+in this sandbox; worth tightening (e.g. requiring proximity to a
+"Consensus"/"Rating" anchor) once the real DOM can be inspected.
 """
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+
+_ALLOWED_HOST = "trendlyne.com"
 
 _HEADERS = {
     "User-Agent": (
@@ -66,6 +77,17 @@ _UPSIDE_RE = re.compile(
 )
 
 
+def _is_trendlyne_host(url: str) -> bool:
+    """Guards against following a resolved URL off trendlyne.com — both the
+    direct-URL path (a redirect could in principle land anywhere) and the
+    search-page fallback (which parses arbitrary anchors out of returned
+    HTML) must never hand a cross-domain URL to the follow-up fetch. An
+    unvalidated absolute href here would be an SSRF vector: this module
+    fetches whatever URL it resolves to with a real browser User-Agent."""
+    host = (urlparse(url).netloc or "").lower()
+    return host == _ALLOWED_HOST or host.endswith("." + _ALLOWED_HOST)
+
+
 def _empty_result(symbol: str, error: str | None = None) -> dict:
     result = {
         "symbol":              symbol,
@@ -85,12 +107,15 @@ def _resolve_trendlyne_url(symbol: str) -> str | None:
     page. Tries the direct /equity/{symbol}/ path first (Trendlyne is known
     to redirect a bare symbol to its full /equity/<id>/<symbol>/<slug>/
     URL); falls back to Trendlyne's own search page and takes the first
-    result link that looks like a company page. Returns None (never a
-    guessed URL) if neither resolves."""
+    result link that looks like a company page. Every candidate URL is
+    host-checked against trendlyne.com (_is_trendlyne_host) before being
+    accepted — a redirect or a parsed anchor pointing off-domain is treated
+    as unresolved, never followed. Returns None (never a guessed URL) if
+    nothing resolves."""
     direct_url = f"https://trendlyne.com/equity/{quote(symbol)}/"
     try:
         resp = requests.get(direct_url, headers=_HEADERS, timeout=10, allow_redirects=True)
-        if resp.status_code == 200 and "/equity/" in resp.url:
+        if resp.status_code == 200 and "/equity/" in resp.url and _is_trendlyne_host(resp.url):
             return resp.url
     except Exception:
         pass
@@ -106,8 +131,11 @@ def _resolve_trendlyne_url(symbol: str) -> str | None:
         soup = BeautifulSoup(search_resp.text, "lxml")
         for a in soup.find_all("a", href=True):
             href = a["href"]
-            if "/equity/" in href:
-                return href if href.startswith("http") else f"https://trendlyne.com{href}"
+            if "/equity/" not in href:
+                continue
+            resolved = href if href.startswith("http") else f"https://trendlyne.com{href}"
+            if _is_trendlyne_host(resolved):
+                return resolved
     except Exception:
         pass
 

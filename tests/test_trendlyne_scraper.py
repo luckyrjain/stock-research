@@ -92,6 +92,32 @@ class ResolveTrendlyneUrlTest(unittest.TestCase):
             url = _resolve_trendlyne_url("TCS")
         self.assertIsNone(url)
 
+    def test_search_fallback_ignores_cross_domain_absolute_hrefs(self) -> None:
+        # Regression test for an SSRF-relevant bug: an absolute anchor on
+        # Trendlyne's own search page (an ad slot, a "similar stocks"
+        # widget, a tracking redirect) must never be trusted just because
+        # its href happens to contain "/equity/" — only a URL that actually
+        # resolves onto trendlyne.com may be followed.
+        search_html = (
+            '<a href="http://evil.example.com/equity/hack/">Fake</a>'
+            '<a href="/equity/4/HDFC/hdfc-bank/">Real</a>'
+        )
+        with patch("tools.trendlyne_scraper.requests.get", side_effect=[_resp(404), _resp(200, text=search_html)]):
+            url = _resolve_trendlyne_url("HDFC")
+        self.assertEqual(url, "https://trendlyne.com/equity/4/HDFC/hdfc-bank/")
+
+    def test_search_fallback_returns_none_when_only_cross_domain_hrefs_present(self) -> None:
+        search_html = '<a href="http://evil.example.com/equity/hack/">Fake</a>'
+        with patch("tools.trendlyne_scraper.requests.get", side_effect=[_resp(404), _resp(200, text=search_html)]):
+            url = _resolve_trendlyne_url("NOSUCHSTOCK")
+        self.assertIsNone(url)
+
+    def test_direct_url_redirect_to_non_trendlyne_host_is_rejected(self) -> None:
+        redirected = _resp(200, url="http://evil.example.com/equity/hack/")
+        with patch("tools.trendlyne_scraper.requests.get", side_effect=[redirected, _resp(404)]):
+            url = _resolve_trendlyne_url("TCS")
+        self.assertIsNone(url)
+
 
 class FetchTrendlyneNumericConsensusTest(unittest.TestCase):
     def test_full_success_path(self) -> None:
