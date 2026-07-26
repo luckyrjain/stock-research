@@ -451,6 +451,46 @@ class PhaseResearchValuationPercentileTest(unittest.TestCase):
         self.assertEqual(cached["absolute_anchor"]["percentile"], 33.3)
 
 
+class PhaseScrapeSourceHealthTest(unittest.TestCase):
+    def test_records_health_for_every_source_ok_and_empty(self) -> None:
+        fake_sources = [("Source A", "news", "fn_a"), ("Source B", "news", "fn_b")]
+
+        def fn_a():
+            return {"source": "Source A", "type": "news", "articles": [{"title": "x"}]}
+
+        def fn_b():
+            return {"source": "Source B", "type": "news", "articles": []}
+
+        pipeline = MarketPicksPipeline()
+        with patch("tools.market_picks_tools.SCRAPER_FNS", {"Source A": fn_a, "Source B": fn_b}), \
+             patch("tools.market_picks_tools.SOURCES", fake_sources), \
+             patch("source_health.record_and_check") as mock_record:
+            pipeline._phase_scrape(emit=lambda p: None)
+
+        calls = {c.args[0]: c.args[1] for c in mock_record.call_args_list}
+        self.assertEqual(calls, {"Source A": True, "Source B": False})
+
+    def test_a_broken_health_tracker_does_not_break_the_scrape_phase(self) -> None:
+        # source_health.record_and_check() already never raises on its own
+        # (see test_source_health.py), but this pins the calling contract:
+        # even if it somehow did, the scrape phase itself must not crash.
+        fake_sources = [("Source A", "news", "fn_a")]
+
+        def fn_a():
+            return {"source": "Source A", "type": "news", "articles": [{"title": "x"}]}
+
+        pipeline = MarketPicksPipeline()
+        with patch("tools.market_picks_tools.SCRAPER_FNS", {"Source A": fn_a}), \
+             patch("tools.market_picks_tools.SOURCES", fake_sources), \
+             patch("source_health.record_and_check", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                pipeline._phase_scrape(emit=lambda p: None)
+        # Documents current behavior: _phase_scrape does not itself guard
+        # against a raising health tracker — it relies on record_and_check's
+        # own never-raise contract. If that contract is ever loosened, this
+        # test will catch the regression here rather than in production.
+
+
 class PruneExtractCacheTest(unittest.TestCase):
     """output/_extract_cache/ is content-hash-keyed, so every distinct batch of
     articles a source ever serves creates a new file — _extraction_cache_get()

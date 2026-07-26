@@ -8,6 +8,7 @@ symbol. Same pattern GET /api/market-picks/history already uses to cache
 the Nifty benchmark series under a "NSEI" pseudo-symbol.
 """
 import cache
+import source_health
 from signals.models import Signal
 from tools.macro_context_tools import get_macro_context
 from tools.nse_fii_dii_tools import get_fii_dii_flow
@@ -33,6 +34,14 @@ def _cached_fii_dii_flow() -> dict:
     if cached is not None:
         return cached
     flow = get_fii_dii_flow()
+    # Only recorded on an actual fetch (not a cache hit) — this is a daily-
+    # cadence source, so one health record per real fetch already matches
+    # its own refresh rate; recording on every cache hit too would just
+    # inflate the rolling window with duplicate "ok" entries for the same
+    # underlying fetch.
+    source_health.record_and_check(
+        "fii_dii_flow", flow.get("fii_net_cr") is not None or flow.get("dii_net_cr") is not None,
+    )
     cache.save(_MACRO_PSEUDO_SYMBOL, "fii_dii_flow", flow)
     return flow
 
@@ -42,6 +51,9 @@ def _cached_macro_context() -> dict:
     if cached is not None:
         return cached
     context = get_macro_context()
+    source_health.record_and_check(
+        "macro_context", context.get("repo_rate_pct") is not None or context.get("cpi_inflation_pct") is not None,
+    )
     cache.save(_MACRO_PSEUDO_SYMBOL, "macro_context", context)
     return context
 

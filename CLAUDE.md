@@ -49,6 +49,7 @@ stock-research/
 ├── error_tracking.py       Optional Sentry-style hook, wired into log_event()'s error-level path
 ├── schema_drift.py         Type-drift detection for the six scraped data slices
 ├── peer_analytics.py       Peer-percentile + absolute valuation-anchor math (api.py + market_picks_pipeline.py)
+├── source_health.py        Freshness/volume monitoring for market-picks sources + macro overlay
 ├── requirements.txt
 ├── .env.example
 ├── config/
@@ -866,6 +867,54 @@ false-positive noise on exactly the symbols/fields this convention already expec
    disclosed-limitation notes elsewhere in this doc about being unverified against live
    responses in this sandbox; extending drift detection to them is future work, not silently
    assumed to already be covered by this pass.
+
+### Source freshness/volume monitoring (`source_health.py`)
+
+`schema_drift.py` above only catches *type* drift on the six `ALL_DATA_TASKS` fields — it has
+nothing to say about a source that's still returning well-shaped data but has silently gone
+quiet (0 results every run), since an empty result isn't a shape mismatch. That failure mode was
+otherwise invisible for the 20 Market Picks `SOURCES` and the two market-wide macro-overlay
+fetches: `_SOURCE_CREDIBILITY` weights every source into confidence scoring, so a dead source
+doesn't error, it just quietly stops contributing to every future pick's score.
+
+1. `source_health.record_and_check(source_name, ok, **context)` records this run's boolean
+   ok/not-ok result, under today's UTC calendar day, to a small per-source JSON file under
+   `output/_source_health/` (same "cache directory" convention as everything else in this
+   codebase — no database needed for something this lightweight), then warns via
+   `observability.log_event(level="warning")` once a source that had an established healthy
+   baseline (≥5 prior days, at least one of which succeeded) has now failed 3 consecutive
+   *days* in a row. Never raises — a broken health-tracking file must not break the
+   scrape/pipeline run it's trying to observe.
+2. **Time-normalized, not raw-call-count**: several calls for the same source on the same UTC
+   calendar day collapse into a single entry for that day (keeping the latest result) rather
+   than each counting as its own data point — otherwise a burst of same-hour `?force=true`
+   retries could trip the "3 consecutive failures" threshold in minutes, while the intended
+   weekly-cron cadence would need 3 *weeks* to ever flag a genuinely dead source. `date` is an
+   optional keyword-only override (defaults to `None` → today) that exists purely so tests can
+   simulate distinct calendar days without sleeping in real time — deliberately an explicit
+   per-call argument rather than a patchable module-level "now" function, since a process-wide
+   monkeypatch of a shared function is itself racy across the concurrent-caller tests this
+   module needs (one thread's patched value can leak into another's call).
+3. **Concurrency-safe**: the whole read-modify-write cycle for one source's file is guarded by
+   `_locked()`, an advisory `fcntl.flock`-based exclusive lock keyed per source (POSIX-only,
+   matching this codebase's Linux-only deployment assumption). Without it, two callers racing to
+   update the same source at once — e.g. several `market_picks_pipeline.py` `_phase_scrape`
+   workers, or the same `signals/macro.py` cache-miss race across worker threads CLAUDE.md's
+   "Shared state and queues" section already documents for `fii_dii_flow`/`macro_context` — is a
+   classic lost-update race: both read the same prior history, both write their own updated
+   version, and the second write can either corrupt the file (interleaved writes) or silently
+   clobber the first caller's update, including resetting the rolling baseline. The file itself
+   is still written atomically (tempfile + `os.replace`, same convention as `cache.py::save()`)
+   as defense in depth, but the lock is what actually prevents the lost-update race — an atomic
+   write alone only prevents a *torn* write, not two full read-modify-write cycles racing.
+4. Deliberately **not** wired into the three genuinely per-symbol standalone endpoints (peers,
+   insider activity, street consensus) — most individual stocks legitimately have zero insider
+   trades or zero Trendlyne-cited coverage on a given day, which is this codebase's own
+   documented "expected common case" everywhere else in this doc, not a source-health anomaly.
+   Applying the same volume-anomaly heuristic there would just be noise, not a signal.
+5. A new source (fewer than 5 prior days, or no successful day yet) never alerts — there's no
+   established baseline yet to regress from, and a source that's simply always been empty (e.g.
+   genuinely thin coverage) shouldn't page anyone either.
 
 ### SME golden cross flow
 
