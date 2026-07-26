@@ -46,6 +46,9 @@ stock-research/
 ├── email_sender.py         Sends the magic-link sign-in + watchlist-alert emails over generic SMTP
 ├── watchlist_alerts.py     Daily batch job: emails signed-in users on a watched stock's recommendation change
 ├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
+├── routes/                 Per-domain FastAPI routers extracted out of api.py (see
+│                           "Route module extraction" below) — watchlist.py, positions.py,
+│                           _shared.py (the read/write wrapper both share)
 ├── observability.py        Structured JSON logging via log_event()
 ├── error_tracking.py       Optional Sentry-style hook, wired into log_event()'s error-level path
 ├── schema_drift.py         Type-drift detection for the six scraped data slices
@@ -958,7 +961,7 @@ Prev/Next through actual snapshot days without a second round trip.
 **Positions ("I bought this")**: originally purely client-side (no backend endpoint, no DB table) —
 now backed by a `positions` Postgres table with the exact same ownership shape as `watchlist_items`
 (see "Watchlist flow" above): an anonymous per-browser `client_id` until the user signs in, then the
-account's `user_id`, resolved by the same `_resolve_watchlist_owner()`/`_owner_column()` helpers
+account's `user_id`, resolved by the same `routes.watchlist.resolve_owner()`/`owner_column()` helpers
 (nothing about that resolution logic is watchlist-specific). This closed the one gap the frontend
 design review called out directly: Watchlist, auth, and API keys had all moved toward real accounts
 while Positions stayed the one feature standing still, still tied to a single browser with no way to
@@ -1475,6 +1478,48 @@ mirroring `sme_ema_pipeline.py`'s shape, served at `/screener` via `GET /api/scr
    unlike `sme_ema_pipeline.py --reset-db`, which operates on the shared `MetaData()` and so
    drops every table in the app — see that command's own disclosed limitation above.
 
+### Route module extraction (`routes/`)
+
+`api.py` had grown to ~2900 lines with every endpoint defined inline — a maintainability
+gap a deep engineering/CTO-lens review called out directly. Watchlist and Positions were
+the first (and, as of this pass, only) two domains split out, chosen because they're the
+most duplicated: 8 endpoints total, each repeating the exact same rate-limit → 503-if-no-
+`DATABASE_URL` → `run_in_executor` → sanitize-error wrapper.
+
+1. `routes/watchlist.py` and `routes/positions.py` are `APIRouter` modules, registered via
+   `app.include_router(...)` in `api.py` (placed after the shared helpers they depend on —
+   `_get_db_engine`, `_rate_limit`, `_bearer_token_from_request`, `LOGGER`, `log_event` —
+   are already defined). Each still owns its own routes exactly as before the split — this
+   is a file reorganization, not a behavior or URL change.
+2. Both modules import `api` itself (`import api`), not `from api import X` — reaching
+   shared state via dotted access (`api._get_db_engine()`) rather than a copied reference.
+   This avoids a circular-import ordering problem (`api.py` imports these routers, so they
+   can't import `api.py`'s names at their own top-level before those names exist yet) and
+   preserves this app's existing `unittest.mock.patch("api._get_db_engine", ...)` test
+   convention — a patch only takes effect on code that looks the name up through the module
+   object at call time, not on a name a `from api import X` already copied at import time.
+3. `routes/_shared.py::run_owned_db_call(request, rate_limit_name, max_calls, sync_fn,
+   event_prefix)` is the extracted wrapper itself — the repeated rate-limit/DATABASE_URL-
+   check/executor/sanitize-error shape both domains' 6 CRUD endpoints (of 8 total; the two
+   list-shaped calendar/read-only paths that don't fit this exact shape stay inline) now
+   call instead of re-implementing.
+4. `routes/watchlist.py` owns the ownership-resolution primitives (`resolve_owner()`,
+   `owner_column()`, `WatchlistOwner`, `_VALID_EXCHANGES` — renamed from `api.py`'s original
+   `_resolve_watchlist_owner`/`_owner_column`) since positions.py imports and reuses them
+   directly rather than duplicating — nothing about "which column owns this request's rows"
+   is watchlist-specific, but watchlist was the first domain to need it.
+5. `api.py` re-exports `_MAX_WATCHLIST_ITEMS_PER_CLIENT` and `_MAX_POSITIONS_PER_CLIENT`
+   (`from routes.watchlist import _MAX_WATCHLIST_ITEMS_PER_CLIENT`, etc.) purely for backward
+   compatibility — `tests/test_api.py` reads both as plain values (e.g.
+   `count_result.scalar.return_value = api._MAX_POSITIONS_PER_CLIENT`), not just as patch
+   targets, so moving the constants without a re-export would have silently broken that
+   existing test code.
+6. **Deliberately scoped to these two domains only** — splitting the remaining ~25 endpoints
+   (SME signals, screener, market picks, auth, API keys, financials, etc.) into their own
+   `routes/*.py` modules is future work, the same disclosed "first increment, not the full
+   file" scope call this codebase already makes elsewhere (e.g. `tests_live/`'s own coverage
+   note). `api.py` is smaller after this pass, not fully decomposed.
+
 ### Watchlist flow
 
 The `watchlist_items` table (PostgreSQL, `DATABASE_URL`) is the one piece of shared state
@@ -1487,9 +1532,10 @@ every row's `NULL` as distinct from every other `NULL`, so it wouldn't actually 
 identity to one row per symbol).
 
 1. `GET /api/watchlist?client_id=`, `POST /api/watchlist` (`{client_id, symbol, company, exchange}`,
-   `client_id` optional), `DELETE /api/watchlist/{symbol}?client_id=` — all in `api.py`, using
-   the same cached engine (`_get_db_engine()`) as the SME endpoints
-2. **Identity resolution** (`api._resolve_watchlist_owner()`): a valid session (the
+   `client_id` optional), `DELETE /api/watchlist/{symbol}?client_id=` — all in
+   `routes/watchlist.py` (see "Route module extraction" above), using the same cached engine
+   (`_get_db_engine()`) as the SME endpoints
+2. **Identity resolution** (`routes.watchlist.resolve_owner()`): a valid session (the
    `Authorization: Bearer <token>` header — see "Account & magic-link auth flow" below) always
    wins over `client_id` when both are present in a request, since the whole point of an
    account is that it doesn't depend on which browser sent the request. An expired/invalid
