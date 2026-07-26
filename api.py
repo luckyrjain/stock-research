@@ -188,7 +188,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -209,6 +209,14 @@ def _is_isin(s: str) -> bool:
 
 _TICKER_RE = re.compile(r"^[A-Z0-9&\-]{1,20}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Every REST endpoint already sanitizes an internal exception to this shape
+# before it reaches the client (see e.g. "Database error. See server logs.").
+# The two SSE streaming endpoints (/api/analyse, /api/market-picks) previously
+# embedded raw str(exc) text straight into the events a browser receives —
+# this is the same sanitization, reused there. The real message still reaches
+# log_event() at the call site, for server-side visibility.
+_SANITIZED_ERROR = "An internal error occurred. See server logs."
 
 
 def _load_isin_map() -> dict:
@@ -620,8 +628,16 @@ async def analyse(symbol: str, request: Request, force: bool = False):
                         await q.put({"event": "task_done", "task": name, "ok": True})
                         return name, normed
                     except Exception as exc:
-                        await q.put({"event": "task_done", "task": name, "ok": False, "error": str(exc)})
-                        return name, {"error": str(exc), "symbol": sym}
+                        log_event(LOGGER, "fetch_task_failed", level="error", run_id=run_id, symbol=sym, task=name, error=str(exc))
+                        # The SSE event reaches the browser directly — never echo
+                        # raw exception text there, same sanitization convention
+                        # every REST endpoint already follows. The dict returned
+                        # to the caller stays internal (feeds cache/report-building
+                        # logic that only checks for the presence of an "error"
+                        # key, per cache.py's _is_failed_payload()), but is
+                        # sanitized too rather than trusting that boundary forever.
+                        await q.put({"event": "task_done", "task": name, "ok": False, "error": _SANITIZED_ERROR})
+                        return name, {"error": _SANITIZED_ERROR, "symbol": sym}
 
                 tasks = [asyncio.create_task(fetch_one(n)) for n in stale]
                 for _ in stale:
@@ -767,7 +783,7 @@ async def analyse(symbol: str, request: Request, force: bool = False):
 
         except Exception as exc:
             log_event(LOGGER, "api_analysis_failed", level="error", run_id=run_id, symbol=sym, error=str(exc))
-            yield _sse({"event": "error", "message": str(exc)})
+            yield _sse({"event": "error", "message": _SANITIZED_ERROR})
         finally:
             if llm_slot_acquired:
                 _release_llm_slot()
@@ -872,7 +888,7 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
                     })
                 except Exception as exc:
                     log_event(LOGGER, "market_picks_failed", level="error", run_id=run_id, error=str(exc))
-                    loop.call_soon_threadsafe(q.put_nowait, {"event": "error", "message": str(exc)})
+                    loop.call_soon_threadsafe(q.put_nowait, {"event": "error", "message": _SANITIZED_ERROR})
                 finally:
                     _release_llm_slot()
                     if lock_acquired:
@@ -894,7 +910,7 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
             _release_llm_slot()
             if lock_acquired:
                 rate_limiter.release_lock(_MARKET_PICKS_REFRESH_LOCK_NAME)
-            yield _sse({"event": "error", "message": str(exc)})
+            yield _sse({"event": "error", "message": _SANITIZED_ERROR})
             return
 
         while True:

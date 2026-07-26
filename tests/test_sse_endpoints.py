@@ -140,6 +140,28 @@ class AnalyseSuccessPathTest(unittest.TestCase):
         self.assertEqual(events[-1]["event"], "error")
         self.assertIn("capacity", events[-1]["message"].lower())
 
+    def test_unexpected_failure_sanitizes_the_sse_error_message(self) -> None:
+        # Security regression: this SSE event reaches the browser directly —
+        # a raw exception message (potential file paths, driver internals)
+        # must never leak there, same sanitization convention every REST
+        # endpoint already follows for its own errors.
+        with patch("main._fetch_task", side_effect=RuntimeError("connection refused: password=hunter2")), \
+             patch("schemas.normalize", side_effect=lambda name, data: data), \
+             patch("schemas.validate", return_value=(True, "")), \
+             patch("signals.engine.run_signal_engine", side_effect=RuntimeError("connection refused: password=hunter2")):
+            resp = client.get("/api/analyse/TCS")
+
+        events = _parse_sse(resp.text)
+        error_events = [e for e in events if e.get("event") == "error"]
+        self.assertTrue(error_events)
+        for event in error_events:
+            self.assertEqual(event["message"], api._SANITIZED_ERROR)
+            self.assertNotIn("hunter2", event["message"])
+        task_done_errors = [e for e in events if e.get("event") == "task_done" and not e.get("ok")]
+        for event in task_done_errors:
+            self.assertEqual(event["error"], api._SANITIZED_ERROR)
+            self.assertNotIn("hunter2", event["error"])
+
 
 class MarketPicksSuccessPathTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -210,6 +232,20 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
         # Capacity rejection happens before the pipeline ever launches — the
         # lock must still be released here too, not just on the success path.
         self.assertFalse(rate_limiter.is_locked("market_picks_refresh"))
+
+    def test_pipeline_failure_sanitizes_the_sse_error_message(self) -> None:
+        # Security regression: same sanitization as the analyse endpoint's
+        # equivalent test — a pipeline exception must never reach the
+        # browser as raw text via this SSE event.
+        failing_pipeline = MagicMock()
+        failing_pipeline.run.side_effect = RuntimeError("connection refused: password=hunter2")
+        with patch("market_picks_pipeline.MarketPicksPipeline", MagicMock(return_value=failing_pipeline)):
+            resp = client.get("/api/market-picks?force=true")
+
+        events = _parse_sse(resp.text)
+        self.assertEqual(events[-1]["event"], "error")
+        self.assertEqual(events[-1]["message"], api._SANITIZED_ERROR)
+        self.assertNotIn("hunter2", events[-1]["message"])
 
 
 if __name__ == "__main__":
