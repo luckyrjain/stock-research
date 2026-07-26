@@ -54,6 +54,7 @@ stock-research/
 ├── schema_drift.py         Type-drift detection for the six scraped data slices
 ├── peer_analytics.py       Peer-percentile + absolute valuation-anchor math (api.py + market_picks_pipeline.py)
 ├── source_health.py        Freshness/volume monitoring for market-picks sources + macro overlay
+├── scraper_error_counters.py  Error (not empty-result) counters for the 4 standalone per-symbol scrapers
 ├── requirements.txt
 ├── .env.example
 ├── config/
@@ -1283,6 +1284,46 @@ doesn't error, it just quietly stops contributing to every future pick's score.
 5. A new source (fewer than 5 prior days, or no successful day yet) never alerts — there's no
    established baseline yet to regress from, and a source that's simply always been empty (e.g.
    genuinely thin coverage) shouldn't page anyone either.
+
+### Standalone scraper error counters (`scraper_error_counters.py`)
+
+Point 4 above deliberately excludes `peers`/`insider-activity`/`street-consensus` from
+`source_health.py`'s volume-anomaly heuristic, since an empty result is their expected common
+case — but that left those endpoints with genuinely no signal at all when something actually
+broke. `fetch_insider_trades_for_symbol(sym).get("trades", [])`-shaped call sites silently
+mapped both "NSE returned nothing today" (normal) and "NSE request failed" (a real, silent
+degradation — these tool functions never raise, they return `{"error": ...}` instead) to the
+exact same empty list, with no log line to grep for either. An engineering-lens review flagged
+this directly: "the ~10 standalone scrapers outside [the six-task] path have no structured
+logging of their own — a silent layout change there degrades with no log line to grep for."
+
+1. `scraper_error_counters.record_scraper_error(scraper_name, **context)` increments a small
+   persisted counter (`output/_scraper_error_counters/<name>.json`, same tempfile +
+   `os.replace` atomic-write convention as `cache.py`/`source_health.py`) and immediately logs
+   a `level="warning"` event — no "N bad days in a row" threshold like `source_health.py`,
+   since a single error at one of these on-demand, per-request endpoints already means one
+   real user's request degraded, unlike a scheduled batch job where a single bad run is
+   expected background noise. Never raises. `get_error_count(scraper_name)` is a non-mutating
+   read for tests and a future ops surface.
+2. Wired into 6 call sites across the 4 standalone endpoints named in the review — each now
+   distinguishes a genuine `{"error": ...}` tool-function result from a legitimate empty one
+   before deciding whether to count/log: `GET /api/peers/{symbol}` (`"peers"`),
+   `GET /api/financials/{symbol}` (`"financials"`), `GET /api/insider-activity/{symbol}`'s two
+   independent sub-fetches (`"insider_trades"`, `"bulk_block_deals"`), and
+   `GET /api/street-consensus/{symbol}`'s two independent sub-fetches
+   (`"trendlyne_articles"`, `"trendlyne_numeric_consensus"`). A legitimate empty result (no
+   `"error"` key) never touches this module — same "don't manufacture noise from the expected
+   common case" instinct `source_health.py` already applies.
+3. **Deliberately not a full observability platform** — this is a grep-able counter file plus
+   a log line, not a metrics dashboard, alerting integration, or a new `/api/*` status
+   endpoint. Consistent with this codebase's other disclosed "first increment" scope calls
+   (`tests_live/`'s own coverage note, the two-domain `routes/` split above) rather than a
+   claim that scraper observability is now fully solved.
+4. `signals/engine.py::_log_unmatched_sector_once()` was also promoted from `level="debug"` to
+   `level="warning"` in this same pass — a debug-level line is invisible in this codebase's
+   default INFO-level deployments, so the sector-taxonomy validation this log line exists to
+   enable (see "Sector-aware signal weights" above) could never actually happen against real
+   production traffic without someone first turning debug logging on.
 
 ### SME golden cross flow
 

@@ -1327,6 +1327,8 @@ async def get_peers(request: Request, symbol: str):
 
         raw = json.loads(get_peer_comparison.run(symbol=sym))
         if raw.get("error"):
+            import scraper_error_counters
+            scraper_error_counters.record_scraper_error("peers", symbol=sym)
             return {
                 "symbol": sym, "self": None, "peers": [], "sector_median": None,
                 "percentiles": {}, "absolute_anchor": None,
@@ -1390,6 +1392,8 @@ async def get_financials(request: Request, symbol: str):
             # transient scrape failure should be retried on the next
             # request, not locked in as "this company has no financials"
             # for a full 24h TTL.
+            import scraper_error_counters
+            scraper_error_counters.record_scraper_error("financials", symbol=sym)
             return {"symbol": sym, "profit_loss": None, "balance_sheet": None, "cash_flow": None, "dcf": None, "concalls": []}
 
         stock_info = cache.load(sym, "stock_info") or {}
@@ -1452,18 +1456,34 @@ async def get_insider_activity(request: Request, symbol: str):
         # either one shouldn't be able to take down the *other* section, the
         # same per-section isolation _consolidated_payload uses.
         try:
+            import scraper_error_counters
             from tools.nse_insider_trades import fetch_insider_trades_for_symbol
 
-            return fetch_insider_trades_for_symbol(sym).get("trades", [])
+            raw = fetch_insider_trades_for_symbol(sym)
+            if raw.get("error"):
+                # These tool functions never raise (see "tools never raise"
+                # convention) — a scrape failure comes back as this "error"
+                # key, not an exception, so the except clause below alone
+                # would never catch it. Without this check, a real NSE
+                # failure and "no insider trades today" (the expected common
+                # case) both silently collapse to the same [].
+                scraper_error_counters.record_scraper_error("insider_trades", symbol=sym)
+                return []
+            return raw.get("trades", [])
         except Exception as exc:
             log_event(LOGGER, "insider_trades_fetch_failed", level="warning", symbol=sym, error=str(exc))
             return []
 
     def _fetch_bulk_block() -> list[dict]:
         try:
+            import scraper_error_counters
             from tools.nse_bulk_block_deals import fetch_bulk_block_deals_for_symbol
 
-            return fetch_bulk_block_deals_for_symbol(sym).get("deals", [])
+            raw = fetch_bulk_block_deals_for_symbol(sym)
+            if raw.get("error"):
+                scraper_error_counters.record_scraper_error("bulk_block_deals", symbol=sym)
+                return []
+            return raw.get("deals", [])
         except Exception as exc:
             log_event(LOGGER, "bulk_block_deals_fetch_failed", level="warning", symbol=sym, error=str(exc))
             return []
@@ -1531,9 +1551,14 @@ async def get_street_consensus(request: Request, symbol: str):
         # first-exception-wins behavior, same per-section isolation as
         # insider_activity's two independent sub-fetches.
         try:
+            import scraper_error_counters
             from tools.trendlyne_agent import fetch_trendlyne_consensus_for_symbol
 
-            return fetch_trendlyne_consensus_for_symbol(sym).get("articles", [])
+            raw = fetch_trendlyne_consensus_for_symbol(sym)
+            if raw.get("error"):
+                scraper_error_counters.record_scraper_error("trendlyne_articles", symbol=sym)
+                return []
+            return raw.get("articles", [])
         except Exception as exc:
             log_event(LOGGER, "trendlyne_articles_fetch_failed", level="warning", symbol=sym, error=str(exc))
             return []
@@ -1545,6 +1570,7 @@ async def get_street_consensus(request: Request, symbol: str):
         # to never raise anyway, but this endpoint doesn't lean on that
         # guarantee alone.
         try:
+            import scraper_error_counters
             from tools.trendlyne_scraper import fetch_trendlyne_numeric_consensus
 
             result = fetch_trendlyne_numeric_consensus(sym)
@@ -1555,6 +1581,8 @@ async def get_street_consensus(request: Request, symbol: str):
             # same "sanitized, no raw exception text" convention as every
             # other endpoint that surfaces a failure state (e.g. the
             # Watchlist flow's DB-unreachable 503 handling).
+            if result.get("error"):
+                scraper_error_counters.record_scraper_error("trendlyne_numeric_consensus", symbol=sym)
             result.pop("error", None)
             return result
         except Exception as exc:
