@@ -25,6 +25,20 @@ class BuildReportTest(unittest.TestCase):
         self.assertNotIn("_degraded", report["analysis"])
         self.assertEqual(report["analysis"]["recommendation"], "HOLD")
 
+    def test_degraded_marker_is_promoted_to_a_top_level_report_field(self) -> None:
+        # _degraded is stripped from `analysis` (see the test above) but must
+        # still reach the frontend somehow, or a provider outage's safe
+        # fallback is indistinguishable from a real HOLD verdict — see
+        # crew.py::_safe_analysis_fallback and types/index.ts's `degraded`.
+        analysis = {"symbol": "TCS", "recommendation": "HOLD", "_degraded": True}
+        report = _build_report("TCS", {}, analysis, {})
+        self.assertTrue(report["degraded"])
+
+    def test_degraded_defaults_to_false_for_a_real_analysis(self) -> None:
+        analysis = {"symbol": "TCS", "recommendation": "BUY"}
+        report = _build_report("TCS", {}, analysis, {})
+        self.assertFalse(report["degraded"])
+
     def test_filings_flow_through_to_the_report(self) -> None:
         # filings is fetched and feeds signals.filings_signal, but used to be
         # dropped when the report dict was assembled — never reaching the

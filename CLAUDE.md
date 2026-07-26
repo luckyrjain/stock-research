@@ -34,7 +34,9 @@ A shared **search box** (`HeaderSearch`, in every page's nav bar) answers "what 
 stock-research/
 ├── api.py                  FastAPI server — SSE endpoints and symbol validation
 ├── main.py                 CLI entry point; also contains _fetch_task, _build_report (shared with api.py)
-├── crew.py                 Analyst guardrails, run_analysis_with_fallback (direct litellm call)
+├── crew.py                 Analyst guardrails, run_analysis_with_fallback (direct litellm call,
+│                           cross-provider failover)
+├── llm_cost.py             Per-call LLM cost instrumentation + running daily total
 ├── cache.py                File-based TTL cache (output/<SYMBOL>/<task>.json)
 ├── schemas.py              Normalization contracts: raw tool output → canonical dicts
 ├── market_picks_pipeline.py  Multi-agent weekly picks pipeline (6 phases)
@@ -176,7 +178,7 @@ deliberately excluded from every other test invocation in this repo.
 
 These tool functions are decorated with `@tool` from `crewai.tools` purely for a consistent `.run(**kwargs)` calling convention (see `main._fetch_task`) — that's the only thing this codebase still uses CrewAI for. There used to be a second, parallel orchestration path (`build_crew()` in `crew.py`, wiring per-task `Agent`/`Task`/`Crew` objects from `config/agents.json` + `config/tasks.json`) but it had zero callers and zero test coverage — data collection has always gone through `_fetch_task()` in production — so it was removed rather than left as unverified dead code. If you're looking for `LLM_MODEL` / the "data-agent tier" model config from an older version of this doc: it only ever fed that removed path and has been dropped too — `ANALYST_MODEL` (below) is the only model-selection env var that does anything.
 
-**Analyst (direct LLM call)**: `run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI involved. It receives all six data slices plus signal engine context, and must return a specific JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structural rules and grounded-claims checks; a guardrail failure triggers one corrective LLM retry with the validation error appended, and only if that also fails does it return a safe HOLD fallback via `_safe_analysis_fallback()`.
+**Analyst (direct LLM call)**: `run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI involved. It receives all six data slices plus signal engine context, and must return a specific JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structural rules and grounded-claims checks; a guardrail failure triggers one corrective LLM retry with the validation error appended. Only if that *also* fails — and a second configured provider, if any, also fails the same way — does it return a safe HOLD fallback via `_safe_analysis_fallback()`. See "LLM cost instrumentation + cross-provider failover" below.
 
 **Market picks pipeline** (`market_picks_pipeline.py`): Six sequential phases, all blocking work offloaded to `ThreadPoolExecutor`. Communicates back to the SSE stream via `on_event` callbacks bridged through `asyncio.Queue` with `loop.call_soon_threadsafe`.
 
@@ -188,6 +190,60 @@ These tool functions are decorated with `@tool` from `crewai.tools` purely for a
 | `_phase_research` | Fetches `stock_info` + `research` + signal engine + a valuation percentile per stock (4 workers, up to `_MAX_STOCKS` stocks). |
 | `_phase_analyze` | Batched LLM calls (8 stocks/batch, parallel) for qualitative summary + bull/bear factors. Does NOT ask the LLM for prices. |
 | `_phase_score` | Deterministic confidence scoring (`_compute_confidence`: 50% signal engine + 30% consensus + 20% recency, 0–100, plus a small ±3-point valuation nudge layered on top — see below). The 4-tier rec (BUY / WATCHLIST / HOLD / SELL) is a *separate* formula on top — `combined_dir = 0.55 × consensus + 0.45 × signal_score`, thresholded, with a quant-veto that demotes BUY → WATCHLIST on a strongly negative signal score. Entry/target/stop-loss computed from price and signal score — no LLM. Sector-balanced (`_apply_sector_balance()`): max 2 stocks per sector promoted to the primary list, excess deferred to the end — `sector` stays on every pick in the response (real, filterable data, not popped like the old internal-only `_sector`). Saves a daily snapshot to `output/_history/` for trend tracking. |
+
+### LLM cost instrumentation + cross-provider failover
+
+Two related gaps a CTO/investor-lens review flagged directly: "no per-analysis LLM cost
+instrumentation and no margin model anywhere" (user growth scales a real, metered API cost
+against a product that currently monetizes nobody), and "a full provider outage converges every
+analysis, platform-wide, to the same generic HOLD, indistinguishable from a real call, with no
+user-facing 'degraded' signal and no attempt at a second configured provider."
+
+1. **Cost instrumentation** (`llm_cost.py`) — `crew.py::_attempt_provider()` calls
+   `llm_cost.record_call_cost()` after *every* `litellm.completion()` call, not just the one that
+   ultimately validates: a guardrail-retry or a failed failover attempt still spent real tokens.
+   `estimate_cost_usd()` wraps `litellm.completion_cost()` — never raises, never guesses: litellm
+   doesn't have pricing data for every model (a self-hosted Ollama model, a brand-new release its
+   pricing table hasn't caught up to), and a missing price degrades to `None`, never a fabricated
+   number that looks like a real cost. Each call's cost/tokens are logged immediately
+   (`llm_call_cost` event, queryable through whatever this deployment already does with structured
+   logs) and accumulated into a small running-total JSON file, `output/_llm_cost/<date>.json`
+   (`call_count`, `total_cost_usd`, `calls_with_unknown_cost`) — the same "grep-able counter file
+   plus a log line" convention as `scraper_error_counters.py`/`source_health.py`, a real answer to
+   "what's today's total LLM spend" without a second billing/observability platform.
+2. **Cross-provider failover** (`crew.py`) — `run_analysis_with_fallback()`'s single-provider LLM
+   call is extracted into `_attempt_provider()` (its own guardrail retry once, rate-limit retry
+   once — unchanged from before this existed), so a second, differently-configured provider can
+   get exactly one full attempt before falling through to the safe HOLD fallback.
+   `_configured_providers()` returns every provider with a usable API key
+   (`_API_KEY_ENV`, declared order); the primary is `_resolve_provider()` (respects
+   `LLM_PROVIDER` if set, else the auto-detected first configured key), and the failover
+   candidate is the first *other* configured provider, if any. With only one key configured — the
+   common case per `.env.example`'s "set exactly one" instruction — this is a no-op: behavior is
+   byte-identical to before failover existed, and existing tests confirm it (no provider key is
+   set in this test environment, so `providers_to_try` has exactly one entry). `ANALYST_MODEL`
+   (if set) only ever overrides the *primary* provider's model — reusing it for a failover
+   attempt against a different provider would very likely be an invalid model string for that
+   provider, so the failover attempt always uses that provider's own `_ANALYST_DEFAULTS` entry.
+3. **Visible degraded state** — previously, `crew._safe_analysis_fallback()` already set an
+   internal `_degraded: True` marker, but `main._strip_meta()` dropped it (underscore-prefixed,
+   same convention as `_meta`) before the report ever left the backend — a provider outage's
+   safe-fallback HOLD was genuinely indistinguishable from a real HOLD verdict anywhere in the
+   UI, exactly the gap the review called out. `main._build_report()` now promotes this into a
+   proper sibling `degraded: bool` field on the `Report` itself (never inside `analysis`, so it
+   isn't subject to the four-file analyst-schema lockstep rule — the LLM never produces this
+   field, it's a backend-computed meta-flag, the same instinct as `filings_summary` sitting
+   alongside `filings` rather than folded into it). `frontend/types/index.ts`'s `Report.degraded`
+   is a required `boolean` (never optional/undefined — always explicitly `true`/`false`).
+   `results-dashboard.tsx` renders a `⚠ Analysis degraded` banner above the hero when true,
+   explaining that this is a safe fallback, not a genuine analyst call, while noting that the
+   scraped market data elsewhere in the report is still real.
+4. **Disclosed scope**: this is a one-shot failover (primary → at most one alternate), not an
+   n-provider cascade — matching this codebase's other disclosed "sufficient increment, not
+   maximal engineering" scope calls (e.g. the live-contract-check harness covering 4 scrapers,
+   not all ~10). The cost tracker is a grep-able counter file, not a billing/margin model — it
+   answers "what did today cost", not "what's our unit economics at scale," which remains
+   unaddressed and is flagged as such in the "out of scope" notes elsewhere in this doc.
 
 **Peer/valuation-anchor wired into scoring**: `GET /api/peers/{symbol}`'s `absolute_anchor` (where a
 stock's current P/E sits within its own last 3-5 years of Screener-published P/E — see "Absolute

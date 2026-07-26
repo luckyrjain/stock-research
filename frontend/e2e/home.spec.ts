@@ -91,4 +91,34 @@ test.describe('Home page', () => {
     await expect(page.getByRole('link', { name: 'Market Picks' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Screener' })).toBeVisible();
   });
+
+  test('shows a degraded-analysis banner when every LLM provider failed', async ({ page }) => {
+    // A full provider outage previously converged to a generic HOLD with no
+    // visible signal that this wasn't a real analyst call — see crew.py's
+    // run_analysis_with_fallback and the `degraded` field's own comment in
+    // types/index.ts.
+    const symbol = 'TCS';
+    await page.route(`**/api/analyse/${symbol}**`, route =>
+      route.fulfill({ status: 200, headers: SSE_HEADERS, body: sseAnalysisBody(symbol, { degraded: true }) }));
+    await page.route('**/api/peers/**', route => route.fulfill({
+      json: { symbol, self: null, peers: [], sector_median: null, percentiles: {}, absolute_anchor: null },
+    }));
+    await page.route('**/api/insider-activity/**', route => route.fulfill({
+      json: { symbol, insider_trades: [], bulk_block_deals: [] },
+    }));
+    await page.route('**/api/street-consensus/**', route => route.fulfill({
+      json: { symbol, articles: [] },
+    }));
+    await page.route('**/api/prices/history/**', route => route.fulfill({
+      json: { symbol, exchange: 'NSE', dates: [], closes: [] },
+    }));
+    await page.route('**/api/verdict-history/**', route => route.fulfill({
+      json: { symbol, history: [], win_rate: null, scored_count: 0 },
+    }));
+
+    await page.goto('/');
+    await page.getByRole('button', { name: /See a real report for TCS/ }).click();
+
+    await expect(page.getByText('Analysis degraded —', { exact: false })).toBeVisible({ timeout: 15000 });
+  });
 });

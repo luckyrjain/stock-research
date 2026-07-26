@@ -356,6 +356,14 @@ def _build_report(
         "symbol": symbol,
         "generated_at": date.today().isoformat(),
         "analysis": _strip_meta(analysis),
+        # Promoted out of `analysis` (where it's `_degraded`, underscore-
+        # prefixed and stripped above) into its own sibling field — a
+        # previous LLM outage converged straight to a safe-fallback HOLD
+        # that was indistinguishable from a real one anywhere in the
+        # report, since _strip_meta() dropped the one flag that said
+        # otherwise. See crew.py::_safe_analysis_fallback and
+        # ResultsDashboard's degraded-analysis banner.
+        "degraded": bool(analysis.get("_degraded", False)),
         "signals": signals or {},
         "stock_info": stock,
         "research": research,

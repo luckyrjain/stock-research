@@ -112,6 +112,22 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
   return (
     <div className="animate-fade-up space-y-5">
 
+      {/* Every configured LLM provider failed (or returned unparseable
+          output past its guardrail retry) — this is crew.py's generic
+          safe-fallback HOLD, not a real analyst call. Previously
+          indistinguishable from a genuine HOLD anywhere in this report;
+          see the `degraded` field's own comment in types/index.ts. */}
+      {report.degraded && (
+        <div className="px-5 py-3 rounded-xl bg-hold/10 border border-hold/30 text-sm flex items-start gap-2">
+          <span className="text-hold shrink-0" aria-hidden="true">⚠</span>
+          <span className="text-tx">
+            <span className="font-semibold text-hold">Analysis degraded — </span>
+            the AI analyst couldn&apos;t return a valid response, so this is a neutral safe fallback,
+            not a genuine call. Market data below is real; try refreshing later for a full analysis.
+          </span>
+        </div>
+      )}
+
       {/* ── 1. Hero strip: identity · verdict · price ── */}
       <div className={`rounded-xl border overflow-hidden ${cfg.border} ${cfg.bg}`}>
         <div className={`h-0.5 ${cfg.strip}`} />
