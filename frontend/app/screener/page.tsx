@@ -5,6 +5,7 @@ import Link from 'next/link';
 import type { ScreenerResponse, ScreenerStock } from '@/types';
 import SiteNav from '@/components/site-nav';
 import WatchlistButton from '@/components/watchlist-button';
+import { Skeleton, FilterChip, SortableTh, fmtMarketCap } from '@/components/data-table-ui';
 
 type EmaTrendFilter = 'all' | 'bullish' | 'bearish';
 type SortKey = 'symbol' | 'current_price' | 'pe_ratio' | 'market_cap_cr' | 'avg_volume_10d' | 'rsi14';
@@ -46,10 +47,6 @@ function loadPersistedFilters(): PersistedFilters {
   }
 }
 
-function Skeleton({ className }: { className: string }) {
-  return <div className={`bg-border/60 rounded animate-pulse ${className}`} />;
-}
-
 function TrendBadge({ trend }: { trend: 'bullish' | 'bearish' | null }) {
   if (trend == null) return <span className="text-muted text-[10px]">—</span>;
   return trend === 'bullish' ? (
@@ -70,61 +67,8 @@ function rsiColor(v: number | null): string {
   return 'text-tx';
 }
 
-function fmtMarketCap(v: number | null): string {
-  if (v == null) return '—';
-  if (v >= 1_000) return `₹${(v / 1_000).toFixed(2)}k Cr`;
-  return `₹${v.toFixed(0)} Cr`;
-}
-
 function fmtNum(v: number | null, digits = 1): string {
   return v == null ? '—' : v.toFixed(digits);
-}
-
-function FilterChip<T extends string>({
-  value, active, onClick, label,
-}: { value: T; active: boolean; onClick: (v: T) => void; label: string }) {
-  return (
-    <button
-      onClick={() => onClick(value)}
-      aria-pressed={active}
-      className={`px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-colors
-        ${active
-          ? 'bg-accent/15 border-accent/40 text-accent'
-          : 'bg-surface border-border text-muted hover:text-tx hover:border-border-hi'}`}
-    >
-      {label}
-    </button>
-  );
-}
-
-function SortableTh({ label, sortK, currentKey, currentDir, onSort, align = 'left' }: {
-  label: string;
-  sortK: SortKey;
-  currentKey: SortKey;
-  currentDir: 'asc' | 'desc';
-  onSort: (k: SortKey) => void;
-  align?: 'left' | 'right';
-}) {
-  const active = currentKey === sortK;
-  return (
-    <th
-      aria-sort={active ? (currentDir === 'desc' ? 'descending' : 'ascending') : 'none'}
-      className={`p-0 text-[10px] font-bold text-muted uppercase tracking-wider whitespace-nowrap ${align === 'right' ? 'text-right' : 'text-left'}`}
-    >
-      <button
-        type="button"
-        onClick={() => onSort(sortK)}
-        className={`inline-flex items-center gap-1 px-4 py-3 uppercase tracking-wider
-                   cursor-pointer hover:text-tx transition-colors select-none group
-                   ${align === 'right' ? 'flex-row-reverse' : ''}`}
-      >
-        {label}
-        <span className={`text-[9px] transition-colors ${active ? 'text-accent' : 'text-muted/25 group-hover:text-muted/60'}`}>
-          {active ? (currentDir === 'desc' ? '↓' : '↑') : '↕'}
-        </span>
-      </button>
-    </th>
-  );
 }
 
 function SkeletonRows() {

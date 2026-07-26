@@ -6,6 +6,7 @@ import type { SmeSignal, SmeCrossEvent, SmeSignalHistoryResponse, SmeSignalsResp
 import EmaChart from '@/components/ema-chart';
 import SiteNav from '@/components/site-nav';
 import WatchlistButton from '@/components/watchlist-button';
+import { Skeleton, FilterChip, SortableTh, fmtMarketCap } from '@/components/data-table-ui';
 
 // ── Filter types ──────────────────────────────────────────────────────────────
 
@@ -29,12 +30,6 @@ const _RSI_OVERSOLD   = 30;
 const _RSI_OVERBOUGHT = 70;
 
 // ── Helper components ─────────────────────────────────────────────────────────
-
-function Skeleton({ className }: { className: string }) {
-  return (
-    <div className={`bg-border/60 rounded animate-pulse ${className}`} />
-  );
-}
 
 function CrossBadge({ cross }: { cross: 'golden' | 'death' | null }) {
   // null in regime view: this stock's latest row usually isn't a cross day.
@@ -84,12 +79,6 @@ function fmtTurnover(v: number | null): string {
   if (v >= 1_00_00_000) return `₹${(v / 1_00_00_000).toFixed(2)}Cr`;
   if (v >= 1_00_000) return `₹${(v / 1_00_000).toFixed(1)}L`;
   return `₹${v.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
-}
-
-function fmtMarketCap(v: number | null): string {
-  if (v == null) return '—';
-  if (v >= 1_000) return `₹${(v / 1_000).toFixed(2)}k Cr`;
-  return `₹${v.toFixed(0)} Cr`;
 }
 
 function rsiColor(v: number | null): string {
@@ -149,53 +138,6 @@ function CrossOutcomeSummary({ events }: { events: SmeCrossEvent[] }) {
       {golden.length > 0 && renderTrail('golden', golden, 'text-buy/80')}
       {death.length > 0 && renderTrail('death', death, 'text-sell/80')}
     </div>
-  );
-}
-
-function FilterChip<T extends string | number>({
-  value, active, onClick, label,
-}: { value: T; active: boolean; onClick: (v: T) => void; label: string }) {
-  return (
-    <button
-      onClick={() => onClick(value)}
-      aria-pressed={active}
-      className={`px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-colors
-        ${active
-          ? 'bg-accent/15 border-accent/40 text-accent'
-          : 'bg-surface border-border text-muted hover:text-tx hover:border-border-hi'}`}
-    >
-      {label}
-    </button>
-  );
-}
-
-function SortableTh({ label, sortK, currentKey, currentDir, onSort, align = 'left' }: {
-  label: string;
-  sortK: SortKey;
-  currentKey: SortKey | null;
-  currentDir: 'asc' | 'desc';
-  onSort: (k: SortKey) => void;
-  align?: 'left' | 'right';
-}) {
-  const active = currentKey === sortK;
-  return (
-    <th
-      aria-sort={active ? (currentDir === 'desc' ? 'descending' : 'ascending') : 'none'}
-      className={`p-0 text-[10px] font-bold text-muted uppercase tracking-wider whitespace-nowrap ${align === 'right' ? 'text-right' : 'text-left'}`}
-    >
-      <button
-        type="button"
-        onClick={() => onSort(sortK)}
-        className={`inline-flex items-center gap-1 px-4 py-3 uppercase tracking-wider
-                   cursor-pointer hover:text-tx transition-colors select-none group
-                   ${align === 'right' ? 'flex-row-reverse' : ''}`}
-      >
-        {label}
-        <span className={`text-[9px] transition-colors ${active ? 'text-accent' : 'text-muted/25 group-hover:text-muted/60'}`}>
-          {active ? (currentDir === 'desc' ? '↓' : '↑') : '↕'}
-        </span>
-      </button>
-    </th>
   );
 }
 
