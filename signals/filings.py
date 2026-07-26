@@ -40,9 +40,21 @@ def filings_signal(features: dict) -> Signal:
     meta = {"hits": hits}
     if rating_action:
         meta["rating_action"] = rating_action
+        # Only relabel when the rating action is what actually moved the
+        # score off zero (no keyword hits) — a keyword-driven label
+        # (STRONG_DEAL_FLOW/WEAK_SIGNAL) still correctly names the
+        # dominant driver even with a rating nudge layered on top, so it's
+        # left as-is. Without this, a downgrade-only filing set rendered
+        # as `Signal(value="NONE", score=-0.15)` — a frontend badge
+        # literally labeled "NONE" while still colored red/green off the
+        # nonzero score.
         if rating_action["action"] == "upgrade":
             base_score = min(1.0, base_score + _RATING_NUDGE)
+            if label == "NONE":
+                label = "RATING_UPGRADE"
         elif rating_action["action"] == "downgrade":
             base_score = max(-1.0, base_score - _RATING_NUDGE)
+            if label == "NONE":
+                label = "RATING_DOWNGRADE"
 
     return Signal("filings", label, base_score, meta)

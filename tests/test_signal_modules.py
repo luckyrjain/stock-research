@@ -150,7 +150,10 @@ class FilingsSignalTest(unittest.TestCase):
         sig = filings_signal({"filings": [
             {"title": "CRISIL upgrades rating", "desc": "", "date": "01-Jan-2026"},
         ]})
-        self.assertEqual(sig.value, "NONE")  # no deal-flow keyword hits
+        # Regression test: the label must reflect what actually moved the
+        # score off zero — a badge literally labeled "NONE" while still
+        # nonzero/colored would be misleading in the UI.
+        self.assertEqual(sig.value, "RATING_UPGRADE")
         self.assertAlmostEqual(sig.score, 0.15)
         self.assertEqual(sig.meta["rating_action"]["action"], "upgrade")
 
@@ -158,6 +161,7 @@ class FilingsSignalTest(unittest.TestCase):
         sig = filings_signal({"filings": [
             {"title": "ICRA downgrades rating", "desc": "", "date": "01-Jan-2026"},
         ]})
+        self.assertEqual(sig.value, "RATING_DOWNGRADE")
         self.assertAlmostEqual(sig.score, -0.15)
 
     def test_rating_reaffirmed_does_not_move_score(self) -> None:

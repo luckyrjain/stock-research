@@ -676,8 +676,10 @@ This is pure text classification over the already-fetched `filings` list — no 
    parsed out of the most recent "board meeting to consider financial results" filing's own text
    — rejected if it parses to before the filing's own date, since that's more likely an unrelated
    date mentioned in the same text than the actual meeting date). `classify_filings()` combines all
-   three into one dict — the single call site both consumers below use, so the classification logic
-   itself is never duplicated between them.
+   three into one dict, used by the frontend-facing consumer below; the signal-engine consumer
+   calls `classify_rating_action()` directly (it only needs the rating piece) — both run the exact
+   same function over the exact same filings list within one request, so the two can never disagree
+   even though `classify_filings()` isn't literally shared between them.
 2. **Disclosed limitation**: the exact category/title vocabulary NSE uses for these filing types
    was not verified against a live response in this sandbox (no outbound internet — same
    disclosure pattern as every other NSE/BSE scraper in this codebase). Every field is `None`/`[]`

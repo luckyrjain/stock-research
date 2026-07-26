@@ -98,6 +98,17 @@ class ClassifyRatingActionTest(unittest.TestCase):
         self.assertIsNone(result["from_rating"])
         self.assertIsNone(result["to_rating"])
 
+    def test_from_to_extracted_even_with_no_trailing_punctuation(self) -> None:
+        # Regression test: the "from X to Y" phrase can legitimately be the
+        # very tail of the joined title+desc+category text (category is
+        # joined last) with nothing after it — a regex requiring a trailing
+        # whitespace/period/comma would silently fail to extract from_rating/
+        # to_rating even though the phrase itself is perfectly clean.
+        filings = [{"title": "CRISIL Rating Action", "desc": "", "category": "downgraded from AA+ to AA-", "date": "01-Jan-2026"}]
+        result = classify_rating_action(filings)
+        self.assertEqual(result["from_rating"], "AA+")
+        self.assertEqual(result["to_rating"], "AA-")
+
     def test_no_rating_agency_mention_returns_none(self) -> None:
         filings = [{"title": "Board Meeting Intimation", "desc": "", "category": "", "date": "01-Jan-2026"}]
         self.assertIsNone(classify_rating_action(filings))

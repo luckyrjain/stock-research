@@ -42,7 +42,7 @@ _RATING_ACTION_KEYWORDS = {
     "reaffirmed": ("reaffirmed", "reaffirms", "reaffirm"),
 }
 _RATING_FROM_TO_RE = re.compile(
-    r"from\s+['\"]?([A-Za-z0-9+\-/ ]{2,15}?)['\"]?\s+to\s+['\"]?([A-Za-z0-9+\-/ ]{2,15}?)['\"]?[\s.,]",
+    r"from\s+['\"]?([A-Za-z0-9+\-/ ]{2,15}?)['\"]?\s+to\s+['\"]?([A-Za-z0-9+\-/ ]{2,15}?)['\"]?(?=[\s.,]|$)",
     re.IGNORECASE,
 )
 
@@ -186,11 +186,14 @@ def extract_next_results_date(filings: list[dict]) -> str | None:
 
 
 def classify_filings(filings: list[dict]) -> dict:
-    """Convenience wrapper combining all three classifiers — the single
-    call site both main.py::_build_report() (frontend display) and
-    signals/filings.py::filings_signal() (rating-change nudge) use, so
-    the same text-classification logic is never duplicated between the
-    two independent call sites."""
+    """Convenience wrapper combining all three classifiers, used by
+    main.py::_build_report() for the frontend's filings_summary field.
+    signals/filings.py::filings_signal() calls classify_rating_action()
+    directly instead (it only needs the rating piece, not the other two)
+    — but both call sites run the exact same classify_rating_action()
+    function over the exact same filings list within one request, so the
+    two can never disagree even though classify_filings() itself isn't
+    literally shared between them."""
     return {
         "corporate_actions": classify_corporate_actions(filings),
         "rating_action": classify_rating_action(filings),
