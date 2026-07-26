@@ -23,6 +23,7 @@ from schema_drift import log_drift_if_any
 from schemas import normalize as schema_normalize
 from schemas import validate as schema_validate
 from signals.engine import run_signal_engine
+from signals.filings_classifier import classify_filings
 from signals.store import save_signal
 from signals.interpreter import interpret
 from tools.news_tools import get_latest_news
@@ -336,6 +337,7 @@ def _build_report(symbol: str, all_data: dict, analysis: dict, signals: dict | N
     filings_raw = _strip_meta(all_data.get("filings", {}))
 
     holdings = {**shareholding, "mutual_funds": mf.get("mutual_funds", [])}
+    filings_list = filings_raw.get("filings", []) if isinstance(filings_raw, dict) else []
 
     return {
         "symbol": symbol,
@@ -346,7 +348,8 @@ def _build_report(symbol: str, all_data: dict, analysis: dict, signals: dict | N
         "research": research,
         "news": news_raw.get("articles", []) if isinstance(news_raw, dict) else [],
         "holdings": holdings,
-        "filings": filings_raw.get("filings", []) if isinstance(filings_raw, dict) else [],
+        "filings": filings_list,
+        "filings_summary": classify_filings(filings_list),
     }
 
 
