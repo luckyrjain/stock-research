@@ -41,6 +41,7 @@ stock-research/
 ├── sme_ema_pipeline.py     SME golden/death cross batch pipeline (PostgreSQL)
 ├── screener_pipeline.py    NIFTY 500 custom screener batch pipeline (PostgreSQL)
 ├── verdict_history.py      Daily verdict/price snapshots (PostgreSQL) — powers the hero's timeline strip
+├── mf_holdings_history.py  Quarterly MF stake snapshots (PostgreSQL) — powers the stake-delta badges
 ├── auth.py                 Magic-link auth: token/session issuance + validation (PostgreSQL)
 ├── email_sender.py         Sends the magic-link sign-in + watchlist-alert emails over generic SMTP
 ├── watchlist_alerts.py     Daily batch job: emails signed-in users on a watched stock's recommendation change
@@ -697,6 +698,49 @@ This is pure text classification over the already-fetched `filings` list — no 
    existing Corporate Filings card renders it as a row of small badges (each corporate action,
    the rating action color-coded buy/sell/hold by direction, the next results date) above the
    existing filing list, and renders nothing extra when `filings_summary` has nothing to show.
+
+### MF holdings trend (`mf_holdings_history.py`)
+
+The `mf_holdings` task's shareholding disclosure was already fetched every ~7 days (its own
+`shareholding`-tier cache TTL) but only ever shown as a single live snapshot — there was no way
+to see whether a fund was building or trimming its stake quarter over quarter.
+
+1. `mf_holdings_history` (new Postgres table, `db/models.py` + `db/schema.sql`, same
+   `CREATE TABLE IF NOT EXISTS` pattern as `verdict_history`/`screener_stocks` — a wholly new
+   table needs no separate `ALTER TABLE` migration guard, unlike a new column on an existing
+   table) stores one row per `(symbol, as_of_date, fund)`.
+2. `mf_holdings_history.save_snapshot(symbol, mf_holdings)` is wired into `main._fetch_task()` —
+   the same choke point `schema_drift.log_drift_if_any()` already uses — guarded to only the
+   `mf_holdings` task, on both its raw-dict and parsed-JSON-text success paths. Since
+   `_fetch_task()` is only ever called for a task api.py's cache-freshness check marked stale, a
+   cache hit never reaches this at all — the table's write cadence naturally follows however
+   often `mf_holdings` actually gets re-fetched, no separate poller. No-ops (never invented) if
+   `DATABASE_URL` isn't set, the fetch was an error payload, or there's no `as_of_date`/no funds
+   to record. A same-quarter re-fetch upserts existing rows rather than duplicating them.
+3. `mf_holdings_history.compute_stake_deltas(symbol)` ranks the most recent stored snapshot's
+   funds by stake, each with `delta_pct` — the change vs. that same fund's stake in the
+   second-most-recent stored snapshot. `delta_pct` is `None` (never guessed) when there's no
+   prior snapshot at all, or the fund is a new entrant absent from it.
+4. **Kept out of `main._build_report()` itself, unlike `filings_summary`**: `compute_stake_deltas()`
+   is a DB query, not pure in-memory computation — `_build_report()` runs directly on api.py's
+   event loop (unlike `save_verdict_snapshot`, which is deliberately fire-and-forget through
+   `run_in_executor` since the client isn't waiting on it), so a DB call inside it would violate
+   the "never block the event loop" rule the SSE bridge pattern documents. Instead
+   `mf_holdings_trend` is computed by each caller — `api.py` via an *awaited*
+   `run_in_executor` call (the frontend does need this in the response, unlike verdict history)
+   and `main.py`'s CLI path directly (no event loop to protect there) — and passed into
+   `_build_report()` as a parameter, the same pattern the pre-existing `signals` parameter
+   already established for keeping DB/compute-heavy work outside the report-assembly function.
+5. `results-dashboard.tsx`'s existing "Mutual Fund Holdings" card renders a small ▲/▼ delta next
+   to each fund's live holding % (green up, red down, muted for exactly 0%) by matching fund name
+   against `mf_holdings_trend` — funds with no computable delta (no prior snapshot, or a new
+   entrant) simply show no delta badge, the live percentage still renders as before. **Undisclosed
+   risk worth flagging**: this match is exact-string on `fund` between the live-scraped
+   `holdings.mutual_funds` and the DB-stored `mf_holdings_trend` (both ultimately sourced from the
+   same Screener/NSE fund-name text, but fetched independently) — a fund renaming itself, or
+   Screener changing its formatting of the same fund's name between quarters, would silently show
+   no delta badge rather than a wrong one, same fail-open-to-"no data" instinct as everywhere else
+   in this doc, but unlike those cases this specific assumption wasn't previously written down.
 
 ### Symbol validation flow (`GET /api/validate/{symbol}`)
 

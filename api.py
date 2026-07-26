@@ -594,6 +594,7 @@ async def analyse(symbol: str, request: Request, force: bool = False):
             import cache
             from crew import ALL_DATA_TASKS
             from main import _fetch_task, _build_report
+            from mf_holdings_history import compute_stake_deltas as compute_mf_holdings_deltas
             from schemas import normalize as schema_normalize, validate as schema_validate
             from signals.engine import run_signal_engine
             from signals.store import save_signal
@@ -748,7 +749,12 @@ async def analyse(symbol: str, request: Request, force: bool = False):
             else:
                 analysis = cache.load(sym, "analysis") or {}
 
-            report = _build_report(sym, all_data, analysis, signal_context)
+            # Unlike verdict_history below, the frontend actually needs this in
+            # the response — awaited, but still off the event loop (a DB query,
+            # same "never block the event loop" rule as everywhere else in this
+            # SSE path) via run_in_executor rather than called inline.
+            mf_holdings_trend = await loop.run_in_executor(None, compute_mf_holdings_deltas, sym)
+            report = _build_report(sym, all_data, analysis, signal_context, mf_holdings_trend)
             # Fire-and-forget: verdict_history is a best-effort side effect (it
             # already logs and swallows its own failures) that the client isn't
             # waiting on, so it must not add a DB round-trip to the response's

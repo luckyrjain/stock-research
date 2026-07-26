@@ -135,6 +135,21 @@ export interface Report {
   };
   filings: Filing[];   // corporate announcements — also what signals.filings feeds on
   filings_summary: FilingsSummary;
+  mf_holdings_trend: MfHoldingsStakeDelta[];
+}
+
+// One entry per mutual fund currently holding this stock, ranked by stake —
+// see mf_holdings_history.py. delta_pct is the change vs. the same fund's
+// stake in the previous stored quarterly snapshot; null (never guessed) when
+// there's no prior snapshot at all, or this fund is a new entrant not
+// present in it. Empty array when DATABASE_URL isn't configured or no
+// snapshot has ever been stored for this symbol — not an error.
+export interface MfHoldingsStakeDelta {
+  fund:              string;
+  holding_pct:       number;
+  delta_pct:         number | null;
+  as_of_date:        string;
+  prior_as_of_date:  string | null;
 }
 
 // Standalone daily-close series for sparklines — fetched separately from the

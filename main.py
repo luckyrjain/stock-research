@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 import cache
 from crew import ALL_DATA_TASKS, parse_json_object, run_analysis_with_fallback
 from error_tracking import init_error_tracking
+from mf_holdings_history import compute_stake_deltas as compute_mf_holdings_deltas
+from mf_holdings_history import save_snapshot as save_mf_holdings_snapshot
 from observability import get_logger, log_event
 from schema_drift import log_drift_if_any
 from schemas import normalize as schema_normalize
@@ -95,6 +97,8 @@ def _fetch_task(task_name: str, symbol: str, run_id: str, max_attempts: int = 3)
                     payload_type="dict",
                 )
                 log_drift_if_any(task_name, raw, run_id=run_id, symbol=symbol)
+                if task_name == "mf_holdings":
+                    save_mf_holdings_snapshot(symbol, raw)
                 return raw
 
             parsed = parse_json_object(str(raw))
@@ -112,6 +116,8 @@ def _fetch_task(task_name: str, symbol: str, run_id: str, max_attempts: int = 3)
                     payload_type="json_text",
                 )
                 log_drift_if_any(task_name, parsed, run_id=run_id, symbol=symbol)
+                if task_name == "mf_holdings":
+                    save_mf_holdings_snapshot(symbol, parsed)
                 return parsed
 
             last_error = "tool returned an unparseable payload"
@@ -318,7 +324,8 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     _print_report(all_data, analysis)
 
     # ── Step 3: save merged report ────────────────────────────────────────────
-    report = _build_report(symbol, all_data, analysis, signal_context)
+    mf_holdings_trend = compute_mf_holdings_deltas(symbol)
+    report = _build_report(symbol, all_data, analysis, signal_context, mf_holdings_trend)
     save_verdict_snapshot(symbol, analysis, signal_context, all_data.get("stock_info") or {})
     report_dir = Path("output") / symbol
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -328,7 +335,13 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     log_event(LOGGER, "pipeline_completed", run_id=run_id, symbol=symbol, report_path=str(report_path))
 
 
-def _build_report(symbol: str, all_data: dict, analysis: dict, signals: dict | None = None) -> dict:
+def _build_report(
+    symbol: str,
+    all_data: dict,
+    analysis: dict,
+    signals: dict | None = None,
+    mf_holdings_trend: list[dict] | None = None,
+) -> dict:
     stock       = _strip_meta(all_data.get("stock_info", {}))
     research    = _strip_meta(all_data.get("research", {}))
     news_raw    = _strip_meta(all_data.get("news", {}))
@@ -350,6 +363,7 @@ def _build_report(symbol: str, all_data: dict, analysis: dict, signals: dict | N
         "holdings": holdings,
         "filings": filings_list,
         "filings_summary": classify_filings(filings_list),
+        "mf_holdings_trend": mf_holdings_trend or [],
     }
 
 
