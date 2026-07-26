@@ -4,13 +4,43 @@ import { sseAnalysisBody, SSE_HEADERS, validationResult } from './fixtures';
 test.describe('Home page', () => {
   test('shows the search UI and entry points into the other modes', async ({ page }) => {
     // The idle home page (before any analysis has run) shows a compact hero
-    // with just two pill links, not the full nav bar — the full nav only
-    // appears once `phase` leaves 'idle' (see the second test below, which
-    // exercises that state after a completed analysis).
+    // with two pill links AND the full nav bar — a first-time visitor must
+    // be able to sign in and discover Screener/Watchlist/Portfolio/Compare
+    // without first committing a real ticker and waiting through a full
+    // analysis (see the second test below for the post-analysis state).
     await page.goto('/');
     await expect(page.getByLabel('NSE or BSE stock ticker')).toBeVisible();
     await expect(page.getByRole('link', { name: /top picks/ })).toBeVisible();
     await expect(page.getByRole('link', { name: /SME golden cross screener/ })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Screener' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Watchlist' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Sign in' })).toBeVisible();
+  });
+
+  test('idle hero offers a one-click sample report for skeptical first-time visitors', async ({ page }) => {
+    const symbol = 'TCS';
+    await page.route(`**/api/analyse/${symbol}**`, route =>
+      route.fulfill({ status: 200, headers: SSE_HEADERS, body: sseAnalysisBody(symbol) }));
+    await page.route('**/api/peers/**', route => route.fulfill({
+      json: { symbol, self: null, peers: [], sector_median: null, percentiles: {}, absolute_anchor: null },
+    }));
+    await page.route('**/api/insider-activity/**', route => route.fulfill({
+      json: { symbol, insider_trades: [], bulk_block_deals: [] },
+    }));
+    await page.route('**/api/street-consensus/**', route => route.fulfill({
+      json: { symbol, articles: [] },
+    }));
+    await page.route('**/api/prices/history/**', route => route.fulfill({
+      json: { symbol, exchange: 'NSE', dates: [], closes: [] },
+    }));
+    await page.route('**/api/verdict-history/**', route => route.fulfill({
+      json: { symbol, history: [], win_rate: null, scored_count: 0 },
+    }));
+
+    await page.goto('/');
+    await page.getByRole('button', { name: /See a real report for TCS/ }).click();
+
+    await expect(page.getByText('BUY', { exact: true }).first()).toBeVisible({ timeout: 15000 });
   });
 
   test('runs a full mocked stock analysis and renders the verdict', async ({ page }) => {
@@ -55,10 +85,8 @@ test.describe('Home page', () => {
     await expect(page.getByText('BUY', { exact: true }).first()).toBeVisible({ timeout: 15000 });
     await expect(page.getByText(`${symbol} Limited`).first()).toBeVisible();
 
-    // The full nav bar (hidden on the idle hero — see the test above) appears
-    // once phase leaves 'idle'. Home's own nav doesn't carry a Portfolio
-    // link (see CLAUDE.md's "Portfolio summary" section — positions are
-    // only ever created from Market Picks, so that page's nav is enough).
+    // The nav bar is visible on the idle hero too now (see the test above) —
+    // still present once a report has loaded.
     await expect(page.getByRole('link', { name: 'Market Picks' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Screener' })).toBeVisible();
   });

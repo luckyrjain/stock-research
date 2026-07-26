@@ -73,10 +73,16 @@ function HomePageInner() {
 
   return (
     <main className="min-h-screen bg-bg text-tx">
-      <div className={`max-w-5xl mx-auto px-4 ${isIdle ? 'py-16' : 'pt-8 pb-16'}`}>
+      <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
+
+        {/* Nav is always mounted, idle or not — a first-time visitor
+            previously couldn't sign in or discover Screener/Watchlist/
+            Portfolio/Compare at all until they'd already run an analysis,
+            since only the non-idle branch rendered it. */}
+        <SiteNav />
 
         {isIdle ? (
-          <div className="max-w-2xl mx-auto">
+          <div className="max-w-2xl mx-auto pt-8">
             <div className="mb-12 text-center">
               <h1 className="text-4xl font-black tracking-tight text-tx mb-2">
                 Alpha<span className="text-accent">Pulse</span>
@@ -116,11 +122,29 @@ function HomePageInner() {
             )}
 
             <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} />
+
+            {/* A skeptical first-time visitor previously had to commit a real
+                ticker and wait through the full multi-stage pipeline before
+                seeing any payoff at all. This runs a real analysis for a
+                well-known large-cap on one click — the exact same live
+                pipeline every other query goes through, never a fabricated
+                mock report, which would risk being mistaken for a real
+                recommendation on a product whose whole premise is trustworthy
+                data. */}
+            <p className="text-center text-muted/50 text-xs mt-4">
+              New here?{' '}
+              <button
+                type="button"
+                onClick={() => handleAnalyse('TCS')}
+                disabled={isRunning}
+                className="text-accent hover:underline font-medium disabled:opacity-50 disabled:no-underline"
+              >
+                See a real report for TCS →
+              </button>
+            </p>
           </div>
         ) : (
           <>
-            <SiteNav />
-
             <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} compact />
 
             {(phase === 'fetching' || phase === 'analysing') && (
