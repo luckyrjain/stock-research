@@ -135,6 +135,11 @@ python -m pytest tests/test_analysis_guardrails.py -v   # single file
 
 Tests use `unittest` and are collected by pytest. They mock heavy dependencies (crewai, tool imports) via `sys.modules` patching — no external calls made.
 
+`tests_live/` is a **separate** test root, never collected by the command above — it makes real
+network calls to a handful of third-party sites and only runs opt-in (`RUN_LIVE_TESTS=1`), on a
+weekly schedule. See "Live scraper contract checks" further down for why it exists and why it's
+deliberately excluded from every other test invocation in this repo.
+
 ### Key libraries
 
 | Library | Purpose |
@@ -1190,6 +1195,43 @@ false-positive noise on exactly the symbols/fields this convention already expec
    disclosed-limitation notes elsewhere in this doc about being unverified against live
    responses in this sandbox; extending drift detection to them is future work, not silently
    assumed to already be covered by this pass.
+
+### Live scraper contract checks (`tests_live/`)
+
+`schema_drift.py`/`source_health.py` above only ever learn a scraper broke from *production*
+traffic, after the fact — there was previously no earlier, narrower signal, and this repo's own
+docs disclose roughly a dozen scraper assumptions (Screener's section ids, Trendlyne's DOM
+labels, NSE's XBRL field names, RBI's table layout, the NIFTY 500 CSV shape, the sector-taxonomy
+guess in `signals/engine.py`) that were never actually checked against a live response in this
+sandbox (no outbound internet to non-allowlisted hosts, repeated throughout this file).
+
+1. `tests_live/test_scraper_contracts.py` is a **second, independent test root** — deliberately
+   not inside `tests/`, since `python -m pytest tests/` (the command this repo's CI and this
+   file both document) must never make a live network call, matching every other test in this
+   codebase. It covers the four highest-blast-radius scrapers: Screener.in's peer table (feeds
+   fundamentals, peers, DCF, and the analyst prompt simultaneously), Trendlyne's symbol
+   resolution, NSE's FII/DII flow, and RBI's rate/inflation table.
+2. Opt-in via `RUN_LIVE_TESTS=1` (checked in each test's `setUp`) — running `pytest tests_live/`
+   without it is a clean, immediate skip, so this can never accidentally fire from a local
+   `pytest` invocation or an unrelated CI job.
+3. **Connectivity is checked before the scraper, not inferred from its result.** Every tool
+   function in this codebase follows the "tools never raise" convention (see "Important Rules
+   for Claude" below) — a connectivity failure and a genuine site-layout change both surface the
+   same way, as a returned `{"error": ...}` dict, so pattern-matching the tool's own output to
+   tell them apart would be unreliable. Each test instead makes its own minimal, direct
+   `requests.head()` probe to the target host first; only once that succeeds does a
+   still-returned `"error"` (or a missing expected field) count as a real contract failure.
+   Confirmed while building this: this sandbox's own outbound proxy 403s the CONNECT tunnel for
+   all four target hosts, so every test correctly skips here rather than reporting a false
+   pass or a false failure — the exact failure mode a naive live test would have hit.
+4. `.github/workflows/live-contract-check.yml` runs this weekly (`workflow_dispatch` also
+   available for an on-demand run) — low frequency deliberately, since this is an early-warning
+   signal for the scrapers' *shape*, not a data-collection job. A genuine contract break fails
+   the Actions job and fires GitHub's own run-failure notification, the same "let a bad run fail
+   loudly" convention `sme_ema_pipeline.py`'s own health gate already established.
+5. **Explicitly does not close the gap for every disclosed-but-unverified assumption** — four
+   scrapers, not all ~10 standalone ones outside `ALL_DATA_TASKS`. A starting point at the
+   highest-blast-radius sources, not full coverage.
 
 ### Source freshness/volume monitoring (`source_health.py`)
 
