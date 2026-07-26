@@ -25,6 +25,24 @@ function RecBadge({ rec }: { rec: string }) {
   );
 }
 
+function fmtAsOf(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+// Analysis is a 3-tier BUY/HOLD/SELL verdict; Market Picks is a separate
+// 4-tier BUY/WATCHLIST/HOLD/SELL score (see CLAUDE.md's "4-tier
+// recommendation in market picks"). The two run independently and can
+// legitimately disagree — this used to just stack both badges with no
+// acknowledgement that they might not match.
+function verdictsDisagree(analysisRec: string | null, pickRec: string | null): boolean {
+  if (!analysisRec || !pickRec) return false;
+  if (pickRec === 'WATCHLIST') return analysisRec !== 'BUY';
+  return analysisRec !== pickRec;
+}
+
 function SectionSkeleton() {
   return (
     <div className="space-y-3">
@@ -107,8 +125,20 @@ export default function ConsolidatedCard({ symbol, onClose }: Props) {
 
           {!loading && !error && data && (
             <>
+              {verdictsDisagree(data.analysis?.recommendation ?? null, data.market_pick?.recommendation ?? null) && (
+                <p className="text-[11px] text-hold bg-hold/8 border border-hold/20 rounded-lg px-3 py-2 leading-relaxed">
+                  Stock Analysis and Market Picks disagree here — they&apos;re two independent scoring
+                  methods (3-tier vs. 4-tier), not a single source of truth, so this isn&apos;t a bug.
+                </p>
+              )}
+
               <section className="rounded-lg border border-border p-4">
-                <p className="text-[10px] font-bold text-muted uppercase tracking-wider mb-2">Stock Analysis</p>
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <p className="text-[10px] font-bold text-muted uppercase tracking-wider">Stock Analysis</p>
+                  {fmtAsOf(data.analysis?.as_of) && (
+                    <p className="text-[10px] text-muted/60">as of {fmtAsOf(data.analysis?.as_of)}</p>
+                  )}
+                </div>
                 {data.analysis ? (
                   <>
                     <div className="flex items-center gap-2 mb-1.5 flex-wrap">
@@ -133,7 +163,12 @@ export default function ConsolidatedCard({ symbol, onClose }: Props) {
               </section>
 
               <section className="rounded-lg border border-border p-4">
-                <p className="text-[10px] font-bold text-muted uppercase tracking-wider mb-2">Market Picks</p>
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <p className="text-[10px] font-bold text-muted uppercase tracking-wider">Market Picks</p>
+                  {fmtAsOf(data.market_pick?.generated_at) && (
+                    <p className="text-[10px] text-muted/60">as of {fmtAsOf(data.market_pick?.generated_at)}</p>
+                  )}
+                </div>
                 {data.market_pick ? (
                   <>
                     <div className="flex items-center gap-2 mb-1.5 flex-wrap">

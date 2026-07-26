@@ -3,8 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { usePositions, type Position } from '@/lib/positions';
-import HeaderSearch from '@/components/header-search';
-import AuthWidget from '@/components/auth-widget';
+import SiteNav from '@/components/site-nav';
 
 interface LivePrice {
   price: number;
@@ -125,38 +124,7 @@ export default function PortfolioPage() {
     <main className="min-h-screen bg-bg text-tx">
       <div className="max-w-4xl mx-auto px-4 pt-8 pb-16">
 
-        {/* Nav */}
-        <div className="flex items-center gap-4 mb-8 pb-4 border-b border-border flex-wrap">
-          <Link href="/" className="text-base font-black tracking-tight text-tx">
-            Alpha<span className="text-accent">Pulse</span>
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/market-picks" className="text-sm text-muted hover:text-tx transition-colors">
-            Market Picks
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/sme-signals" className="text-sm text-muted hover:text-tx transition-colors">
-            SME Signals
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/screener" className="text-sm text-muted hover:text-tx transition-colors">
-            Screener
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/watchlist" className="text-sm text-muted hover:text-tx transition-colors">
-            Watchlist
-          </Link>
-          <span className="text-border-hi">|</span>
-          <span className="text-sm font-semibold text-accent">Portfolio</span>
-          <span className="text-border-hi">|</span>
-          <Link href="/compare" className="text-sm text-muted hover:text-tx transition-colors">
-            Compare
-          </Link>
-          <div className="ml-auto flex items-center gap-3">
-            <HeaderSearch />
-            <AuthWidget />
-          </div>
-        </div>
+        <SiteNav active="portfolio" wrap />
 
         {/* Header */}
         <div className="mb-8 animate-fade-up">

@@ -499,6 +499,80 @@ class MarketPicksStatusEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 429)
 
 
+class FetchNiftyClosesCacheSharingTest(unittest.TestCase):
+    """_fetch_nifty_closes() is shared by two independent callers with very
+    different range shapes: the picks-history alpha stat (a range spanning
+    the whole snapshot archive, only ever growing) and the per-stock Nifty
+    benchmark endpoint (a ~180-day trailing window that differs per stock).
+    A naive exact-range cache key means these two essentially never agree on
+    a range and evict each other's entry on every single call — these tests
+    lock in the coverage-based fix (cached range must merely *contain* the
+    requested one, not match it) so that regression can't come back silently."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-nifty-cache-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
+        self._cache_patch.start()
+        self.addCleanup(self._cache_patch.stop)
+
+    def _fake_ticker(self, closes: dict[str, float]) -> MagicMock:
+        idx = pd.to_datetime(list(closes.keys()))
+        df = pd.DataFrame({"Close": list(closes.values())}, index=idx)
+        fake_ticker = MagicMock()
+        fake_ticker.history.return_value = df
+        return fake_ticker
+
+    def test_narrower_request_inside_cached_range_is_served_from_cache(self) -> None:
+        wide = {f"2026-01-{d:02d}": 20000.0 + d for d in range(1, 29)}
+        with patch("yfinance.Ticker", return_value=self._fake_ticker(wide)):
+            api._fetch_nifty_closes("2026-01-01", "2026-01-28")
+
+        # A different caller's narrower, non-identical range is fully
+        # contained by what's already cached — must NOT hit yfinance again.
+        with patch("yfinance.Ticker", side_effect=AssertionError("should be served from cache")):
+            result = api._fetch_nifty_closes("2026-01-10", "2026-01-20")
+        self.assertEqual(result["2026-01-10"], wide["2026-01-10"])
+        self.assertEqual(len(result), 28)
+
+    def test_uncovered_range_triggers_union_refetch_not_narrow_refetch(self) -> None:
+        first = {f"2026-01-{d:02d}": 20000.0 + d for d in range(10, 21)}
+        with patch("yfinance.Ticker", return_value=self._fake_ticker(first)):
+            api._fetch_nifty_closes("2026-01-10", "2026-01-20")
+
+        # A second caller's range only partially overlaps — extends earlier.
+        # The re-fetch must cover the UNION (2026-01-01..2026-01-20), not
+        # just the newly requested slice, so future requests for the middle
+        # of the old range stay servable from cache too.
+        second = {f"2026-01-{d:02d}": 20000.0 + d for d in range(1, 21)}
+        fake_ticker = self._fake_ticker(second)
+        with patch("yfinance.Ticker", return_value=fake_ticker):
+            result = api._fetch_nifty_closes("2026-01-01", "2026-01-15")
+        call_kwargs = fake_ticker.history.call_args.kwargs
+        self.assertEqual(call_kwargs["start"], "2026-01-01")
+        self.assertEqual(call_kwargs["end"], "2026-01-21")  # end-exclusive, one day past 2026-01-20
+        self.assertEqual(len(result), 20)
+
+    def test_yfinance_failure_returns_empty_dict(self) -> None:
+        with patch("yfinance.Ticker", side_effect=RuntimeError("outage")):
+            result = api._fetch_nifty_closes("2026-01-01", "2026-01-10")
+        self.assertEqual(result, {})
+
+    def test_old_shape_cache_entry_without_start_end_keys_does_not_crash(self) -> None:
+        # A cache file written before the coverage-based scheme existed (the
+        # old {"range": "...", "closes": {...}} shape) must not KeyError on
+        # its first read post-deploy — it should just be treated as
+        # non-covering and trigger a normal fresh fetch.
+        import cache as cache_module
+
+        cache_module.save("NSEI", "index_history", {"range": "2025-01-01:2025-01-10", "closes": {"2025-01-01": 100.0}})
+        fresh = {f"2026-01-{d:02d}": 20000.0 + d for d in range(1, 11)}
+        with patch("yfinance.Ticker", return_value=self._fake_ticker(fresh)):
+            result = api._fetch_nifty_closes("2026-01-01", "2026-01-10")
+        self.assertEqual(len(result), 10)
+        self.assertEqual(result["2026-01-01"], fresh["2026-01-01"])
+
+
 class MarketPicksHistoryEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-picks-history-test-")
@@ -844,6 +918,61 @@ class PriceHistoryEndpointTest(unittest.TestCase):
         resp = client.get("/api/prices/history/%2e%2e")
         self.assertEqual(resp.status_code, 422)
 
+    def test_benchmark_omitted_by_default(self) -> None:
+        fake_ticker = MagicMock()
+        fake_ticker.history.return_value = self._fake_history_df(10)
+        with patch("yfinance.Ticker", return_value=fake_ticker):
+            resp = client.get("/api/prices/history/TCS?days=30")
+        self.assertEqual(resp.status_code, 200)
+        # Opt-in: no "benchmark" key at all (not even null) unless requested —
+        # most callers of this endpoint (e.g. quarterly-trend sparklines) aren't
+        # plotting a price series, so a Nifty comparison would be meaningless.
+        self.assertNotIn("benchmark", resp.json())
+
+    def test_benchmark_true_computes_relative_performance(self) -> None:
+        stock_df = self._fake_history_df(10)  # closes: 100 .. 109, a +9% move
+        nifty_df = pd.DataFrame(
+            {"Close": [20000.0 + i * 20 for i in range(10)]},  # 20000 -> 20180, a +0.9% move
+            index=pd.date_range("2026-01-01", periods=10, freq="D"),
+        )
+
+        def _ticker_side_effect(sym: str):
+            m = MagicMock()
+            m.history.return_value = nifty_df if sym == "^NSEI" else stock_df
+            return m
+
+        with patch("yfinance.Ticker", side_effect=_ticker_side_effect):
+            resp = client.get("/api/prices/history/TCS?days=30&benchmark=true")
+        self.assertEqual(resp.status_code, 200)
+        bench = resp.json()["benchmark"]
+        self.assertIsNotNone(bench)
+        self.assertAlmostEqual(bench["stock_change_pct"], 9.0, places=1)
+        self.assertAlmostEqual(bench["nifty_change_pct"], 0.9, places=1)
+        self.assertAlmostEqual(bench["alpha_pct"], bench["stock_change_pct"] - bench["nifty_change_pct"], places=2)
+
+    def test_benchmark_null_when_nifty_fetch_fails(self) -> None:
+        stock_df = self._fake_history_df(10)
+
+        def _ticker_side_effect(sym: str):
+            if sym == "^NSEI":
+                raise RuntimeError("yfinance outage")
+            m = MagicMock()
+            m.history.return_value = stock_df
+            return m
+
+        with patch("yfinance.Ticker", side_effect=_ticker_side_effect):
+            resp = client.get("/api/prices/history/TCS?days=30&benchmark=true")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.json()["benchmark"])
+
+    def test_benchmark_null_when_series_too_short(self) -> None:
+        empty_ticker = MagicMock()
+        empty_ticker.history.return_value = pd.DataFrame()
+        with patch("yfinance.Ticker", return_value=empty_ticker):
+            resp = client.get("/api/prices/history/NOSUCHSYMBOL?benchmark=true")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.json()["benchmark"])
+
 
 class PeersEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -981,6 +1110,117 @@ class PeersEndpointTest(unittest.TestCase):
         self.assertIn("absolute_anchor", resp.json())
         self.assertIsNone(resp.json()["absolute_anchor"])
         should_not_run.run.assert_not_called()
+
+
+class FinancialsEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-financials-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
+        self._cache_patch.start()
+        self.addCleanup(self._cache_patch.stop)
+        rate_limiter._memory_calls.clear()
+
+    def tearDown(self) -> None:
+        rate_limiter._memory_calls.clear()
+
+    def test_invalid_symbol_returns_422(self) -> None:
+        resp = client.get("/api/financials/bad symbol")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_rate_limited_returns_429(self) -> None:
+        rate_limiter._memory_calls["financials:testclient"] = [api.time.monotonic()] * 30
+        resp = client.get("/api/financials/TCS")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_returns_statements_and_caches(self) -> None:
+        raw = json.dumps({
+            "symbol": "TCS",
+            "profit_loss": {"years": ["Mar 2023", "Mar 2024"], "rows": [{"label": "Sales", "values": [100.0, 120.0]}]},
+            "balance_sheet": {"years": ["Mar 2023", "Mar 2024"], "rows": [{"label": "Total Assets", "values": [500.0, 550.0]}]},
+            "cash_flow": {"years": ["Mar 2023", "Mar 2024"], "rows": [{"label": "Cash from Operating Activity", "values": [80.0, 90.0]}]},
+        })
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = raw
+        with patch("tools.screener_tools.get_financial_statements", fake_tool):
+            resp = client.get("/api/financials/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["symbol"], "TCS")
+        self.assertEqual(body["profit_loss"]["rows"][0]["label"], "Sales")
+        self.assertEqual(body["cash_flow"]["rows"][0]["label"], "Cash from Operating Activity")
+        fake_tool.run.assert_called_once()
+
+        # Second call must be served from cache — the scraper must not run again.
+        with patch("tools.screener_tools.get_financial_statements") as should_not_run:
+            resp2 = client.get("/api/financials/TCS")
+        self.assertEqual(resp2.status_code, 200)
+        should_not_run.run.assert_not_called()
+
+    def test_tool_error_returns_all_null_payload_not_500(self) -> None:
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
+        with patch("tools.screener_tools.get_financial_statements", fake_tool):
+            resp = client.get("/api/financials/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertIsNone(body["profit_loss"])
+        self.assertIsNone(body["balance_sheet"])
+        self.assertIsNone(body["cash_flow"])
+        self.assertIsNone(body["dcf"])
+
+    def test_tool_error_is_not_cached_so_next_request_retries(self) -> None:
+        # Same convention as GET /api/peers/{symbol}: a transient scrape
+        # failure must not get locked in as "no financials" for the full
+        # 24h TTL — the very next request should hit the scraper again.
+        failing_tool = MagicMock()
+        failing_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
+        with patch("tools.screener_tools.get_financial_statements", failing_tool):
+            client.get("/api/financials/TCS")
+        failing_tool.run.assert_called_once()
+
+        succeeding_tool = MagicMock()
+        succeeding_tool.run.return_value = json.dumps({
+            "symbol": "TCS",
+            "profit_loss": {"years": ["Mar 2024"], "rows": [{"label": "Sales", "values": [100.0]}]},
+        })
+        with patch("tools.screener_tools.get_financial_statements", succeeding_tool):
+            resp = client.get("/api/financials/TCS")
+        succeeding_tool.run.assert_called_once()
+        self.assertIsNotNone(resp.json()["profit_loss"])
+
+    def test_dcf_computed_when_stock_info_cached(self) -> None:
+        cache.save("TCS", "stock_info", {"current_price": 500.0, "market_cap_cr": 50000.0})
+        raw = json.dumps({
+            "symbol": "TCS",
+            "cash_flow": {
+                "years": ["2020", "2021", "2022", "2023"],
+                "rows": [{"label": "Cash from Operating Activity", "values": [100.0, 140.0, 190.0, 240.0]}],
+            },
+        })
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = raw
+        with patch("tools.screener_tools.get_financial_statements", fake_tool):
+            resp = client.get("/api/financials/TCS")
+        self.assertEqual(resp.status_code, 200)
+        dcf = resp.json()["dcf"]
+        self.assertIsNotNone(dcf)
+        self.assertIn(dcf["verdict"], {"Undervalued", "Overvalued", "Fair"})
+
+    def test_dcf_null_without_stock_info_cached(self) -> None:
+        raw = json.dumps({
+            "symbol": "TCS",
+            "cash_flow": {
+                "years": ["2020", "2021", "2022", "2023"],
+                "rows": [{"label": "Cash from Operating Activity", "values": [100.0, 140.0, 190.0, 240.0]}],
+            },
+        })
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = raw
+        with patch("tools.screener_tools.get_financial_statements", fake_tool):
+            resp = client.get("/api/financials/TCS")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.json()["dcf"])
 
 
 class InsiderActivityEndpointTest(unittest.TestCase):
@@ -1882,6 +2122,67 @@ class WatchlistEndpointsTest(unittest.TestCase):
     def test_delete_missing_database_url_returns_503(self) -> None:
         resp = client.delete("/api/watchlist/TCS?client_id=client-abc")
         self.assertEqual(resp.status_code, 503)
+
+
+class WatchlistCalendarEndpointTest(unittest.TestCase):
+    """Pure read-aggregation over each symbol's already-cached `filings` —
+    no DATABASE_URL involved at all, unlike the rest of the watchlist
+    endpoints, since the caller (the watchlist page) already has its own
+    symbol list from GET /api/watchlist and just passes it through."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-watchlist-calendar-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
+        self._cache_patch.start()
+        self.addCleanup(self._cache_patch.stop)
+        rate_limiter._memory_calls.clear()
+
+    def tearDown(self) -> None:
+        rate_limiter._memory_calls.clear()
+
+    def test_no_symbols_returns_empty_entries(self) -> None:
+        resp = client.get("/api/watchlist/calendar?symbols=")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["entries"], [])
+
+    def test_symbol_with_no_cached_filings_contributes_nothing(self) -> None:
+        resp = client.get("/api/watchlist/calendar?symbols=TCS")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["entries"], [])
+
+    def test_symbol_with_classifiable_filing_is_included(self) -> None:
+        cache.save("TCS", "filings", {"symbol": "TCS", "filings": [
+            {
+                "title": "Board Meeting Intimation for considering financial results",
+                "desc": "The Board will meet on 15-08-2026 to consider financial results.",
+                "date": "2026-07-20",
+                "category": "Board Meeting",
+                "attachment": None,
+            },
+        ]})
+        resp = client.get("/api/watchlist/calendar?symbols=TCS")
+        self.assertEqual(resp.status_code, 200)
+        entries = resp.json()["entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["symbol"], "TCS")
+
+    def test_symbol_with_only_routine_filings_contributes_nothing(self) -> None:
+        cache.save("TCS", "filings", {"symbol": "TCS", "filings": [
+            {"title": "Newspaper publication", "desc": "", "date": "2026-07-20", "category": "Other", "attachment": None},
+        ]})
+        resp = client.get("/api/watchlist/calendar?symbols=TCS")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["entries"], [])
+
+    def test_invalid_symbols_are_filtered_out(self) -> None:
+        resp = client.get("/api/watchlist/calendar?symbols=bad symbol!,TCS")
+        self.assertEqual(resp.status_code, 200)  # invalid entries dropped, not a 422 — best-effort endpoint
+
+    def test_rate_limited_returns_429(self) -> None:
+        rate_limiter._memory_calls["watchlist_calendar:testclient"] = [api.time.monotonic()] * 30
+        resp = client.get("/api/watchlist/calendar?symbols=TCS")
+        self.assertEqual(resp.status_code, 429)
 
 
 class _SqlRecordingConn:

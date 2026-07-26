@@ -6,9 +6,10 @@ const TASK_LABELS: Record<TaskName, string> = {
   news:         'News',
   shareholding: 'Shareholding',
   mf_holdings:  'MF Holdings',
+  filings:      'Filings',
 };
 
-const ALL_TASKS: TaskName[] = ['stock_info', 'research', 'news', 'shareholding', 'mf_holdings'];
+const ALL_TASKS: TaskName[] = ['stock_info', 'research', 'news', 'shareholding', 'mf_holdings', 'filings'];
 
 interface Props {
   taskStatus: Record<TaskName, TaskStatus>;

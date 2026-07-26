@@ -395,6 +395,24 @@ flow this whole product is centered on.
    `technical` entry appears automatically with no frontend code change — only its tooltip copy
    was updated to mention it.
 
+**Stock-vs-Nifty relative performance**: `GET /api/prices/history/{symbol}?benchmark=true` is an
+opt-in addition to the sparkline endpoint from point 1 above — `api._compute_benchmark_sync()`
+diffs the requested window's first/last close against the Nifty50 over the identical window
+(reusing `_fetch_nifty_closes()`, the same 24h `"NSEI"`-pseudo-symbol-cached series
+`GET /api/market-picks/history`'s alpha stat already shares — no second index-fetch path).
+Returns `{stock_change_pct, nifty_change_pct, alpha_pct}` or `null` (never guessed) when there
+are fewer than 2 closes to compare or the Nifty fetch itself fails. Opt-in rather than
+always-on since most callers of this endpoint (the Quarterly Trend card's revenue/EPS/margin
+sparklines) aren't plotting a price series at all, so a Nifty comparison would be meaningless
+for them — only `PriceSparkline` in the hero passes `?benchmark=true`, rendering a small
+"+N% vs Nifty" line (buy/sell-toned by sign) under the sparkline.
+
+**Sparkline hover tooltip**: `frontend/components/sparkline.tsx` gained an optional `dates` prop
+— when supplied and aligned 1:1 with `closes`, hovering the chart shows the date + value at the
+nearest point. `PriceHistory.dates` was fetched by every call site of this component but never
+actually read before this — no chart anywhere in the app was previously inspectable. A caller
+without `dates` (or a length mismatch) gets the exact same non-interactive chart as before.
+
 ### Macro overlay signal (FII/DII flow + RBI rate/inflation)
 
 A market-wide overlay on top of the per-stock signals above — "is the broader institutional/rate
@@ -661,6 +679,62 @@ difference in what it can honestly return:
    backend's own host check in point 3. The article list below it is unchanged — up to 6
    recent titles/dates as external links, placed after
    `InsiderActivityCard` in the card grid.
+
+### Multi-year financial statements + DCF valuation flow (`GET /api/financials/{symbol}`)
+
+Closes the biggest single gap a competitive design review found versus Screener.in itself:
+this app previously only ever surfaced current-year ratios (`research.ratios`) and a short
+quarterly Sales/EPS/OPM window (`_extract_quarterly_trend`) — never a real multi-year
+Income Statement / Balance Sheet / Cash Flow view.
+
+1. `tools/screener_tools.py::_extract_yearly_statement(soup, section_id, max_years=10)` is a
+   generic yearly-table extractor reused for Screener's `section#profit-loss`,
+   `section#balance-sheet`, and `section#cash-flow` tables (the same company page
+   `get_fundamentals()`/`get_peer_comparison()` already fetch — no extra request). Deliberately
+   not a hardcoded row schema (a bank's balance sheet looks nothing like an FMCG company's) —
+   whatever rows Screener renders come back as `{"years": [...], "rows": [{"label", "values"}]}`,
+   same "whatever the table has is what's returned" instinct as `_parse_peer_table`. Unlike
+   `_extract_quarterly_trend`'s strict "every cell must parse or the row is dropped" rule, a
+   row here keeps `None` for any single year it can't parse — across up to a decade of history
+   a gap in one year (e.g. a line item that didn't exist pre-IPO) is expected, not a
+   misalignment to guard against. **Disclosed limitation**: neither the exact section ids nor
+   row labels were verified against a live Screener response in this sandbox (no outbound
+   internet — same disclosure pattern as every other Screener/NSE scraper in this file); a
+   mismatch degrades to `{}` for that statement, never a fabricated table.
+2. `get_financial_statements(symbol)` combines all three (each independently optional) into one
+   payload. `GET /api/financials/{symbol}` caches it (24h TTL, `"financials"` cache task) but
+   intentionally outside `ALL_DATA_TASKS` — standalone and on-demand like `peers`/
+   `insider_activity`. A scrape failure is **not** cached (same as `GET /api/peers/{symbol}`) —
+   a transient failure gets retried on the next request rather than locking in "no financials"
+   for the full TTL.
+3. `dcf_valuation.py::compute_dcf_estimate()` is a deterministic two-stage DCF off the cash-flow
+   table's Operating Activity row — never LLM-generated, same "computed, not model-generated"
+   convention as Market Picks' entry/target/stop-loss levels. A genuinely different valuation
+   lens from the two this app already had (`_compute_peer_percentiles`'s peer-relative
+   percentile, and `_compute_valuation_anchor`'s own-P/E-history anchor): both of those answer
+   "cheap vs. what" (peers, or its own trading history), this answers "cheap vs. what its cash
+   flows are worth". **Disclosed simplifications** (in the module's own docstring, not hidden):
+   Operating Cash Flow is used as the Free-Cash-Flow proxy since Screener's cash-flow table has
+   no cleanly-labelled, sector-independent Capex row to net against it; the discount rate (12%)
+   and terminal growth (5%) are fixed market-wide assumptions, not per-company; historical OCF
+   growth is clamped to [-20%, 25%] before being used to project forward, since a couple of
+   noisy years can otherwise imply an absurd CAGR. Returns `None` (never a guessed number) when
+   there's fewer than 3 years of OCF history, the latest OCF isn't positive, or a share count
+   can't be derived from `market_cap_cr` + `current_price`. Wired into the same
+   `GET /api/financials/{symbol}` response as a sibling `dcf` field.
+4. `results-dashboard.tsx`'s `FinancialStatementsCard` renders each statement as a collapsible
+   `<details>` table (`StatementTable`) — collapsed by default since a full 10-year table is
+   dense. The DCF result renders inside the existing Valuation card, below the LLM's own
+   Undervalued/Overvalued verdict, tone-colored by its own verdict and with an `InfoTooltip`
+   disclosing the assumptions above — deliberately not a second competing "verdict" presented
+   without context.
+5. **Deliberately not attempted in this pass**: a numeric analyst consensus rating/target price
+   was considered and explicitly rejected here as "would require fabricating data" — before the
+   real Trendlyne-backed scraper above (`tools/trendlyne_scraper.py`) shipped and closed that
+   gap properly. Left as a pointer in case the two efforts ever need reconciling: this section's
+   DCF is a from-scratch model estimate; the Street Consensus section's numeric fields are
+   scraped real numbers — they can legitimately disagree and neither should be read as
+   correcting the other.
 
 ### NSE session consolidation + Screener.in fallback resilience
 
@@ -1356,6 +1430,18 @@ identity to one row per symbol).
    (sanitized — no raw exception text in the response), 422 on invalid `client_id`/`symbol`/
    missing identity, rate-limited via `_rate_limit()`, capped at 200 items per identity
    (`_MAX_WATCHLIST_ITEMS_PER_CLIENT`, same cap for both client_id- and user_id-owned rows)
+9. **Corporate-action calendar** (`GET /api/watchlist/calendar?symbols=...`) — a "what's coming
+   up across everything I'm watching" roll-up, closing a gap a watchlist otherwise exists to
+   solve. Deliberately **not** a `watchlist_items` query at all — the frontend already has its
+   own symbol list from `GET /api/watchlist`, so this endpoint just takes that list directly and
+   runs `signals/filings_classifier.py::classify_filings()` (the same classifier
+   `main._build_report()` already runs per-symbol for the single-stock report's own "Corporate
+   Filings" card) over each symbol's already-cached `filings`. No new scrape, no `DATABASE_URL`
+   dependency. A symbol with no cached filings (or nothing classifiable in them) contributes
+   nothing — best-effort over whatever's already in cache, not an error. `frontend/app/
+   watchlist/page.tsx`'s `CalendarStrip` renders one row per symbol with something to show
+   (next-results date, a rating action, up to 2 corporate actions), sorted next-results-date
+   first.
 
 ### Watchlist alert emails
 
@@ -1381,9 +1467,19 @@ anonymous `client_id` row has no email to notify and is excluded at the query le
    `_consolidated_payload()` and `get_insider_activity()` use for their independent sub-fetches.
 3. `_detect_change(symbol)` compares `verdict_history.load_history(symbol, limit=2)`'s two most
    recent rows — today's just-saved snapshot against the one immediately before it — and returns
-   `{"symbol", "old_recommendation", "new_recommendation", "confidence"}` only when the
-   recommendation actually differs and both rows exist (a symbol analysed for the first time
-   today, like `VerdictTimeline`'s own 2-day minimum, has nothing to compare against yet).
+   `{"kind": "recommendation_change", "symbol", "old_recommendation", "new_recommendation",
+   "confidence"}` only when the recommendation actually differs and both rows exist (a symbol
+   analysed for the first time today, like `VerdictTimeline`'s own 2-day minimum, has nothing to
+   compare against yet). `_detect_price_move(symbol)` runs the same two-row comparison
+   independently and returns `{"kind": "price_move", "symbol", "old_price", "new_price",
+   "change_pct"}` when the live price moved at least `_PRICE_MOVE_THRESHOLD_PCT` (10%) since the
+   prior snapshot — a stock can move double digits in a day and still close as a HOLD, which the
+   recommendation-change check alone would never catch. This is a deliberately scoped-down,
+   email-digest version of "real-time price alerts" — a genuine push channel (device tokens,
+   APNs/FCM/web-push infra, a subscription UI) is new product infrastructure this repo doesn't
+   have anywhere yet, so this widens the *existing* once-daily digest's trigger set instead of
+   adding a new delivery mechanism. Both detectors run per symbol; a symbol can contribute both
+   alert kinds to the same day's digest.
 4. This job runs the full paid LLM analyst call per distinct watched symbol, so an unbounded
    watchlist fan-in would mean an unbounded daily bill — the same cost-control instinct as
    `market_picks_pipeline.py`'s `_MAX_STOCKS`. `_MAX_ALERT_SYMBOLS` (50) caps how many distinct
@@ -1392,10 +1488,12 @@ anonymous `client_id` row has no email to notify and is excluded at the query le
 5. `email_sender.py` gained a second message builder/sender pair —
    `send_watchlist_alert_email(to_email, alerts)` — alongside the existing magic-link one; both
    now share one `_send_via_smtp()` helper (extracted, not duplicated) for the connect/STARTTLS/
-   login/send sequence. One digest email per user per run lists every changed symbol, not one
-   email per symbol, so a user watching several stocks that all moved the same day gets a single
-   message. Same best-effort convention as `send_magic_link_email`: returns `True`/`False`,
-   never raises, and a missing `SMTP_HOST` just means the email never arrives.
+   login/send sequence. One digest email per user per run lists every alert (recommendation
+   changes and/or price moves) for that user, not one email per symbol, so a user watching
+   several stocks that all moved the same day gets a single message; `_format_alert_line()`
+   branches on each alert's `kind` to render the right line shape. Same best-effort convention
+   as `send_magic_link_email`: returns `True`/`False`, never raises, and a missing `SMTP_HOST`
+   just means the email never arrives.
 6. **Daily auto-run**: `.github/workflows/watchlist-alerts-cron.yml` runs at 13:30 UTC (19:00
    IST) on weekdays — after `sme-cron.yml` (13:00 UTC) so that pipeline's own writes have
    settled, and well after NSE's 15:30 IST close. Requires the same `DATABASE_URL` secret as
@@ -1552,6 +1650,20 @@ layout compressed rather than actually reflowing. `/compare`'s own column layout
 switches from stacked to side-by-side at `2xl:` (1536px) specifically so that by the time
 two columns sit side by side, each is wide enough for `ResultsDashboard`'s own layout to
 still look right — below that, the two reports stack full-width instead of squeezing.
+
+**Head-to-head diff table** (`frontend/components/compare-diff-table.tsx`): previously this
+page was genuinely just two independent reports with no synchronized comparison — a real gap
+for a page literally named "Compare". `ComparePageInner` lifts each `CompareColumn`'s finished
+`Report` up via a stable (`useCallback`, empty deps) `onReport` callback — each column still
+owns its own SSE fetch entirely; the parent only reads the result, never re-fetches. Once both
+symbols have a loaded report, `CompareDiffTable` renders above the two columns: a metric-by-
+metric table (verdict, confidence, P/E, P/B, EPS, market cap, dividend yield, beta, signal
+score, plus whatever `research.ratios` keys both companies share) with the stronger side
+highlighted — but **only** for metrics with a documented, unambiguous direction (lower P/E and
+P/B read as cheaper; higher EPS/market cap/yield/signal-score/growth-or-margin-ratios read as
+stronger). A `research.ratios` key that doesn't match a known direction hint is shown side by
+side with no highlight — "better" is never asserted for a ratio this app doesn't recognize,
+same "never invent a judgment" instinct as the rest of this codebase.
 
 ### Verdict history flow
 

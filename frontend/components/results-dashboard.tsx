@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import type { InsiderActivity, PeerComparison, PriceHistory, QuarterlyTrend, Report, StockInfo, StreetConsensus, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
+import Link from 'next/link';
+import type { FinancialStatement, FinancialStatementsResponse, InsiderActivity, PeerComparison, PriceHistory, QuarterlyTrend, Report, StockInfo, StreetConsensus, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
 import InfoTooltip from './info-tooltip';
 import Sparkline from './sparkline';
 import WatchlistButton from './watchlist-button';
@@ -28,6 +29,90 @@ function usePeerComparison(symbol: string): PeerComparison | null {
   }, [symbol]);
 
   return peers;
+}
+
+function useFinancials(symbol: string): FinancialStatementsResponse | null {
+  const [data, setData] = useState<FinancialStatementsResponse | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setData(null);
+    fetch(`/api/financials/${encodeURIComponent(symbol)}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then((d: FinancialStatementsResponse | null) => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData(null); });
+    return () => { cancelled = true; };
+  }, [symbol]);
+
+  return data;
+}
+
+// One collapsible <details> table per statement — up to 10 years x however
+// many rows Screener renders for this company, so this stays collapsed by
+// default rather than dumping a wide, dense table into the page unasked.
+function StatementTable({ title, statement }: { title: string; statement: FinancialStatement | null }) {
+  if (!statement || statement.rows.length === 0) return null;
+  return (
+    <details className="group/stmt py-2">
+      <summary className="cursor-pointer select-none list-none flex items-center justify-between
+                           text-sm font-semibold text-tx [&::-webkit-details-marker]:hidden">
+        <span className="flex items-center gap-1.5">
+          <span className="text-muted text-xs transition-transform group-open/stmt:rotate-90">›</span>
+          {title}
+        </span>
+        <span className="text-[11px] font-normal text-muted">{statement.years.length} years</span>
+      </summary>
+      <div className="overflow-x-auto mt-2 -mx-1">
+        <table className="text-xs w-full">
+          <thead>
+            <tr className="border-b border-border">
+              <th className="text-left px-1.5 py-1.5 text-muted font-semibold whitespace-nowrap">₹ Cr</th>
+              {statement.years.map(y => (
+                <th key={y} className="text-right px-2 py-1.5 text-muted font-semibold whitespace-nowrap">{y}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {statement.rows.map(row => (
+              <tr key={row.label} className="border-b border-border/60 last:border-0">
+                <td className="px-1.5 py-1.5 whitespace-nowrap text-tx">{row.label}</td>
+                {row.values.map((v, i) => (
+                  <td key={i} className="text-right px-2 py-1.5 font-mono text-tx whitespace-nowrap">
+                    {v != null ? fmt(v, 0) : '—'}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  );
+}
+
+// Up to 10 years of Screener's own yearly P&L / Balance Sheet / Cash Flow
+// tables — previously this app only ever showed current-year ratios
+// (Fundamentals card) and a short quarterly trend, never full statement
+// history, the single biggest gap the frontend design review found versus
+// Screener.in itself. `data` is lifted from ResultsDashboard (shared with
+// the DCF block in the Valuation card below) rather than fetched again here.
+function FinancialStatementsCard({ data }: { data: FinancialStatementsResponse | null }) {
+  if (!data || (!data.profit_loss && !data.balance_sheet && !data.cash_flow)) return null;
+  return (
+    <Card title={<>
+      Financial Statements
+      <InfoTooltip title="Financial Statements" align="left">
+        <p>Up to 10 years of Screener.in&apos;s own yearly Profit &amp; Loss, Balance Sheet, and Cash Flow tables, in ₹ Cr.</p>
+        <p>A blank cell is a genuine gap in that year&apos;s reporting for this company (e.g. before IPO), not a missing scrape.</p>
+      </InfoTooltip>
+    </>}>
+      <div className="divide-y divide-border">
+        <StatementTable title="Profit & Loss" statement={data.profit_loss} />
+        <StatementTable title="Balance Sheet" statement={data.balance_sheet} />
+        <StatementTable title="Cash Flow" statement={data.cash_flow} />
+      </div>
+    </Card>
+  );
 }
 
 function PercentileBadge({ value }: { value: number }) {
@@ -128,6 +213,33 @@ function PeerTable({ peers }: { peers: PeerComparison | null }) {
   );
 }
 
+// Lightweight "you might also look at" rail off the same peer list the Peer
+// Comparison table already fetches — no new data source. Screener's own peer
+// `slug` is usually the NSE ticker itself, but that's not guaranteed for
+// every listing (a few Screener slugs diverge from the tradable symbol) — a
+// bad deep link degrades to this app's existing "couldn't resolve/analyse
+// that symbol" error state on the destination page, the same as a mistyped
+// manual search, rather than silently failing here.
+function SimilarStocksRail({ peers }: { peers: PeerComparison | null }) {
+  if (!peers || peers.peers.length === 0) return null;
+  return (
+    <Card title="Similar Stocks">
+      <div className="flex flex-wrap gap-2">
+        {peers.peers.map(p => (
+          <Link
+            key={p.slug || p.name}
+            href={`/?symbol=${encodeURIComponent(p.slug || p.name)}`}
+            className="text-xs font-medium px-2.5 py-1 rounded-full border border-border bg-surface
+                       text-tx hover:border-accent/40 hover:text-accent transition-colors"
+          >
+            {p.name}
+          </Link>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 // Raw-rupee formatter for insider-trade/bulk-deal values (L/Cr), distinct
 // from fmtCr() above which expects a value already denominated in crores
 // (e.g. market_cap_cr) — these come off the wire as plain rupee amounts.
@@ -148,6 +260,17 @@ function ActionBadge({ action }: { action: 'BUY' | 'SELL' }) {
       action === 'BUY' ? 'bg-buy/12 text-buy border-buy/25' : 'bg-sell/12 text-sell border-sell/25'
     }`}>
       {action}
+    </span>
+  );
+}
+
+// Neutral, always-visible tag — distinct from ActionBadge's buy/sell tone —
+// for a plain classification (insider category, Bulk vs. Block deal type)
+// that previously only ever surfaced on hover via the row's `title` attribute.
+function TagBadge({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded border border-border text-muted whitespace-nowrap">
+      {children}
     </span>
   );
 }
@@ -196,7 +319,8 @@ function InsiderActivityCard({ symbol }: { symbol: string }) {
               <div key={i} className="flex items-center justify-between gap-2 text-xs">
                 <div className="min-w-0 flex items-center gap-1.5">
                   <ActionBadge action={t.action} />
-                  <span className="text-tx truncate" title={`${t.person} (${t.category})`}>{t.person}</span>
+                  {t.category && <TagBadge>{t.category}</TagBadge>}
+                  <span className="text-tx truncate">{t.person}</span>
                 </div>
                 <div className="flex items-center gap-2 shrink-0 font-mono text-muted">
                   <span>{fmtInr(t.value)}</span>
@@ -216,7 +340,8 @@ function InsiderActivityCard({ symbol }: { symbol: string }) {
               <div key={i} className="flex items-center justify-between gap-2 text-xs">
                 <div className="min-w-0 flex items-center gap-1.5">
                   <ActionBadge action={d.action} />
-                  <span className="text-tx truncate" title={`${d.client} (${d.deal_type})`}>{d.client}</span>
+                  <TagBadge>{d.deal_type === 'Block Deal' ? 'Block' : 'Bulk'}</TagBadge>
+                  <span className="text-tx truncate">{d.client}</span>
                 </div>
                 <div className="flex items-center gap-2 shrink-0 font-mono text-muted">
                   <span>{fmtInr(d.price * d.quantity)}</span>
@@ -355,7 +480,7 @@ function PriceSparkline({ symbol }: { symbol: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/prices/history/${encodeURIComponent(symbol)}?days=180`)
+    fetch(`/api/prices/history/${encodeURIComponent(symbol)}?days=180&benchmark=true`)
       .then(res => (res.ok ? res.json() : null))
       .then((data: PriceHistory | null) => { if (!cancelled) setHistory(data); })
       .catch(() => { if (!cancelled) setHistory(null); });
@@ -363,11 +488,26 @@ function PriceSparkline({ symbol }: { symbol: string }) {
   }, [symbol]);
 
   if (!history || history.closes.length < 2) return null;
+  const bench = history.benchmark;
 
   return (
     <div className="flex flex-col items-end gap-1 shrink-0">
       <span className="text-[9px] font-semibold text-muted uppercase tracking-wider">6M trend</span>
-      <Sparkline closes={history.closes} width={110} height={30} />
+      <Sparkline
+        closes={history.closes}
+        dates={history.dates}
+        width={110}
+        height={30}
+        formatValue={v => `₹${fmt(v, 2)}`}
+      />
+      {bench && (
+        <span
+          className={`text-[10px] font-mono ${bench.alpha_pct >= 0 ? 'text-buy' : 'text-sell'}`}
+          title={`Stock ${bench.stock_change_pct >= 0 ? '+' : ''}${bench.stock_change_pct}% vs. Nifty ${bench.nifty_change_pct >= 0 ? '+' : ''}${bench.nifty_change_pct}% over the same window`}
+        >
+          {bench.alpha_pct >= 0 ? '+' : ''}{bench.alpha_pct}% vs Nifty
+        </span>
+      )}
     </div>
   );
 }
@@ -482,9 +622,11 @@ function QuarterlyTrendCard({ trend }: { trend: QuarterlyTrend | undefined }) {
           </div>
           <Sparkline
             closes={trend.revenue}
+            dates={trend.quarters}
             width={220}
             height={32}
             ariaLabel={`Quarterly revenue trend over the last ${trend.quarters.length} quarters`}
+            formatValue={v => `₹${fmt(v, 0)} Cr`}
           />
         </div>
         <div>
@@ -496,9 +638,11 @@ function QuarterlyTrendCard({ trend }: { trend: QuarterlyTrend | undefined }) {
           </div>
           <Sparkline
             closes={trend.eps}
+            dates={trend.quarters}
             width={220}
             height={32}
             ariaLabel={`Quarterly EPS trend over the last ${trend.quarters.length} quarters`}
+            formatValue={v => `₹${fmt(v, 2)}`}
           />
         </div>
         {trend.operating_margin && trend.operating_margin.length === trend.quarters.length && (
@@ -511,9 +655,11 @@ function QuarterlyTrendCard({ trend }: { trend: QuarterlyTrend | undefined }) {
             </div>
             <Sparkline
               closes={trend.operating_margin}
+              dates={trend.quarters}
               width={220}
               height={32}
               ariaLabel={`Quarterly operating margin trend over the last ${trend.quarters.length} quarters`}
+              formatValue={v => `${fmt(v, 1)}%`}
             />
           </div>
         )}
@@ -542,6 +688,11 @@ function fmtCr(n: number | null | undefined) {
   return `₹${fmt(n)} Cr`;
 }
 
+function fmtVolume(n: number | null | undefined) {
+  if (n == null) return '—';
+  return n.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+}
+
 const REC_CONFIG = {
   BUY:  { bg: 'bg-buy/10',  border: 'border-buy/30',  text: 'text-buy',  badge: 'bg-buy  text-white', strip: 'bg-buy'  },
   SELL: { bg: 'bg-sell/10', border: 'border-sell/30', text: 'text-sell', badge: 'bg-sell text-white', strip: 'bg-sell' },
@@ -566,11 +717,11 @@ function Card({ title, children, className = '' }: { title: React.ReactNode; chi
 }
 
 function MetricRow({ label, value, colorClass = 'text-tx', percentile }: {
-  label: string; value: string; colorClass?: string; percentile?: number;
+  label: React.ReactNode; value: string; colorClass?: string; percentile?: number;
 }) {
   return (
     <div className="flex items-center justify-between py-1.5 border-b border-border last:border-0">
-      <span className="text-sm text-muted">{label}</span>
+      <span className="text-sm text-muted flex items-center gap-1">{label}</span>
       <span className="flex items-center">
         <span className={`text-sm font-semibold font-mono ${colorClass}`}>{value}</span>
         {percentile != null && <PercentileBadge value={percentile} />}
@@ -693,11 +844,24 @@ function RangeBar({ low, current, high }: { low: number; current: number; high: 
       </div>
       <div className="flex justify-between text-[10px] text-muted/60 mt-1">
         <span>₹{fmt(low, 0)}</span>
-        <span>52W Range</span>
+        <span>52W Range · {Math.round(pct)}%</span>
         <span>₹{fmt(high, 0)}</span>
       </div>
     </div>
   );
+}
+
+// Humanizes a SignalItem.meta key ("fii_dii_flow_cr" -> "Fii Dii Flow Cr") for
+// the per-signal tooltip below — this is diagnostic context (why a signal
+// scored the way it did: RSI value, FII/DII flow, repo rate, CPI, ...) that
+// was previously fetched but never surfaced anywhere in the UI.
+function humanizeMetaKey(key: string): string {
+  return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function formatMetaValue(value: number | string | null): string {
+  if (value == null) return '—';
+  return typeof value === 'number' ? fmt(value, Number.isInteger(value) ? 0 : 2) : value;
 }
 
 function fmtRatio(raw: string): string {
@@ -719,6 +883,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
   const { analysis: a, signals: sig, stock_info: s, research: r, news, holdings: h, filings, filings_summary: fs, mf_holdings_trend: mfTrend } = report;
 
   const peers = usePeerComparison(report.symbol);
+  const financials = useFinancials(report.symbol);
   const percentileByNormalizedKey = useMemo(() => {
     const map: Record<string, number> = {};
     for (const [key, value] of Object.entries(peers?.percentiles ?? {})) {
@@ -882,6 +1047,25 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
             </div>
             <MetricRow label="Market Cap" value={fmtCr(s?.market_cap_cr)} />
             <MetricRow label="Book Value" value={s?.book_value != null ? `₹${fmt(s.book_value)}` : '—'} />
+            {s?.volume != null && (
+              <MetricRow
+                label="Volume"
+                value={
+                  s.avg_volume_10d != null
+                    ? `${fmtVolume(s.volume)} (avg ${fmtVolume(s.avg_volume_10d)})`
+                    : fmtVolume(s.volume)
+                }
+                colorClass={
+                  // Elevated volume is a neutral "worth noting" signal, not
+                  // inherently bullish or bearish — text-hold (amber) is this
+                  // design system's "attention" tone; text-accent is reserved
+                  // for interactive elements, never data labels (design.md).
+                  s.avg_volume_10d != null && s.avg_volume_10d > 0 && s.volume > s.avg_volume_10d * 1.5
+                    ? 'text-hold'
+                    : 'text-tx'
+                }
+              />
+            )}
             {s?.beta != null && <MetricRow label="Beta" value={fmt(s.beta, 2)} />}
             {s?.dividend_yield_pct != null && (
               <MetricRow label="Div Yield" value={`${fmt(s.dividend_yield_pct, 2)}%`} />
@@ -917,7 +1101,11 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
 
           <QuarterlyTrendCard trend={r?.quarterly_trend} />
 
+          <FinancialStatementsCard data={financials} />
+
           <PeerTable peers={peers} />
+
+          <SimilarStocksRail peers={peers} />
 
           <InsiderActivityCard symbol={report.symbol} />
 
@@ -930,6 +1118,26 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                 a.valuation.verdict === 'Overvalued'  ? 'text-sell' : 'text-hold'
               }`}>{a.valuation.verdict}</p>
               <p className="text-sm text-muted leading-relaxed">{a.valuation.comment}</p>
+              {financials?.dcf && (
+                <div className={`mt-3 pt-3 border-t border-border text-xs ${
+                  financials.dcf.verdict === 'Undervalued' ? 'text-buy' :
+                  financials.dcf.verdict === 'Overvalued'  ? 'text-sell' : 'text-hold'
+                }`}>
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <span className="font-semibold">DCF Estimate: {financials.dcf.verdict}</span>
+                    <InfoTooltip title="DCF Estimate" align="left">
+                      <p>A simple two-stage discounted-cash-flow model off the Cash Flow statement&apos;s Operating Activity row — a different lens from the peer/history views above: &quot;cheap vs. what its cash flows are worth&quot;, not &quot;cheap vs. peers&quot;.</p>
+                      <p>Assumes {financials.dcf.discount_rate}% discount rate, {financials.dcf.terminal_growth}% terminal growth, and projects at {financials.dcf.growth_rate_used}% (clamped historical OCF growth). Operating Cash Flow is used as a Free-Cash-Flow proxy since Screener&apos;s cash-flow table doesn&apos;t cleanly separate Capex — a simplification, not a full DCF.</p>
+                      <p>Deterministic, computed — not LLM-generated. Not investment advice.</p>
+                    </InfoTooltip>
+                  </div>
+                  <p className="text-tx">
+                    Fair value ≈ <span className="font-mono font-semibold">₹{fmt(financials.dcf.fair_value_per_share, 2)}</span>
+                    {' '}vs. current <span className="font-mono">₹{fmt(financials.dcf.current_price, 2)}</span>
+                    {' '}({financials.dcf.upside_pct >= 0 ? '+' : ''}{fmt(financials.dcf.upside_pct, 1)}%)
+                  </p>
+                </div>
+              )}
             </Card>
           )}
 
@@ -951,14 +1159,29 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
               {sig.verdict && (
                 <MetricRow label="Signal Verdict" value={sig.verdict} />
               )}
-              {Object.entries(sig.signals).map(([name, signal]) => (
-                <MetricRow
-                  key={name}
-                  label={`${name} (${signal.value})`}
-                  value={fmt(signal.score, 2)}
-                  colorClass={signal.score > 0 ? 'text-buy' : signal.score < 0 ? 'text-sell' : 'text-muted'}
-                />
-              ))}
+              {Object.entries(sig.signals).map(([name, signal]) => {
+                const metaEntries = Object.entries(signal.meta ?? {}).filter(([, v]) => v != null);
+                return (
+                  <MetricRow
+                    key={name}
+                    label={<>
+                      {name} ({signal.value})
+                      {metaEntries.length > 0 && (
+                        <InfoTooltip title={`${name} — details`} align="left">
+                          {metaEntries.map(([k, v]) => (
+                            <p key={k} className="flex justify-between gap-3">
+                              <span>{humanizeMetaKey(k)}</span>
+                              <span className="font-mono text-tx">{formatMetaValue(v)}</span>
+                            </p>
+                          ))}
+                        </InfoTooltip>
+                      )}
+                    </>}
+                    value={fmt(signal.score, 2)}
+                    colorClass={signal.score > 0 ? 'text-buy' : signal.score < 0 ? 'text-sell' : 'text-muted'}
+                  />
+                );
+              })}
             </Card>
           )}
         </div>
@@ -1111,7 +1334,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
           <div className="divide-y divide-border">
             {filings.slice(0, 5).map((f, i) => {
               const meta = [f.category, f.date].filter(Boolean).join(' · ');
-              const body = (
+              const titleRow = (
                 <>
                   <span className="text-sm text-tx group-hover:text-accent transition-colors leading-snug">
                     {f.title ?? 'Untitled filing'}
@@ -1121,15 +1344,25 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                   )}
                 </>
               );
-              return f.attachment ? (
-                <a key={i} href={f.attachment} target="_blank" rel="noopener noreferrer"
-                  className="flex flex-col gap-1 py-3 first:pt-0 last:pb-0 group"
-                >
-                  {body}
-                </a>
-              ) : (
-                <div key={i} className="flex flex-col gap-1 py-3 first:pt-0 last:pb-0">
-                  {body}
+              return (
+                <div key={i} className="py-3 first:pt-0 last:pb-0">
+                  {f.attachment ? (
+                    <a href={f.attachment} target="_blank" rel="noopener noreferrer" className="flex flex-col gap-1 group">
+                      {titleRow}
+                    </a>
+                  ) : (
+                    <div className="flex flex-col gap-1">{titleRow}</div>
+                  )}
+                  {f.desc && (
+                    <details className="mt-1.5 group/desc">
+                      <summary className="text-[11px] text-accent cursor-pointer select-none list-none
+                                           [&::-webkit-details-marker]:hidden">
+                        <span className="group-open/desc:hidden">Show details</span>
+                        <span className="hidden group-open/desc:inline">Hide details</span>
+                      </summary>
+                      <p className="text-xs text-muted leading-relaxed mt-1.5">{f.desc}</p>
+                    </details>
+                  )}
                 </div>
               );
             })}

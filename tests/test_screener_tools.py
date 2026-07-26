@@ -11,8 +11,10 @@ from tools.screener_tools import (
     _extract_latest_metric_from_tables,
     _extract_quarterly_trend,
     _extract_valuation_band,
+    _extract_yearly_statement,
     _parse_peer_table,
     _resolve_screener_slug,
+    get_financial_statements,
     get_fundamentals,
     get_holdings,
     get_peer_comparison,
@@ -560,6 +562,126 @@ class ExtractValuationBandTest(unittest.TestCase):
         )
         soup = BeautifulSoup(html, "lxml")
         self.assertEqual(_extract_valuation_band(soup), {})
+
+
+class ExtractYearlyStatementTest(unittest.TestCase):
+    def _statement_html(self, section_id: str, header_row: str, body_rows: str) -> str:
+        return f"""
+        <section id="{section_id}">
+          <table>
+            <thead><tr><th>Row</th>{header_row}</tr></thead>
+            <tbody>{body_rows}</tbody>
+          </table>
+        </section>
+        """
+
+    def test_extracts_years_and_rows(self) -> None:
+        html = self._statement_html(
+            "profit-loss",
+            "<th>Mar 2019</th><th>Mar 2020</th><th>Mar 2021</th>",
+            "<tr><td>Sales+</td><td>1,000</td><td>1,200</td><td>1,500</td></tr>"
+            "<tr><td>Net Profit+</td><td>-</td><td>100</td><td>150</td></tr>",
+        )
+        soup = BeautifulSoup(html, "lxml")
+        result = _extract_yearly_statement(soup, "profit-loss")
+        self.assertEqual(result["years"], ["Mar 2019", "Mar 2020", "Mar 2021"])
+        self.assertEqual(result["rows"][0], {"label": "Sales", "values": [1000.0, 1200.0, 1500.0]})
+        # Trailing "+" (Screener's own tooltip marker) is stripped, and an
+        # unparseable cell ("-") becomes None rather than being dropped or
+        # guessed — a genuine gap in that year's reported figure.
+        self.assertEqual(result["rows"][1], {"label": "Net Profit", "values": [None, 100.0, 150.0]})
+
+    def test_missing_section_returns_empty_dict(self) -> None:
+        soup = BeautifulSoup("<html></html>", "lxml")
+        self.assertEqual(_extract_yearly_statement(soup, "profit-loss"), {})
+
+    def test_missing_table_returns_empty_dict(self) -> None:
+        soup = BeautifulSoup('<section id="profit-loss"></section>', "lxml")
+        self.assertEqual(_extract_yearly_statement(soup, "profit-loss"), {})
+
+    def test_caps_to_max_years(self) -> None:
+        html = self._statement_html(
+            "profit-loss",
+            "<th>Mar 2019</th><th>Mar 2020</th><th>Mar 2021</th>",
+            "<tr><td>Sales</td><td>1000</td><td>1200</td><td>1500</td></tr>",
+        )
+        soup = BeautifulSoup(html, "lxml")
+        result = _extract_yearly_statement(soup, "profit-loss", max_years=2)
+        self.assertEqual(result["years"], ["Mar 2020", "Mar 2021"])
+        self.assertEqual(result["rows"][0]["values"], [1200.0, 1500.0])
+
+    def test_row_cell_count_mismatch_is_skipped(self) -> None:
+        # A row with a different cell count than the header (e.g. a trailing
+        # summary column only one of the two carries) is dropped entirely
+        # rather than misaligned to the wrong year.
+        html = self._statement_html(
+            "profit-loss",
+            "<th>Mar 2019</th><th>Mar 2020</th><th>Mar 2021</th>",
+            "<tr><td>Sales</td><td>1000</td><td>1200</td></tr>",
+        )
+        soup = BeautifulSoup(html, "lxml")
+        result = _extract_yearly_statement(soup, "profit-loss")
+        self.assertEqual(result, {})
+
+    def test_all_null_row_is_dropped(self) -> None:
+        html = self._statement_html(
+            "profit-loss",
+            "<th>Mar 2019</th><th>Mar 2020</th>",
+            "<tr><td>Empty Row</td><td>-</td><td>-</td></tr>",
+        )
+        soup = BeautifulSoup(html, "lxml")
+        result = _extract_yearly_statement(soup, "profit-loss")
+        self.assertEqual(result, {})
+
+    def test_no_header_years_returns_empty_dict(self) -> None:
+        soup = BeautifulSoup(
+            '<section id="profit-loss"><table><thead><tr><th></th></tr></thead>'
+            '<tbody><tr><td>Sales</td></tr></tbody></table></section>',
+            "lxml",
+        )
+        self.assertEqual(_extract_yearly_statement(soup, "profit-loss"), {})
+
+
+class GetFinancialStatementsTest(unittest.TestCase):
+    @patch("tools.screener_tools._fetch_soup")
+    def test_combines_all_three_statements(self, mock_fetch_soup: MagicMock) -> None:
+        html = """
+        <section id="profit-loss">
+          <table><thead><tr><th></th><th>Mar 2022</th><th>Mar 2023</th><th>Mar 2024</th></tr></thead>
+          <tbody><tr><td>Sales</td><td>100</td><td>120</td><td>150</td></tr></tbody></table>
+        </section>
+        <section id="balance-sheet">
+          <table><thead><tr><th></th><th>Mar 2022</th><th>Mar 2023</th><th>Mar 2024</th></tr></thead>
+          <tbody><tr><td>Total Assets</td><td>500</td><td>550</td><td>600</td></tr></tbody></table>
+        </section>
+        <section id="cash-flow">
+          <table><thead><tr><th></th><th>Mar 2022</th><th>Mar 2023</th><th>Mar 2024</th></tr></thead>
+          <tbody><tr><td>Cash from Operating Activity</td><td>80</td><td>90</td><td>110</td></tr></tbody></table>
+        </section>
+        """
+        mock_fetch_soup.return_value = BeautifulSoup(html, "lxml")
+        result = json.loads(get_financial_statements.run(symbol="TCS"))
+        self.assertEqual(result["symbol"], "TCS")
+        self.assertIn("profit_loss", result)
+        self.assertIn("balance_sheet", result)
+        self.assertIn("cash_flow", result)
+        self.assertEqual(result["cash_flow"]["rows"][0]["label"], "Cash from Operating Activity")
+
+    @patch("tools.screener_tools._fetch_soup")
+    def test_missing_statements_are_omitted_not_guessed(self, mock_fetch_soup: MagicMock) -> None:
+        mock_fetch_soup.return_value = BeautifulSoup("<html></html>", "lxml")
+        result = json.loads(get_financial_statements.run(symbol="TCS"))
+        self.assertEqual(result["symbol"], "TCS")
+        self.assertNotIn("profit_loss", result)
+        self.assertNotIn("balance_sheet", result)
+        self.assertNotIn("cash_flow", result)
+
+    @patch("tools.screener_tools._fetch_soup")
+    def test_fetch_failure_returns_error_payload(self, mock_fetch_soup: MagicMock) -> None:
+        mock_fetch_soup.side_effect = RuntimeError("network down")
+        result = json.loads(get_financial_statements.run(symbol="TCS"))
+        self.assertIn("error", result)
+        self.assertEqual(result["symbol"], "TCS")
 
 
 class ParsePeerTableTest(unittest.TestCase):

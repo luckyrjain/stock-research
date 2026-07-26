@@ -94,6 +94,19 @@ export interface FilingsSummary {
   next_results_date:  string | null;   // 'YYYY-MM-DD'
 }
 
+// GET /api/watchlist/calendar?symbols=... — one entry per watched symbol that
+// has *something* to show (a next results date and/or a pending corporate
+// action), read straight off each symbol's already-cached filings. A symbol
+// with no cached filings, or nothing classifiable in them, contributes no
+// entry at all rather than a mostly-empty one.
+export interface WatchlistCalendarEntry extends FilingsSummary {
+  symbol: string;
+}
+
+export interface WatchlistCalendarResponse {
+  entries: WatchlistCalendarEntry[];
+}
+
 // Quarterly Sales/EPS/operating-margin mini-trend scraped from Screener's
 // Quarterly Results table — same page fundamentals already fetches, so it's
 // free. Oldest first, same convention as PriceHistory. revenue/eps are
@@ -154,11 +167,22 @@ export interface MfHoldingsStakeDelta {
 
 // Standalone daily-close series for sparklines — fetched separately from the
 // six-task pipeline above, so it's not part of TaskName/SSEMessage.
+// Stock's return over the same window a PriceHistory series covers, benchmarked
+// against the Nifty50 — only present when that series was fetched with
+// ?benchmark=true. null (never guessed) when there's under 2 closes to
+// compare, or the Nifty fetch itself failed.
+export interface PriceHistoryBenchmark {
+  stock_change_pct: number;
+  nifty_change_pct: number;
+  alpha_pct:        number;
+}
+
 export interface PriceHistory {
-  symbol:   string;
-  exchange: string | null;
-  dates:    string[];   // 'YYYY-MM-DD', oldest first
-  closes:   number[];   // aligned with dates
+  symbol:     string;
+  exchange:   string | null;
+  dates:      string[];   // 'YYYY-MM-DD', oldest first
+  closes:     number[];   // aligned with dates
+  benchmark?: PriceHistoryBenchmark | null;
 }
 
 // One row per (symbol, day) the analysis pipeline ran, powering the hero's
@@ -184,7 +208,7 @@ export interface VerdictHistoryResponse {
   scored_count:  number;
 }
 
-export type TaskName = 'stock_info' | 'research' | 'news' | 'shareholding' | 'mf_holdings';
+export type TaskName = 'stock_info' | 'research' | 'news' | 'shareholding' | 'mf_holdings' | 'filings';
 export type TaskStatus = 'idle' | 'running' | 'ok' | 'fail' | 'cached';
 export type Phase = 'idle' | 'fetching' | 'analysing' | 'done' | 'error';
 
@@ -492,6 +516,51 @@ export interface PeerComparison {
   sector_median:    PeerRow | null;
   percentiles:      Record<string, number>;  // 0–100, keyed by the same column labels as `values`
   absolute_anchor:  ValuationAnchor | null;
+}
+
+// GET /api/financials/{symbol} — multi-year Profit & Loss / Balance Sheet /
+// Cash Flow tables scraped from Screener.in (see
+// tools/screener_tools.py::get_financial_statements), the biggest data gap
+// the frontend design review found versus Screener.in itself. Row set is
+// whatever Screener renders for that company (not a fixed schema, a bank's
+// balance sheet looks nothing like an FMCG company's) — `rows` is a plain
+// list of {label, values}, values aligned 1:1 with `years`. A `null` entry
+// in `values` is a genuine gap in that company's history for that year/row
+// (e.g. before IPO), not a parse failure.
+export interface FinancialStatementRow {
+  label:  string;
+  values: (number | null)[];
+}
+
+export interface FinancialStatement {
+  years: string[];
+  rows:  FinancialStatementRow[];
+}
+
+// A deterministic two-stage DCF off the cash-flow statement's Operating
+// Activity row (see dcf_valuation.py) — never LLM-generated. null whenever
+// the underlying preconditions aren't met (thin cash-flow history, a
+// non-positive latest OCF, or missing price/market-cap to derive a share
+// count) — see dcf_valuation.py's own docstring for the full list of
+// disclosed simplifications (OCF used as an FCF proxy, a fixed discount
+// rate, clamped historical growth).
+export interface DcfEstimate {
+  fair_value_per_share: number;
+  current_price:        number;
+  upside_pct:            number;
+  verdict:                'Undervalued' | 'Overvalued' | 'Fair';
+  growth_rate_used:      number;   // %, clamped historical OCF CAGR used for the projection
+  discount_rate:          number;   // %
+  terminal_growth:        number;   // %
+  latest_ocf_cr:          number;   // ₹ Cr, the OCF the projection started from
+}
+
+export interface FinancialStatementsResponse {
+  symbol:         string;
+  profit_loss:    FinancialStatement | null;
+  balance_sheet:  FinancialStatement | null;
+  cash_flow:      FinancialStatement | null;
+  dcf:            DcfEstimate | null;
 }
 
 // Programmatic API access (GET/POST/DELETE /api/api-keys). `key` is present

@@ -37,6 +37,17 @@ LOGGER = get_logger("watchlist_alerts")
 _MAX_ALERT_SYMBOLS = 50
 _MAX_ACCEPTABLE_ERROR_RATE = 0.5
 
+# A scoped-down, email-digest version of "real-time price alerts" — the
+# review this shipped from called for push notifications on price/verdict
+# thresholds, but a genuine push channel (device tokens, APNs/FCM/web-push
+# infra, a subscription UI) is new product infrastructure this repo doesn't
+# have anywhere yet. This instead widens the *existing* once-daily digest
+# job's trigger set: alongside a recommendation change, also flag when a
+# watched stock's live price has moved at least this much since the prior
+# stored verdict snapshot. Same email, same cadence, one more reason to
+# include a symbol in it.
+_PRICE_MOVE_THRESHOLD_PCT = 10.0
+
 
 def _get_watched_symbols(engine) -> dict[str, list[dict]]:
     """symbol -> [{"user_id", "email"}, ...] for every signed-in user's
@@ -126,10 +137,38 @@ def _detect_change(symbol: str) -> dict | None:
     if not new_rec or new_rec == previous.get("recommendation"):
         return None
     return {
+        "kind": "recommendation_change",
         "symbol": symbol,
         "old_recommendation": previous.get("recommendation"),
         "new_recommendation": new_rec,
         "confidence": current.get("confidence"),
+    }
+
+
+def _detect_price_move(symbol: str) -> dict | None:
+    """Compare today's freshly-saved verdict snapshot's price against the
+    one immediately before it — None if there's no prior snapshot yet,
+    either price is missing, the prior price is zero (can't compute a
+    percentage off it), or the move is under _PRICE_MOVE_THRESHOLD_PCT.
+    Independent of _detect_change: a stock can move 12% in a day and still
+    close as a HOLD, which the recommendation-change check alone would
+    never surface."""
+    history = verdict_history.load_history(symbol, limit=2)
+    if len(history) < 2:
+        return None
+    previous, current = history[0], history[1]
+    old_price, new_price = previous.get("current_price"), current.get("current_price")
+    if old_price is None or new_price is None or not old_price:
+        return None
+    change_pct = round((new_price - old_price) / old_price * 100, 1)
+    if abs(change_pct) < _PRICE_MOVE_THRESHOLD_PCT:
+        return None
+    return {
+        "kind": "price_move",
+        "symbol": symbol,
+        "old_price": old_price,
+        "new_price": new_price,
+        "change_pct": change_pct,
     }
 
 
@@ -173,12 +212,12 @@ def run(force: bool = False) -> bool:
             continue
         analyzed += 1
 
-        change = _detect_change(symbol)
-        if not change:
+        symbol_alerts = [a for a in (_detect_change(symbol), _detect_price_move(symbol)) if a]
+        if not symbol_alerts:
             continue
         for watcher in by_symbol[symbol]:
             entry = alerts_by_user.setdefault(watcher["user_id"], {"email": watcher["email"], "alerts": []})
-            entry["alerts"].append(change)
+            entry["alerts"].extend(symbol_alerts)
 
     for user in alerts_by_user.values():
         sent = send_watchlist_alert_email(user["email"], user["alerts"])

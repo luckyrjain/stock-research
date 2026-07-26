@@ -6,8 +6,7 @@ import { useSearchParams } from 'next/navigation';
 import TickerSearch     from '@/components/ticker-search';
 import ProgressTracker  from '@/components/progress-tracker';
 import ResultsDashboard from '@/components/results-dashboard';
-import HeaderSearch     from '@/components/header-search';
-import AuthWidget       from '@/components/auth-widget';
+import SiteNav          from '@/components/site-nav';
 import { useStockAnalysis } from '@/lib/useStockAnalysis';
 
 // Matches api.py's _is_isin(). A deep-linked ISIN (used for BSE SME stocks,
@@ -25,15 +24,22 @@ function HomePageInner() {
   } = useStockAnalysis();
 
   const searchParams = useSearchParams();
-  const deepLinkDone = useRef(false);
+  // Tracks the last `?symbol=` value this effect actually acted on — not a
+  // one-shot boolean, since that would only ever fire for the very first
+  // deep link on mount. A report page stays mounted at `/` and several
+  // in-app links point at a *new* `/?symbol=` while it's already showing a
+  // report (Similar Stocks rail, ConsolidatedCard's "View full analysis",
+  // SME/screener deep links) — each of those needs to re-trigger analysis,
+  // not be silently ignored because *some* symbol was already deep-linked.
+  const lastDeepLinkedSymbol = useRef<string | null>(null);
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
 
   // Deep link: /?symbol=TCS auto-starts analysis (used by SME signals page links)
   useEffect(() => {
     const sym = searchParams.get('symbol')?.toUpperCase();
-    if (!sym || deepLinkDone.current) return;
-    deepLinkDone.current = true;
+    if (!sym || sym === lastDeepLinkedSymbol.current) return;
+    lastDeepLinkedSymbol.current = sym;
 
     if (!ISIN_RE.test(sym)) {
       handleAnalyse(sym);
@@ -44,14 +50,25 @@ function HomePageInner() {
     fetch(`/api/validate/${encodeURIComponent(sym)}`)
       .then(res => res.json())
       .then((data: { valid?: boolean; symbol?: string }) => {
+        // Stale-response guard: the user may have already navigated to a
+        // *different* `/?symbol=` (e.g. a Similar Stocks link needing no
+        // resolution, so it wins the race) before this validate call
+        // returns — `lastDeepLinkedSymbol` no longer being `sym` means a
+        // newer deep link has since superseded this one, so don't clobber
+        // whatever's now on screen with this stale result.
+        if (lastDeepLinkedSymbol.current !== sym) return;
         if (data.valid && data.symbol) {
           handleAnalyse(data.symbol);
         } else {
           setResolveError(`Couldn't resolve ${sym} to an analyzable ticker.`);
         }
       })
-      .catch(() => setResolveError(`Couldn't resolve ${sym} to an analyzable ticker.`))
-      .finally(() => setResolving(false));
+      .catch(() => {
+        if (lastDeepLinkedSymbol.current === sym) setResolveError(`Couldn't resolve ${sym} to an analyzable ticker.`);
+      })
+      .finally(() => {
+        if (lastDeepLinkedSymbol.current === sym) setResolving(false);
+      });
   }, [searchParams, handleAnalyse]);
 
   return (
@@ -102,45 +119,7 @@ function HomePageInner() {
           </div>
         ) : (
           <>
-            <div className="flex items-center gap-4 mb-5 pb-4 border-b border-border">
-              <span className="text-base font-black tracking-tight text-tx">
-                Alpha<span className="text-accent">Pulse</span>
-              </span>
-              <Link
-                href="/market-picks"
-                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
-              >
-                Market Picks →
-              </Link>
-              <Link
-                href="/sme-signals"
-                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
-              >
-                SME Signals →
-              </Link>
-              <Link
-                href="/screener"
-                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
-              >
-                Screener →
-              </Link>
-              <Link
-                href="/watchlist"
-                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
-              >
-                Watchlist →
-              </Link>
-              <Link
-                href="/compare"
-                className="text-xs font-semibold text-muted hover:text-accent transition-colors"
-              >
-                Compare →
-              </Link>
-              <div className="ml-auto flex items-center gap-3">
-                <HeaderSearch />
-                <AuthWidget />
-              </div>
-            </div>
+            <SiteNav />
 
             <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} compact />
 

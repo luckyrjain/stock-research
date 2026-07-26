@@ -964,24 +964,43 @@ def _fetch_nifty_closes(start_date: str, end_date: str) -> dict[str, float]:
     date — cheaper and just as complete, since a ranged history() call already
     returns every trading day's close in between. Cached via cache.py using
     'NSEI' as a pseudo-symbol (there's no real per-symbol subject here, just
-    one shared index series) — 24h TTL, keyed to the exact range requested so
-    a newly-added snapshot date (which grows the range) forces a fresh fetch
-    rather than serving a stale range that doesn't cover it yet.
+    one shared index series) — 24h TTL.
+
+    Coverage-based, not exact-range-keyed: the cache records the actual
+    [start, end] it covers, and a request is served from cache whenever that
+    stored range already contains the requested one — it does not need to
+    match exactly. Two independent callers now hit this (the picks-history
+    alpha stat, whose range is the full snapshot archive and only ever grows
+    over time, and the per-stock Nifty-benchmark endpoint, whose range is a
+    ~180-day trailing window that differs per stock) — exact-range keying
+    would mean these two essentially never agree on a range and evict each
+    other's entry on every request, defeating the 24h TTL and hammering
+    yfinance on every single call. A miss (nothing cached, or the cached
+    range doesn't fully cover this request) fetches the *union* of whatever
+    was cached and what's newly requested, so cached coverage only ever
+    grows, never shrinks or thrashes between callers.
+
     Best-effort: a yfinance outage degrades to {} so the endpoint still
     returns — the alpha column/stat is simply omitted, same as any other
     "a hiccup in one section must not fail the rest" section in this file.
     """
     import cache
 
-    range_key = f"{start_date}:{end_date}"
     cached = cache.load("NSEI", "index_history")
-    if cached and cached.get("range") == range_key:
+    if cached and cached.get("start", "9999-99-99") <= start_date and cached.get("end", "0000-00-00") >= end_date:
         return cached.get("closes", {})
+
+    # .get() with a fallback, not direct indexing — a cache file written
+    # before this coverage-based scheme existed (the old {"range", "closes"}
+    # shape) would otherwise KeyError here on its first read post-deploy,
+    # outside the try/except below.
+    fetch_start = min(start_date, cached.get("start", start_date)) if cached else start_date
+    fetch_end = max(end_date, cached.get("end", end_date)) if cached else end_date
 
     try:
         import yfinance as yf
-        end_exclusive = (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-        hist = yf.Ticker("^NSEI").history(start=start_date, end=end_exclusive, interval="1d")
+        end_exclusive = (datetime.strptime(fetch_end, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = yf.Ticker("^NSEI").history(start=fetch_start, end=end_exclusive, interval="1d")
         closes = {
             idx.strftime("%Y-%m-%d"): round(float(close), 2)
             for idx, close in hist["Close"].items()
@@ -990,7 +1009,7 @@ def _fetch_nifty_closes(start_date: str, end_date: str) -> dict[str, float]:
         return {}
 
     if closes:
-        cache.save("NSEI", "index_history", {"range": range_key, "closes": closes})
+        cache.save("NSEI", "index_history", {"start": fetch_start, "end": fetch_end, "closes": closes})
     return closes
 
 
@@ -1192,11 +1211,55 @@ async def get_prices(request: Request, symbols: str = Query(...)):
     return {"prices": dict(results)}
 
 
+def _compute_benchmark_sync(dates: list[str], closes: list[float]) -> dict | None:
+    """Stock-vs-Nifty relative performance over the exact window a price
+    series covers — "is this stock beating the index, or just beating a flat
+    market" is one of the fastest reads on Screener.in/Moneycontrol/Tickertape
+    and this app had no per-stock equivalent (only Market Picks track record
+    benchmarks against Nifty, and only in aggregate). Reuses
+    _fetch_nifty_closes rather than a second index-fetch path — same 24h
+    "NSEI" pseudo-symbol cache the picks-history alpha stat already shares.
+    None (never guessed) if there are fewer than 2 closes to compare, or the
+    Nifty fetch itself comes back empty (yfinance outage) — same "a hiccup in
+    one section must not fail the rest" degrade as every other best-effort
+    section in this file.
+    """
+    if len(closes) < 2 or len(dates) < 2:
+        return None
+    nifty_closes = _fetch_nifty_closes(dates[0], dates[-1])
+    if not nifty_closes:
+        return None
+    nifty_start = _nifty_close_on_or_before(nifty_closes, dates[0])
+    nifty_end = _nifty_close_on_or_before(nifty_closes, dates[-1])
+    if not nifty_start or not nifty_end:
+        return None
+
+    stock_change_pct = round((closes[-1] - closes[0]) / closes[0] * 100, 2) if closes[0] else None
+    nifty_change_pct = round((nifty_end - nifty_start) / nifty_start * 100, 2) if nifty_start else None
+    if stock_change_pct is None or nifty_change_pct is None:
+        return None
+    return {
+        "stock_change_pct": stock_change_pct,
+        "nifty_change_pct": nifty_change_pct,
+        "alpha_pct":        round(stock_change_pct - nifty_change_pct, 2),
+    }
+
+
 @app.get("/api/prices/history/{symbol}")
-async def get_price_history(request: Request, symbol: str, days: int = Query(180, ge=7, le=365)):
+async def get_price_history(
+    request: Request, symbol: str, days: int = Query(180, ge=7, le=365),
+    benchmark: bool = Query(False),
+):
     """Return a daily-close series for sparklines. Cached like the six data
     slices (6 h TTL) but intentionally outside ALL_DATA_TASKS — this is a
     standalone, on-demand series, not part of the six-task analysis pipeline.
+
+    `?benchmark=true` additionally computes the stock's return over the same
+    window against the Nifty50 (see _compute_benchmark_sync) — opt-in rather
+    than always-on since it costs an extra (cached) index fetch and most
+    callers of this endpoint (e.g. the Quarterly Trend card's revenue/EPS
+    sparklines) aren't plotting a price series at all, so a Nifty comparison
+    would be meaningless for them.
     """
     _rate_limit(request, "prices_history", max_calls=60, window_seconds=60)
     sym = symbol.upper().strip()
@@ -1205,7 +1268,15 @@ async def get_price_history(request: Request, symbol: str, days: int = Query(180
     from tools.price_history_tools import get_price_series
 
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, get_price_series, sym, days)
+    result = await loop.run_in_executor(None, get_price_series, sym, days)
+    if benchmark:
+        result = {
+            **result,
+            "benchmark": await loop.run_in_executor(
+                None, _compute_benchmark_sync, result.get("dates", []), result.get("closes", [])
+            ),
+        }
+    return result
 
 
 @app.get("/api/peers/{symbol}")
@@ -1247,6 +1318,73 @@ async def get_peers(request: Request, symbol: str):
 
         result = _build_peer_result(sym, raw)
         cache.save(sym, "peers", result)
+        return result
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _fetch_sync)
+
+
+@app.get("/api/financials/{symbol}")
+async def get_financials(request: Request, symbol: str):
+    """Multi-year Profit & Loss / Balance Sheet / Cash Flow statements
+    scraped from Screener.in (see tools/screener_tools.py::
+    get_financial_statements) — the biggest structural gap the frontend
+    design review found versus Screener.in itself: this app previously only
+    ever showed current-year ratios and a short quarterly Sales/EPS/OPM
+    trend, never full statement history. Also carries a deterministic DCF
+    fair-value estimate computed off the cash-flow table (see
+    dcf_valuation.py) — a second, independent valuation lens alongside the
+    existing peer-percentile and absolute P/E-anchor views, answering "cheap
+    vs. what its cash flows are worth" rather than "cheap vs. peers/its own
+    trading history".
+
+    Each of profit_loss/balance_sheet/cash_flow/dcf is independently
+    optional (null, never guessed) — a company Screener doesn't have one of
+    these tables for, or whose cash flow doesn't support a DCF (see
+    dcf_valuation.py's own preconditions), just has that field come back
+    null rather than a fabricated number. Cached like peers/insider-activity
+    (24h TTL) but intentionally outside ALL_DATA_TASKS — standalone and
+    on-demand, not part of the six-task analysis pipeline.
+    """
+    _rate_limit(request, "financials", max_calls=30, window_seconds=60)
+    sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+
+    def _fetch_sync() -> dict:
+        import cache
+
+        cached = cache.load(sym, "financials")
+        if cached is not None:
+            return {k: v for k, v in cached.items() if k != "_meta"}
+
+        from tools.screener_tools import get_financial_statements
+
+        raw = json.loads(get_financial_statements.run(symbol=sym))
+        if raw.get("error"):
+            # Not cached — same convention as GET /api/peers/{symbol}: a
+            # transient scrape failure should be retried on the next
+            # request, not locked in as "this company has no financials"
+            # for a full 24h TTL.
+            return {"symbol": sym, "profit_loss": None, "balance_sheet": None, "cash_flow": None, "dcf": None}
+
+        stock_info = cache.load(sym, "stock_info") or {}
+        from dcf_valuation import compute_dcf_estimate
+
+        dcf = compute_dcf_estimate(
+            raw.get("cash_flow"),
+            stock_info.get("current_price"),
+            stock_info.get("market_cap_cr"),
+        )
+
+        result = {
+            "symbol":        sym,
+            "profit_loss":   raw.get("profit_loss"),
+            "balance_sheet": raw.get("balance_sheet"),
+            "cash_flow":     raw.get("cash_flow"),
+            "dcf":           dcf,
+        }
+        cache.save(sym, "financials", result)
         return result
 
     loop = asyncio.get_running_loop()
@@ -2042,6 +2180,52 @@ async def get_watchlist(request: Request, client_id: str | None = Query(None)):
         log_event(LOGGER, "watchlist_read_failed", level="error", error=str(exc))
         raise HTTPException(status_code=503, detail="Database error. See server logs.")
     return {"items": items}
+
+
+@app.get("/api/watchlist/calendar")
+async def get_watchlist_calendar(request: Request, symbols: str = Query(...)):
+    """Upcoming corporate-action calendar across a set of watched symbols —
+    pure read-aggregation over each symbol's already-cached `filings` data,
+    running the same classify_filings() classifier main._build_report()
+    already runs per-symbol for the single-stock report's "Corporate
+    Filings" card. No new scraping and no DATABASE_URL dependency: the
+    caller (the watchlist page, which already has its own symbol list from
+    GET /api/watchlist) passes the symbols directly rather than this
+    endpoint re-querying ownership itself.
+
+    A symbol whose filings haven't been fetched (or have gone stale) simply
+    contributes nothing to the result — best-effort scoped to whatever's
+    already in cache, same as every other standalone aggregation endpoint
+    in this file, not an error.
+    """
+    _rate_limit(request, "watchlist_calendar", max_calls=30, window_seconds=60)
+    sym_list = [s.strip().upper() for s in symbols.split(",") if _TICKER_RE.match(s.strip())][:_MAX_WATCHLIST_ITEMS_PER_CLIENT]
+    if not sym_list:
+        return {"entries": []}
+
+    def _one(sym: str) -> dict | None:
+        import cache
+        from signals.filings_classifier import classify_filings
+
+        cached = cache.load(sym, "filings")
+        if not cached:
+            return None
+        filings_list = cached.get("filings", [])
+        if not isinstance(filings_list, list) or not filings_list:
+            return None
+        summary = classify_filings(filings_list)
+        if not summary.get("next_results_date") and not summary.get("corporate_actions"):
+            return None
+        return {"symbol": sym, **summary}
+
+    loop = asyncio.get_running_loop()
+    results = await asyncio.gather(*[loop.run_in_executor(None, _one, s) for s in sym_list])
+    entries = [r for r in results if r]
+    # Symbols with no next_results_date sort after ones that have it, rather
+    # than first — a corporate-action-only entry (e.g. a dividend filing with
+    # no upcoming results date) is still worth surfacing, just not up front.
+    entries.sort(key=lambda e: e.get("next_results_date") or "9999-99-99")
+    return {"entries": entries}
 
 
 @app.post("/api/watchlist")

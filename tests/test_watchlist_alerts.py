@@ -65,6 +65,7 @@ class DetectChangeTest(unittest.TestCase):
         with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
             change = watchlist_alerts._detect_change("TCS")
         self.assertEqual(change, {
+            "kind": "recommendation_change",
             "symbol": "TCS", "old_recommendation": "HOLD",
             "new_recommendation": "BUY", "confidence": "HIGH",
         })
@@ -73,6 +74,42 @@ class DetectChangeTest(unittest.TestCase):
         history = [{"recommendation": "HOLD"}, {"recommendation": None}]
         with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
             self.assertIsNone(watchlist_alerts._detect_change("TCS"))
+
+
+class DetectPriceMoveTest(unittest.TestCase):
+    def test_none_with_fewer_than_two_entries(self) -> None:
+        with patch("watchlist_alerts.verdict_history.load_history", return_value=[{"current_price": 100.0}]):
+            self.assertIsNone(watchlist_alerts._detect_price_move("TCS"))
+
+    def test_none_when_move_under_threshold(self) -> None:
+        history = [{"current_price": 100.0}, {"current_price": 105.0}]  # +5%, under the 10% threshold
+        with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
+            self.assertIsNone(watchlist_alerts._detect_price_move("TCS"))
+
+    def test_returns_move_dict_when_move_at_or_above_threshold(self) -> None:
+        history = [{"current_price": 100.0}, {"current_price": 112.0}]  # +12%
+        with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
+            move = watchlist_alerts._detect_price_move("TCS")
+        self.assertEqual(move, {
+            "kind": "price_move", "symbol": "TCS",
+            "old_price": 100.0, "new_price": 112.0, "change_pct": 12.0,
+        })
+
+    def test_detects_downward_move_too(self) -> None:
+        history = [{"current_price": 100.0}, {"current_price": 85.0}]  # -15%
+        with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
+            move = watchlist_alerts._detect_price_move("TCS")
+        self.assertEqual(move["change_pct"], -15.0)
+
+    def test_none_when_either_price_missing(self) -> None:
+        history = [{"current_price": None}, {"current_price": 112.0}]
+        with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
+            self.assertIsNone(watchlist_alerts._detect_price_move("TCS"))
+
+    def test_none_when_prior_price_is_zero(self) -> None:
+        history = [{"current_price": 0.0}, {"current_price": 112.0}]
+        with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
+            self.assertIsNone(watchlist_alerts._detect_price_move("TCS"))
 
 
 class AnalyzeSymbolTest(unittest.TestCase):
@@ -175,7 +212,7 @@ class RunTest(unittest.TestCase):
             "TCS": [{"user_id": 1, "email": "a@example.com"}],
             "INFY": [{"user_id": 1, "email": "a@example.com"}, {"user_id": 2, "email": "b@example.com"}],
         }
-        change = {"symbol": "TCS", "old_recommendation": "HOLD", "new_recommendation": "BUY", "confidence": "HIGH"}
+        change = {"kind": "recommendation_change", "symbol": "TCS", "old_recommendation": "HOLD", "new_recommendation": "BUY", "confidence": "HIGH"}
 
         def fake_detect(symbol):
             return change if symbol == "TCS" else None
@@ -184,11 +221,47 @@ class RunTest(unittest.TestCase):
              patch("watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
              patch("watchlist_alerts._analyze_symbol", return_value={"recommendation": "BUY"}), \
              patch("watchlist_alerts._detect_change", side_effect=fake_detect), \
+             patch("watchlist_alerts._detect_price_move", return_value=None), \
              patch("watchlist_alerts.send_watchlist_alert_email", return_value=True) as send_email:
             result = watchlist_alerts.run()
 
         self.assertTrue(result)
         send_email.assert_called_once_with("a@example.com", [change])
+
+    def test_sends_alert_for_price_move_even_without_recommendation_change(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        os.environ["ANTHROPIC_API_KEY"] = "fake"
+        by_symbol = {"TCS": [{"user_id": 1, "email": "a@example.com"}]}
+        move = {"kind": "price_move", "symbol": "TCS", "old_price": 100.0, "new_price": 115.0, "change_pct": 15.0}
+
+        with patch("watchlist_alerts.get_engine", return_value=MagicMock()), \
+             patch("watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
+             patch("watchlist_alerts._analyze_symbol", return_value={"recommendation": "HOLD"}), \
+             patch("watchlist_alerts._detect_change", return_value=None), \
+             patch("watchlist_alerts._detect_price_move", return_value=move), \
+             patch("watchlist_alerts.send_watchlist_alert_email", return_value=True) as send_email:
+            result = watchlist_alerts.run()
+
+        self.assertTrue(result)
+        send_email.assert_called_once_with("a@example.com", [move])
+
+    def test_both_alert_kinds_included_for_the_same_symbol(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        os.environ["ANTHROPIC_API_KEY"] = "fake"
+        by_symbol = {"TCS": [{"user_id": 1, "email": "a@example.com"}]}
+        change = {"kind": "recommendation_change", "symbol": "TCS", "old_recommendation": "HOLD", "new_recommendation": "SELL", "confidence": "HIGH"}
+        move = {"kind": "price_move", "symbol": "TCS", "old_price": 100.0, "new_price": 80.0, "change_pct": -20.0}
+
+        with patch("watchlist_alerts.get_engine", return_value=MagicMock()), \
+             patch("watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
+             patch("watchlist_alerts._analyze_symbol", return_value={"recommendation": "SELL"}), \
+             patch("watchlist_alerts._detect_change", return_value=change), \
+             patch("watchlist_alerts._detect_price_move", return_value=move), \
+             patch("watchlist_alerts.send_watchlist_alert_email", return_value=True) as send_email:
+            result = watchlist_alerts.run()
+
+        self.assertTrue(result)
+        send_email.assert_called_once_with("a@example.com", [change, move])
 
     def test_caps_symbol_count(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
@@ -199,6 +272,7 @@ class RunTest(unittest.TestCase):
              patch("watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
              patch("watchlist_alerts._analyze_symbol", return_value={"recommendation": "HOLD"}) as analyze, \
              patch("watchlist_alerts._detect_change", return_value=None), \
+             patch("watchlist_alerts._detect_price_move", return_value=None), \
              patch("watchlist_alerts.send_watchlist_alert_email"):
             watchlist_alerts.run()
 

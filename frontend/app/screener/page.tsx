@@ -3,8 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import type { ScreenerResponse, ScreenerStock } from '@/types';
-import HeaderSearch from '@/components/header-search';
-import AuthWidget from '@/components/auth-widget';
+import SiteNav from '@/components/site-nav';
 import WatchlistButton from '@/components/watchlist-button';
 
 type EmaTrendFilter = 'all' | 'bullish' | 'bearish';
@@ -102,6 +101,7 @@ function SkeletonRows() {
           <td className="px-4 py-4"><Skeleton className="h-3.5 w-6" /></td>
           <td className="px-4 py-4"><Skeleton className="h-3.5 w-20" /></td>
           <td className="px-4 py-4"><Skeleton className="h-3.5 w-36" /></td>
+          <td className="px-4 py-4"><Skeleton className="h-3.5 w-20" /></td>
           <td className="px-4 py-4"><Skeleton className="h-3.5 w-16 ml-auto" /></td>
           <td className="px-4 py-4"><Skeleton className="h-3.5 w-12 ml-auto" /></td>
           <td className="px-4 py-4"><Skeleton className="h-3.5 w-16 ml-auto" /></td>
@@ -225,32 +225,10 @@ export default function ScreenerPage() {
     <main className="min-h-screen bg-bg text-tx">
       <div className="max-w-6xl mx-auto px-4 pt-8 pb-16">
 
-        {/* Nav */}
-        <div className="flex items-center gap-4 mb-8 pb-4 border-b border-border flex-wrap">
-          <Link href="/" className="text-base font-black tracking-tight text-tx">
-            Alpha<span className="text-accent">Pulse</span>
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/market-picks" className="text-sm text-muted hover:text-tx transition-colors">
-            Market Picks
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/sme-signals" className="text-sm text-muted hover:text-tx transition-colors">
-            SME Signals
-          </Link>
-          <span className="text-border-hi">|</span>
-          <span className="text-sm font-semibold text-accent">Screener</span>
-          <span className="text-border-hi">|</span>
-          <Link href="/watchlist" className="text-sm text-muted hover:text-tx transition-colors">
-            Watchlist
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/compare" className="text-sm text-muted hover:text-tx transition-colors">
-            Compare
-          </Link>
-          <div className="ml-auto flex items-center gap-3">
-            <HeaderSearch />
-            <AuthWidget />
+        <SiteNav
+          active="screener"
+          wrap
+          right={<>
             <button
               onClick={startRefresh}
               disabled={refreshing}
@@ -266,8 +244,8 @@ export default function ScreenerPage() {
             >
               {loading ? 'Loading…' : '↺ Reload'}
             </button>
-          </div>
-        </div>
+          </>}
+        />
 
         {/* Header */}
         <div className="mb-8 animate-fade-up">
@@ -344,6 +322,7 @@ export default function ScreenerPage() {
                   <th className="w-10 px-4 py-3"></th>
                   <SortableTh label="Symbol" sortK="symbol" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
                   <th className="text-left px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Company</th>
+                  <th className="text-left px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Sector</th>
                   <SortableTh label="Price" sortK="current_price" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
                   <SortableTh label="P/E" sortK="pe_ratio" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
                   <SortableTh label="Mkt Cap" sortK="market_cap_cr" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
@@ -357,11 +336,11 @@ export default function ScreenerPage() {
                   <SkeletonRows />
                 ) : error ? (
                   <tr>
-                    <td colSpan={9} className="px-4 py-10 text-center text-sell text-sm">{error}</td>
+                    <td colSpan={10} className="px-4 py-10 text-center text-sell text-sm">{error}</td>
                   </tr>
                 ) : stocks.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-4 py-10 text-center text-muted text-sm">
+                    <td colSpan={10} className="px-4 py-10 text-center text-muted text-sm">
                       No stocks match these filters, or the screener hasn&apos;t run yet — try &quot;Refresh Data&quot;.
                     </td>
                   </tr>
@@ -377,6 +356,7 @@ export default function ScreenerPage() {
                         </Link>
                       </td>
                       <td className="px-4 py-3 text-muted truncate max-w-xs">{s.company_name ?? '—'}</td>
+                      <td className="px-4 py-3 text-muted/70 text-xs whitespace-nowrap">{s.sector ?? '—'}</td>
                       <td className="px-4 py-3 text-right font-mono">{s.current_price != null ? `₹${s.current_price.toFixed(2)}` : '—'}</td>
                       <td className="px-4 py-3 text-right font-mono">{fmtNum(s.pe_ratio)}</td>
                       <td className="px-4 py-3 text-right font-mono">{fmtMarketCap(s.market_cap_cr)}</td>

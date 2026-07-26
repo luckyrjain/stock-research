@@ -1,13 +1,14 @@
 'use client';
 
-import { useEffect, useRef, useState, Suspense } from 'react';
+import { useCallback, useEffect, useRef, useState, Suspense } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import ProgressTracker  from '@/components/progress-tracker';
-import ResultsDashboard from '@/components/results-dashboard';
-import HeaderSearch     from '@/components/header-search';
-import AuthWidget       from '@/components/auth-widget';
+import ProgressTracker    from '@/components/progress-tracker';
+import ResultsDashboard   from '@/components/results-dashboard';
+import SiteNav            from '@/components/site-nav';
+import CompareDiffTable   from '@/components/compare-diff-table';
 import { useStockAnalysis } from '@/lib/useStockAnalysis';
+import type { Report } from '@/types';
 
 const MAX_SYMBOLS = 2;
 
@@ -25,7 +26,7 @@ function parseSymbols(raw: string): string[] {
   return symbols;
 }
 
-function CompareColumn({ symbol }: { symbol: string }) {
+function CompareColumn({ symbol, onReport }: { symbol: string; onReport: (symbol: string, report: Report | null) => void }) {
   const {
     phase, taskStatus, report, error,
     handleAnalyse, handleHardRefresh,
@@ -37,6 +38,13 @@ function CompareColumn({ symbol }: { symbol: string }) {
     started.current = true;
     handleAnalyse(symbol);
   }, [symbol, handleAnalyse]);
+
+  // Lifts the finished report up to the parent for the head-to-head diff
+  // table — this column still owns its own SSE fetch/progress state
+  // entirely; the parent never re-fetches anything, it just reads the result.
+  useEffect(() => {
+    onReport(symbol, report);
+  }, [symbol, report, onReport]);
 
   return (
     <div className="w-full 2xl:flex-1 2xl:min-w-0 min-w-0">
@@ -79,11 +87,21 @@ function ComparePageInner() {
   const urlSymbols = parseSymbols(searchParams.get('symbols') ?? '');
 
   const [inputValue, setInputValue] = useState(urlSymbols.join(', '));
+  const [reports, setReports] = useState<Record<string, Report | null>>({});
 
   useEffect(() => {
     setInputValue(urlSymbols.join(', '));
+    setReports({});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams.get('symbols')]);
+
+  // Stable across renders (empty dep array), so CompareColumn's own
+  // `[symbol, report, onReport]` effect only re-fires when its report
+  // actually changes. The Object.is bail-out is cheap extra safety against
+  // ever setting `reports` to an equivalent-but-new object.
+  const handleReport = useCallback((symbol: string, report: Report | null) => {
+    setReports(prev => (prev[symbol] === report ? prev : { ...prev, [symbol]: report }));
+  }, []);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -95,34 +113,7 @@ function ComparePageInner() {
     <main className="min-h-screen bg-bg text-tx">
       <div className="max-w-[1600px] mx-auto px-4 pt-8 pb-16">
 
-        {/* Nav */}
-        <div className="flex items-center gap-4 mb-8 pb-4 border-b border-border flex-wrap">
-          <Link href="/" className="text-base font-black tracking-tight text-tx">
-            Alpha<span className="text-accent">Pulse</span>
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/market-picks" className="text-sm text-muted hover:text-tx transition-colors">
-            Market Picks
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/sme-signals" className="text-sm text-muted hover:text-tx transition-colors">
-            SME Signals
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/screener" className="text-sm text-muted hover:text-tx transition-colors">
-            Screener
-          </Link>
-          <span className="text-border-hi">|</span>
-          <Link href="/watchlist" className="text-sm text-muted hover:text-tx transition-colors">
-            Watchlist
-          </Link>
-          <span className="text-border-hi">|</span>
-          <span className="text-sm font-semibold text-accent">Compare</span>
-          <div className="ml-auto flex items-center gap-3">
-            <HeaderSearch />
-            <AuthWidget />
-          </div>
-        </div>
+        <SiteNav active="compare" wrap />
 
         <div className="mb-6">
           <h1 className="text-xl font-black tracking-tight text-tx mb-1.5">Compare Stocks</h1>
@@ -161,11 +152,16 @@ function ComparePageInner() {
             </p>
           </div>
         ) : (
-          <div className="flex flex-col 2xl:flex-row gap-8 items-start">
-            {urlSymbols.map(sym => (
-              <CompareColumn key={sym} symbol={sym} />
-            ))}
-          </div>
+          <>
+            {urlSymbols.length === MAX_SYMBOLS && reports[urlSymbols[0]] && reports[urlSymbols[1]] && (
+              <CompareDiffTable reportA={reports[urlSymbols[0]]!} reportB={reports[urlSymbols[1]]!} />
+            )}
+            <div className="flex flex-col 2xl:flex-row gap-8 items-start">
+              {urlSymbols.map(sym => (
+                <CompareColumn key={sym} symbol={sym} onReport={handleReport} />
+              ))}
+            </div>
+          </>
         )}
       </div>
     </main>

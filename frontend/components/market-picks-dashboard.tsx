@@ -7,7 +7,7 @@ import WatchlistButton from './watchlist-button';
 import PositionButton from './position-button';
 import { usePositions } from '@/lib/positions';
 
-type SortKey    = 'confidence_score' | 'change_pct' | 'pe_ratio';
+type SortKey    = 'confidence_score' | 'change_pct' | 'pe_ratio' | 'valuation_percentile';
 type ConfFilter = 'all' | 'high' | 'medium' | 'low';
 type HorizonFilter = 'all' | 'short' | 'medium' | 'long';
 type CapFilter  = 'all' | 'large' | 'mid' | 'small';
@@ -271,7 +271,7 @@ function TradeBox({ pick }: { pick: MarketPick }) {
 function ExpandedRow({ pick }: { pick: MarketPick }) {
   return (
     <tr>
-      <td colSpan={9} className="border-b border-border">
+      <td colSpan={10} className="border-b border-border">
         <div className="px-6 py-5 bg-card/60 space-y-5">
           <TradeBox pick={pick} />
 
@@ -655,13 +655,22 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                 <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider">LTP</th>
                 <SortableHeader label="±%" sortK="change_pct" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
                 <SortableHeader label="P/E" sortK="pe_ratio"  currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
+                <SortableHeader
+                  label="Val." sortK="valuation_percentile" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort}
+                  tooltip={
+                    <InfoTooltip title="Valuation Percentile" align="left">
+                      <p>Where the stock&apos;s current P/E sits within its own 3–5yr Screener-published P/E history.</p>
+                      <p><span className="text-buy font-semibold">≤33rd pctl</span> cheap vs. its own history · <span className="text-sell font-semibold">≥67th pctl</span> rich. Blank when Screener doesn&apos;t have a usable band.</p>
+                    </InfoTooltip>
+                  }
+                />
                 <th className="px-4 py-3 w-8" />
               </tr>
             </thead>
             <tbody>
               {displayed.length === 0 && (
                 <tr>
-                  <td colSpan={9} className="px-4 py-12 text-center">
+                  <td colSpan={10} className="px-4 py-12 text-center">
                     <p className="text-sm text-muted">No stocks match your filter.</p>
                     <button onClick={clearFilters}
                             className="mt-2 text-xs text-accent hover:underline">
@@ -781,6 +790,21 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                       {/* P/E */}
                       <td className="px-4 py-4 font-mono text-xs text-muted tabular-nums">
                         {pick.pe_ratio != null ? pick.pe_ratio.toFixed(1) : '—'}
+                      </td>
+
+                      {/* Valuation percentile — cheap/rich vs. the stock's own P/E history */}
+                      <td className="px-4 py-4 font-mono text-xs tabular-nums">
+                        {pick.valuation_percentile != null ? (
+                          <span className={
+                            pick.valuation_percentile <= 33 ? 'text-buy'
+                              : pick.valuation_percentile >= 67 ? 'text-sell'
+                              : 'text-hold'
+                          }>
+                            {pick.valuation_percentile.toFixed(0)}th
+                          </span>
+                        ) : (
+                          <span className="text-muted">—</span>
+                        )}
                       </td>
 
                       {/* Expand chevron */}

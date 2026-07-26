@@ -13,7 +13,7 @@ from observability import get_logger, log_event
 LOGGER = get_logger("email_sender")
 
 _MAGIC_LINK_SUBJECT = "Your AlphaPulse sign-in link"
-_WATCHLIST_ALERT_SUBJECT = "AlphaPulse watchlist: recommendation change"
+_WATCHLIST_ALERT_SUBJECT = "AlphaPulse watchlist: updates"
 
 
 def _from_address() -> str:
@@ -34,15 +34,28 @@ def _build_message(to_email: str, login_url: str) -> EmailMessage:
     return msg
 
 
+def _format_alert_line(a: dict) -> str:
+    """One line per alert — recommendation-change alerts and price-move
+    alerts carry different fields (see watchlist_alerts._detect_change /
+    _detect_price_move), so this branches on `kind` rather than assuming a
+    single shape. `kind` defaults to "recommendation_change" for alerts
+    built before this field existed, so an older in-flight call site (if
+    any) still renders the same as before."""
+    if a.get("kind") == "price_move":
+        direction = "up" if a["change_pct"] >= 0 else "down"
+        return (
+            f"  {a['symbol']}: price moved {direction} {abs(a['change_pct'])}% "
+            f"(₹{a['old_price']} -> ₹{a['new_price']})"
+        )
+    conf = f" [{a['confidence']} confidence]" if a.get("confidence") else ""
+    return f"  {a['symbol']}: {a['old_recommendation']} -> {a['new_recommendation']}{conf}"
+
+
 def _build_watchlist_alert_message(to_email: str, alerts: list[dict]) -> EmailMessage:
     lines = [
-        "A stock on your AlphaPulse watchlist has a new recommendation:\n",
+        "Updates on your AlphaPulse watchlist:\n",
     ]
-    for a in alerts:
-        conf = f" [{a['confidence']} confidence]" if a.get("confidence") else ""
-        lines.append(
-            f"  {a['symbol']}: {a['old_recommendation']} -> {a['new_recommendation']}{conf}"
-        )
+    lines.extend(_format_alert_line(a) for a in alerts)
     lines.append(
         "\nOpen AlphaPulse and search the symbol to see the full updated analysis."
     )
@@ -98,11 +111,13 @@ def send_magic_link_email(to_email: str, login_url: str) -> bool:
 
 def send_watchlist_alert_email(to_email: str, alerts: list[dict]) -> bool:
     """Best-effort digest email for watchlist_alerts.py: one email per user
-    per run, listing every symbol whose recommendation changed since the
-    prior stored verdict. `alerts` is a list of
-    {"symbol", "old_recommendation", "new_recommendation", "confidence"}
-    dicts (see watchlist_alerts._detect_change). Never raises; the caller
-    only uses the return value for logging, same convention as
+    per run, listing every alert for that run — a recommendation change
+    ({"kind": "recommendation_change", "symbol", "old_recommendation",
+    "new_recommendation", "confidence"}, see
+    watchlist_alerts._detect_change) and/or a large price move
+    ({"kind": "price_move", "symbol", "old_price", "new_price",
+    "change_pct"}, see watchlist_alerts._detect_price_move). Never raises;
+    the caller only uses the return value for logging, same convention as
     send_magic_link_email."""
     if not alerts:
         return False
