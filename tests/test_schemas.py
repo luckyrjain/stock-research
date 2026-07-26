@@ -25,6 +25,18 @@ class NormalizeTest(unittest.TestCase):
         result = schemas.normalize("research", {"symbol": "TCS", "ratios": {}})
         self.assertEqual(result["quarterly_trend"], {})
 
+    def test_research_passes_through_nse_fallback_ratios_when_present(self) -> None:
+        result = schemas.normalize("research", {
+            "symbol": "TCS",
+            "ratios": {},
+            "nse_fallback_ratios": {"eps": 12.5, "source": "nse_xbrl"},
+        })
+        self.assertEqual(result["nse_fallback_ratios"], {"eps": 12.5, "source": "nse_xbrl"})
+
+    def test_research_omits_nse_fallback_ratios_when_absent(self) -> None:
+        result = schemas.normalize("research", {"symbol": "TCS", "ratios": {"P/E": "28"}})
+        self.assertNotIn("nse_fallback_ratios", result)
+
     def test_shareholding_passes_through_pledge_pct(self) -> None:
         result = schemas.normalize("shareholding", {
             "symbol": "TCS",

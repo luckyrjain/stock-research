@@ -1,10 +1,16 @@
 import contextlib
 import io
 import json
+from datetime import datetime
+from urllib.parse import quote
+
 import requests
 import yfinance as yf
 from lxml import etree
 from crewai.tools import tool
+
+from tools._nse_session import NSE_BASE_URL as _NSE_BASE
+from tools._nse_session import get_nse_session
 
 _NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -12,13 +18,9 @@ _NSE_HEADERS = {
     "Referer": "https://www.nseindia.com",
 }
 
-_NSE_BASE = "https://www.nseindia.com"
-
 
 def _nse_session() -> requests.Session:
-    session = requests.Session()
-    session.get(_NSE_BASE, headers=_NSE_HEADERS, timeout=10)
-    return session
+    return get_nse_session(timeout=10)
 
 
 def _percent_from_ambiguous_value(value: float | None, plausible_max: float) -> float | None:
@@ -218,3 +220,124 @@ def get_mf_holdings(symbol: str) -> str:
         })
     except Exception as e:
         return json.dumps({"error": str(e), "symbol": symbol})
+
+
+# Standard Ind-AS XBRL tag localnames a "Financial Results" filing's basic
+# EPS fact is commonly reported under. Matched by localname only, ignoring
+# namespace — the same approach get_mf_holdings() above already uses
+# successfully for shareholding XBRL, since NSE's own XBRL namespace URIs
+# for results filings weren't verifiable in this sandbox either.
+_XBRL_EPS_TAGS = (
+    "BasicEarningsLossPerShareFromContinuingOperations",
+    "BasicEarningsPerShareFromContinuingOperations",
+    "BasicEarningsLossPerShareFromContinuingAndDiscontinuedOperations",
+    "BasicEarningsPerEquityShare",
+)
+
+
+def _parse_filing_date(date_str: object) -> str | None:
+    """NSE's corporate-announcements `date` field is `dd-Mon-yyyy[ HH:MM]`,
+    which does NOT sort lexically in calendar order (the same drift
+    tools/nse_insider_trades.py::_parse_pit_date already documents and
+    fixes for its own date field) — a bare string sort of raw NSE dates
+    would silently pick the wrong "most recent" filing. Returns an
+    ISO-8601 string sortable in true chronological order, or None if the
+    format doesn't match any of these (never guessed)."""
+    if not isinstance(date_str, str):
+        return None
+    for fmt in ("%d-%b-%Y %H:%M", "%d-%b-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(date_str, fmt).isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def get_nse_basic_ratios(symbol: str) -> dict:
+    """Best-effort fallback for a stock's basic EPS, sourced from NSE's own
+    XBRL-tagged financial-results filings rather than Screener.in. Not a
+    @tool — not one of the six ALL_DATA_TASKS, called only from
+    tools/screener_tools.py::get_fundamentals() when Screener's own ratios
+    table came back completely empty (e.g. a recent IPO Screener hasn't
+    indexed yet, but NSE already has a results filing for). Returns {}
+    (never invented) on any failure, missing filing, missing XBRL
+    attachment, or an unrecognized tag — the same "never invent" convention
+    every other tool in this codebase follows.
+
+    **Deliberately EPS-only, not "EPS, sales, profit"**: a per-share figure
+    like EPS is self-scaled (always "rupees and paise per share") with no
+    unit ambiguity. Sales/profit are aggregate rupee figures that XBRL
+    reports at a `decimals`/`unitRef`-dependent scale (absolute rupees,
+    lakhs, or crore) — correctly resolving that would require parsing the
+    XBRL unit/decimals metadata against a real NSE filing to confirm the
+    convention it actually uses, which could not be verified in this
+    sandbox (no outbound internet — same disclosed-limitation pattern as
+    every other NSE/BSE scraper in this codebase). Guessing a scale and
+    getting it wrong would inject a confidently-incorrect figure (e.g. off
+    by 100x) — actively worse than the missing-data case this fallback
+    exists to improve on, so those two fields are intentionally left out
+    of this first pass rather than shipped as a guess.
+
+    **Disclosed limitation**: neither NSE's corporate-announcements
+    response shape under `reqXbrl=true` (which field, if any, carries the
+    XBRL attachment URL — this tries several plausible field names) nor
+    the exact Ind-AS tag names a real filing uses were verified against a
+    live response in this sandbox. Worth spot-checking before this is
+    relied on in production; until then it degrades to {} exactly like an
+    unreachable endpoint would, so a wrong guess here is invisible/safe
+    rather than actively misleading.
+    """
+    try:
+        session = _nse_session()
+        sym = symbol.upper().strip()
+        url = (
+            f"{_NSE_BASE}/api/corporate-announcements?"
+            f"index=equities&symbol={quote(sym)}&reqXbrl=true"
+        )
+        resp = session.get(url, timeout=10)
+        resp.raise_for_status()
+        filings = resp.json()
+        if not isinstance(filings, list) or not filings:
+            return {}
+
+        results_filings = [
+            f for f in filings
+            if isinstance(f, dict)
+            and "financial results" in str(f.get("desc") or f.get("subject") or "").lower()
+        ]
+        candidates = sorted(
+            results_filings or filings,
+            key=lambda f: _parse_filing_date(f.get("date")) or "",
+            reverse=True,
+        )
+
+        xbrl_url = None
+        for f in candidates:
+            if not isinstance(f, dict):
+                continue
+            for key in ("xbrl", "xbrlUrl", "xbrl_attachment", "attchmntFile"):
+                val = f.get(key)
+                if val and str(val).lower().endswith((".xml", ".xbrl")):
+                    xbrl_url = val
+                    break
+            if xbrl_url:
+                break
+        if not xbrl_url:
+            return {}
+
+        xbrl_resp = requests.get(xbrl_url, headers={"User-Agent": _NSE_HEADERS["User-Agent"]}, timeout=20)
+        xbrl_resp.raise_for_status()
+        root = etree.fromstring(xbrl_resp.content)
+
+        eps = None
+        for elem in root.iter():
+            if etree.QName(elem.tag).localname in _XBRL_EPS_TAGS and elem.text:
+                try:
+                    eps = float(elem.text.strip())
+                    break
+                except ValueError:
+                    continue
+
+        return {"eps": eps, "source": "nse_xbrl", "as_of_date": candidates[0].get("date")} if eps is not None else {}
+    except Exception:
+        return {}

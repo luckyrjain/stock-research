@@ -92,7 +92,18 @@ export interface Report {
   analysis: Partial<Analysis>;
   signals?: Partial<SignalSummary>;
   stock_info: Partial<StockInfo>;
-  research: { ratios?: Record<string, string>; about?: string; quarterly_trend?: QuarterlyTrend };
+  research: {
+    ratios?: Record<string, string>;
+    about?: string;
+    quarterly_trend?: QuarterlyTrend;
+    // Only present when Screener's own ratios table came back completely
+    // empty and NSE's own XBRL results filings had a usable EPS — see
+    // tools/nse_tools.py::get_nse_basic_ratios. Deliberately EPS-only, not
+    // a full ratios set — see that function's own docstring for why
+    // sales/profit are intentionally excluded (unresolvable XBRL unit
+    // scale without a live response to verify against).
+    nse_fallback_ratios?: { eps: number; source: string; as_of_date?: string | null };
+  };
   news: { title: string; source: string; published_at: string; url: string }[];
   holdings: {
     shareholding_pattern?: Record<string, number>;

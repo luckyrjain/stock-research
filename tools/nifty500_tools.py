@@ -30,6 +30,8 @@ from pathlib import Path
 
 import requests
 
+from tools._nse_session import get_nse_session
+
 logger = logging.getLogger(__name__)
 
 _CACHE_PATH = Path("output/_nifty500_master.json")
@@ -42,13 +44,11 @@ _CACHE_TTL_HOURS = 24
 # below 500 to tolerate real index-reconstitution drift.
 _MIN_PLAUSIBLE_COUNT = 400
 
-_NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Referer": "https://www.nseindia.com",
-    "Accept": "text/csv,application/json,*/*",
-}
-
 _NIFTY500_CSV_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
+
+
+def _nse_session() -> requests.Session:
+    return get_nse_session(timeout=10, accept="text/csv,application/json,*/*")
 
 
 def _is_fresh(path: Path) -> bool:
@@ -72,12 +72,8 @@ def get_nifty500_constituents(force: bool = False) -> list[dict]:
         return json.loads(_CACHE_PATH.read_text())
 
     try:
-        session = requests.Session()
-        # Prime NSE session cookie, same pattern as tools/sme_tools.py's
-        # fetch_nse_emerge_stocks — NSE endpoints reject a cold request with
-        # no prior visit to the site.
-        session.get("https://www.nseindia.com", headers=_NSE_HEADERS, timeout=10)
-        resp = session.get(_NIFTY500_CSV_URL, headers=_NSE_HEADERS, timeout=15)
+        session = _nse_session()
+        resp = session.get(_NIFTY500_CSV_URL, timeout=15)
         resp.raise_for_status()
 
         reader = csv.DictReader(io.StringIO(resp.text))

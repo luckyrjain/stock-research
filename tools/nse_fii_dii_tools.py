@@ -14,20 +14,14 @@ module: a shape mismatch (NSE changed its response format) degrades to an
 `{"error": ...}` dict exactly like a network failure would, rather than
 raising into the signal engine.
 """
-import time
-
 import requests
 
 from observability import get_logger, log_event
+from tools._nse_session import get_nse_session
 
 LOGGER = get_logger("nse_fii_dii_tools")
 
 _FII_DII_URL = "https://www.nseindia.com/api/fiidiiTradeReact"
-_NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-    "Referer": "https://www.nseindia.com",
-}
 
 # signals/macro.py's ±500/±3000 Cr thresholds assume NSE's `netValue` field
 # is already in ₹ Crore, which could not be verified against a live response
@@ -42,14 +36,7 @@ _PLAUSIBLE_MAX_NET_CR = 100_000.0
 
 
 def _nse_session() -> requests.Session:
-    sess = requests.Session()
-    sess.headers.update(_NSE_HEADERS)
-    try:
-        sess.get("https://www.nseindia.com", timeout=8)
-        time.sleep(0.5)
-    except Exception:  # pylint: disable=broad-exception-caught
-        pass
-    return sess
+    return get_nse_session(timeout=8)
 
 
 def _to_float(value) -> float | None:

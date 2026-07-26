@@ -61,6 +61,8 @@ stock-research/
 │   ├── sme_tools.py           NSE Emerge + BSE SME stock-list fetchers
 │   ├── nifty500_tools.py      NIFTY 500 constituent list fetcher (screener_pipeline.py's universe)
 │   ├── hdfc_sec_agent.py      HDFC Securities Fundamental + Technical scrapers (GNews-based)
+│   ├── _nse_session.py        Shared NSE session-priming helper — every NSE-touching tools/*.py
+│   │                          module delegates its own local session helper to this
 │   └── ...                    Other data-fetching functions (yfinance, Screener.in, gnews, NSE API)
 ├── signals/                Quantitative signal engine (features → signal scores → verdict)
 ├── tests/                  unittest-based tests (no pytest plugins needed)
@@ -600,6 +602,63 @@ difference in what it can honestly return:
 4. `results-dashboard.tsx`'s `StreetConsensusCard` (via `useStreetConsensus()`) renders
    nothing when `articles` is empty, and otherwise lists up to 6 recent article
    titles/dates as external links — placed after `InsiderActivityCard` in the card grid.
+
+### NSE session consolidation + Screener.in fallback resilience
+
+Seven `tools/*.py` modules independently talk to NSE, and each one had to "prime" its own
+`requests.Session` (a GET to nseindia.com's homepage for cookies — NSE rejects a cold request
+with none) before its real API/CSV call. Three of the seven (`nse_insider_trades.py`,
+`nse_bulk_block_deals.py`, `nse_fii_dii_tools.py`) had ended up byte-identical; the other four
+(`nse_tools.py`, `nse_filings_tools.py`, `sme_tools.py`, `nifty500_tools.py`) had each drifted —
+different helper names (`_nse_session` vs. `_get_session`), different priming timeouts (5/6/8/10s),
+and inconsistent handling of a priming failure (two modules let it propagate uncaught into the
+caller's own broad `except`, one folded a priming failure and a real data-fetch failure into the
+same log line).
+
+1. `tools/_nse_session.py::get_nse_session(timeout, accept, extra_headers, sleep_after_prime)` is
+   the one place this logic now lives — builds a `requests.Session`, sets NSE-friendly headers via
+   `session.headers.update()`, and primes it with a swallow-and-continue `try/except` GET plus a
+   short sleep on success. Every one of the seven modules keeps its own thin local wrapper (same
+   function name, same call signature it already had — `nse_tools.py` still defines `_nse_session()`,
+   `nse_filings_tools.py` still defines `_get_session()`) that delegates here with its own
+   timeout/header needs, specifically so every existing test's `patch("tools.<module>._nse_session",
+   ...)` target keeps working unchanged rather than needing a rewrite across seven test files.
+2. **Resilience is standardized, not just deduplicated** — every priming attempt across all seven
+   modules now uniformly swallows a failure and sleeps 0.5s on success (previously two modules
+   let a priming exception propagate, and the sleep/swallow behavior varied module to module).
+   `sme_tools.py` and `nifty500_tools.py` previously inlined this logic directly in their one
+   call site with no named helper at all — both now have a local `_nse_session()` too, so all
+   seven modules follow the identical pattern. `tests/test_nifty500_tools.py` was the one test
+   file that had to change its patch target (`requests.Session` → `_nse_session`), since it was
+   the only module with no pre-existing named helper to patch.
+3. `tools/nse_tools.py::get_nse_basic_ratios(symbol)` is a new best-effort fallback — not a
+   `@tool`, not one of the six `ALL_DATA_TASKS` — that `tools/screener_tools.py::get_fundamentals()`
+   calls (lazy import, no module-level dependency) **only when Screener's own `ratios` dict came
+   back completely empty** (e.g. a recent IPO Screener hasn't indexed a ratios table for yet, but
+   NSE already has a results filing). It hits NSE's `corporate-announcements` endpoint with
+   `reqXbrl=true`, finds the most recent "Financial Results" filing's XBRL attachment, and parses
+   it (same localname-matching `lxml.etree` approach `get_mf_holdings()` already uses successfully
+   for shareholding XBRL) for a basic EPS fact. Returns `{}` (never invented) on any failure —
+   missing filing, missing XBRL attachment, or an unrecognized tag.
+4. **Deliberately EPS-only, not "EPS, sales, profit"**: EPS is self-scaled (always "rupees and
+   paise per share"), so there's no unit ambiguity. Sales/profit are aggregate rupee figures XBRL
+   reports at a `decimals`/`unitRef`-dependent scale (absolute rupees, lakhs, or crore) —
+   correctly resolving that requires parsing a real filing's unit metadata to confirm which
+   convention it actually uses, which could not be verified in this sandbox (no outbound internet
+   — see point 5). Guessing a scale and getting it wrong would inject a confidently-incorrect
+   figure (e.g. off by 100×) — worse than the missing-data case this fallback exists to improve
+   on — so those two fields are intentionally out of this first pass rather than shipped as a guess.
+5. **Disclosed limitation**: neither NSE's `corporate-announcements` response shape under
+   `reqXbrl=true` (which field, if any, carries the XBRL attachment URL — several plausible field
+   names are tried) nor the exact Ind-AS XBRL tag names a real filing uses were verified against a
+   live response in this sandbox — same disclosure pattern as every other NSE/BSE scraper in this
+   codebase. Worth spot-checking before this is relied on in production; until then a wrong guess
+   here degrades to `{}` exactly like an unreachable endpoint would, never a wrong number.
+6. `schemas.py`'s `research` contract carries `nse_fallback_ratios` as an independently-optional
+   field (present only when this fallback found something), and
+   `results-dashboard.tsx`'s Fundamentals card renders a small "Screener.in had no ratios — showing
+   EPS from NSE's own filings instead" note with just the EPS row when `ratios` is empty but
+   `nse_fallback_ratios` is present — the ordinary ratios table renders as before in every other case.
 
 ### Symbol validation flow (`GET /api/validate/{symbol}`)
 

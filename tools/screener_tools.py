@@ -320,6 +320,26 @@ def get_fundamentals(symbol: str) -> str:
         if quarterly_trend:
             payload["quarterly_trend"] = quarterly_trend
 
+        # Best-effort NSE fallback — only when Screener's own ratios table
+        # came back completely empty (e.g. a recent IPO Screener hasn't
+        # indexed a ratios table for yet, but NSE already has a results
+        # filing). A lazy import, not a module-level one: nse_tools.py
+        # doesn't import this module, so there's no circularity, but this
+        # keeps the dependency scoped to the one code path that needs it,
+        # matching this codebase's existing lazy-import convention for
+        # cross-tool composition (e.g. market_picks_pipeline.py's
+        # _fetch_valuation_percentile). Never lets a fallback failure
+        # affect the primary Screener payload above.
+        if not ratios:
+            try:
+                from tools.nse_tools import get_nse_basic_ratios
+
+                fallback = get_nse_basic_ratios(symbol)
+                if fallback:
+                    payload["nse_fallback_ratios"] = fallback
+            except Exception:
+                pass
+
         return json.dumps(payload)
     except Exception as e:
         return json.dumps({"error": str(e), "symbol": symbol})

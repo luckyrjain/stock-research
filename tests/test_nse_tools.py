@@ -4,7 +4,13 @@ from unittest.mock import MagicMock, patch
 
 from lxml import etree
 
-from tools.nse_tools import _build_quote_payload, _is_valid_quote, get_mf_holdings, get_stock_quote
+from tools.nse_tools import (
+    _build_quote_payload,
+    _is_valid_quote,
+    get_mf_holdings,
+    get_nse_basic_ratios,
+    get_stock_quote,
+)
 
 
 class IsValidQuoteTest(unittest.TestCase):
@@ -227,6 +233,146 @@ class GetMfHoldingsTest(unittest.TestCase):
             result = json.loads(get_mf_holdings.run(symbol="TCS"))
 
         self.assertEqual(result["mutual_funds"], [])
+
+
+class GetNseBasicRatiosTest(unittest.TestCase):
+    def _filings_session(self, filings: list) -> MagicMock:
+        sess = MagicMock()
+        resp = MagicMock()
+        resp.json.return_value = filings
+        sess.get.return_value = resp
+        return sess
+
+    def test_no_filings_returns_empty_dict(self) -> None:
+        with patch("tools.nse_tools._nse_session", return_value=self._filings_session([])):
+            self.assertEqual(get_nse_basic_ratios("TCS"), {})
+
+    def test_non_list_response_returns_empty_dict(self) -> None:
+        sess = MagicMock()
+        resp = MagicMock()
+        resp.json.return_value = {"error": "blocked"}
+        sess.get.return_value = resp
+        with patch("tools.nse_tools._nse_session", return_value=sess):
+            self.assertEqual(get_nse_basic_ratios("TCS"), {})
+
+    def test_no_xbrl_attachment_returns_empty_dict(self) -> None:
+        filings = [{"date": "2026-01-01", "desc": "Financial Results", "attchmntFile": "notice.pdf"}]
+        with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)):
+            self.assertEqual(get_nse_basic_ratios("TCS"), {})
+
+    def test_network_failure_returns_empty_dict_not_raise(self) -> None:
+        with patch("tools.nse_tools._nse_session", side_effect=ConnectionError("boom")):
+            self.assertEqual(get_nse_basic_ratios("TCS"), {})
+
+    def test_parses_eps_from_xbrl_financial_results_filing(self) -> None:
+        filings = [
+            {"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nse.example/results.xml"},
+        ]
+        xbrl = '''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance">
+          <BasicEarningsPerEquityShare contextRef="D1" unitRef="INR">42.5</BasicEarningsPerEquityShare>
+        </xbrli:xbrl>'''
+        xbrl_resp = MagicMock()
+        xbrl_resp.content = xbrl.encode()
+
+        with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
+             patch("requests.get", return_value=xbrl_resp):
+            result = get_nse_basic_ratios("TCS")
+
+        self.assertEqual(result["eps"], 42.5)
+        self.assertEqual(result["source"], "nse_xbrl")
+        self.assertEqual(result["as_of_date"], "2026-01-01")
+
+    def test_prefers_financial_results_filing_over_other_categories(self) -> None:
+        filings = [
+            {"date": "2026-02-01", "desc": "Board Meeting Intimation", "xbrl": "https://nse.example/board.xml"},
+            {"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nse.example/results.xml"},
+        ]
+        xbrl = '''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance">
+          <BasicEarningsPerEquityShare contextRef="D1">10.0</BasicEarningsPerEquityShare>
+        </xbrli:xbrl>'''
+        xbrl_resp = MagicMock()
+        xbrl_resp.content = xbrl.encode()
+
+        with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
+             patch("requests.get", return_value=xbrl_resp) as mock_get:
+            result = get_nse_basic_ratios("TCS")
+
+        self.assertEqual(result["eps"], 10.0)
+        mock_get.assert_called_once_with(
+            "https://nse.example/results.xml",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=20,
+        )
+
+    def test_unrecognized_tag_names_return_empty_dict(self) -> None:
+        filings = [{"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nse.example/results.xml"}]
+        xbrl = '''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance">
+          <SomeUnrelatedFact contextRef="D1">99</SomeUnrelatedFact>
+        </xbrli:xbrl>'''
+        xbrl_resp = MagicMock()
+        xbrl_resp.content = xbrl.encode()
+
+        with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
+             patch("requests.get", return_value=xbrl_resp):
+            self.assertEqual(get_nse_basic_ratios("TCS"), {})
+
+    def test_non_numeric_eps_fact_does_not_raise(self) -> None:
+        filings = [{"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nse.example/results.xml"}]
+        xbrl = '''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance">
+          <BasicEarningsPerEquityShare contextRef="D1">not-a-number</BasicEarningsPerEquityShare>
+        </xbrli:xbrl>'''
+        xbrl_resp = MagicMock()
+        xbrl_resp.content = xbrl.encode()
+
+        with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
+             patch("requests.get", return_value=xbrl_resp):
+            self.assertEqual(get_nse_basic_ratios("TCS"), {})
+
+    def test_xbrl_fetch_failure_returns_empty_dict_not_raise(self) -> None:
+        filings = [{"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nse.example/results.xml"}]
+        with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
+             patch("requests.get", side_effect=ConnectionError("boom")):
+            self.assertEqual(get_nse_basic_ratios("TCS"), {})
+
+    def test_picks_the_chronologically_newest_filing_not_lexically_last(self) -> None:
+        # Regression test: NSE's own dd-Mon-yyyy date format does not sort
+        # lexically in calendar order (same drift nse_insider_trades.py's
+        # _parse_pit_date already documents/fixes for its own date field).
+        # "05-Feb-2026" is chronologically newer than "20-Jan-2026" but
+        # lexically SMALLER ("0" < "2"), so a raw string sort would
+        # (wrongly) treat the January filing as more recent.
+        filings = [
+            {"date": "20-Jan-2026", "desc": "Financial Results", "xbrl": "https://nse.example/jan.xml"},
+            {"date": "05-Feb-2026", "desc": "Financial Results", "xbrl": "https://nse.example/feb.xml"},
+        ]
+        xbrl = '''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance">
+          <BasicEarningsPerEquityShare contextRef="D1">99.0</BasicEarningsPerEquityShare>
+        </xbrli:xbrl>'''
+        xbrl_resp = MagicMock()
+        xbrl_resp.content = xbrl.encode()
+
+        with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
+             patch("requests.get", return_value=xbrl_resp) as mock_get:
+            result = get_nse_basic_ratios("TCS")
+
+        self.assertEqual(result["as_of_date"], "05-Feb-2026")
+        mock_get.assert_called_once_with(
+            "https://nse.example/feb.xml",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=20,
+        )
+
+    def test_ampersand_in_symbol_is_url_encoded(self) -> None:
+        # Regression test: a real NSE ticker like "M&M" must not corrupt
+        # the query string — an unescaped "&" would silently truncate the
+        # "symbol" param and/or inject a bogus extra query parameter.
+        sess = self._filings_session([])
+        with patch("tools.nse_tools._nse_session", return_value=sess):
+            get_nse_basic_ratios("M&M")
+
+        requested_url = sess.get.call_args[0][0]
+        self.assertIn("symbol=M%26M", requested_url)
+        self.assertNotIn("symbol=M&M&", requested_url)
 
 
 if __name__ == "__main__":
