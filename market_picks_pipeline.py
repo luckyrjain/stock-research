@@ -25,6 +25,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
+import source_health
 from error_tracking import init_error_tracking
 from observability import get_logger, log_event
 
@@ -776,6 +777,7 @@ class MarketPicksPipeline:
                 name, result = fut.result()
                 raw_sources[name] = result
                 arts = result.get("articles", [])
+                source_health.record_and_check(name, bool(arts), run_id=self._run_id)
                 emit({
                     "event":    "source_done",
                     "source":   name,
