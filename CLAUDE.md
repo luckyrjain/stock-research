@@ -1054,6 +1054,47 @@ flagged this as the blocker to scaling past a single process).
    wires `REDIS_URL` into the `backend` service automatically — a manual/non-Compose deployment
    only needs to set `REDIS_URL` once it scales past one worker (see `docs/deployment.md`).
 
+### Redis-backed cache for multi-host deployments (`cache.py`)
+
+The rate-limiter work above fixed *guard state* being per-worker — but `cache.py`'s local-disk
+JSON cache is this app's documented **persistent shared state** for every scraped data slice
+(`stock_info`, `research`, `news`, `peers`, `financials`, ...), and a CTO-lens review flagged it
+directly as the real ceiling on horizontal scale: it works today because there's one host, but
+past a second host/replica without a shared disk volume, every cache silently forks per instance,
+multiplying scraper load on the exact fragile third-party sources (Screener.in, NSE, Trendlyne,
+RBI) this codebase already treats cautiously everywhere else in this doc.
+
+1. `cache.py` gained the same opt-in `REDIS_URL`-gated Redis backing as `rate_limiter.py`, with
+   its own independent lazily-constructed client (duplicated, not imported, from
+   `rate_limiter.py`'s client-getter — `cache.py` is imported by nearly every other module in
+   this codebase, so it deliberately doesn't take on a dependency on a sibling module for
+   something this small). `save()` writes through to Redis (`SET ... EX <TTL_HOURS-derived
+   seconds>`) *in addition to* local disk, never instead of it — disk stays the persistent store
+   on a single-host deployment and becomes a fast local mirror/fallback once Redis is configured.
+2. **The core invariant**: once Redis has *any* opinion on a key — fresh, stale, or a cached
+   failure — every host must agree with it. `load()`/`is_fresh()` check Redis first and only
+   fall back to this host's own disk copy when Redis has **no entry at all** for that key (a
+   Redis outage, an eviction, or a key predating `REDIS_URL` being set). A stale/failed Redis
+   entry is trusted as-is and never overridden by a possibly-fresher local disk copy — falling
+   through in that case would silently reintroduce the exact per-host fork this feature exists
+   to close (host A's disk might have a fresher `research` blob than what Redis/host B last
+   wrote, and serving it would mean the two hosts disagree on freshness again).
+3. Freshness is always re-derived from each entry's own `_meta.fetched_at` against the current
+   `TTL_HOURS` map — never trusted from a store's own expiry mechanism (Redis's `EX`, a file's
+   mtime) — so a `TTL_HOURS` tuning change takes effect immediately for entries already written,
+   on both backends, without needing them to be rewritten. Same graceful-degradation convention
+   as everywhere else: a Redis read/write failure logs a warning (`cache_redis_read_failed`,
+   `cache_redis_write_failed`) and falls back to disk for that one call; a single-host deployment
+   behaves identically with or without `REDIS_URL` set.
+4. Verified in this sandbox against a real local Redis instance (not just the mocked unit tests in
+   `tests/test_cache_redis.py`): two separate Python processes, each pointed at its own,
+   completely separate local disk directory (simulating two hosts with no shared volume), with
+   `cache.save()` in process A immediately visible to `cache.load()` in process B — process B
+   never touches its own (empty) disk directory at all on that read, confirming the fork this
+   feature exists to close is actually closed, not just plausible on paper.
+5. See `docs/deployment.md`'s "Scaling" section for the operator-facing version of this same
+   story, including the updated guard-state table.
+
 ### Trusted client IP for per-IP rate limiting
 
 The Redis-shared limiter above fixed rate-limit state being *per-worker* — but every one of
