@@ -968,8 +968,9 @@ account's `user_id`, resolved by the same `routes.watchlist.resolve_owner()`/`ow
 (nothing about that resolution logic is watchlist-specific). This closed the one gap the frontend
 design review called out directly: Watchlist, auth, and API keys had all moved toward real accounts
 while Positions stayed the one feature standing still, still tied to a single browser with no way to
-follow a signed-in user across devices. Signing in does **not** migrate an existing `client_id`'s
-positions onto the account — same deliberate scope call as `watchlist_items`.
+follow a signed-in user across devices. Signing in does **not** automatically migrate an existing
+`client_id`'s positions onto the account — same deliberate scope call as `watchlist_items` — though
+an explicit opt-in "claim my data" flow now exists for both; see "Watchlist flow"'s point 10 below.
 
 `GET /api/positions?client_id=`, `POST /api/positions` (`{client_id, symbol, company, exchange,
 entry_price, target_price, stop_loss}` — upserts via `ON CONFLICT ... DO UPDATE`, refreshing the
@@ -1680,12 +1681,13 @@ identity to one row per symbol).
    token isn't a 401 here — this endpoint doesn't require being signed in, so it just falls
    through to the `client_id` path, same as no token at all. A request with neither a valid
    session nor a well-formed `client_id` gets 422.
-3. **No migration on sign-in**: an anonymous `client_id`'s existing rows are never
-   claimed/merged onto an account when a user signs in — a freshly-signed-in user simply
-   starts seeing whatever rows their account already owns (possibly none), and their old
+3. **No *automatic* migration on sign-in**: an anonymous `client_id`'s existing rows are never
+   silently claimed/merged onto an account when a user signs in — a freshly-signed-in user
+   simply starts seeing whatever rows their account already owns (possibly none), and their old
    anonymous rows remain reachable only by that same browser's `client_id` while logged out.
    This mirrors the same deliberate scope call `db/models.py`'s `users` table comment
-   documents for the auth system as a whole.
+   documents for the auth system as a whole. An explicit, user-initiated opt-in escape hatch
+   exists for this — see point 10 below — but nothing ever triggers it automatically.
 4. `client_id` is a UUID generated client-side (`crypto.randomUUID()`) and persisted in
    `localStorage` — it groups one browser's anonymous rows, nothing more
 5. `frontend/lib/watchlist.ts`'s `useWatchlist()` hook holds a module-level shared cache +
@@ -1718,6 +1720,42 @@ identity to one row per symbol).
    watchlist/page.tsx`'s `CalendarStrip` renders one row per symbol with something to show
    (next-results date, a rating action, up to 2 corporate actions), sorted next-results-date
    first.
+10. **Opt-in "claim my data" flow** (`POST /api/watchlist/claim` + `POST /api/positions/claim`,
+    `routes/_shared.py::claim_anonymous_rows_sync()`) — a product-lens review flagged that the
+    no-migration default in point 3 above was "actively suppressing conversion": a visitor who
+    built up a watchlist anonymously, then signs in, previously just saw an empty account with
+    no path back to their anonymous rows short of staying logged out. This closes that gap
+    without reversing the underlying safety-conscious default — migration still never happens
+    automatically, only when a signed-in user explicitly asks for it.
+    - Both endpoints require a valid session (`Authorization: Bearer <token>`) — a missing or
+      expired one is a real `401`, not a silent fall-through to `client_id`, since each
+      endpoint's only caller (below) already knows a session exists by the time it fires.
+    - `claim_anonymous_rows_sync(engine, table, order_column, client_id, user_id,
+      max_per_owner, lock_prefix)` is shared by both tables (`watchlist_items`/`added_at`,
+      `positions`/`bought_at`) since they share the exact same ownership shape. A symbol the
+      account already owns keeps the account's row; the anonymous duplicate is discarded
+      (it could never be claimed anyway — `uq_{table}_user_symbol` forbids two rows for the
+      same `(user_id, symbol)`). Rows are claimed oldest-first up to the account's remaining
+      room under the existing per-owner cap (`_MAX_WATCHLIST_ITEMS_PER_CLIENT`/
+      `_MAX_POSITIONS_PER_CLIENT`) — anything beyond that is left owned by `client_id` rather
+      than silently exceeding the cap, and reported back as `skipped_over_cap` rather than
+      dropped. Guarded by the same per-account advisory-lock pattern (`pg_advisory_xact_lock`)
+      the add endpoints already use, under its own lock-key namespace so a claim can't race a
+      concurrent add for the same account. Verified end-to-end against a real local Postgres
+      instance in this sandbox (both the plain-claim and over-cap-partial-claim paths), not
+      just the mocked unit tests `tests/test_api.py` also carries.
+    - **The one caller**: `frontend/app/auth/verify/page.tsx`, right before it calls
+      `GET /api/auth/verify` (i.e. while the browser still has no session cookie, so
+      `GET /api/watchlist`/`GET /api/positions` still resolve via `client_id`, not an
+      account), fetches both endpoints' current item counts for this browser's `client_id`.
+      If either is non-zero, once sign-in itself succeeds the page shows a "You have N
+      watchlist items / M positions from browsing anonymously — claim them?" prompt with
+      explicit **Claim** / **Skip** buttons, instead of immediately redirecting home. Skipping
+      leaves the anonymous rows exactly where point 3 above already says they'd stay — reachable
+      by that same browser's `client_id` while logged out, nothing lost. `frontend/lib/
+      watchlist.ts::claimWatchlist()` / `frontend/lib/positions.ts::claimPositions()` are thin
+      wrappers that also refresh their module's own shared cache on success, same pattern as
+      `refreshWatchlist()`/`refreshPositions()`.
 
 ### Watchlist alert emails
 

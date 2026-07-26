@@ -10,8 +10,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 import api
-from routes._shared import run_owned_db_call
-from routes.watchlist import _VALID_EXCHANGES, WatchlistOwner, owner_column, resolve_owner
+from routes._shared import claim_anonymous_rows_sync, run_owned_db_call
+from routes.watchlist import _CLIENT_ID_RE, _VALID_EXCHANGES, WatchlistOwner, owner_column, resolve_owner
 
 router = APIRouter()
 
@@ -168,3 +168,43 @@ async def remove_position(request: Request, symbol: str, client_id: str | None =
         return {"items": _positions_rows_sync(owner)}
 
     return await run_owned_db_call(request, "positions_write", 60, _delete_sync, "positions_write")
+
+
+class ClaimRequest(BaseModel):
+    client_id: str
+
+
+@router.post("/api/positions/claim")
+async def claim_positions(request: Request, body: ClaimRequest):
+    """Opt-in migration of an anonymous browser's positions onto the account
+    that just signed in — same escape hatch as routes/watchlist.py's
+    claim_watchlist(), for the same "no migration on sign-in" default (see
+    that module's docstring). Requires a valid session for the same reason:
+    this endpoint's only caller is the post-sign-in "claim your data"
+    prompt, so a missing/expired session is a real 401.
+    """
+    if not body.client_id or not _CLIENT_ID_RE.match(body.client_id):
+        raise HTTPException(status_code=422, detail="Invalid client_id.")
+    token = api._bearer_token_from_request(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Sign in required to claim anonymous data.")
+
+    def _claim_sync() -> dict:
+        import auth as _auth
+
+        user = _auth.get_user_for_session(token)
+        if not user:
+            raise PermissionError("Your session has expired. Sign in again to claim this data.")
+        user_id = user["id"]
+
+        claimed, skipped = claim_anonymous_rows_sync(
+            api._get_db_engine(), "positions", "bought_at",
+            body.client_id, user_id, _MAX_POSITIONS_PER_CLIENT, "positions_claim",
+        )
+        return {
+            "claimed": claimed,
+            "skipped_over_cap": skipped,
+            "items": _positions_rows_sync(("user", user_id)),
+        }
+
+    return await run_owned_db_call(request, "positions_write", 60, _claim_sync, "positions_claim")

@@ -67,6 +67,29 @@ export function refreshPositions(): Promise<Position[]> {
   return fetchPositions();
 }
 
+/** Opt-in migration of the anonymous browser's positions onto the account
+ * that just signed in — same escape hatch as lib/watchlist.ts's
+ * claimWatchlist(), for the "no migration on sign-in" default. Must be
+ * called with a session cookie already set; returns null on any failure. */
+export async function claimPositions(clientId: string): Promise<{ claimed: number; skippedOverCap: number } | null> {
+  try {
+    const res = await fetch('/api/positions/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: clientId }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { claimed: number; skipped_over_cap: number; items: Position[] };
+    generation++;
+    inFlight = null;
+    cachedPositions = data.items;
+    notify();
+    return { claimed: data.claimed, skippedOverCap: data.skipped_over_cap };
+  } catch {
+    return null;
+  }
+}
+
 /** Shared cross-component "I bought this" position tracking, backed by
  * Postgres (positions table, keyed by the same anonymous client_id as the
  * watchlist, or an account's user_id once signed in — see CLAUDE.md's

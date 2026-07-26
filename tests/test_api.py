@@ -2415,6 +2415,91 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 422)
 
 
+class WatchlistClaimEndpointTest(unittest.TestCase):
+    """POST /api/watchlist/claim — the opt-in escape hatch for this app's
+    "no migration on sign-in" default (see routes/watchlist.py's own
+    docstring). Only ever called by the post-sign-in "claim your data"
+    prompt, so it requires a valid session rather than silently no-op-ing."""
+
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
+
+    def test_without_session_returns_401(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.post("/api/watchlist/claim", json={"client_id": "client-abc"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_with_expired_session_returns_401(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.get_user_for_session", return_value=None):
+            resp = client.post(
+                "/api/watchlist/claim", json={"client_id": "client-abc"},
+                headers={"Authorization": "Bearer expired-token"},
+            )
+        self.assertEqual(resp.status_code, 401)
+
+    def test_invalid_client_id_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.post(
+            "/api/watchlist/claim", json={"client_id": "not valid!!"},
+            headers={"Authorization": "Bearer sometoken"},
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_happy_path_claims_rows_and_returns_counts(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        lock_result = MagicMock()
+        delete_conflicts_result = MagicMock()
+        count_existing_result = MagicMock()
+        count_existing_result.scalar.return_value = 1
+        update_result = MagicMock()
+        update_result.rowcount = 3
+        count_skipped_result = MagicMock()
+        count_skipped_result.scalar.return_value = 0
+        begin_conn = _SqlRecordingConn([
+            lock_result, delete_conflicts_result, count_existing_result,
+            update_result, count_skipped_result,
+        ])
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = [
+            {"symbol": "TCS", "company": "Tata Consultancy Services", "exchange": "NSE",
+             "addedAt": "2026-01-01T00:00:00"},
+        ]
+        connect_conn = _SqlRecordingConn([rows_result])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = begin_conn
+        fake_engine.connect.return_value = connect_conn
+
+        with patch("api._get_db_engine", return_value=fake_engine), \
+             patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
+            resp = client.post(
+                "/api/watchlist/claim", json={"client_id": "client-abc"},
+                headers={"Authorization": "Bearer sometoken"},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["claimed"], 3)
+        self.assertEqual(body["skipped_over_cap"], 0)
+        self.assertEqual(body["items"][0]["symbol"], "TCS")
+        # The row cap check runs against the account's own existing rows,
+        # not the anonymous client_id's.
+        count_query, count_params = begin_conn.queries[2]
+        self.assertIn("user_id = :user_id", count_query)
+        self.assertEqual(count_params["user_id"], 42)
+        update_query, update_params = begin_conn.queries[3]
+        self.assertIn("SET client_id = NULL, user_id = :user_id", update_query)
+        self.assertEqual(update_params["client_id"], "client-abc")
+
+
 class PositionsEndpointsTest(unittest.TestCase):
     """"I bought this" positions — same ownership/validation shape as
     watchlist_items (see WatchlistEndpointsTest above), now backed by
@@ -2718,6 +2803,86 @@ class PositionsAccountLinkingTest(unittest.TestCase):
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         resp = client.delete("/api/positions/TCS")
         self.assertEqual(resp.status_code, 422)
+
+
+class PositionsClaimEndpointTest(unittest.TestCase):
+    """POST /api/positions/claim — same opt-in escape hatch as
+    WatchlistClaimEndpointTest above, for the positions table."""
+
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
+
+    def test_without_session_returns_401(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.post("/api/positions/claim", json={"client_id": "client-abc"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_with_expired_session_returns_401(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("auth.get_user_for_session", return_value=None):
+            resp = client.post(
+                "/api/positions/claim", json={"client_id": "client-abc"},
+                headers={"Authorization": "Bearer expired-token"},
+            )
+        self.assertEqual(resp.status_code, 401)
+
+    def test_invalid_client_id_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.post(
+            "/api/positions/claim", json={"client_id": "not valid!!"},
+            headers={"Authorization": "Bearer sometoken"},
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_happy_path_claims_rows_and_returns_counts(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        lock_result = MagicMock()
+        delete_conflicts_result = MagicMock()
+        count_existing_result = MagicMock()
+        count_existing_result.scalar.return_value = 0
+        update_result = MagicMock()
+        update_result.rowcount = 2
+        count_skipped_result = MagicMock()
+        count_skipped_result.scalar.return_value = 1
+        begin_conn = _SqlRecordingConn([
+            lock_result, delete_conflicts_result, count_existing_result,
+            update_result, count_skipped_result,
+        ])
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = [
+            {"symbol": "TCS", "company": "", "exchange": "NSE",
+             "entry_price": None, "target_price": None, "stop_loss": None,
+             "shares": None, "bought_at": "2026-01-01T00:00:00"},
+        ]
+        connect_conn = _SqlRecordingConn([rows_result])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = begin_conn
+        fake_engine.connect.return_value = connect_conn
+
+        with patch("api._get_db_engine", return_value=fake_engine), \
+             patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
+            resp = client.post(
+                "/api/positions/claim", json={"client_id": "client-abc"},
+                headers={"Authorization": "Bearer sometoken"},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["claimed"], 2)
+        self.assertEqual(body["skipped_over_cap"], 1)
+        self.assertEqual(body["items"][0]["symbol"], "TCS")
+        update_query, update_params = begin_conn.queries[3]
+        self.assertIn("SET client_id = NULL, user_id = :user_id", update_query)
+        self.assertEqual(update_params["client_id"], "client-abc")
+        self.assertEqual(update_params["user_id"], 42)
 
 
 class VerdictHistoryEndpointTest(unittest.TestCase):
