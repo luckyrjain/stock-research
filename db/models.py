@@ -221,6 +221,32 @@ screener_stocks = Table(
 )
 
 
+# One row per (symbol, as_of_date, fund) — a snapshot of every mutual fund's
+# stake in a stock as of NSE's quarterly shareholding disclosure, populated
+# by mf_holdings_history.save_snapshot() from main._fetch_task() (the one
+# choke point both the CLI and api.py's SSE endpoint already funnel every
+# data-slice fetch through — see CLAUDE.md's "Filings classification"
+# section for the same pattern applied to schema_drift). Only written on a
+# genuine fresh fetch (a cache hit never reaches _fetch_task at all), so
+# this table's cadence naturally follows however often mf_holdings actually
+# gets re-fetched (its own 168h/7-day cache TTL) — not a separate poller.
+# Powers the "stake change vs. prior quarter" trend on the stock analysis
+# report — a same-quarter re-fetch upserts the existing row rather than
+# adding a duplicate, same convention as verdict_history.
+mf_holdings_history = Table(
+    "mf_holdings_history",
+    metadata,
+    Column("id",           Integer, primary_key=True, autoincrement=True),
+    Column("symbol",       String(20), nullable=False),
+    Column("as_of_date",   Date,       nullable=False),
+    Column("fund",         String(200), nullable=False),
+    Column("holding_pct",  Numeric(6, 3), nullable=False),
+    Column("created_at",   DateTime(timezone=True), server_default=text("NOW()")),
+    UniqueConstraint("symbol", "as_of_date", "fund", name="uq_mf_holdings_history_symbol_date_fund"),
+    Index("idx_mf_holdings_history_symbol", "symbol"),
+)
+
+
 def get_engine(database_url: str | None = None):
     url = database_url or os.environ["DATABASE_URL"]
     return _create_engine(url)

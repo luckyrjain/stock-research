@@ -659,7 +659,7 @@ function summaryBullets(text: string): string[] {
 }
 
 export default function ResultsDashboard({ report, onHardRefresh }: Props) {
-  const { analysis: a, signals: sig, stock_info: s, research: r, news, holdings: h, filings, filings_summary: fs } = report;
+  const { analysis: a, signals: sig, stock_info: s, research: r, news, holdings: h, filings, filings_summary: fs, mf_holdings_trend: mfTrend } = report;
 
   const peers = usePeerComparison(report.symbol);
   const percentileByNormalizedKey = useMemo(() => {
@@ -669,6 +669,14 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
     }
     return map;
   }, [peers]);
+
+  const mfDeltaByFund = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const d of mfTrend ?? []) {
+      if (d.delta_pct != null) map[d.fund] = d.delta_pct;
+    }
+    return map;
+  }, [mfTrend]);
 
   const rec = (a?.recommendation ?? 'HOLD') as 'BUY' | 'SELL' | 'HOLD';
   const cfg = REC_CONFIG[rec];
@@ -971,12 +979,24 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
         {h?.mutual_funds && h.mutual_funds.length > 0 && (
           <Card title="Mutual Fund Holdings">
             <div className="divide-y divide-border">
-              {h.mutual_funds.slice(0, 8).map((mf, i) => (
-                <div key={i} className="flex items-center justify-between py-2">
-                  <span className="text-sm text-tx">{mf.fund}</span>
-                  <span className="text-sm font-mono font-semibold text-accent">{fmt(mf.holding_pct, 2)}%</span>
-                </div>
-              ))}
+              {h.mutual_funds.slice(0, 8).map((mf, i) => {
+                const delta = mfDeltaByFund[mf.fund];
+                return (
+                  <div key={i} className="flex items-center justify-between py-2">
+                    <span className="text-sm text-tx">{mf.fund}</span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="text-sm font-mono font-semibold text-accent">{fmt(mf.holding_pct, 2)}%</span>
+                      {delta != null && (
+                        <span className={`text-[11px] font-mono ${
+                          delta > 0 ? 'text-buy' : delta < 0 ? 'text-sell' : 'text-muted'
+                        }`}>
+                          {delta > 0 ? '▲' : delta < 0 ? '▼' : '–'} {Math.abs(delta).toFixed(2)}%
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           </Card>
         )}

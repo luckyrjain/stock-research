@@ -237,3 +237,22 @@ CREATE TABLE IF NOT EXISTS screener_stocks (
 
 CREATE INDEX IF NOT EXISTS idx_screener_stocks_industry ON screener_stocks(nse_industry);
 CREATE INDEX IF NOT EXISTS idx_screener_stocks_sector   ON screener_stocks(sector);
+
+-- One row per (symbol, as_of_date, fund) — a snapshot of every mutual fund's
+-- stake in a stock as of NSE's quarterly shareholding disclosure. Written
+-- only on a genuine fresh mf_holdings fetch (main._fetch_task, shared by the
+-- CLI and api.py's SSE endpoint), never on a cache hit. Powers the "stake
+-- change vs. prior quarter" trend on the stock analysis report. A
+-- same-quarter re-fetch upserts the existing row rather than adding a
+-- duplicate, same convention as verdict_history.
+CREATE TABLE IF NOT EXISTS mf_holdings_history (
+    id            SERIAL PRIMARY KEY,
+    symbol        VARCHAR(20)  NOT NULL,
+    as_of_date    DATE         NOT NULL,
+    fund          VARCHAR(200) NOT NULL,
+    holding_pct   NUMERIC(6, 3) NOT NULL,
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(symbol, as_of_date, fund)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mf_holdings_history_symbol ON mf_holdings_history(symbol);

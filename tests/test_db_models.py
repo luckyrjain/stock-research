@@ -2,7 +2,17 @@ import os
 import unittest
 from unittest.mock import patch
 
-from db.models import api_keys, ema_signals, get_engine, magic_links, sessions, sme_stocks, users, watchlist_items
+from db.models import (
+    api_keys,
+    ema_signals,
+    get_engine,
+    magic_links,
+    mf_holdings_history,
+    sessions,
+    sme_stocks,
+    users,
+    watchlist_items,
+)
 
 
 class GetEngineTest(unittest.TestCase):
@@ -100,6 +110,24 @@ class TableSchemaTest(unittest.TestCase):
         index_columns = {tuple(c.name for c in idx.columns) for idx in watchlist_items.indexes}
         self.assertIn(("client_id",), index_columns)
         self.assertIn(("user_id",), index_columns)
+
+    def test_mf_holdings_history_columns_and_constraints(self) -> None:
+        cols = set(mf_holdings_history.columns.keys())
+        self.assertEqual(cols, {"id", "symbol", "as_of_date", "fund", "holding_pct", "created_at"})
+        self.assertFalse(mf_holdings_history.columns["symbol"].nullable)
+        self.assertFalse(mf_holdings_history.columns["as_of_date"].nullable)
+        self.assertFalse(mf_holdings_history.columns["fund"].nullable)
+        self.assertFalse(mf_holdings_history.columns["holding_pct"].nullable)
+
+        unique_constraint_cols = [
+            tuple(c.name for c in constraint.columns)
+            for constraint in mf_holdings_history.constraints
+            if constraint.__class__.__name__ == "UniqueConstraint"
+        ]
+        self.assertIn(("symbol", "as_of_date", "fund"), unique_constraint_cols)
+
+        index_columns = {tuple(c.name for c in idx.columns) for idx in mf_holdings_history.indexes}
+        self.assertIn(("symbol",), index_columns)
 
     def test_users_columns(self) -> None:
         cols = set(users.columns.keys())
