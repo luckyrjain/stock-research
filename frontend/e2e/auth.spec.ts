@@ -176,6 +176,9 @@ test.describe('Pricing page', () => {
     await expect(page.getByText('100', { exact: true })).toBeVisible();
     await expect(page.getByText('1,000', { exact: true })).toBeVisible();
     await expect(page.getByText(/no self-serve checkout/)).toBeVisible();
-    await expect(page.getByRole('link', { name: 'API Keys' })).toBeVisible();
+    // .first() — the primary nav (present on every page) and this page's own
+    // usage-card link both render an "API Keys" link; either satisfies this
+    // check, so this isn't a strict-mode ambiguity worth disambiguating further.
+    await expect(page.getByRole('link', { name: 'API Keys' }).first()).toBeVisible();
   });
 });

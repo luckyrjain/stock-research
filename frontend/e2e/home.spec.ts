@@ -12,7 +12,11 @@ test.describe('Home page', () => {
     await expect(page.getByLabel('NSE or BSE stock ticker')).toBeVisible();
     await expect(page.getByRole('link', { name: /top picks/ })).toBeVisible();
     await expect(page.getByRole('link', { name: /SME golden cross screener/ })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Screener' })).toBeVisible();
+    // exact: true — the idle hero's own "⚡ SME golden cross screener →" pill
+    // (checked on the line above) also contains the substring "screener",
+    // which would otherwise make this locator match two elements once the
+    // nav is always mounted alongside that pill.
+    await expect(page.getByRole('link', { name: 'Screener', exact: true })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Watchlist' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'API Keys' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Sign in' })).toBeVisible();
@@ -89,7 +93,7 @@ test.describe('Home page', () => {
     // The nav bar is visible on the idle hero too now (see the test above) —
     // still present once a report has loaded.
     await expect(page.getByRole('link', { name: 'Market Picks' })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Screener' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Screener', exact: true })).toBeVisible();
   });
 
   test('shows a degraded-analysis banner when every LLM provider failed', async ({ page }) => {
