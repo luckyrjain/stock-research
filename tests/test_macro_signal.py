@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import cache
+import source_health
 from signals.macro import macro_signal
 
 
@@ -15,6 +16,9 @@ class MacroSignalTest(unittest.TestCase):
         self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
         self._cache_patch.start()
         self.addCleanup(self._cache_patch.stop)
+        self._health_patch = patch.object(source_health, "_HEALTH_DIR", Path(self._tmpdir) / "_source_health")
+        self._health_patch.start()
+        self.addCleanup(self._health_patch.stop)
 
     def _run(self, flow: dict, macro: dict):
         with patch("signals.macro.get_fii_dii_flow", return_value=flow), \
@@ -75,6 +79,24 @@ class MacroSignalTest(unittest.TestCase):
             macro_signal()
         flow_fn.assert_called_once()
         macro_fn.assert_called_once()
+
+    def test_health_is_recorded_once_per_real_fetch_not_per_cache_hit(self) -> None:
+        with patch("signals.macro.get_fii_dii_flow", return_value={"fii_net_cr": 1000.0}), \
+             patch("signals.macro.get_macro_context", return_value={"repo_rate_pct": 6.5}), \
+             patch("source_health.record_and_check") as mock_record:
+            macro_signal()
+            macro_signal()
+        calls = {c.args[0]: c.args[1] for c in mock_record.call_args_list}
+        self.assertEqual(calls, {"fii_dii_flow": True, "macro_context": True})
+        self.assertEqual(mock_record.call_count, 2)  # one per source, not one per macro_signal() call
+
+    def test_health_reports_not_ok_when_fetch_returns_no_usable_fields(self) -> None:
+        with patch("signals.macro.get_fii_dii_flow", return_value={"error": "boom"}), \
+             patch("signals.macro.get_macro_context", return_value={"error": "boom"}), \
+             patch("source_health.record_and_check") as mock_record:
+            macro_signal()
+        calls = {c.args[0]: c.args[1] for c in mock_record.call_args_list}
+        self.assertEqual(calls, {"fii_dii_flow": False, "macro_context": False})
 
 
 if __name__ == "__main__":

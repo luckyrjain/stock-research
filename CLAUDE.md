@@ -48,6 +48,7 @@ stock-research/
 ├── observability.py        Structured JSON logging via log_event()
 ├── error_tracking.py       Optional Sentry-style hook, wired into log_event()'s error-level path
 ├── schema_drift.py         Type-drift detection for the six scraped data slices
+├── source_health.py        Freshness/volume monitoring for market-picks sources + macro overlay
 ├── requirements.txt
 ├── .env.example
 ├── config/
@@ -830,6 +831,37 @@ false-positive noise on exactly the symbols/fields this convention already expec
    disclosed-limitation notes elsewhere in this doc about being unverified against live
    responses in this sandbox; extending drift detection to them is future work, not silently
    assumed to already be covered by this pass.
+
+### Source freshness/volume monitoring (`source_health.py`)
+
+`schema_drift.py` above only catches *type* drift on the six `ALL_DATA_TASKS` fields — it has
+nothing to say about a source that's still returning well-shaped data but has silently gone
+quiet (0 results every run), since an empty result isn't a shape mismatch. That failure mode was
+otherwise invisible for the 20 Market Picks `SOURCES` and the two market-wide macro-overlay
+fetches: `_SOURCE_CREDIBILITY` weights every source into confidence scoring, so a dead source
+doesn't error, it just quietly stops contributing to every future pick's score.
+
+1. `source_health.record_and_check(source_name, ok, **context)` appends this run's boolean
+   ok/not-ok result to a small per-source JSON file under `output/_source_health/` (same "cache
+   directory" convention as everything else in this codebase — no database needed for something
+   this lightweight), then warns via `observability.log_event(level="warning")` once a source
+   that had an established healthy baseline (≥5 prior runs, at least one of which succeeded) has
+   now failed 3 consecutive runs in a row. Never raises — a broken health-tracking file must not
+   break the scrape/pipeline run it's trying to observe.
+2. Wired into two call sites: `market_picks_pipeline.py`'s `_phase_scrape` (once per source, per
+   pipeline run, keyed off whether that source's `articles` list is non-empty) and
+   `signals/macro.py`'s `_cached_fii_dii_flow()`/`_cached_macro_context()` (once per real fetch,
+   not per cache hit — recording on every cache hit would just inflate the rolling window with
+   duplicate entries for the same underlying daily-cadence fetch, since both are cached under the
+   `"_MACRO"` pseudo-symbol on a 24 h TTL).
+3. Deliberately **not** wired into the three genuinely per-symbol standalone endpoints (peers,
+   insider activity, street consensus) — most individual stocks legitimately have zero insider
+   trades or zero Trendlyne-cited coverage on a given day, which is this codebase's own
+   documented "expected common case" everywhere else in this doc, not a source-health anomaly.
+   Applying the same volume-anomaly heuristic there would just be noise, not a signal.
+4. A new source (fewer than 5 prior runs, or no successful run yet) never alerts — there's no
+   established baseline yet to regress from, and a source that's simply always been empty (e.g.
+   genuinely thin coverage) shouldn't page anyone either.
 
 ### SME golden cross flow
 
