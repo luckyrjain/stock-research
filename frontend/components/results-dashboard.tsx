@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import type { DcfEstimate, FinancialStatement, FinancialStatementsResponse, InsiderActivity, MfHoldingsStakeDelta, PeerComparison, PriceHistory, QuarterlyTrend, Report, StockInfo, StreetConsensus, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
+import type { Concall, DcfEstimate, FinancialStatement, FinancialStatementsResponse, InsiderActivity, MfHoldingsStakeDelta, PeerComparison, PriceHistory, QuarterlyTrend, Report, StockInfo, StreetConsensus, VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
 import InfoTooltip from './info-tooltip';
 import Sparkline from './sparkline';
 import WatchlistButton from './watchlist-button';
@@ -110,6 +110,57 @@ function FinancialStatementsCard({ data }: { data: FinancialStatementsResponse |
         <StatementTable title="Profit & Loss" statement={data.profit_loss} />
         <StatementTable title="Balance Sheet" statement={data.balance_sheet} />
         <StatementTable title="Cash Flow" statement={data.cash_flow} />
+      </div>
+    </Card>
+  );
+}
+
+const _CONCALL_LINK_LABELS: { key: keyof Concall; label: string }[] = [
+  { key: 'transcript_url', label: 'Transcript' },
+  { key: 'ppt_url',        label: 'PPT' },
+  { key: 'notes_url',      label: 'Notes' },
+  { key: 'audio_url',      label: 'REC' },
+];
+
+// Primary-source management commentary — what the company actually said on
+// its own quarterly earnings calls — scraped from Screener's own Concalls
+// section. Previously this app only ever surfaced third-party news coverage
+// and Screener's numeric ratios, never the calls themselves. `data` is
+// lifted from ResultsDashboard (same fetch as FinancialStatementsCard/the
+// DCF block, no second request) rather than fetched again here.
+function ConcallsCard({ concalls }: { concalls: Concall[] | undefined }) {
+  if (!concalls || concalls.length === 0) return null;
+  return (
+    <Card title={<>
+      Concalls
+      <InfoTooltip title="Concalls" align="left">
+        <p>Screener.in&apos;s own list of this company&apos;s quarterly earnings-call materials — transcript, investor presentation, Screener&apos;s own notes, and the audio recording, whichever of those Screener has published for each quarter.</p>
+        <p>Real, primary-source management commentary, not a third-party summary — every link is exactly what Screener links to.</p>
+      </InfoTooltip>
+    </>}>
+      <div className="divide-y divide-border">
+        {concalls.map((c, i) => (
+          <div key={i} className="flex items-center justify-between gap-2 py-2 first:pt-0 last:pb-0 text-sm">
+            <span className="text-tx font-medium">{c.date}</span>
+            <div className="flex items-center gap-2 flex-wrap justify-end">
+              {_CONCALL_LINK_LABELS.map(({ key, label }) => {
+                const url = c[key];
+                if (typeof url !== 'string') return null;
+                return (
+                  <a
+                    key={key}
+                    href={url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[11px] font-semibold px-2 py-0.5 rounded-full border border-border text-muted hover:text-accent hover:border-accent/40 transition-colors"
+                  >
+                    {label} ↗
+                  </a>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
     </Card>
   );
@@ -1213,6 +1264,8 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
           <QuarterlyTrendCard trend={r?.quarterly_trend} />
 
           <FinancialStatementsCard data={financials} />
+
+          <ConcallsCard concalls={financials?.concalls} />
 
           <PeerTable peers={peers} />
 

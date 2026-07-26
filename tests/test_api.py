@@ -1139,6 +1139,7 @@ class FinancialsEndpointTest(unittest.TestCase):
             "profit_loss": {"years": ["Mar 2023", "Mar 2024"], "rows": [{"label": "Sales", "values": [100.0, 120.0]}]},
             "balance_sheet": {"years": ["Mar 2023", "Mar 2024"], "rows": [{"label": "Total Assets", "values": [500.0, 550.0]}]},
             "cash_flow": {"years": ["Mar 2023", "Mar 2024"], "rows": [{"label": "Cash from Operating Activity", "values": [80.0, 90.0]}]},
+            "concalls": [{"date": "Jul 2026", "transcript_url": "https://www.screener.in/concall/t.pdf"}],
         })
         fake_tool = MagicMock()
         fake_tool.run.return_value = raw
@@ -1149,6 +1150,7 @@ class FinancialsEndpointTest(unittest.TestCase):
         self.assertEqual(body["symbol"], "TCS")
         self.assertEqual(body["profit_loss"]["rows"][0]["label"], "Sales")
         self.assertEqual(body["cash_flow"]["rows"][0]["label"], "Cash from Operating Activity")
+        self.assertEqual(body["concalls"], [{"date": "Jul 2026", "transcript_url": "https://www.screener.in/concall/t.pdf"}])
         fake_tool.run.assert_called_once()
 
         # Second call must be served from cache — the scraper must not run again.
@@ -1168,6 +1170,7 @@ class FinancialsEndpointTest(unittest.TestCase):
         self.assertIsNone(body["balance_sheet"])
         self.assertIsNone(body["cash_flow"])
         self.assertIsNone(body["dcf"])
+        self.assertEqual(body["concalls"], [])
 
     def test_tool_error_is_not_cached_so_next_request_retries(self) -> None:
         # Same convention as GET /api/peers/{symbol}: a transient scrape

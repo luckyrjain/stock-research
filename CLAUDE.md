@@ -735,6 +735,33 @@ Income Statement / Balance Sheet / Cash Flow view.
    DCF is a from-scratch model estimate; the Street Consensus section's numeric fields are
    scraped real numbers — they can legitimately disagree and neither should be read as
    correcting the other.
+6. **Concalls** — `tools/screener_tools.py::_extract_concalls()` parses Screener's own
+   "Concalls" section (`section#concalls`) on the same company page fetch as the three
+   statements above, into one entry per quarterly earnings call with whichever of
+   Transcript/PPT/Notes/REC links Screener has published for it. This closes a gap the design
+   review called out directly: primary-source management commentary — what the company actually
+   said on its own earnings calls — was entirely absent from this app; only third-party news
+   coverage (Street Consensus) and Screener's own numeric ratios were ever surfaced. Wired into
+   the same `GET /api/financials/{symbol}` response as a sibling `concalls` field (`[]`, never
+   null, when Screener has none on record) rather than a new endpoint, since it's free off the
+   same fetch. An entry missing one of the four link types simply omits that key; a call whose
+   date this parser can't confidently read from the row's text is dropped rather than kept with
+   a `None` date. **Disclosed limitation**: Screener's exact section id/label/markup for this
+   feature was not verified against a live response in this sandbox — same disclosure pattern as
+   every other Screener extractor in this section; a real-world mismatch degrades to `[]`, never
+   a fabricated call date or link. `results-dashboard.tsx`'s `ConcallsCard` renders each entry as
+   a date with a row of small "Transcript ↗ / PPT ↗ / Notes ↗ / REC ↗" link pills, right after
+   `FinancialStatementsCard` — renders nothing when Screener has no calls on record.
+7. **IPO grey-market premium (GMP) — explicitly out of scope for now.** The design review that
+   produced points 1–6 above also flagged IPO GMP as a candidate metric. It's deliberately not
+   implemented: GMP isn't exchange-published or vendor data like everything else this app
+   sources (NSE, BSE, Screener, Trendlyne, RBI) — it's an informal, unregulated indicator that
+   only exists on grey-market-tracking portals, SEBI has repeatedly warned it doesn't reflect a
+   security's real value, and scraping those portals carries materially different reliability
+   and ToS risk than the regulator/vendor sources this codebase otherwise limits itself to. This
+   mirrors point 5's "declined to fabricate/source data without a solid footing" precedent
+   rather than a "haven't gotten to it yet" gap — revisit only if a specific, reliable,
+   ToS-compatible source is identified and the tradeoff above is explicitly re-examined.
 
 ### NSE session consolidation + Screener.in fallback resilience
 

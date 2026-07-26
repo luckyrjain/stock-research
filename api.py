@@ -1336,15 +1336,23 @@ async def get_financials(request: Request, symbol: str):
     dcf_valuation.py) — a second, independent valuation lens alongside the
     existing peer-percentile and absolute P/E-anchor views, answering "cheap
     vs. what its cash flows are worth" rather than "cheap vs. peers/its own
-    trading history".
+    trading history". Also carries `concalls` — Screener's own list of
+    quarterly earnings-call Transcript/PPT/Notes/REC links (see
+    tools/screener_tools.py::_extract_concalls), the primary-source
+    management commentary this app otherwise never surfaced — only
+    third-party news coverage and Screener's own numeric ratios were ever
+    shown before this.
 
     Each of profit_loss/balance_sheet/cash_flow/dcf is independently
     optional (null, never guessed) — a company Screener doesn't have one of
     these tables for, or whose cash flow doesn't support a DCF (see
     dcf_valuation.py's own preconditions), just has that field come back
-    null rather than a fabricated number. Cached like peers/insider-activity
-    (24h TTL) but intentionally outside ALL_DATA_TASKS — standalone and
-    on-demand, not part of the six-task analysis pipeline.
+    null rather than a fabricated number. `concalls` is `[]` (never null)
+    when Screener has no calls on record for this company, matching how
+    every other empty-but-not-missing list in this app is represented.
+    Cached like peers/insider-activity (24h TTL) but intentionally outside
+    ALL_DATA_TASKS — standalone and on-demand, not part of the six-task
+    analysis pipeline.
     """
     _rate_limit(request, "financials", max_calls=30, window_seconds=60)
     sym = symbol.upper().strip()
@@ -1366,7 +1374,7 @@ async def get_financials(request: Request, symbol: str):
             # transient scrape failure should be retried on the next
             # request, not locked in as "this company has no financials"
             # for a full 24h TTL.
-            return {"symbol": sym, "profit_loss": None, "balance_sheet": None, "cash_flow": None, "dcf": None}
+            return {"symbol": sym, "profit_loss": None, "balance_sheet": None, "cash_flow": None, "dcf": None, "concalls": []}
 
         stock_info = cache.load(sym, "stock_info") or {}
         from dcf_valuation import compute_dcf_estimate
@@ -1383,6 +1391,7 @@ async def get_financials(request: Request, symbol: str):
             "balance_sheet": raw.get("balance_sheet"),
             "cash_flow":     raw.get("cash_flow"),
             "dcf":           dcf,
+            "concalls":      raw.get("concalls", []),
         }
         cache.save(sym, "financials", result)
         return result

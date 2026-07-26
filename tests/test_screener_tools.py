@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 from tools.screener_tools import (
     _clean,
     _extract_compounded_growth,
+    _extract_concalls,
     _extract_growth_metrics,
     _extract_latest_metric_from_tables,
     _extract_quarterly_trend,
@@ -642,6 +643,82 @@ class ExtractYearlyStatementTest(unittest.TestCase):
         self.assertEqual(_extract_yearly_statement(soup, "profit-loss"), {})
 
 
+class ExtractConcallsTest(unittest.TestCase):
+    def test_extracts_date_and_links(self) -> None:
+        soup = BeautifulSoup(
+            """
+            <section id="concalls">
+              <ul>
+                <li>Jul 2026
+                  <a href="https://www.screener.in/concall/transcript.pdf">Transcript</a>
+                  <a href="https://www.screener.in/concall/ppt.pdf">PPT</a>
+                  <a href="https://www.screener.in/concall/notes">Notes</a>
+                  <a href="https://youtube.com/watch?v=abc">REC</a>
+                </li>
+              </ul>
+            </section>
+            """,
+            "lxml",
+        )
+        result = _extract_concalls(soup)
+        self.assertEqual(result, [{
+            "date": "Jul 2026",
+            "transcript_url": "https://www.screener.in/concall/transcript.pdf",
+            "ppt_url": "https://www.screener.in/concall/ppt.pdf",
+            "notes_url": "https://www.screener.in/concall/notes",
+            "audio_url": "https://youtube.com/watch?v=abc",
+        }])
+
+    def test_partial_links_omit_missing_keys(self) -> None:
+        soup = BeautifulSoup(
+            '<section id="concalls"><ul><li>Apr 2025 '
+            '<a href="https://www.screener.in/concall/t.pdf">Transcript</a>'
+            '</li></ul></section>',
+            "lxml",
+        )
+        result = _extract_concalls(soup)
+        self.assertEqual(result, [{"date": "Apr 2025", "transcript_url": "https://www.screener.in/concall/t.pdf"}])
+
+    def test_missing_section_returns_empty_list(self) -> None:
+        soup = BeautifulSoup("<html></html>", "lxml")
+        self.assertEqual(_extract_concalls(soup), [])
+
+    def test_entry_with_no_recognizable_links_is_dropped(self) -> None:
+        soup = BeautifulSoup(
+            '<section id="concalls"><ul><li>Jul 2026 '
+            '<a href="https://www.screener.in/concall/unknown.pdf">Something Else</a>'
+            '</li></ul></section>',
+            "lxml",
+        )
+        self.assertEqual(_extract_concalls(soup), [])
+
+    def test_entry_with_no_leading_date_is_dropped(self) -> None:
+        soup = BeautifulSoup(
+            '<section id="concalls"><ul><li>'
+            '<a href="https://www.screener.in/concall/t.pdf">Transcript</a>'
+            '</li></ul></section>',
+            "lxml",
+        )
+        self.assertEqual(_extract_concalls(soup), [])
+
+    def test_non_http_href_is_ignored(self) -> None:
+        soup = BeautifulSoup(
+            '<section id="concalls"><ul><li>Jul 2026 '
+            '<a href="/relative/path.pdf">Transcript</a>'
+            '</li></ul></section>',
+            "lxml",
+        )
+        self.assertEqual(_extract_concalls(soup), [])
+
+    def test_caps_to_max_entries(self) -> None:
+        items = "".join(
+            f'<li>Jan {2020 + i} <a href="https://www.screener.in/t{i}.pdf">Transcript</a></li>'
+            for i in range(12)
+        )
+        soup = BeautifulSoup(f'<section id="concalls"><ul>{items}</ul></section>', "lxml")
+        self.assertEqual(len(_extract_concalls(soup, max_entries=5)), 5)
+
+
 class GetFinancialStatementsTest(unittest.TestCase):
     @patch("tools.screener_tools._fetch_soup")
     def test_combines_all_three_statements(self, mock_fetch_soup: MagicMock) -> None:
@@ -675,6 +752,18 @@ class GetFinancialStatementsTest(unittest.TestCase):
         self.assertNotIn("profit_loss", result)
         self.assertNotIn("balance_sheet", result)
         self.assertNotIn("cash_flow", result)
+        self.assertNotIn("concalls", result)
+
+    @patch("tools.screener_tools._fetch_soup")
+    def test_includes_concalls_when_present(self, mock_fetch_soup: MagicMock) -> None:
+        html = (
+            '<section id="concalls"><ul><li>Jul 2026 '
+            '<a href="https://www.screener.in/concall/t.pdf">Transcript</a>'
+            '</li></ul></section>'
+        )
+        mock_fetch_soup.return_value = BeautifulSoup(html, "lxml")
+        result = json.loads(get_financial_statements.run(symbol="TCS"))
+        self.assertEqual(result["concalls"], [{"date": "Jul 2026", "transcript_url": "https://www.screener.in/concall/t.pdf"}])
 
     @patch("tools.screener_tools._fetch_soup")
     def test_fetch_failure_returns_error_payload(self, mock_fetch_soup: MagicMock) -> None:

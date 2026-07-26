@@ -573,12 +573,27 @@ export interface DcfEstimate {
   latest_ocf_cr:          number;   // ₹ Cr, the OCF the projection started from
 }
 
+// Screener's own quarterly-earnings-call links (see
+// tools/screener_tools.py::_extract_concalls) — the primary-source
+// management commentary this app otherwise never surfaced, only third-party
+// news coverage and Screener's own numeric ratios. Every *_url field is
+// independently optional — an entry with only a Transcript link (no PPT,
+// Notes, or recording) is common, not a parse failure.
+export interface Concall {
+  date:            string;   // e.g. "Jul 2026"
+  transcript_url?: string;
+  ppt_url?:        string;
+  notes_url?:      string;
+  audio_url?:      string;
+}
+
 export interface FinancialStatementsResponse {
   symbol:         string;
   profit_loss:    FinancialStatement | null;
   balance_sheet:  FinancialStatement | null;
   cash_flow:      FinancialStatement | null;
   dcf:            DcfEstimate | null;
+  concalls:       Concall[];   // [] (never absent) when Screener has none on record
 }
 
 // Programmatic API access (GET/POST/DELETE /api/api-keys). `key` is present
