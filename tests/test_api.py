@@ -2415,6 +2415,311 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 422)
 
 
+class PositionsEndpointsTest(unittest.TestCase):
+    """"I bought this" positions — same ownership/validation shape as
+    watchlist_items (see WatchlistEndpointsTest above), now backed by
+    Postgres instead of pure localStorage so a position survives a browser
+    switch once the user is signed in."""
+
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
+
+    def test_get_missing_database_url_returns_503(self) -> None:
+        resp = client.get("/api/positions?client_id=client-abc")
+        self.assertEqual(resp.status_code, 503)
+
+    def test_get_invalid_client_id_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.get(f"/api/positions?client_id={'x' * 100}")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_get_returns_items_with_mocked_engine(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = [
+            {"symbol": "TCS", "company": "Tata Consultancy Services", "exchange": "NSE",
+             "entry_price": 3500.0, "target_price": 3800.0, "stop_loss": 3300.0, "shares": None,
+             "bought_at": "2026-01-01T00:00:00"},
+        ]
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value = _FakeConn([rows_result])
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.get("/api/positions?client_id=client-abc")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(len(body["items"]), 1)
+        self.assertEqual(body["items"][0]["symbol"], "TCS")
+        self.assertIsNone(body["items"][0]["shares"])
+
+    def test_get_db_error_returns_sanitized_503(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("api._get_db_engine", side_effect=RuntimeError("connection refused: password exposed")):
+            resp = client.get("/api/positions?client_id=client-abc")
+        self.assertEqual(resp.status_code, 503)
+        self.assertNotIn("password", resp.json()["detail"])
+
+    def test_get_rate_limited_returns_429(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rate_limiter._memory_calls["positions_read:testclient"] = [api.time.monotonic()] * 120
+        resp = client.get("/api/positions?client_id=client-abc")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_post_missing_database_url_returns_503(self) -> None:
+        resp = client.post("/api/positions", json={"client_id": "client-abc", "symbol": "TCS"})
+        self.assertEqual(resp.status_code, 503)
+
+    def test_post_invalid_symbol_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.post("/api/positions", json={"client_id": "client-abc", "symbol": "bad symbol!"})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_post_invalid_exchange_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.post("/api/positions", json={
+            "client_id": "client-abc", "symbol": "TCS", "exchange": "XYZ",
+        })
+        self.assertEqual(resp.status_code, 422)
+
+    def test_post_adds_position_with_mocked_engine(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        lock_result = MagicMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = 0
+        existing_result = MagicMock()
+        existing_result.first.return_value = None
+        insert_result = MagicMock()
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = [
+            {"symbol": "TCS", "company": "Tata Consultancy Services", "exchange": "NSE",
+             "entry_price": 3500.0, "target_price": 3800.0, "stop_loss": 3300.0, "shares": None,
+             "bought_at": "2026-01-01T00:00:00"},
+        ]
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = _FakeConn([lock_result, count_result, existing_result, insert_result])
+        fake_engine.connect.return_value = _FakeConn([rows_result])
+
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.post("/api/positions", json={
+                "client_id": "client-abc", "symbol": "tcs", "company": "Tata Consultancy Services",
+                "exchange": "NSE", "entry_price": 3500.0, "target_price": 3800.0, "stop_loss": 3300.0,
+            })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["items"][0]["symbol"], "TCS")
+
+    def test_post_over_cap_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        lock_result = MagicMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = api._MAX_POSITIONS_PER_CLIENT
+        existing_result = MagicMock()
+        existing_result.first.return_value = None
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = _FakeConn([lock_result, count_result, existing_result])
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.post("/api/positions", json={"client_id": "client-abc", "symbol": "TCS"})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_post_over_cap_but_symbol_already_exists_is_allowed(self) -> None:
+        # A re-mark-as-bought on an existing position is an UPDATE via
+        # ON CONFLICT, not a new row — it must not be blocked by the cap.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        lock_result = MagicMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = api._MAX_POSITIONS_PER_CLIENT
+        existing_result = MagicMock()
+        existing_result.first.return_value = (1,)
+        insert_result = MagicMock()
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = []
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = _FakeConn([lock_result, count_result, existing_result, insert_result])
+        fake_engine.connect.return_value = _FakeConn([rows_result])
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.post("/api/positions", json={"client_id": "client-abc", "symbol": "TCS"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_patch_updates_shares(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        update_result = MagicMock()
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = [
+            {"symbol": "TCS", "company": "", "exchange": "NSE",
+             "entry_price": 3500.0, "target_price": None, "stop_loss": None, "shares": 10.0,
+             "bought_at": "2026-01-01T00:00:00"},
+        ]
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = _FakeConn([update_result])
+        fake_engine.connect.return_value = _FakeConn([rows_result])
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.patch("/api/positions/TCS", json={"client_id": "client-abc", "shares": 10})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["items"][0]["shares"], 10.0)
+
+    def test_patch_negative_shares_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.patch("/api/positions/TCS", json={"client_id": "client-abc", "shares": -5})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_patch_null_shares_clears_it(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        update_result = MagicMock()
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = []
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = _FakeConn([update_result])
+        fake_engine.connect.return_value = _FakeConn([rows_result])
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.patch("/api/positions/TCS", json={"client_id": "client-abc", "shares": None})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_patch_invalid_symbol_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.patch("/api/positions/bad%20symbol", json={"client_id": "client-abc", "shares": 5})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_delete_invalid_symbol_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.delete("/api/positions/bad%20symbol?client_id=client-abc")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_delete_removes_position_with_mocked_engine(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        delete_result = MagicMock()
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = []
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = _FakeConn([delete_result])
+        fake_engine.connect.return_value = _FakeConn([rows_result])
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.delete("/api/positions/TCS?client_id=client-abc")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["items"], [])
+
+    def test_delete_missing_database_url_returns_503(self) -> None:
+        resp = client.delete("/api/positions/TCS?client_id=client-abc")
+        self.assertEqual(resp.status_code, 503)
+
+
+class PositionsAccountLinkingTest(unittest.TestCase):
+    """A valid session always wins over client_id, same as watchlist — see
+    WatchlistAccountLinkingTest above for the equivalent watchlist coverage."""
+
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
+
+    def test_get_with_valid_session_queries_by_user_id_ignoring_client_id(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = []
+        conn = _SqlRecordingConn([rows_result])
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value = conn
+
+        with patch("api._get_db_engine", return_value=fake_engine), \
+             patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
+            resp = client.get(
+                "/api/positions?client_id=client-abc",
+                headers={"Authorization": "Bearer sometoken"},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        query_text, params = conn.queries[0]
+        self.assertIn("user_id = :owner_value", query_text)
+        self.assertNotIn("client_id", query_text)
+        self.assertEqual(params, {"owner_value": 42})
+
+    def test_get_without_session_falls_back_to_client_id(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = []
+        conn = _SqlRecordingConn([rows_result])
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value = conn
+
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.get("/api/positions?client_id=client-abc")
+
+        self.assertEqual(resp.status_code, 200)
+        query_text, params = conn.queries[0]
+        self.assertIn("client_id = :owner_value", query_text)
+        self.assertEqual(params, {"owner_value": "client-abc"})
+
+    def test_get_without_session_or_client_id_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.get("/api/positions")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_post_with_valid_session_inserts_by_user_id(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        lock_result = MagicMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = 0
+        existing_result = MagicMock()
+        existing_result.first.return_value = None
+        insert_result = MagicMock()
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = []
+        begin_conn = _SqlRecordingConn([lock_result, count_result, existing_result, insert_result])
+        connect_conn = _SqlRecordingConn([rows_result])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = begin_conn
+        fake_engine.connect.return_value = connect_conn
+
+        with patch("api._get_db_engine", return_value=fake_engine), \
+             patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
+            resp = client.post(
+                "/api/positions",
+                json={"symbol": "TCS"},
+                headers={"Authorization": "Bearer sometoken"},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        insert_query, insert_params = begin_conn.queries[-1]
+        self.assertIn("user_id", insert_query)
+        self.assertEqual(insert_params["owner_value"], 42)
+
+    def test_delete_with_valid_session_deletes_by_user_id(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        delete_result = MagicMock()
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = []
+        begin_conn = _SqlRecordingConn([delete_result])
+        connect_conn = _SqlRecordingConn([rows_result])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = begin_conn
+        fake_engine.connect.return_value = connect_conn
+
+        with patch("api._get_db_engine", return_value=fake_engine), \
+             patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
+            resp = client.delete("/api/positions/TCS", headers={"Authorization": "Bearer sometoken"})
+
+        self.assertEqual(resp.status_code, 200)
+        delete_query, delete_params = begin_conn.queries[0]
+        self.assertIn("user_id = :owner_value", delete_query)
+        self.assertEqual(delete_params["owner_value"], 42)
+
+    def test_delete_without_session_or_client_id_returns_422(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.delete("/api/positions/TCS")
+        self.assertEqual(resp.status_code, 422)
+
+
 class VerdictHistoryEndpointTest(unittest.TestCase):
     """Read-only aggregation over verdict_history.load_history() — degrades to
     an empty list rather than an error, same philosophy as /api/consolidated."""

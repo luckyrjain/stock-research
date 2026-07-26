@@ -31,9 +31,11 @@ test.describe('Magic-link verification', () => {
   test('completes sign-in on confirm click and redirects home', async ({ page }) => {
     await page.route('**/api/auth/verify?token=**', route => route.fulfill({ json: { user: USER } }));
     await page.route('**/api/auth/me', route => route.fulfill({ json: { user: USER } }));
-    // /auth/verify's success path calls refreshWatchlist(), which fetches
-    // the DB-backed watchlist for the newly-signed-in identity.
+    // /auth/verify's success path calls refreshWatchlist() and
+    // refreshPositions(), which fetch the DB-backed watchlist/positions for
+    // the newly-signed-in identity.
     await page.route('**/api/watchlist*', route => route.fulfill({ json: { items: [] } }));
+    await page.route('**/api/positions*', route => route.fulfill({ json: { items: [] } }));
 
     await page.goto('/auth/verify?token=faketoken123');
     await expect(page.getByRole('button', { name: 'Complete sign-in' })).toBeVisible();

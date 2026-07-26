@@ -56,9 +56,11 @@ function fmtInr(n: number): string {
 }
 
 /** Aggregate view over every "I bought this" position (frontend/lib/positions.ts,
- * localStorage-only, no backend of its own — see PositionsStrip for the per-pick
- * strip this generalizes). Purely client-side: reuses the same GET /api/prices
- * poll the Market Picks page already uses for live LTP, no new backend work.
+ * account-linked positions table now, same ownership shape as the watchlist —
+ * see PositionsStrip for the per-pick strip this generalizes). The price
+ * polling itself is still purely client-side: reuses the same GET /api/prices
+ * poll the Market Picks page already uses for live LTP, no new backend work
+ * for that part.
  *
  * Positions carry an optional, user-entered share count (filled in via the
  * "Shares" column below, not asked for at "I bought this" click-time — that's
@@ -70,7 +72,7 @@ function fmtInr(n: number): string {
  * position regardless of share count, since those don't need one.
  */
 export default function PortfolioPage() {
-  const { positions, removePosition, updateShares } = usePositions();
+  const { positions, loading, removePosition, updateShares } = usePositions();
   const [prices, setPrices] = useState<Record<string, LivePrice>>({});
   const [sortDesc, setSortDesc] = useState(true);
 
@@ -169,11 +171,23 @@ export default function PortfolioPage() {
             An equal-weighted return summary across every &quot;I bought this&quot; position, plus a real
             ₹ invested/current value for whichever positions you&apos;ve added a share count to below
             (never assumed — a position with no share count just isn&apos;t counted in that total).
-            Purely local to this browser; nothing here is sent to a server.
+            Tied to this browser until you sign in, then it follows your account instead.
           </p>
         </div>
 
-        {positions.length === 0 ? (
+        {loading ? (
+          <div className="rounded-xl border border-border overflow-hidden">
+            <div className="divide-y divide-border/60">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="px-4 py-4 flex items-center gap-4">
+                  <div className="h-4 w-16 bg-border/60 rounded animate-pulse" />
+                  <div className="h-4 w-32 bg-border/60 rounded animate-pulse" />
+                  <div className="h-4 w-16 ml-auto bg-border/60 rounded animate-pulse" />
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : positions.length === 0 ? (
           <div className="rounded-xl border border-border bg-card px-6 py-10 text-center">
             <p className="text-muted text-sm mb-3">
               You haven&apos;t marked any picks as bought yet.

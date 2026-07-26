@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { refreshWatchlist } from '@/lib/watchlist';
+import { refreshPositions } from '@/lib/positions';
 
 export interface AuthUser {
   id: number;
@@ -96,10 +97,12 @@ export function useAuth() {
       inFlight = null;
       cachedUser = null;
       notify();
-      // The watchlist's own module-level cache has no way to know the
-      // caller's identity just changed back to the anonymous client_id —
-      // without this it would keep showing the account's rows post-logout.
+      // The watchlist's and positions' own module-level caches have no way
+      // to know the caller's identity just changed back to the anonymous
+      // client_id — without this they'd keep showing the account's rows
+      // post-logout.
       refreshWatchlist();
+      refreshPositions();
     }
   }, []);
 

@@ -26,7 +26,7 @@ export default function PositionButton({
       onClick={(e) => {
         e.stopPropagation();
         if (bought) removePosition(symbol);
-        else addPosition({ symbol, company, exchange, entry_price, target_price, stop_loss, shares: null });
+        else addPosition({ symbol, company, exchange, entry_price, target_price, stop_loss });
       }}
       aria-pressed={bought}
       aria-label={bought ? `Remove ${symbol} from your tracked positions` : `Mark ${symbol} as bought — track live P&L`}

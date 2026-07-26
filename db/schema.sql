@@ -256,3 +256,34 @@ CREATE TABLE IF NOT EXISTS mf_holdings_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_mf_holdings_history_symbol ON mf_holdings_history(symbol);
+
+-- "I bought this" positions (see CLAUDE.md's "Positions" section) — a wholly
+-- new table, so unlike watchlist_items above (which evolved from
+-- client_id-only to dual-owner over two migrations further up this file),
+-- the exact-one-owner CHECK and both UNIQUE constraints are declared inline
+-- from the start; there's no pre-existing single-owner data to migrate.
+-- Same ownership shape as watchlist_items and the same reasoning: an
+-- anonymous per-browser client_id until the user signs in, then the
+-- account's user_id — never both, never neither — and signing in does NOT
+-- migrate an existing client_id's positions onto the account. shares is
+-- user-entered, never scraped/computed — NULL (not 0) until the user fills
+-- it in on the Portfolio page.
+CREATE TABLE IF NOT EXISTS positions (
+    id            SERIAL PRIMARY KEY,
+    client_id     VARCHAR(36),
+    user_id       INTEGER REFERENCES users(id),
+    symbol        VARCHAR(20) NOT NULL,
+    company       VARCHAR(200),
+    exchange      VARCHAR(5),
+    entry_price   NUMERIC(14, 4),
+    target_price  NUMERIC(14, 4),
+    stop_loss     NUMERIC(14, 4),
+    shares        NUMERIC(16, 4),
+    bought_at     TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT ck_positions_exactly_one_owner CHECK ((client_id IS NULL) <> (user_id IS NULL)),
+    UNIQUE(client_id, symbol),
+    UNIQUE(user_id, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_positions_client ON positions(client_id);
+CREATE INDEX IF NOT EXISTS idx_positions_user   ON positions(user_id);

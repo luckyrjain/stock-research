@@ -5,6 +5,7 @@ import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { refreshAuth } from '@/lib/auth';
 import { refreshWatchlist } from '@/lib/watchlist';
+import { refreshPositions } from '@/lib/positions';
 
 // Verification requires an explicit click rather than firing automatically
 // on page load. The backend token is single-use, and corporate "safe link"
@@ -36,10 +37,12 @@ function VerifyInner() {
         return;
       }
       await refreshAuth();
-      // The watchlist's own module-level cache has no way to know the
-      // caller's identity just changed to this account — without this it
-      // would keep showing whatever the anonymous client_id had.
+      // The watchlist's and positions' own module-level caches have no way
+      // to know the caller's identity just changed to this account —
+      // without this they'd keep showing whatever the anonymous client_id
+      // had.
       refreshWatchlist();
+      refreshPositions();
       if (!mountedRef.current) return;
       router.replace('/');
     } catch {

@@ -2345,6 +2345,216 @@ async def remove_from_watchlist(request: Request, symbol: str, client_id: str | 
     return {"items": items}
 
 
+# ── Positions ("I bought this") ────────────────────────────────────────────────
+# Same ownership shape as watchlist_items above — an anonymous per-browser
+# client_id until the user signs in, then the account's user_id, resolved via
+# the same _resolve_watchlist_owner()/_owner_column() helpers (nothing about
+# that resolution logic is watchlist-specific; it just answers "which column
+# owns this request's rows"). Previously this feature was pure localStorage,
+# explicitly flagged as the one thing this app's account push hadn't reached —
+# these endpoints close that gap: positions now survive a browser switch once
+# signed in, the same way the watchlist already does. Signing in does NOT
+# migrate an existing client_id's positions onto the account, same documented
+# scope call as watchlist_items.
+_MAX_POSITIONS_PER_CLIENT = 200
+
+
+class PositionAddRequest(BaseModel):
+    client_id: str | None = None
+    symbol: str
+    company: str = Field(default="")
+    exchange: str = Field(default="NSE")
+    entry_price: float | None = None
+    target_price: float | None = None
+    stop_loss: float | None = None
+
+
+class PositionSharesRequest(BaseModel):
+    client_id: str | None = None
+    # None clears a previously-entered share count back to "unknown" — never
+    # invented, never defaulted to 0/1.
+    shares: float | None = None
+
+
+def _positions_rows_sync(owner: WatchlistOwner) -> list[dict]:
+    from sqlalchemy import text as _text
+
+    column = _owner_column(owner)
+    engine = _get_db_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(_text(f"""
+            SELECT symbol, company, exchange,
+                   entry_price, target_price, stop_loss, shares,
+                   bought_at::text AS "bought_at"
+            FROM positions
+            WHERE {column} = :owner_value
+            ORDER BY bought_at DESC
+        """), {"owner_value": owner[1]}).mappings().fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/positions")
+async def get_positions(request: Request, client_id: str | None = Query(None)):
+    _rate_limit(request, "positions_read", max_calls=120, window_seconds=60)
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+    token = _bearer_token_from_request(request)
+
+    def _sync() -> list[dict]:
+        owner = _resolve_watchlist_owner(token, client_id)
+        return _positions_rows_sync(owner)
+
+    loop = asyncio.get_running_loop()
+    try:
+        items = await loop.run_in_executor(None, _sync)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        log_event(LOGGER, "positions_read_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    return {"items": items}
+
+
+@app.post("/api/positions")
+async def add_position(request: Request, body: PositionAddRequest):
+    _rate_limit(request, "positions_write", max_calls=60, window_seconds=60)
+    symbol = body.symbol.upper().strip()
+    if not _TICKER_RE.match(symbol):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    exchange = body.exchange.upper().strip()
+    if exchange not in _VALID_EXCHANGES:
+        raise HTTPException(status_code=422, detail="Invalid exchange.")
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+    token = _bearer_token_from_request(request)
+
+    def _upsert_sync() -> list[dict]:
+        from sqlalchemy import text as _text
+
+        owner = _resolve_watchlist_owner(token, body.client_id)
+        column = _owner_column(owner)
+        lock_key = f"positions:{owner[0]}:{owner[1]}"
+
+        engine = _get_db_engine()
+        with engine.begin() as conn:
+            # Same advisory-lock-then-count pattern as watchlist's POST, scoped
+            # to its own "positions:" lock-key namespace so it can never
+            # collide with a concurrent watchlist add for the same owner.
+            conn.execute(_text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"), {"lock_key": lock_key})
+            count = conn.execute(_text(
+                f"SELECT COUNT(*) FROM positions WHERE {column} = :owner_value"
+            ), {"owner_value": owner[1]}).scalar() or 0
+            existing = conn.execute(_text(
+                f"SELECT 1 FROM positions WHERE {column} = :owner_value AND symbol = :symbol"
+            ), {"owner_value": owner[1], "symbol": symbol}).first()
+            if count >= _MAX_POSITIONS_PER_CLIENT and not existing:
+                raise ValueError(f"Positions are capped at {_MAX_POSITIONS_PER_CLIENT} stocks.")
+            # On conflict, refresh the market levels captured at this mark-time
+            # but leave `shares` and `bought_at` untouched — a user-entered
+            # share count or the original buy timestamp shouldn't be wiped by
+            # re-marking a pick as bought (the normal UI flow removes the row
+            # first, so this path is mostly a safety net, not the common case).
+            conn.execute(_text(f"""
+                INSERT INTO positions ({column}, symbol, company, exchange, entry_price, target_price, stop_loss)
+                VALUES (:owner_value, :symbol, :company, :exchange, :entry_price, :target_price, :stop_loss)
+                ON CONFLICT ({column}, symbol) DO UPDATE SET
+                    company = EXCLUDED.company,
+                    exchange = EXCLUDED.exchange,
+                    entry_price = EXCLUDED.entry_price,
+                    target_price = EXCLUDED.target_price,
+                    stop_loss = EXCLUDED.stop_loss
+            """), {
+                "owner_value": owner[1], "symbol": symbol,
+                "company": body.company[:200], "exchange": exchange,
+                "entry_price": body.entry_price, "target_price": body.target_price, "stop_loss": body.stop_loss,
+            })
+        return _positions_rows_sync(owner)
+
+    loop = asyncio.get_running_loop()
+    try:
+        items = await loop.run_in_executor(None, _upsert_sync)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        log_event(LOGGER, "positions_write_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    return {"items": items}
+
+
+@app.patch("/api/positions/{symbol}")
+async def update_position_shares(request: Request, symbol: str, body: PositionSharesRequest):
+    """The one field a user fills in after the fact, from the Portfolio page
+    (see CLAUDE.md's "Positions" section for why this isn't asked for at
+    "I bought this" click-time) — a dedicated endpoint rather than folding
+    into POST, since this never touches company/exchange/entry/target/stop."""
+    _rate_limit(request, "positions_write", max_calls=60, window_seconds=60)
+    sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    if body.shares is not None and body.shares < 0:
+        raise HTTPException(status_code=422, detail="Shares cannot be negative.")
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+    token = _bearer_token_from_request(request)
+
+    def _update_sync() -> list[dict]:
+        from sqlalchemy import text as _text
+
+        owner = _resolve_watchlist_owner(token, body.client_id)
+        column = _owner_column(owner)
+
+        engine = _get_db_engine()
+        with engine.begin() as conn:
+            conn.execute(_text(
+                f"UPDATE positions SET shares = :shares WHERE {column} = :owner_value AND symbol = :symbol"
+            ), {"shares": body.shares, "owner_value": owner[1], "symbol": sym})
+        return _positions_rows_sync(owner)
+
+    loop = asyncio.get_running_loop()
+    try:
+        items = await loop.run_in_executor(None, _update_sync)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        log_event(LOGGER, "positions_write_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    return {"items": items}
+
+
+@app.delete("/api/positions/{symbol}")
+async def remove_position(request: Request, symbol: str, client_id: str | None = Query(None)):
+    _rate_limit(request, "positions_write", max_calls=60, window_seconds=60)
+    sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
+    token = _bearer_token_from_request(request)
+
+    def _delete_sync() -> list[dict]:
+        from sqlalchemy import text as _text
+
+        owner = _resolve_watchlist_owner(token, client_id)
+        column = _owner_column(owner)
+
+        engine = _get_db_engine()
+        with engine.begin() as conn:
+            conn.execute(_text(
+                f"DELETE FROM positions WHERE {column} = :owner_value AND symbol = :symbol"
+            ), {"owner_value": owner[1], "symbol": sym})
+        return _positions_rows_sync(owner)
+
+    loop = asyncio.get_running_loop()
+    try:
+        items = await loop.run_in_executor(None, _delete_sync)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        log_event(LOGGER, "positions_write_failed", level="error", error=str(exc))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    return {"items": items}
+
+
 # ── Consolidated view ──────────────────────────────────────────────────────────
 # "What does AlphaPulse think about X" spans three independently-run pipelines
 # today, so answering it means visiting three pages. This endpoint answers it
