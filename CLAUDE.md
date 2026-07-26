@@ -22,7 +22,7 @@ A fourth mode — **Screener** — is a PostgreSQL-backed batch pipeline (`scree
 
 A **Watchlist** ties the three modes together: a star button in each dashboard adds/removes a stock from a PostgreSQL-backed `watchlist_items` table, and `/watchlist` lists everything starred with live prices. Each row is owned by either an anonymous per-browser `client_id` (a UUID in `localStorage`) or, once signed in, an account (`user_id`) — see "Watchlist flow" below for how a request's identity is resolved, and "Account & magic-link auth flow" for the account system itself. Signing in never migrates an existing `client_id`'s rows onto the account. A daily batch job (`watchlist_alerts.py`, see "Watchlist alert emails" below) re-analyses every account-owned watchlist symbol and emails a digest to any user whose stock's recommendation changed since the prior stored verdict — anonymous `client_id` rows have no email to notify and are excluded.
 
-A minimal **account system** (magic-link email, no passwords) exists via `POST /api/auth/request-link` + `GET /api/auth/verify` — a `Sign in` link appears in every page's nav bar (`AuthWidget`). The watchlist (above) is account-aware; "I bought this" positions tracking (`frontend/lib/positions.ts`) remains purely anonymous/`localStorage`-only for now, with no backend of its own to link to an account.
+A minimal **account system** (magic-link email, no passwords) exists via `POST /api/auth/request-link` + `GET /api/auth/verify` — a `Sign in` link appears in every page's nav bar (`AuthWidget`). Both the watchlist (above) and "I bought this" positions tracking (`frontend/lib/positions.ts`, backed by a `positions` table with the same anonymous-`client_id`-or-account-`user_id` ownership shape as `watchlist_items` — see "Positions" under "Market picks flow" below) are account-aware.
 
 A shared **search box** (`HeaderSearch`, in every page's nav bar) answers "what does AlphaPulse think about X" in one query: `GET /api/consolidated/{symbol}` is pure aggregation of what the three modes above have already cached/computed for that symbol — no new fetching, no LLM calls. Any section is `null` when that pipeline hasn't run for the symbol yet (the common case), not an error.
 
@@ -84,7 +84,8 @@ stock-research/
 │   │   └── app/api/auth/         request-link / verify / me / logout — verify + logout also
 │   │                             set/clear the httpOnly session cookie (see auth-cookie.ts)
 │   ├── lib/watchlist.ts          useWatchlist() hook (DB-backed via /api/watchlist, anonymous client_id)
-│   ├── lib/positions.ts          usePositions() hook ("I bought this" — localStorage only, no backend)
+│   ├── lib/positions.ts          usePositions() hook ("I bought this" — DB-backed via /api/positions,
+│   │                             same client_id/account ownership shape as useWatchlist)
 │   ├── lib/auth.ts               useAuth() hook (session-cookie-backed; same shared-cache pattern as useWatchlist)
 │   ├── lib/auth-cookie.ts        Server-only cookie helpers used by app/api/auth/* route handlers
 │   ├── lib/useStockAnalysis.ts   Per-symbol SSE analysis hook, shared by the home page and /compare
@@ -949,30 +950,52 @@ aggregated response also grew an `available_dates` field (every date with a stor
 frontend's date picker (`/market-picks/history`) can bound its `<input type="date">` and step
 Prev/Next through actual snapshot days without a second round trip.
 
-**Positions ("I bought this")**: purely client-side — no backend endpoint, no DB table.
-`frontend/lib/positions.ts`'s `usePositions()` hook persists a `Position[]` (symbol, company,
-exchange, `entry_price`/`target_price`/`stop_loss` captured at mark-time from the live `MarketPick`,
-and a `bought_at` timestamp) straight to `localStorage` under `alphapulse_positions`, using the same
-module-level shared-cache-plus-listener-set pattern `useWatchlist()` uses for its Postgres-backed
-data — here there's simply no fetch step, since localStorage reads/writes are synchronous.
+**Positions ("I bought this")**: originally purely client-side (no backend endpoint, no DB table) —
+now backed by a `positions` Postgres table with the exact same ownership shape as `watchlist_items`
+(see "Watchlist flow" above): an anonymous per-browser `client_id` until the user signs in, then the
+account's `user_id`, resolved by the same `_resolve_watchlist_owner()`/`_owner_column()` helpers
+(nothing about that resolution logic is watchlist-specific). This closed the one gap the frontend
+design review called out directly: Watchlist, auth, and API keys had all moved toward real accounts
+while Positions stayed the one feature standing still, still tied to a single browser with no way to
+follow a signed-in user across devices. Signing in does **not** migrate an existing `client_id`'s
+positions onto the account — same deliberate scope call as `watchlist_items`.
+
+`GET /api/positions?client_id=`, `POST /api/positions` (`{client_id, symbol, company, exchange,
+entry_price, target_price, stop_loss}` — upserts via `ON CONFLICT ... DO UPDATE`, refreshing the
+market levels captured at mark-time but leaving `shares`/`bought_at` untouched on a re-mark, since
+the normal UI flow removes a position before re-adding it and this is mostly a safety net), and
+`PATCH /api/positions/{symbol}` (`{client_id, shares}` — the one field filled in after the fact, see
+below) / `DELETE /api/positions/{symbol}?client_id=` all live in `api.py` alongside the Watchlist
+endpoints, same rate-limiting/cap/advisory-lock conventions (`_MAX_POSITIONS_PER_CLIENT`, 200, same
+number as the watchlist cap). `frontend/lib/positions.ts`'s `usePositions()` hook is now a thin
+network-backed hook — same module-level shared-cache-plus-generation-counter pattern as
+`useWatchlist()`, reusing that hook's own `getClientId()` directly rather than duplicating it — and
+`refreshPositions()` is wired into `/auth/verify`'s success path and `useAuth()`'s `logout()`
+alongside `refreshWatchlist()`, for the same reason: neither hook's module-level cache otherwise has
+any way to know the caller's identity just changed.
+
 `PositionButton` (next to `TradeBox`'s entry/target/stop-loss in each pick's expanded row) toggles a
 pick in/out of this list; `PositionsStrip` (rendered above the phase content on `/market-picks`, so it
 shows regardless of whether a fresh scan has run) polls the *existing* `GET /api/prices` endpoint every
-30 s for the tracked symbols' live price — no new backend work — and computes P&L client-side against
-each position's stored entry, flagging "At target" / "At stop-loss" when the live price clears either
-level.
+30 s for the tracked symbols' live price — no new backend work needed for that part — and computes P&L
+client-side against each position's stored entry, flagging "At target" / "At stop-loss" when the live
+price clears either level.
 
 **Portfolio summary** (`/portfolio`): an aggregate view over every tracked position, addressing the
 Product-lens gap "positions aren't aggregated into a portfolio" — `PositionsStrip` only ever showed
-one card per position, with no roll-up. Purely client-side, same as the rest of this feature: no new
-backend endpoint, reuses the exact same `GET /api/prices` poll `PositionsStrip` already makes (30 s
-interval), just computed over the full `positions` array instead of rendered per-card. `Position`
-carries no share-count/quantity field (only `entry_price`/`target_price`/`stop_loss` per symbol), so a
-real capital-weighted portfolio value (₹ invested, ₹ current) isn't data this page actually has —
-computing one would mean silently assuming "1 share per position," which would violate this
+one card per position, with no roll-up. Reuses the exact same `GET /api/prices` poll `PositionsStrip`
+already makes (30 s interval), just computed over the full `positions` array instead of rendered
+per-card. Every position also carries an optional, user-entered `shares` field (never scraped/guessed
+— there's no source of truth to derive it from, so it's `null`, not `0` or an assumed `1`, until the
+user fills it in via an editable "Shares" input in the Portfolio table, which calls
+`updateShares()` → `PATCH /api/positions/{symbol}`). Filling it in is deliberately **not** asked for
+at "I bought this" click-time — that's meant to stay a frictionless one-click action while browsing
+Market Picks. A "Capital-Weighted Value" stats block (₹ invested / ₹ current / ₹ P&L) is computed
+only from positions that actually have a share count, labeled with how many of the total positions
+contribute to it — never silently assuming "1 share per position," which would violate this
 codebase's "never invent" convention the same way guessing a missing scraped field would. The
-aggregate stats shown are therefore explicitly equal-weighted across positions and labeled as such:
-win rate (share of priced positions currently above entry — the adjacent "W/L" breakdown also
+existing equal-weighted stats are unchanged and still cover every priced position regardless of share
+count: win rate (share of priced positions currently above entry — the adjacent "W/L" breakdown also
 surfaces a "flat" count for exactly-0%-P&L positions, so the two numbers always reconcile), average
 P&L% (a plain mean of each position's own % move, not a capital-weighted return), best/worst
 performer, and counts at target/stop-loss. `PositionsStrip` gained a "View full portfolio →" link;

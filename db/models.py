@@ -246,6 +246,44 @@ mf_holdings_history = Table(
     Index("idx_mf_holdings_history_symbol", "symbol"),
 )
 
+# "I bought this" positions (see CLAUDE.md's "Positions" section) — a wholly
+# new table, so (unlike watchlist_items, which evolved from client_id-only to
+# dual-owner over two migrations) the exact-one-owner CHECK and both UNIQUE
+# constraints are declared inline from the start, no ALTER TABLE needed. Same
+# ownership shape as watchlist_items for the same reason: an anonymous
+# per-browser client_id until the user signs in, then the account's user_id —
+# never both, never neither — and signing in does NOT migrate an existing
+# client_id's positions onto the account (same deliberate scope call as
+# watchlist_items; see db/models.py's comment on that table for the full
+# reasoning, which applies here unchanged).
+# shares is user-entered, never scraped/computed/guessed — there's no source
+# of truth for it, so it's NULL (not 0) until the user fills it in on the
+# Portfolio page. Numeric rather than Integer since a mutual-fund-style
+# fractional holding isn't out of the question.
+positions = Table(
+    "positions",
+    metadata,
+    Column("id",           Integer, primary_key=True, autoincrement=True),
+    Column("client_id",    String(36)),
+    Column("user_id",      Integer, ForeignKey("users.id")),
+    Column("symbol",       String(20), nullable=False),
+    Column("company",      String(200)),
+    Column("exchange",     String(5)),
+    Column("entry_price",  Numeric(14, 4)),
+    Column("target_price", Numeric(14, 4)),
+    Column("stop_loss",    Numeric(14, 4)),
+    Column("shares",       Numeric(16, 4)),
+    Column("bought_at",    DateTime(timezone=True), server_default=text("NOW()")),
+    CheckConstraint(
+        "(client_id IS NULL) <> (user_id IS NULL)",
+        name="ck_positions_exactly_one_owner",
+    ),
+    UniqueConstraint("client_id", "symbol", name="uq_positions_client_symbol"),
+    UniqueConstraint("user_id", "symbol", name="uq_positions_user_symbol"),
+    Index("idx_positions_client", "client_id"),
+    Index("idx_positions_user", "user_id"),
+)
+
 
 def get_engine(database_url: str | None = None):
     url = database_url or os.environ["DATABASE_URL"]
