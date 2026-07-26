@@ -317,14 +317,170 @@ def _call_direct_llm(analyst_llm, prompt: str):
     return None
 
 
-# pylint: disable=too-many-locals
+def _resolve_provider() -> str:
+    """LLM_PROVIDER wins if explicitly set; otherwise the first provider
+    (in _API_KEY_ENV's declared order) with a usable API key."""
+    provider = os.getenv("LLM_PROVIDER", "").lower()
+    if provider:
+        return provider
+    for p, env in _API_KEY_ENV.items():
+        if os.getenv(env):
+            return p
+    return ""
+
+
+def _configured_providers() -> list[str]:
+    """Every provider with a usable API key, in _API_KEY_ENV's declared
+    order — used to pick a cross-provider failover candidate below."""
+    return [p for p, env in _API_KEY_ENV.items() if os.getenv(env)]
+
+
+def _resolve_model_and_key(provider: str, is_primary: bool) -> tuple[str, str | None]:
+    if is_primary:
+        # ANALYST_MODEL only ever applies to the primary provider — it's a
+        # model string for one specific provider, and blindly reusing it
+        # for a *different* provider's failover attempt would very likely
+        # be an invalid model string for that provider. The failover
+        # attempt always uses that provider's own documented default.
+        model = os.getenv("ANALYST_MODEL", _ANALYST_DEFAULTS.get(provider, "claude-sonnet-4-6"))
+    else:
+        model = _ANALYST_DEFAULTS.get(provider, "claude-sonnet-4-6")
+    api_key = os.getenv(_API_KEY_ENV.get(provider, ""), "") or None
+    return model, api_key
+
+
+def _attempt_provider(
+    provider: str, model: str, api_key: str | None, prompt: str,
+    all_data: dict, signal_context, symbol: str, run_id: str | None, is_failover: bool,
+) -> Tuple[dict | None, str | None]:
+    """One provider's full attempt — its own guardrail retry (once) and
+    rate-limit retry (once), exactly the same shape run_analysis_with_fallback
+    used to run inline before cross-provider failover existed. Extracted so
+    the outer function can run this against a second, differently-configured
+    provider without duplicating the retry logic. Returns (result, error) —
+    exactly one of the two is non-None."""
+    import litellm
+
+    messages: list[dict] = [{"role": "user", "content": prompt}]
+    rate_limit_retry_used = False
+    guardrail_retry_used = False
+
+    while True:
+        try:
+            started_at = time.perf_counter()
+            log_event(LOGGER, "analyst_llm_started", run_id=run_id, symbol=symbol,
+                      provider=provider, model=model, is_failover=is_failover,
+                      guardrail_retry=guardrail_retry_used)
+            response = litellm.completion(
+                model=model,
+                messages=messages,
+                api_key=api_key,
+            )
+            elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+
+            # Cost is recorded for every completion call, not just the one
+            # that ultimately validates — a guardrail-retry or a failover
+            # attempt that later fails still spent real tokens. Never lets
+            # a broken cost tracker affect the analysis itself (see
+            # llm_cost.py's own "never raise" convention).
+            import llm_cost
+            usage = getattr(response, "usage", None)
+            llm_cost.record_call_cost(
+                symbol=symbol, model=model, provider=provider,
+                cost_usd=llm_cost.estimate_cost_usd(response, model),
+                prompt_tokens=getattr(usage, "prompt_tokens", None),
+                completion_tokens=getattr(usage, "completion_tokens", None),
+                run_id=run_id,
+            )
+
+            text = response.choices[0].message.content or ""
+            parsed = parse_json_object(text)
+            ok, validated = _validate_analysis_payload(parsed, all_data, signal_context)
+            if ok:
+                log_event(LOGGER, "analyst_llm_succeeded", run_id=run_id, symbol=symbol,
+                          provider=provider, model=model, latency_ms=elapsed_ms)
+                return parsed, None
+
+            if not guardrail_retry_used:
+                guardrail_retry_used = True
+                log_event(
+                    LOGGER, "analyst_guardrail_retry", level="warning",
+                    run_id=run_id, symbol=symbol, provider=provider, latency_ms=elapsed_ms, error=str(validated),
+                )
+                messages = [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": text},
+                    {"role": "user", "content": (
+                        f"Your previous response failed validation: {validated} "
+                        "Return only the corrected JSON object — no markdown, no prose."
+                    )},
+                ]
+                continue
+
+            error = str(validated)
+            log_event(
+                LOGGER, "analyst_provider_failed", level="warning",
+                run_id=run_id, symbol=symbol, provider=provider, latency_ms=elapsed_ms,
+                error=error, failure_stage="guardrail",
+            )
+            return None, error
+
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            if _is_rate_limit(exc) and not rate_limit_retry_used:
+                rate_limit_retry_used = True
+                wait = _rate_limit_wait_secs(exc)
+                log_event(
+                    LOGGER, "analyst_rate_limited", level="warning",
+                    run_id=run_id, symbol=symbol, provider=provider, wait_seconds=wait, error=str(exc),
+                )
+                time.sleep(wait)
+                continue
+
+            error = str(exc)
+            log_event(
+                LOGGER, "analyst_provider_failed", level="warning",
+                run_id=run_id, symbol=symbol, provider=provider, error=error, failure_stage="exception",
+            )
+            return None, error
+
+
 def run_analysis_with_fallback(
     symbol: str,
     all_data: dict[str, dict],
     signal_context=None,
     run_id: str | None = None,
 ) -> dict:
-    """Run analyst via direct LLM call. Retries once after waiting if rate-limited."""
+    """Run analyst via direct LLM call. Retries once after waiting if
+    rate-limited, once more after a guardrail validation failure — and, new
+    here, once more against a second configured provider if one exists.
+
+    Previously a full provider outage (not a formatting hiccup — the
+    provider's API itself unreachable, rate-limited past the single retry,
+    or erroring outright) converged straight to the generic safe-HOLD
+    fallback, indistinguishable from the fallback a formatting failure on a
+    perfectly healthy provider also produces. If this deployment has more
+    than one provider's API key configured (see .env.example — most
+    deployments set exactly one, but nothing stops setting two), the second
+    one gets exactly one full attempt (its own guardrail/rate-limit retries
+    included) before falling through to the safe fallback. With only one
+    key configured — the common case — this is a no-op: behavior is
+    unchanged from before failover existed.
+
+    Failover is skipped entirely when `LLM_PROVIDER` is explicitly set —
+    that env var is this deployment's own deliberate choice to pin one
+    provider (e.g. a local-only Ollama deployment kept off the cloud on
+    purpose for data residency), not merely "whichever key happened to be
+    configured first." A stray second provider's key left over in the same
+    environment for an unrelated reason (shared with another service,
+    leftover from testing) must not silently send this analysis's fetched
+    market/fundamentals/news/filings data to that other provider on a
+    transient failure of the pinned one — that would cross a boundary the
+    operator explicitly drew. Failover only ever engages when the primary
+    was auto-detected (no explicit `LLM_PROVIDER`), the same case where
+    "which provider is even primary" was already just "whichever key came
+    first," so trying a second one on failure is a resilience improvement,
+    not a boundary violation.
+    """
     prompt = build_analysis_prompt(symbol, all_data)
 
     if signal_context:
@@ -343,76 +499,34 @@ def run_analysis_with_fallback(
 
     # Resolve model + key without going through CrewAI's LLM wrapper
     # (avoids optional native provider imports like google-genai)
-    provider = os.getenv("LLM_PROVIDER", "").lower()
-    if not provider:
-        for p, env in _API_KEY_ENV.items():
-            if os.getenv(env):
-                provider = p
-                break
-    model   = os.getenv("ANALYST_MODEL", _ANALYST_DEFAULTS.get(provider, "claude-sonnet-4-6"))
-    api_key = os.getenv(_API_KEY_ENV.get(provider, ""), "") or None
+    primary_provider = _resolve_provider()
+    # Only auto-detected primaries get a failover candidate — an explicit
+    # LLM_PROVIDER is a deliberate single-provider pin (see this function's
+    # own docstring above for why a stray second key must not override it).
+    fallback_provider = None if os.getenv("LLM_PROVIDER") else next(
+        (p for p in _configured_providers() if p != primary_provider), None,
+    )
+    providers_to_try = [primary_provider] + ([fallback_provider] if fallback_provider else [])
 
-    import litellm
-
-    messages: list[dict] = [{"role": "user", "content": prompt}]
-    rate_limit_retry_used = False
-    guardrail_retry_used = False
-
-    while True:
-        try:
-            started_at = time.perf_counter()
-            log_event(LOGGER, "analyst_llm_started", run_id=run_id, symbol=symbol,
-                      guardrail_retry=guardrail_retry_used)
-            response = litellm.completion(
-                model=model,
-                messages=messages,
-                api_key=api_key,
-            )
-            elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
-            text = response.choices[0].message.content or ""
-            parsed = parse_json_object(text)
-            ok, validated = _validate_analysis_payload(parsed, all_data, signal_context)
-            if ok:
-                log_event(LOGGER, "analyst_llm_succeeded", run_id=run_id, symbol=symbol, latency_ms=elapsed_ms)
-                return parsed
-
-            if not guardrail_retry_used:
-                guardrail_retry_used = True
+    last_error: str | None = None
+    for i, provider in enumerate(providers_to_try):
+        model, api_key = _resolve_model_and_key(provider, is_primary=(i == 0))
+        result, error = _attempt_provider(
+            provider, model, api_key, prompt, all_data, signal_context, symbol, run_id,
+            is_failover=(i > 0),
+        )
+        if result is not None:
+            if i > 0:
                 log_event(
-                    LOGGER, "analyst_guardrail_retry", level="warning",
-                    run_id=run_id, symbol=symbol, latency_ms=elapsed_ms, error=str(validated),
+                    LOGGER, "analyst_provider_failover_succeeded", run_id=run_id, symbol=symbol,
+                    failed_provider=providers_to_try[0], succeeded_provider=provider,
                 )
-                messages = [
-                    {"role": "user", "content": prompt},
-                    {"role": "assistant", "content": text},
-                    {"role": "user", "content": (
-                        f"Your previous response failed validation: {validated} "
-                        "Return only the corrected JSON object — no markdown, no prose."
-                    )},
-                ]
-                continue
+            return result
+        last_error = error
 
-            log_event(
-                LOGGER, "analyst_llm_failed", level="warning",
-                run_id=run_id, symbol=symbol, latency_ms=elapsed_ms,
-                error=str(validated), failure_stage="guardrail",
-            )
-            return _safe_analysis_fallback(symbol, str(validated))
-
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            if _is_rate_limit(exc) and not rate_limit_retry_used:
-                rate_limit_retry_used = True
-                wait = _rate_limit_wait_secs(exc)
-                log_event(
-                    LOGGER, "analyst_rate_limited", level="warning",
-                    run_id=run_id, symbol=symbol, wait_seconds=wait, error=str(exc),
-                )
-                time.sleep(wait)
-                continue
-
-            log_event(
-                LOGGER, "analyst_llm_failed", level="error",
-                run_id=run_id, symbol=symbol, error=str(exc), failure_stage="exception",
-            )
-            return _safe_analysis_fallback(symbol, str(exc))
-# pylint: enable=too-many-locals
+    log_event(
+        LOGGER, "analyst_llm_failed", level="error",
+        run_id=run_id, symbol=symbol, error=str(last_error),
+        failure_stage="all_providers_exhausted", providers_tried=providers_to_try,
+    )
+    return _safe_analysis_fallback(symbol, str(last_error))

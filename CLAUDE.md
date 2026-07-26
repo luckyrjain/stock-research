@@ -34,7 +34,9 @@ A shared **search box** (`HeaderSearch`, in every page's nav bar) answers "what 
 stock-research/
 ├── api.py                  FastAPI server — SSE endpoints and symbol validation
 ├── main.py                 CLI entry point; also contains _fetch_task, _build_report (shared with api.py)
-├── crew.py                 Analyst guardrails, run_analysis_with_fallback (direct litellm call)
+├── crew.py                 Analyst guardrails, run_analysis_with_fallback (direct litellm call,
+│                           cross-provider failover)
+├── llm_cost.py             Per-call LLM cost instrumentation + running daily total
 ├── cache.py                File-based TTL cache (output/<SYMBOL>/<task>.json)
 ├── schemas.py              Normalization contracts: raw tool output → canonical dicts
 ├── market_picks_pipeline.py  Multi-agent weekly picks pipeline (6 phases)
@@ -46,12 +48,18 @@ stock-research/
 ├── email_sender.py         Sends the magic-link sign-in + watchlist-alert emails over generic SMTP
 ├── watchlist_alerts.py     Daily batch job: emails signed-in users on a watched stock's recommendation change
 ├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
+├── routes/                 Per-domain FastAPI routers extracted out of api.py (see
+│                           "Route module extraction" below) — watchlist.py, positions.py,
+│                           _shared.py (the read/write wrapper both share)
 ├── observability.py        Structured JSON logging via log_event()
 ├── error_tracking.py       Optional Sentry-style hook, wired into log_event()'s error-level path
 ├── schema_drift.py         Type-drift detection for the six scraped data slices
 ├── peer_analytics.py       Peer-percentile + absolute valuation-anchor math (api.py + market_picks_pipeline.py)
 ├── source_health.py        Freshness/volume monitoring for market-picks sources + macro overlay
+├── scraper_error_counters.py  Error (not empty-result) counters for the 4 standalone per-symbol scrapers
 ├── requirements.txt
+├── alembic.ini             Schema-migration config (see "Schema migrations" below)
+├── migrations/             Alembic migration scripts — env.py + versions/0001_baseline_schema.py
 ├── .env.example
 ├── config/
 │   ├── analyst.json        Analyst role/goal/backstory + section labels (config.crew_tasks.ANALYST_SECTIONS)
@@ -135,6 +143,11 @@ python -m pytest tests/test_analysis_guardrails.py -v   # single file
 
 Tests use `unittest` and are collected by pytest. They mock heavy dependencies (crewai, tool imports) via `sys.modules` patching — no external calls made.
 
+`tests_live/` is a **separate** test root, never collected by the command above — it makes real
+network calls to a handful of third-party sites and only runs opt-in (`RUN_LIVE_TESTS=1`), on a
+weekly schedule. See "Live scraper contract checks" further down for why it exists and why it's
+deliberately excluded from every other test invocation in this repo.
+
 ### Key libraries
 
 | Library | Purpose |
@@ -165,7 +178,7 @@ Tests use `unittest` and are collected by pytest. They mock heavy dependencies (
 
 These tool functions are decorated with `@tool` from `crewai.tools` purely for a consistent `.run(**kwargs)` calling convention (see `main._fetch_task`) — that's the only thing this codebase still uses CrewAI for. There used to be a second, parallel orchestration path (`build_crew()` in `crew.py`, wiring per-task `Agent`/`Task`/`Crew` objects from `config/agents.json` + `config/tasks.json`) but it had zero callers and zero test coverage — data collection has always gone through `_fetch_task()` in production — so it was removed rather than left as unverified dead code. If you're looking for `LLM_MODEL` / the "data-agent tier" model config from an older version of this doc: it only ever fed that removed path and has been dropped too — `ANALYST_MODEL` (below) is the only model-selection env var that does anything.
 
-**Analyst (direct LLM call)**: `run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI involved. It receives all six data slices plus signal engine context, and must return a specific JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structural rules and grounded-claims checks; a guardrail failure triggers one corrective LLM retry with the validation error appended, and only if that also fails does it return a safe HOLD fallback via `_safe_analysis_fallback()`.
+**Analyst (direct LLM call)**: `run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI involved. It receives all six data slices plus signal engine context, and must return a specific JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structural rules and grounded-claims checks; a guardrail failure triggers one corrective LLM retry with the validation error appended. Only if that *also* fails — and a second configured provider, if any, also fails the same way — does it return a safe HOLD fallback via `_safe_analysis_fallback()`. See "LLM cost instrumentation + cross-provider failover" below.
 
 **Market picks pipeline** (`market_picks_pipeline.py`): Six sequential phases, all blocking work offloaded to `ThreadPoolExecutor`. Communicates back to the SSE stream via `on_event` callbacks bridged through `asyncio.Queue` with `loop.call_soon_threadsafe`.
 
@@ -177,6 +190,78 @@ These tool functions are decorated with `@tool` from `crewai.tools` purely for a
 | `_phase_research` | Fetches `stock_info` + `research` + signal engine + a valuation percentile per stock (4 workers, up to `_MAX_STOCKS` stocks). |
 | `_phase_analyze` | Batched LLM calls (8 stocks/batch, parallel) for qualitative summary + bull/bear factors. Does NOT ask the LLM for prices. |
 | `_phase_score` | Deterministic confidence scoring (`_compute_confidence`: 50% signal engine + 30% consensus + 20% recency, 0–100, plus a small ±3-point valuation nudge layered on top — see below). The 4-tier rec (BUY / WATCHLIST / HOLD / SELL) is a *separate* formula on top — `combined_dir = 0.55 × consensus + 0.45 × signal_score`, thresholded, with a quant-veto that demotes BUY → WATCHLIST on a strongly negative signal score. Entry/target/stop-loss computed from price and signal score — no LLM. Sector-balanced (`_apply_sector_balance()`): max 2 stocks per sector promoted to the primary list, excess deferred to the end — `sector` stays on every pick in the response (real, filterable data, not popped like the old internal-only `_sector`). Saves a daily snapshot to `output/_history/` for trend tracking. |
+
+### LLM cost instrumentation + cross-provider failover
+
+Two related gaps a CTO/investor-lens review flagged directly: "no per-analysis LLM cost
+instrumentation and no margin model anywhere" (user growth scales a real, metered API cost
+against a product that currently monetizes nobody), and "a full provider outage converges every
+analysis, platform-wide, to the same generic HOLD, indistinguishable from a real call, with no
+user-facing 'degraded' signal and no attempt at a second configured provider."
+
+1. **Cost instrumentation** (`llm_cost.py`) — `crew.py::_attempt_provider()` calls
+   `llm_cost.record_call_cost()` after *every* `litellm.completion()` call, not just the one that
+   ultimately validates: a guardrail-retry or a failed failover attempt still spent real tokens.
+   `estimate_cost_usd()` wraps `litellm.completion_cost()` — never raises, never guesses: litellm
+   doesn't have pricing data for every model (a self-hosted Ollama model, a brand-new release its
+   pricing table hasn't caught up to), and a missing price degrades to `None`, never a fabricated
+   number that looks like a real cost. Each call's cost/tokens are logged immediately
+   (`llm_call_cost` event, queryable through whatever this deployment already does with structured
+   logs) and accumulated into a small running-total JSON file, `output/_llm_cost/<date>.json`
+   (`call_count`, `total_cost_usd`, `calls_with_unknown_cost`) — the same "grep-able counter file
+   plus a log line" convention as `scraper_error_counters.py`/`source_health.py`, a real answer to
+   "what's today's total LLM spend" without a second billing/observability platform. The daily
+   file's read-modify-write cycle is guarded by `_locked(date)`, an advisory `fcntl.flock`-based
+   cross-process lock (same pattern as `source_health.py`'s own `_locked()`) — an own-adversarial-
+   review pass caught that the first version of this module used only an in-process
+   `threading.Lock`, which does nothing to prevent two backend *worker processes* (the exact
+   multi-worker/`REDIS_URL` topology `docs/deployment.md`'s "Scaling" section documents as
+   supported) from both reading the same prior `call_count`, both incrementing locally, and the
+   second write silently overwriting the first — undercounting cost with no warning logged,
+   directly undermining the one thing this module exists to get right. Fixed and covered by a
+   `ConcurrencySafetyTest` in `tests/test_llm_cost.py`, mirroring `source_health.py`'s own.
+2. **Cross-provider failover** (`crew.py`) — `run_analysis_with_fallback()`'s single-provider LLM
+   call is extracted into `_attempt_provider()` (its own guardrail retry once, rate-limit retry
+   once — unchanged from before this existed), so a second, differently-configured provider can
+   get exactly one full attempt before falling through to the safe HOLD fallback.
+   `_configured_providers()` returns every provider with a usable API key
+   (`_API_KEY_ENV`, declared order); the primary is `_resolve_provider()` (respects
+   `LLM_PROVIDER` if set, else the auto-detected first configured key), and the failover
+   candidate is the first *other* configured provider, if any — **but only when `LLM_PROVIDER`
+   itself was never explicitly set**. An explicit `LLM_PROVIDER` is this deployment's own
+   deliberate pin (e.g. a local-only Ollama setup kept off the cloud on purpose for data
+   residency), not merely "whichever key happened to be configured first" — a stray second
+   provider's key left in the same environment for an unrelated reason (shared with another
+   service, leftover from testing) must not silently send this analysis's fetched data to that
+   other provider on a transient failure of the pinned one. Caught in the same adversarial-review
+   pass as point 1 above; regression-tested
+   (`test_explicit_llm_provider_pin_disables_failover_even_with_a_second_key_present`). With only
+   one key configured at all — the common case per `.env.example`'s "set exactly one" instruction
+   — the distinction is moot and this is a no-op either way: behavior is byte-identical to before
+   failover existed, and existing tests confirm it (no provider key is set in this test
+   environment, so `providers_to_try` has exactly one entry). `ANALYST_MODEL` (if set) only ever
+   overrides the *primary* provider's model — reusing it for a failover attempt against a
+   different provider would very likely be an invalid model string for that provider, so the
+   failover attempt always uses that provider's own `_ANALYST_DEFAULTS` entry.
+3. **Visible degraded state** — previously, `crew._safe_analysis_fallback()` already set an
+   internal `_degraded: True` marker, but `main._strip_meta()` dropped it (underscore-prefixed,
+   same convention as `_meta`) before the report ever left the backend — a provider outage's
+   safe-fallback HOLD was genuinely indistinguishable from a real HOLD verdict anywhere in the
+   UI, exactly the gap the review called out. `main._build_report()` now promotes this into a
+   proper sibling `degraded: bool` field on the `Report` itself (never inside `analysis`, so it
+   isn't subject to the four-file analyst-schema lockstep rule — the LLM never produces this
+   field, it's a backend-computed meta-flag, the same instinct as `filings_summary` sitting
+   alongside `filings` rather than folded into it). `frontend/types/index.ts`'s `Report.degraded`
+   is a required `boolean` (never optional/undefined — always explicitly `true`/`false`).
+   `results-dashboard.tsx` renders a `⚠ Analysis degraded` banner above the hero when true,
+   explaining that this is a safe fallback, not a genuine analyst call, while noting that the
+   scraped market data elsewhere in the report is still real.
+4. **Disclosed scope**: this is a one-shot failover (primary → at most one alternate), not an
+   n-provider cascade — matching this codebase's other disclosed "sufficient increment, not
+   maximal engineering" scope calls (e.g. the live-contract-check harness covering 4 scrapers,
+   not all ~10). The cost tracker is a grep-able counter file, not a billing/margin model — it
+   answers "what did today cost", not "what's our unit economics at scale," which remains
+   unaddressed and is flagged as such in the "out of scope" notes elsewhere in this doc.
 
 **Peer/valuation-anchor wired into scoring**: `GET /api/peers/{symbol}`'s `absolute_anchor` (where a
 stock's current P/E sits within its own last 3-5 years of Screener-published P/E — see "Absolute
@@ -322,7 +407,7 @@ Provider is auto-detected from whichever key is present (checked in the order ab
 | `ANALYST_MODEL` | provider default | Model for the analyst LLM call — the only model-selection env var that does anything; data fetching doesn't call an LLM (see "Agent architecture") |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Only needed when `LLM_PROVIDER=ollama` |
 | `LOG_LEVEL` | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`) |
-| `DATABASE_URL` | unset | PostgreSQL DSN — required for the SME signals pipeline (`/api/sme-signals`), the watchlist (`/api/watchlist`), the verdict timeline (`/api/verdict-history/{symbol}`), and account/magic-link auth (`/api/auth/*`) |
+| `DATABASE_URL` | unset | PostgreSQL DSN — required for the SME signals pipeline (`/api/sme-signals`), the watchlist (`/api/watchlist`), the verdict timeline (`/api/verdict-history/{symbol}`), account/magic-link auth (`/api/auth/*`), and Alembic schema migrations (see "Schema migrations" below — `migrations/env.py` reads this same env var) |
 | `FRONTEND_URL` | `http://localhost:3000` | Canonical frontend origin embedded in magic-link sign-in emails (`/auth/verify?token=...` must run in the browser to receive the session cookie, so it can't point at the FastAPI backend directly) |
 | `SMTP_HOST` | unset | SMTP server for magic-link emails. Without it, sign-in links are created and stored but never emailed (logged as a warning; the request still returns success) |
 | `SMTP_PORT` | `587` | SMTP port |
@@ -953,12 +1038,13 @@ Prev/Next through actual snapshot days without a second round trip.
 **Positions ("I bought this")**: originally purely client-side (no backend endpoint, no DB table) —
 now backed by a `positions` Postgres table with the exact same ownership shape as `watchlist_items`
 (see "Watchlist flow" above): an anonymous per-browser `client_id` until the user signs in, then the
-account's `user_id`, resolved by the same `_resolve_watchlist_owner()`/`_owner_column()` helpers
+account's `user_id`, resolved by the same `routes.watchlist.resolve_owner()`/`owner_column()` helpers
 (nothing about that resolution logic is watchlist-specific). This closed the one gap the frontend
 design review called out directly: Watchlist, auth, and API keys had all moved toward real accounts
 while Positions stayed the one feature standing still, still tied to a single browser with no way to
-follow a signed-in user across devices. Signing in does **not** migrate an existing `client_id`'s
-positions onto the account — same deliberate scope call as `watchlist_items`.
+follow a signed-in user across devices. Signing in does **not** automatically migrate an existing
+`client_id`'s positions onto the account — same deliberate scope call as `watchlist_items` — though
+an explicit opt-in "claim my data" flow now exists for both; see "Watchlist flow"'s point 10 below.
 
 `GET /api/positions?client_id=`, `POST /api/positions` (`{client_id, symbol, company, exchange,
 entry_price, target_price, stop_loss}` — upserts via `ON CONFLICT ... DO UPDATE`, refreshing the
@@ -1041,6 +1127,47 @@ flagged this as the blocker to scaling past a single process).
 5. Docker Compose gained a `redis` service (`redis:7-alpine`, persisted via a named volume) and
    wires `REDIS_URL` into the `backend` service automatically — a manual/non-Compose deployment
    only needs to set `REDIS_URL` once it scales past one worker (see `docs/deployment.md`).
+
+### Redis-backed cache for multi-host deployments (`cache.py`)
+
+The rate-limiter work above fixed *guard state* being per-worker — but `cache.py`'s local-disk
+JSON cache is this app's documented **persistent shared state** for every scraped data slice
+(`stock_info`, `research`, `news`, `peers`, `financials`, ...), and a CTO-lens review flagged it
+directly as the real ceiling on horizontal scale: it works today because there's one host, but
+past a second host/replica without a shared disk volume, every cache silently forks per instance,
+multiplying scraper load on the exact fragile third-party sources (Screener.in, NSE, Trendlyne,
+RBI) this codebase already treats cautiously everywhere else in this doc.
+
+1. `cache.py` gained the same opt-in `REDIS_URL`-gated Redis backing as `rate_limiter.py`, with
+   its own independent lazily-constructed client (duplicated, not imported, from
+   `rate_limiter.py`'s client-getter — `cache.py` is imported by nearly every other module in
+   this codebase, so it deliberately doesn't take on a dependency on a sibling module for
+   something this small). `save()` writes through to Redis (`SET ... EX <TTL_HOURS-derived
+   seconds>`) *in addition to* local disk, never instead of it — disk stays the persistent store
+   on a single-host deployment and becomes a fast local mirror/fallback once Redis is configured.
+2. **The core invariant**: once Redis has *any* opinion on a key — fresh, stale, or a cached
+   failure — every host must agree with it. `load()`/`is_fresh()` check Redis first and only
+   fall back to this host's own disk copy when Redis has **no entry at all** for that key (a
+   Redis outage, an eviction, or a key predating `REDIS_URL` being set). A stale/failed Redis
+   entry is trusted as-is and never overridden by a possibly-fresher local disk copy — falling
+   through in that case would silently reintroduce the exact per-host fork this feature exists
+   to close (host A's disk might have a fresher `research` blob than what Redis/host B last
+   wrote, and serving it would mean the two hosts disagree on freshness again).
+3. Freshness is always re-derived from each entry's own `_meta.fetched_at` against the current
+   `TTL_HOURS` map — never trusted from a store's own expiry mechanism (Redis's `EX`, a file's
+   mtime) — so a `TTL_HOURS` tuning change takes effect immediately for entries already written,
+   on both backends, without needing them to be rewritten. Same graceful-degradation convention
+   as everywhere else: a Redis read/write failure logs a warning (`cache_redis_read_failed`,
+   `cache_redis_write_failed`) and falls back to disk for that one call; a single-host deployment
+   behaves identically with or without `REDIS_URL` set.
+4. Verified in this sandbox against a real local Redis instance (not just the mocked unit tests in
+   `tests/test_cache_redis.py`): two separate Python processes, each pointed at its own,
+   completely separate local disk directory (simulating two hosts with no shared volume), with
+   `cache.save()` in process A immediately visible to `cache.load()` in process B — process B
+   never touches its own (empty) disk directory at all on that read, confirming the fork this
+   feature exists to close is actually closed, not just plausible on paper.
+5. See `docs/deployment.md`'s "Scaling" section for the operator-facing version of this same
+   story, including the updated guard-state table.
 
 ### Trusted client IP for per-IP rate limiting
 
@@ -1191,6 +1318,43 @@ false-positive noise on exactly the symbols/fields this convention already expec
    responses in this sandbox; extending drift detection to them is future work, not silently
    assumed to already be covered by this pass.
 
+### Live scraper contract checks (`tests_live/`)
+
+`schema_drift.py`/`source_health.py` above only ever learn a scraper broke from *production*
+traffic, after the fact — there was previously no earlier, narrower signal, and this repo's own
+docs disclose roughly a dozen scraper assumptions (Screener's section ids, Trendlyne's DOM
+labels, NSE's XBRL field names, RBI's table layout, the NIFTY 500 CSV shape, the sector-taxonomy
+guess in `signals/engine.py`) that were never actually checked against a live response in this
+sandbox (no outbound internet to non-allowlisted hosts, repeated throughout this file).
+
+1. `tests_live/test_scraper_contracts.py` is a **second, independent test root** — deliberately
+   not inside `tests/`, since `python -m pytest tests/` (the command this repo's CI and this
+   file both document) must never make a live network call, matching every other test in this
+   codebase. It covers the four highest-blast-radius scrapers: Screener.in's peer table (feeds
+   fundamentals, peers, DCF, and the analyst prompt simultaneously), Trendlyne's symbol
+   resolution, NSE's FII/DII flow, and RBI's rate/inflation table.
+2. Opt-in via `RUN_LIVE_TESTS=1` (checked in each test's `setUp`) — running `pytest tests_live/`
+   without it is a clean, immediate skip, so this can never accidentally fire from a local
+   `pytest` invocation or an unrelated CI job.
+3. **Connectivity is checked before the scraper, not inferred from its result.** Every tool
+   function in this codebase follows the "tools never raise" convention (see "Important Rules
+   for Claude" below) — a connectivity failure and a genuine site-layout change both surface the
+   same way, as a returned `{"error": ...}` dict, so pattern-matching the tool's own output to
+   tell them apart would be unreliable. Each test instead makes its own minimal, direct
+   `requests.head()` probe to the target host first; only once that succeeds does a
+   still-returned `"error"` (or a missing expected field) count as a real contract failure.
+   Confirmed while building this: this sandbox's own outbound proxy 403s the CONNECT tunnel for
+   all four target hosts, so every test correctly skips here rather than reporting a false
+   pass or a false failure — the exact failure mode a naive live test would have hit.
+4. `.github/workflows/live-contract-check.yml` runs this weekly (`workflow_dispatch` also
+   available for an on-demand run) — low frequency deliberately, since this is an early-warning
+   signal for the scrapers' *shape*, not a data-collection job. A genuine contract break fails
+   the Actions job and fires GitHub's own run-failure notification, the same "let a bad run fail
+   loudly" convention `sme_ema_pipeline.py`'s own health gate already established.
+5. **Explicitly does not close the gap for every disclosed-but-unverified assumption** — four
+   scrapers, not all ~10 standalone ones outside `ALL_DATA_TASKS`. A starting point at the
+   highest-blast-radius sources, not full coverage.
+
 ### Source freshness/volume monitoring (`source_health.py`)
 
 `schema_drift.py` above only catches *type* drift on the six `ALL_DATA_TASKS` fields — it has
@@ -1238,6 +1402,46 @@ doesn't error, it just quietly stops contributing to every future pick's score.
 5. A new source (fewer than 5 prior days, or no successful day yet) never alerts — there's no
    established baseline yet to regress from, and a source that's simply always been empty (e.g.
    genuinely thin coverage) shouldn't page anyone either.
+
+### Standalone scraper error counters (`scraper_error_counters.py`)
+
+Point 4 above deliberately excludes `peers`/`insider-activity`/`street-consensus` from
+`source_health.py`'s volume-anomaly heuristic, since an empty result is their expected common
+case — but that left those endpoints with genuinely no signal at all when something actually
+broke. `fetch_insider_trades_for_symbol(sym).get("trades", [])`-shaped call sites silently
+mapped both "NSE returned nothing today" (normal) and "NSE request failed" (a real, silent
+degradation — these tool functions never raise, they return `{"error": ...}` instead) to the
+exact same empty list, with no log line to grep for either. An engineering-lens review flagged
+this directly: "the ~10 standalone scrapers outside [the six-task] path have no structured
+logging of their own — a silent layout change there degrades with no log line to grep for."
+
+1. `scraper_error_counters.record_scraper_error(scraper_name, **context)` increments a small
+   persisted counter (`output/_scraper_error_counters/<name>.json`, same tempfile +
+   `os.replace` atomic-write convention as `cache.py`/`source_health.py`) and immediately logs
+   a `level="warning"` event — no "N bad days in a row" threshold like `source_health.py`,
+   since a single error at one of these on-demand, per-request endpoints already means one
+   real user's request degraded, unlike a scheduled batch job where a single bad run is
+   expected background noise. Never raises. `get_error_count(scraper_name)` is a non-mutating
+   read for tests and a future ops surface.
+2. Wired into 6 call sites across the 4 standalone endpoints named in the review — each now
+   distinguishes a genuine `{"error": ...}` tool-function result from a legitimate empty one
+   before deciding whether to count/log: `GET /api/peers/{symbol}` (`"peers"`),
+   `GET /api/financials/{symbol}` (`"financials"`), `GET /api/insider-activity/{symbol}`'s two
+   independent sub-fetches (`"insider_trades"`, `"bulk_block_deals"`), and
+   `GET /api/street-consensus/{symbol}`'s two independent sub-fetches
+   (`"trendlyne_articles"`, `"trendlyne_numeric_consensus"`). A legitimate empty result (no
+   `"error"` key) never touches this module — same "don't manufacture noise from the expected
+   common case" instinct `source_health.py` already applies.
+3. **Deliberately not a full observability platform** — this is a grep-able counter file plus
+   a log line, not a metrics dashboard, alerting integration, or a new `/api/*` status
+   endpoint. Consistent with this codebase's other disclosed "first increment" scope calls
+   (`tests_live/`'s own coverage note, the two-domain `routes/` split above) rather than a
+   claim that scraper observability is now fully solved.
+4. `signals/engine.py::_log_unmatched_sector_once()` was also promoted from `level="debug"` to
+   `level="warning"` in this same pass — a debug-level line is invisible in this codebase's
+   default INFO-level deployments, so the sector-taxonomy validation this log line exists to
+   enable (see "Sector-aware signal weights" above) could never actually happen against real
+   production traffic without someone first turning debug logging on.
 
 ### SME golden cross flow
 
@@ -1433,6 +1637,143 @@ mirroring `sme_ema_pipeline.py`'s shape, served at `/screener` via `GET /api/scr
    unlike `sme_ema_pipeline.py --reset-db`, which operates on the shared `MetaData()` and so
    drops every table in the app — see that command's own disclosed limitation above.
 
+### Route module extraction (`routes/`)
+
+`api.py` had grown to ~2900 lines with every endpoint defined inline — a maintainability
+gap a deep engineering/CTO-lens review called out directly. Watchlist and Positions were
+the first (and, as of this pass, only) two domains split out, chosen because they're the
+most duplicated: 8 endpoints total, each repeating the exact same rate-limit → 503-if-no-
+`DATABASE_URL` → `run_in_executor` → sanitize-error wrapper.
+
+1. `routes/watchlist.py` and `routes/positions.py` are `APIRouter` modules, registered via
+   `app.include_router(...)` in `api.py` (placed after the shared helpers they depend on —
+   `_get_db_engine`, `_rate_limit`, `_bearer_token_from_request`, `LOGGER`, `log_event` —
+   are already defined). Each still owns its own routes exactly as before the split — this
+   is a file reorganization, not a behavior or URL change.
+2. Both modules import `api` itself (`import api`), not `from api import X` — reaching
+   shared state via dotted access (`api._get_db_engine()`) rather than a copied reference.
+   This avoids a circular-import ordering problem (`api.py` imports these routers, so they
+   can't import `api.py`'s names at their own top-level before those names exist yet) and
+   preserves this app's existing `unittest.mock.patch("api._get_db_engine", ...)` test
+   convention — a patch only takes effect on code that looks the name up through the module
+   object at call time, not on a name a `from api import X` already copied at import time.
+3. `routes/_shared.py::run_owned_db_call(request, rate_limit_name, max_calls, sync_fn,
+   event_prefix)` is the extracted wrapper itself — the repeated rate-limit/DATABASE_URL-
+   check/executor/sanitize-error shape both domains' 6 CRUD endpoints (of 8 total; the two
+   list-shaped calendar/read-only paths that don't fit this exact shape stay inline) now
+   call instead of re-implementing.
+4. `routes/watchlist.py` owns the ownership-resolution primitives (`resolve_owner()`,
+   `owner_column()`, `WatchlistOwner`, `_VALID_EXCHANGES` — renamed from `api.py`'s original
+   `_resolve_watchlist_owner`/`_owner_column`) since positions.py imports and reuses them
+   directly rather than duplicating — nothing about "which column owns this request's rows"
+   is watchlist-specific, but watchlist was the first domain to need it.
+5. `api.py` re-exports `_MAX_WATCHLIST_ITEMS_PER_CLIENT` and `_MAX_POSITIONS_PER_CLIENT`
+   (`from routes.watchlist import _MAX_WATCHLIST_ITEMS_PER_CLIENT`, etc.) purely for backward
+   compatibility — `tests/test_api.py` reads both as plain values (e.g.
+   `count_result.scalar.return_value = api._MAX_POSITIONS_PER_CLIENT`), not just as patch
+   targets, so moving the constants without a re-export would have silently broken that
+   existing test code.
+6. **Deliberately scoped to these two domains only** — splitting the remaining ~25 endpoints
+   (SME signals, screener, market picks, auth, API keys, financials, etc.) into their own
+   `routes/*.py` modules is future work, the same disclosed "first increment, not the full
+   file" scope call this codebase already makes elsewhere (e.g. `tests_live/`'s own coverage
+   note). `api.py` is smaller after this pass, not fully decomposed.
+
+### Dashboard component extraction
+
+`results-dashboard.tsx` had grown to 1566 lines with ~35 top-level functions (fetch hooks,
+card components, and small formatting helpers all defined inline) — the same "one file keeps
+absorbing every new feature" pattern the `routes/` split above fixed on the backend, flagged by
+the same engineering-lens review. Every card added since this component was first written
+(Peer Comparison, Financials, Concalls, Insider Activity, Street Consensus, Valuation Summary,
+Verdict Timeline, Quarterly Trend...) became another inline function here rather than its own
+file.
+
+1. Extracted into standalone files under `frontend/components/`, one per card/domain, mirroring
+   this repo's existing flat `components/` convention (no new subdirectory):
+   `financial-statements-card.tsx` (`useFinancials`, `StatementTable`, `FinancialStatementsCard`,
+   `ConcallsCard`), `peer-comparison-card.tsx` (`usePeerComparison`, `PercentileBadge`,
+   `ValuationAnchorBadge`, `PeerTable`, `SimilarStocksRail`), `insider-activity-card.tsx`,
+   `street-consensus-card.tsx`, `verdict-timeline.tsx`, `valuation-summary-strip.tsx`,
+   `quarterly-trend-card.tsx`, and `price-sparkline.tsx` (the hero's price-history-fetching
+   wrapper — distinct from the pre-existing `sparkline.tsx`, the raw chart primitive it renders).
+2. `dashboard-format.ts` (plain `.ts`, no JSX) holds only the formatting helpers actually shared
+   across more than one card (`fmt`, `fmtCr`, `fmtVolume`, `fmtInr`, `normalizeRatioKey`,
+   `formatAge`, `humanizeMetaKey`, `formatMetaValue`, `fmtRatio`) — a helper used by exactly one
+   card (e.g. `fmtActivityDate`, `fmtConsensusDate`) stayed co-located with that card instead.
+   `dashboard-primitives.tsx` holds the small generic UI atoms reused across several cards
+   (`Card`, `MetricRow`, `ExchangeTable`, `RangeBar`).
+3. Each fetch hook (`usePeerComparison`, `useFinancials`, `useInsiderActivity`,
+   `useStreetConsensus`, `useVerdictHistory`) stayed co-located with the one card that calls it,
+   matching how they already read in the original file (defined immediately above their single
+   consumer) rather than moving into a separate hooks directory.
+4. `results-dashboard.tsx` itself is now 613 lines — the main `ResultsDashboard` component plus
+   the handful of helpers genuinely specific to its own JSX (`formatScalar`/`formatFactor` for
+   the bull/bear factor lists, `formatNewsHighlights`, `summaryBullets`, and the
+   `REC_CONFIG`/`CONF_COLOR`/`SENT_COLOR` tone tables) that no other card needs.
+5. Pure reorganization — same props, same JSX, same behavior; verified with both `npx tsc
+   --noEmit` and `npm run build` (this repo's documented verification bar for anything touching
+   `globals.css`-adjacent styling or requiring the production minifier to catch what `tsc` alone
+   won't).
+6. Every other reference to a specific card by name elsewhere in this document (e.g.
+   "`results-dashboard.tsx`'s `InsiderActivityCard`") still describes the same component and
+   behavior — it just now lives in its own file rather than inline in `results-dashboard.tsx`.
+
+### Schema migrations (Alembic)
+
+11 tables across `db/models.py`, kept in sync with `db/schema.sql`'s hand-written
+`CREATE TABLE IF NOT EXISTS`/`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` guards purely by
+convention (`tests/test_schema_sql_migrations.py` only checks 2 of the 11 tables for a missing
+guard) — a CTO/engineering-lens review flagged this directly: two hand-synced schema sources
+and no real migration tool is exactly the setup that produced `sme_ema_pipeline.py --reset-db`'s
+own documented mistake (dropping every table via the shared `MetaData()` object, not just its
+own, because nothing enforced a narrower blast radius).
+
+1. `alembic.ini` + `migrations/env.py` are configured at the repo root — `migrations/env.py`
+   imports `db.models.metadata` directly as `target_metadata` (the same SQLAlchemy Core
+   `MetaData()` object every table already declares against), so `alembic revision
+   --autogenerate` diffs a live database against the exact same table definitions this app's
+   code already uses — no second, Alembic-specific model layer to keep in sync. `env.py` reads
+   `DATABASE_URL` from the environment (same env var every other DB-backed module in this app
+   already reads, via `db/models.py::get_engine`) rather than `alembic.ini`'s own
+   `sqlalchemy.url`, which is deliberately left blank — one place to configure a connection
+   string, not two.
+2. `migrations/versions/0001_baseline_schema.py` is the one migration in the repo today —
+   autogenerated against a genuinely empty database and verified (in this sandbox, against a
+   real local Postgres instance) to both `alembic upgrade head` cleanly onto nothing and
+   `alembic downgrade base` cleanly back to nothing, producing exactly the same 11 tables,
+   indexes, and constraints `db/schema.sql`/`metadata.create_all()` already produce.
+3. **Existing deployments must `alembic stamp head`, not `alembic upgrade head`, for this first
+   revision** — every deployment of this app already has these 11 tables (created by hand via
+   `db/schema.sql`, or by one of the pipelines' own `--setup-db` flags calling
+   `metadata.create_all()`), so replaying `0001`'s `CREATE TABLE` statements against a database
+   that already has them would fail on the very first one. `alembic stamp head` records "this
+   database is already at revision 0001" without executing any DDL — verified in this sandbox by
+   creating the schema via `metadata.create_all()` (simulating an existing deployment), running
+   `alembic stamp head`, then confirming `alembic check` reports "No new upgrade operations
+   detected" (no drift between the stamped state and `db/models.py`).
+4. **From here on, schema changes should be authored as new Alembic revisions** —
+   `alembic revision --autogenerate -m "..."` after editing `db/models.py`, then `alembic
+   upgrade head` to apply. This is the replacement for the old workflow (hand-edit
+   `db/models.py`, hand-edit a matching `ALTER TABLE ADD COLUMN IF NOT EXISTS` into
+   `db/schema.sql`, hope `test_schema_sql_migrations.py` catches a missed guard on the 2 tables
+   it covers) — a generated revision has an explicit up AND down path, a real ordering (each
+   revision's `down_revision` chains to the last), and autogenerate diffs against the *actual*
+   live schema rather than trusting a hand-written guard was remembered.
+5. **`db/schema.sql` is kept, not deleted** — frozen as a reference for what the schema looked
+   like before Alembic, and because `tests/test_schema_sql_migrations.py` still exercises its
+   existing guard convention for the two tables it already covers. It is not expected to gain
+   any *new* `ALTER TABLE` guards going forward; new columns get a new Alembic revision instead.
+   Whether to eventually retire `schema.sql`/its test entirely once every current deployment has
+   migrated onto Alembic is a future decision, not made here.
+6. **Disclosed scope**: this establishes the tool and a verified, working baseline — it does not
+   itself add any new schema change (no new column, no new table). The two hand-synced-schema
+   and no-rollback-path gaps the review flagged are what's fixed; retroactively backfilling
+   individual historical Alembic revisions for every column `db/schema.sql` already added over
+   this app's history (e.g. `users.tier`, `watchlist_items.user_id`) was not attempted — `0001`
+   captures the schema as it exists today, in one shot, which is sufficient for both a fresh
+   install and an existing deployment's `stamp head` path.
+
 ### Watchlist flow
 
 The `watchlist_items` table (PostgreSQL, `DATABASE_URL`) is the one piece of shared state
@@ -1445,21 +1786,23 @@ every row's `NULL` as distinct from every other `NULL`, so it wouldn't actually 
 identity to one row per symbol).
 
 1. `GET /api/watchlist?client_id=`, `POST /api/watchlist` (`{client_id, symbol, company, exchange}`,
-   `client_id` optional), `DELETE /api/watchlist/{symbol}?client_id=` — all in `api.py`, using
-   the same cached engine (`_get_db_engine()`) as the SME endpoints
-2. **Identity resolution** (`api._resolve_watchlist_owner()`): a valid session (the
+   `client_id` optional), `DELETE /api/watchlist/{symbol}?client_id=` — all in
+   `routes/watchlist.py` (see "Route module extraction" above), using the same cached engine
+   (`_get_db_engine()`) as the SME endpoints
+2. **Identity resolution** (`routes.watchlist.resolve_owner()`): a valid session (the
    `Authorization: Bearer <token>` header — see "Account & magic-link auth flow" below) always
    wins over `client_id` when both are present in a request, since the whole point of an
    account is that it doesn't depend on which browser sent the request. An expired/invalid
    token isn't a 401 here — this endpoint doesn't require being signed in, so it just falls
    through to the `client_id` path, same as no token at all. A request with neither a valid
    session nor a well-formed `client_id` gets 422.
-3. **No migration on sign-in**: an anonymous `client_id`'s existing rows are never
-   claimed/merged onto an account when a user signs in — a freshly-signed-in user simply
-   starts seeing whatever rows their account already owns (possibly none), and their old
+3. **No *automatic* migration on sign-in**: an anonymous `client_id`'s existing rows are never
+   silently claimed/merged onto an account when a user signs in — a freshly-signed-in user
+   simply starts seeing whatever rows their account already owns (possibly none), and their old
    anonymous rows remain reachable only by that same browser's `client_id` while logged out.
    This mirrors the same deliberate scope call `db/models.py`'s `users` table comment
-   documents for the auth system as a whole.
+   documents for the auth system as a whole. An explicit, user-initiated opt-in escape hatch
+   exists for this — see point 10 below — but nothing ever triggers it automatically.
 4. `client_id` is a UUID generated client-side (`crypto.randomUUID()`) and persisted in
    `localStorage` — it groups one browser's anonymous rows, nothing more
 5. `frontend/lib/watchlist.ts`'s `useWatchlist()` hook holds a module-level shared cache +
@@ -1492,6 +1835,67 @@ identity to one row per symbol).
    watchlist/page.tsx`'s `CalendarStrip` renders one row per symbol with something to show
    (next-results date, a rating action, up to 2 corporate actions), sorted next-results-date
    first.
+10. **Opt-in "claim my data" flow** (`POST /api/watchlist/claim` + `POST /api/positions/claim`,
+    `routes/_shared.py::claim_anonymous_rows_sync()`) — a product-lens review flagged that the
+    no-migration default in point 3 above was "actively suppressing conversion": a visitor who
+    built up a watchlist anonymously, then signs in, previously just saw an empty account with
+    no path back to their anonymous rows short of staying logged out. This closes that gap
+    without reversing the underlying safety-conscious default — migration still never happens
+    automatically, only when a signed-in user explicitly asks for it.
+    - Both endpoints require a valid session (`Authorization: Bearer <token>`) — a missing or
+      expired one is a real `401`, not a silent fall-through to `client_id`, since each
+      endpoint's only caller (below) already knows a session exists by the time it fires.
+    - `claim_anonymous_rows_sync(engine, table, order_column, client_id, user_id,
+      max_per_owner, lock_prefix)` is shared by both tables (`watchlist_items`/`added_at`,
+      `positions`/`bought_at`) since they share the exact same ownership shape. A symbol the
+      account already owns keeps the account's row; the anonymous duplicate is discarded
+      (it could never be claimed anyway — `uq_{table}_user_symbol` forbids two rows for the
+      same `(user_id, symbol)`). Rows are claimed oldest-first up to the account's remaining
+      room under the existing per-owner cap (`_MAX_WATCHLIST_ITEMS_PER_CLIENT`/
+      `_MAX_POSITIONS_PER_CLIENT`) — anything beyond that is left owned by `client_id` rather
+      than silently exceeding the cap, and reported back as `skipped_over_cap` rather than
+      dropped. Guarded by the exact same per-account advisory-lock **key** the add endpoint
+      already takes (`pg_advisory_xact_lock(hashtext("watchlist:user:<id>"))`, not a separate
+      `"watchlist_claim:<id>"` namespace) — an own-adversarial-review pass caught that an
+      earlier version of this function used a distinct lock-key prefix that *looked* like a
+      deliberate "own namespace per operation" choice but actually meant a concurrent claim and
+      add for the same account took two different locks and never serialized against each
+      other at all, letting both read the same pre-write row count and both commit, silently
+      exceeding `max_per_owner`. Fixed by matching the lock key exactly; re-verified end-to-end
+      against a real local Postgres instance with two real concurrent transactions racing (a
+      199-row account, cap 200, claiming 1 row while an add fires at the same instant) —
+      confirmed the account lands at exactly 200, never over, matching the invariant the docs
+      already claimed before the fix actually delivered it.
+    - **Disclosed residual risk**: `client_id` was never a secret — any request that knows it
+      can already read/add/delete that browser's rows (see "Identity resolution" in "Watchlist
+      flow" below), the same "grouping key, not a security boundary" design this table has
+      always had. Claiming is more severe than an ordinary read/write, though: it *exclusively*
+      reassigns those rows, permanently cutting off the original anonymous browser's access — a
+      signed-in attacker who obtains someone else's `client_id` (already visible in plaintext
+      query strings on every other endpoint here, so it can leak via a shared screenshot,
+      browser history, or a server access log) could claim their watchlist for themselves. Both
+      claim endpoints are rate-limited far tighter than this table's ordinary writes (5/hour,
+      not the 60/minute every other write here gets — same per-address-not-just-per-IP
+      precedent as the magic-link request-link endpoint's 5/hour) and log a `watchlist_claimed`/
+      `positions_claimed` audit event on every success, which meaningfully bounds
+      automated/brute-force abuse but does not eliminate a single targeted guess of one
+      specific leaked ID — that would need proof of possession (e.g. a signed token minted into
+      the anonymous browser itself), a larger change not attempted in this pass.
+      Verified end-to-end against a real local Postgres instance in this sandbox (both the
+      plain-claim and over-cap-partial-claim paths), not just the mocked unit tests
+      `tests/test_api.py` also carries.
+    - **The one caller**: `frontend/app/auth/verify/page.tsx`, right before it calls
+      `GET /api/auth/verify` (i.e. while the browser still has no session cookie, so
+      `GET /api/watchlist`/`GET /api/positions` still resolve via `client_id`, not an
+      account), fetches both endpoints' current item counts for this browser's `client_id`.
+      If either is non-zero, once sign-in itself succeeds the page shows a "You have N
+      watchlist items / M positions from browsing anonymously — claim them?" prompt with
+      explicit **Claim** / **Skip** buttons, instead of immediately redirecting home. Skipping
+      leaves the anonymous rows exactly where point 3 above already says they'd stay — reachable
+      by that same browser's `client_id` while logged out, nothing lost. `frontend/lib/
+      watchlist.ts::claimWatchlist()` / `frontend/lib/positions.ts::claimPositions()` are thin
+      wrappers that also refresh their module's own shared cache on success, same pattern as
+      `refreshWatchlist()`/`refreshPositions()`.
 
 ### Watchlist alert emails
 
@@ -1628,8 +2032,8 @@ session-cookie identity the frontend itself uses. Three independent pieces:
    a 403, so the endpoint doesn't confirm/deny another user's key IDs exist). A key has no fixed
    TTL, unlike a session — it's valid until explicitly revoked, since a script can't "re-sign-in"
    through a magic link the way a browser redirects through one. `frontend/app/api-keys/page.tsx`
-   (linked from `AuthWidget`'s dropdown) is the management UI: the create form shows the raw key
-   exactly once, in a copy-to-clipboard box, with an explicit "won't be shown again" warning;
+   (in the primary nav — see point 4 below) is the management UI: the create form shows the raw
+   key exactly once, in a copy-to-clipboard box, with an explicit "won't be shown again" warning;
    the list table shows every key including revoked ones (badged), never re-displaying the secret.
 2. **The gated surface itself** — `GET /api/v1/consolidated/{symbol}`, deliberately the *only*
    `/api/v1/*` route today: a thin auth/rate-limit wrapper around the exact same
@@ -1661,6 +2065,21 @@ session-cookie identity the frontend itself uses. Three independent pieces:
    management, not a separate endpoint, since a user managing their keys is exactly who wants to
    see this. `frontend/app/api-keys/page.tsx` renders it as a tier badge + a progress bar (red
    past the limit) above the key-creation form.
+4. **Discoverability + pricing** — a product-lens review flagged two gaps directly: "a
+   signed-out visitor has no navigational path to discover the API exists at all" (it was only
+   ever reachable through the signed-in account dropdown), and "no pricing page, no upgrade
+   button, no checkout anywhere." Both closed without fabricating a payment flow that doesn't
+   exist:
+   - `components/site-nav.tsx`'s `LINKS` gained an `api-keys` entry, visible in the primary nav
+     to every visitor regardless of sign-in state — the page itself already has its own
+     signed-out prompt, so there's no dead end. `components/auth-widget.tsx`'s account dropdown
+     dropped its now-redundant "API keys" menu item since the primary nav covers it.
+   - `frontend/app/pricing/page.tsx` is a genuinely informational page, not a marketing page for
+     a checkout that doesn't exist: it lists the Free (100 calls/hour) and Pro (1,000 calls/hour)
+     tiers and what each unlocks, then states plainly — matching this point's own "no real
+     payment processing exists" disclosure above — that there's no self-serve checkout and Pro
+     access is granted by whoever operates this deployment. `frontend/app/api-keys/page.tsx`'s
+     usage card links to it for free-tier accounts.
 
 ### Consolidated view flow
 
@@ -1835,3 +2254,59 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
 - **`output/_history/<date>.json` snapshot schema** (`symbol`, `confidence`, `effective_signal`, `mention_count`, `current_price`, `recommendation`) is read by two independent consumers: the in-pipeline `_load_trend()` (confidence trend) and `GET /api/market-picks/history` (price track record, `/market-picks/history` page). Snapshots written before `current_price`/`recommendation` were added won't have them — the history endpoint handles this by returning `change_pct: null` rather than guessing. Keep both consumers in mind if the snapshot shape changes.
 - **`GET /api/market-picks/history`** also computes an overall `win_rate` (share of tracked picks with `change_pct > 0`), a `tier_stats` breakdown keyed by `recommendation_then` (count/avg change/win rate per BUY/WATCHLIST/HOLD/SELL), and per-symbol `nifty_change_pct`/`alpha_pct` benchmarked against `^NSEI` over the same `first_seen` → `last_seen` window (`avg_alpha_pct` at the top level). The Nifty series is fetched once per request-range via `yfinance.Ticker("^NSEI").history()` — not once per snapshot date — and cached through `cache.py` using `"NSEI"` as a pseudo-symbol (`index_history`, 24 h TTL, re-fetched whenever a new snapshot date widens the needed range). A closed-market snapshot date (weekend/holiday) falls back to the nearest earlier trading day's close, never a later one. A yfinance outage degrades to `null` alpha fields, not a failed request.
 - **CORS** is restricted via `CORSMiddleware` to origins in `ALLOWED_ORIGINS` (comma-separated env var, defaults to `http://localhost:3000`). This is defense in depth, not something normal operation relies on — the Next.js proxy routes talk to the backend server-to-server, which CORS doesn't apply to. Add your production frontend's origin to `ALLOWED_ORIGINS` before deploying, or direct browser calls to the backend will be rejected.
+
+---
+
+## Explicitly out of scope: organizational, legal, and business decisions
+
+A cross-functional deep review (Engineering, Product, Testing, Security, Executive, CTO, and
+Investor lenses) surfaced three findings that no code change can close, because they aren't
+engineering problems — they're decisions only a human owner/operator of this project can make.
+Listed here explicitly, by name, rather than silently left off the phased-implementation list
+that addressed everything else the same review found — the same "disclosed limitation, not a
+silent gap" instinct this document already applies to every unverified scraper assumption.
+
+1. **Bus factor is one.** The Executive-lens finding, independently corroborated by the
+   Investor lens: this repository's entire commit history traces to a single human author (with
+   an AI pair-programmer co-authoring a portion of commits). The unusually thorough documentation
+   throughout this file is real engineering discipline, but it is not evidence a team exists —
+   if anything, the density reads as compensation for the absence of one, encoding tribal
+   knowledge so the same single person (or an AI agent picking the project back up) doesn't have
+   to hold it all in their head. **Not fixable in code.** Whoever owns this project should have a
+   real answer to "who is the second engineer, and when do they start" — or, short of that, a
+   written handoff plan (this document is a strong start, not a substitute) — before treating this
+   as a system a business depends on rather than one person's project.
+2. **The scraping surface has not had a legal/compliance review.** This codebase scrapes at
+   least the following external sites, on a recurring schedule, at a scale beyond casual/hobby
+   use, with no confirmed Terms-of-Service review by qualified counsel behind any of them:
+   `screener.in`, `nseindia.com` (+ `nsearchives.nseindia.com`), `bseindia.com` (+
+   `api.bseindia.com`), `trendlyne.com`, `rbi.org.in`, plus GNews-mediated search results that
+   surface (without directly scraping) `economictimes.indiatimes.com`, `livemint.com`, and
+   `thehindubusinessline.com` among others. The judgment already shown in this codebase — e.g.
+   declining to scrape IPO grey-market-premium data specifically because SEBI itself has warned
+   against relying on it (see "IPO grey-market premium (GMP) — explicitly out of scope for now"
+   above) — is genuinely good instinct, and every scraper here already follows a consistent,
+   defensive, "never fabricate on a failure" convention. None of that is a substitute for an
+   actual legal risk assessment, which requires a licensed professional reviewing each site's
+   actual ToS, applicable Indian data-protection/scraping case law, and this product's specific
+   redistribution model — none of which an AI agent or this document can perform or stand in for.
+   **Not fixable in code.** Commission that review before scaling traffic against any of these
+   sources materially beyond where it sits today.
+3. **No real payment processing exists, by design, pending a business decision — not an
+   oversight.** `users.tier` (`free`/`pro`) and the informational `/pricing` page (see
+   "Discoverability + pricing" above) were both built specifically to *stop short* of a real
+   checkout flow: there is no payment processor integration, no billing system, and no automated
+   path that ever sets a row to `'pro'` — that column is set by an operator, by hand, today. This
+   is disclosed rather than fixed because standing up real payment processing is itself a
+   business decision (which processor, what pricing actually is, tax/compliance handling in
+   India specifically, refund policy, and so on) that has to precede any engineering work, not
+   follow it — building a checkout flow against undecided pricing and undecided payment-provider
+   terms would be guessing at requirements nobody has actually set, the same "don't fabricate
+   what isn't there yet" instinct this codebase already applies to data it doesn't have.
+   **Not fixable in code** until those business decisions are made; at that point it's a
+   normal, scoped engineering task like everything else in this document.
+
+These three are the sole remaining items from the deep review's own priority ledger not
+addressed by the phased implementation work above — everything else the review flagged (P0
+security/testing fixes, P1 product/engineering cleanups, P2 architectural bets) was implemented
+in code and is documented in its own section above.

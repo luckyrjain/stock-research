@@ -167,6 +167,14 @@ export interface Report {
   filings: Filing[];   // corporate announcements — also what signals.filings feeds on
   filings_summary: FilingsSummary;
   mf_holdings_trend: MfHoldingsStakeDelta[];
+  // True when every configured LLM provider failed (or returned
+  // unparseable output past its guardrail retry) and `analysis` is
+  // crew.py's generic safe-fallback HOLD, not a real analyst call — see
+  // crew.py::_safe_analysis_fallback. Previously invisible to the
+  // frontend: main._strip_meta() dropped the underscore-prefixed
+  // `_degraded` marker before the report ever left the backend, so a
+  // provider outage looked identical to a real HOLD verdict.
+  degraded: boolean;
 }
 
 // One entry per mutual fund currently holding this stock, ranked by stake —

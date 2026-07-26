@@ -1,6 +1,10 @@
 import json
-import unittest
+import os
+import shutil
 import sys
+import tempfile
+import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -22,6 +26,7 @@ sys.modules.setdefault(
 )
 
 import crew
+import llm_cost
 
 
 def _llm_response(content: str) -> SimpleNamespace:
@@ -60,6 +65,16 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
     }
 
     def setUp(self) -> None:
+        # crew.py now records LLM cost on every completion() call via
+        # llm_cost.py — redirect its file writes to a scratch directory so
+        # this test file never touches the real repo's output/ tree, same
+        # convention as every other stateful module's own test file.
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-llm-cost-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._cost_dir_patch = patch.object(llm_cost, "_COST_DIR", Path(self._tmpdir))
+        self._cost_dir_patch.start()
+        self.addCleanup(self._cost_dir_patch.stop)
+
         self.all_data = {
             "stock_info": {
                 "symbol": "SAILIFE",
@@ -284,6 +299,94 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
         # The raw exception is logged server-side (see analyst_llm_failed),
         # not echoed into the client-facing comment.
         self.assertNotIn("boom", analysis["valuation"]["comment"])
+        self.assertTrue(analysis["_degraded"])
+
+    def test_records_cost_on_a_successful_call(self) -> None:
+        with patch("litellm.completion", return_value=_llm_response(json.dumps(self._VALID_PAYLOAD))), \
+             patch("llm_cost.estimate_cost_usd", return_value=0.0123), \
+             patch("llm_cost.record_call_cost") as mock_record:
+            crew.run_analysis_with_fallback("SAILIFE", self.all_data)
+
+        mock_record.assert_called_once()
+        self.assertEqual(mock_record.call_args.kwargs["symbol"], "SAILIFE")
+        self.assertEqual(mock_record.call_args.kwargs["cost_usd"], 0.0123)
+
+
+class CrossProviderFailoverTest(unittest.TestCase):
+    """A full provider outage (not a formatting hiccup on an otherwise
+    healthy provider) previously converged straight to the generic
+    safe-HOLD fallback, indistinguishable from the fallback a working
+    provider's guardrail failure also produces — see crew.py's own
+    run_analysis_with_fallback docstring. These cover the failover path
+    that now runs when a second provider's API key is also configured."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-llm-cost-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._cost_dir_patch = patch.object(llm_cost, "_COST_DIR", Path(self._tmpdir))
+        self._cost_dir_patch.start()
+        self.addCleanup(self._cost_dir_patch.stop)
+
+        self._env_patch = patch.dict(
+            "os.environ",
+            {"ANTHROPIC_API_KEY": "fake-anthropic-key", "OPENAI_API_KEY": "fake-openai-key"},
+            clear=False,
+        )
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
+
+        self.all_data = {name: {} for name in crew.ALL_DATA_TASKS}
+
+    _VALID_PAYLOAD = AnalysisGuardrailFallbackTest._VALID_PAYLOAD
+
+    def test_primary_provider_exception_fails_over_to_the_second_configured_provider(self) -> None:
+        responses = [RuntimeError("anthropic is down"), _llm_response(json.dumps(self._VALID_PAYLOAD))]
+        with patch("litellm.completion", side_effect=responses) as mock_completion:
+            analysis = crew.run_analysis_with_fallback("SAILIFE", self.all_data)
+
+        self.assertEqual(mock_completion.call_count, 2)
+        self.assertEqual(analysis["recommendation"], self._VALID_PAYLOAD["recommendation"])
+        self.assertNotIn("_degraded", analysis)  # a genuine successful call, not the safe fallback
+
+    def test_both_providers_failing_still_falls_back_safely(self) -> None:
+        with patch("litellm.completion", side_effect=RuntimeError("every provider is down")) as mock_completion:
+            analysis = crew.run_analysis_with_fallback("TCS", self.all_data)
+
+        self.assertEqual(mock_completion.call_count, 2)  # one attempt per configured provider
+        self.assertEqual(analysis["recommendation"], "HOLD")
+        self.assertTrue(analysis["_degraded"])
+
+    def test_only_one_configured_provider_never_attempts_failover(self) -> None:
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("OPENAI_API_KEY", None)  # patch.dict restores it on exit
+            with patch("litellm.completion", side_effect=RuntimeError("boom")) as mock_completion:
+                crew.run_analysis_with_fallback("TCS", self.all_data)
+        self.assertEqual(mock_completion.call_count, 1)
+
+    def test_configured_providers_reflects_every_key_present(self) -> None:
+        self.assertEqual(set(crew._configured_providers()), {"anthropic", "openai"})
+
+    def test_fallback_provider_uses_its_own_default_model_not_analyst_model_override(self) -> None:
+        # ANALYST_MODEL is only meant for the primary provider — reusing it
+        # for a failover attempt against a *different* provider would very
+        # likely be an invalid model string for that provider.
+        with patch.dict("os.environ", {"ANALYST_MODEL": "claude-some-specific-snapshot"}, clear=False):
+            model, _key = crew._resolve_model_and_key("openai", is_primary=False)
+        self.assertEqual(model, crew._ANALYST_DEFAULTS["openai"])
+
+    def test_explicit_llm_provider_pin_disables_failover_even_with_a_second_key_present(self) -> None:
+        # Regression test: an operator setting LLM_PROVIDER (e.g. to pin a
+        # local-only Ollama deployment for data residency) is a deliberate
+        # single-provider choice, not "whichever key happened to be
+        # configured first." A stray second key left in the same
+        # environment for an unrelated reason must not cause this
+        # analysis's fetched data to silently be sent to that other
+        # provider on a transient failure of the pinned one.
+        with patch.dict("os.environ", {"LLM_PROVIDER": "anthropic"}, clear=False):
+            with patch("litellm.completion", side_effect=RuntimeError("anthropic is down")) as mock_completion:
+                analysis = crew.run_analysis_with_fallback("TCS", self.all_data)
+
+        self.assertEqual(mock_completion.call_count, 1)  # no failover attempt at all
         self.assertTrue(analysis["_degraded"])
 
 

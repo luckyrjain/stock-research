@@ -89,25 +89,31 @@ the same in-memory-per-process behavior this app had before Redis support existe
 | LLM concurrency ceiling | Caps concurrent analyst/market-picks LLM pipelines across all callers | Each worker gets its own ceiling — `N` workers × the configured limit can run concurrently instead of the limit as a whole |
 | SME refresh lock | One `/api/sme-signals/refresh` run at a time | Two workers can both accept the POST and run the pipeline concurrently — wasteful (duplicate NSE/yfinance calls), not corrupting (upserts are idempotent) |
 | Cached DB engine (`_DB_ENGINE`) | Reused SQLAlchemy engine | Harmless either way — each worker just gets its own connection pool, not a bug, just not shared |
+| `cache.py`'s six-task cache (`stock_info`, `research`, `news`, ...) | The persistent shared state behind every analysis/market-picks/peers/etc. cache TTL | **Only a problem across separate *hosts*/replicas without a shared disk volume** (same-host workers already share one local disk) — each host forks its own copy of every cache entry, multiplying scraper load on Screener.in/NSE/Trendlyne/RBI by however many hosts are running, since none of them see each other's writes |
 
 **Set `REDIS_URL`** (Docker Compose does this automatically via its `redis` service) before scaling
-the backend past one worker/replica — with it set, all three guards above are correctly shared across
-workers, and the default `CMD` in `Dockerfile` (which currently omits `--workers`) can safely gain one.
-Without `REDIS_URL`, keep the backend at a single worker/replica — the gaps in the table still apply.
-The frontend has no such constraint; scale it however you like.
+the backend past one worker/replica — with it set, the three rate-limiter-backed guards above are
+correctly shared across workers on one host, *and* `cache.py` becomes genuinely cross-host shared
+state (see `cache.py`'s own module docstring) — the fix for the single biggest ceiling on running
+this backend across more than one host, since every scraped data slice was previously only ever
+cached per-instance. The default `CMD` in `Dockerfile` (which currently omits `--workers`) can safely
+gain one once `REDIS_URL` is set. Without it, keep the backend at a single worker/replica — the gaps
+in the table still apply, cache included. The frontend has no such constraint; scale it however you like.
 
 A Redis outage mid-flight degrades gracefully, not fatally: every `rate_limiter.py` call falls back to
-its in-memory equivalent for that one call and logs a warning (`redis_rate_limit_failed`, etc.) — the
-backend keeps serving requests with per-worker-only guards until Redis is reachable again, the same
-"missing optional infra degrades rather than breaks" convention as `DATABASE_URL`/`SMTP_HOST`.
+its in-memory equivalent for that one call, and `cache.py` falls back to its own local-disk read/write
+for that one call, each logging a warning (`redis_rate_limit_failed`, `cache_redis_read_failed`, etc.)
+— the backend keeps serving requests with per-worker/per-host-only guards until Redis is reachable
+again, the same "missing optional infra degrades rather than breaks" convention as
+`DATABASE_URL`/`SMTP_HOST`.
 
 ## Environment variable checklist
 
 Beyond an LLM provider key (see [Setup](setup.md)), production deployments should set:
 
 - `DATABASE_URL` — required for SME signals and the watchlist; Docker Compose sets this automatically
-- `REDIS_URL` — required only if you scale the backend past one worker/replica (see "Scaling" above);
-  Docker Compose sets this automatically
+- `REDIS_URL` — required only if you scale the backend past one worker/replica, or across more than
+  one host (see "Scaling" above); Docker Compose sets this automatically
 - `ALLOWED_ORIGINS` — add your real frontend origin (comma-separated for multiple), or direct browser
   calls to the backend get CORS-rejected; defaults to `http://localhost:3000` (see `api.py`)
 - `API_URL` (frontend) — point at your backend's real address if not using Docker Compose's automatic wiring

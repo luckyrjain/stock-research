@@ -202,6 +202,13 @@ def fetch_trendlyne_numeric_consensus(symbol: str) -> dict:
 
         resp = requests.get(url, headers=_HEADERS, timeout=15)
         resp.raise_for_status()
+        # _resolve_trendlyne_url() already host-checked `url` itself, but a
+        # redirect encountered on THIS fetch (not the resolution step) would
+        # otherwise be followed with no check at all — resp.url reflects the
+        # final URL after following redirects, so re-verify it lands on
+        # trendlyne.com before trusting/parsing whatever it returned.
+        if not _is_trendlyne_host(resp.url):
+            return _empty_result(sym)
         soup = BeautifulSoup(resp.text, "lxml")
         page_text = " ".join(soup.stripped_strings)
 

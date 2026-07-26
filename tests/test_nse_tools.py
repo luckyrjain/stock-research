@@ -6,6 +6,7 @@ from lxml import etree
 
 from tools.nse_tools import (
     _build_quote_payload,
+    _is_nse_host,
     _is_valid_quote,
     get_mf_holdings,
     get_nse_basic_ratios,
@@ -118,6 +119,22 @@ class GetStockQuoteTest(unittest.TestCase):
         self.assertEqual(result["primary_exchange"], "BSE")
 
 
+class IsNseHostTest(unittest.TestCase):
+    def test_accepts_bare_and_subdomain_hosts(self) -> None:
+        self.assertTrue(_is_nse_host("https://nseindia.com/x.xml"))
+        self.assertTrue(_is_nse_host("https://www.nseindia.com/x.xml"))
+        self.assertTrue(_is_nse_host("https://nsearchives.nseindia.com/x.xml"))
+
+    def test_rejects_lookalike_and_off_domain_hosts(self) -> None:
+        self.assertFalse(_is_nse_host("https://evilnseindia.com/x.xml"))
+        self.assertFalse(_is_nse_host("https://attacker.com/nseindia.com"))
+        self.assertFalse(_is_nse_host("https://nseindia.com.attacker.com/x.xml"))
+
+    def test_rejects_non_http_schemes(self) -> None:
+        self.assertFalse(_is_nse_host("file:///etc/passwd"))
+        self.assertFalse(_is_nse_host("ftp://nseindia.com/x.xml"))
+
+
 class GetMfHoldingsTest(unittest.TestCase):
     def test_no_shareholding_records_returns_error(self) -> None:
         sess = MagicMock()
@@ -151,11 +168,12 @@ class GetMfHoldingsTest(unittest.TestCase):
 
         sess = MagicMock()
         master_resp = MagicMock()
-        master_resp.json.return_value = [{"date": "2026-01-01", "xbrl": "https://nse.example/x.xml"}]
+        master_resp.json.return_value = [{"date": "2026-01-01", "xbrl": "https://nsearchives.nseindia.com/x.xml"}]
         sess.get.return_value = master_resp
 
         xbrl_resp = MagicMock()
         xbrl_resp.content = xbrl.encode()
+        xbrl_resp.url = "https://nsearchives.nseindia.com/x.xml"
 
         with patch("tools.nse_tools._nse_session", return_value=sess), \
              patch("requests.get", return_value=xbrl_resp):
@@ -192,11 +210,12 @@ class GetMfHoldingsTest(unittest.TestCase):
 
         sess = MagicMock()
         master_resp = MagicMock()
-        master_resp.json.return_value = [{"date": "2026-01-01", "xbrl": "https://nse.example/x.xml"}]
+        master_resp.json.return_value = [{"date": "2026-01-01", "xbrl": "https://nsearchives.nseindia.com/x.xml"}]
         sess.get.return_value = master_resp
 
         xbrl_resp = MagicMock()
         xbrl_resp.content = xbrl.encode()
+        xbrl_resp.url = "https://nsearchives.nseindia.com/x.xml"
 
         with patch("tools.nse_tools._nse_session", return_value=sess), \
              patch("requests.get", return_value=xbrl_resp):
@@ -222,17 +241,49 @@ class GetMfHoldingsTest(unittest.TestCase):
 
         sess = MagicMock()
         master_resp = MagicMock()
-        master_resp.json.return_value = [{"date": "2026-01-01", "xbrl": "https://nse.example/x.xml"}]
+        master_resp.json.return_value = [{"date": "2026-01-01", "xbrl": "https://nsearchives.nseindia.com/x.xml"}]
         sess.get.return_value = master_resp
 
         xbrl_resp = MagicMock()
         xbrl_resp.content = xbrl.encode()
+        xbrl_resp.url = "https://nsearchives.nseindia.com/x.xml"
 
         with patch("tools.nse_tools._nse_session", return_value=sess), \
              patch("requests.get", return_value=xbrl_resp):
             result = json.loads(get_mf_holdings.run(symbol="TCS"))
 
         self.assertEqual(result["mutual_funds"], [])
+
+    def test_xbrl_url_off_nseindia_host_is_rejected(self) -> None:
+        # SSRF regression: the xbrl field comes straight out of NSE's own
+        # API response, not a hardcoded endpoint — must never be fetched
+        # blind.
+        sess = MagicMock()
+        master_resp = MagicMock()
+        master_resp.json.return_value = [{"date": "2026-01-01", "xbrl": "https://evil.example/x.xml"}]
+        sess.get.return_value = master_resp
+        with patch("tools.nse_tools._nse_session", return_value=sess), \
+             patch("requests.get") as mock_get:
+            result = json.loads(get_mf_holdings.run(symbol="TCS"))
+        mock_get.assert_not_called()
+        self.assertIn("error", result)
+
+    def test_xbrl_redirect_off_nseindia_host_is_rejected(self) -> None:
+        # SSRF regression: even a legitimately-hosted URL must be re-checked
+        # after following redirects — a redirect at fetch time could
+        # otherwise land off nseindia.com with no check at all.
+        sess = MagicMock()
+        master_resp = MagicMock()
+        master_resp.json.return_value = [{"date": "2026-01-01", "xbrl": "https://nsearchives.nseindia.com/x.xml"}]
+        sess.get.return_value = master_resp
+
+        xbrl_resp = MagicMock()
+        xbrl_resp.url = "https://evil.example/x.xml"
+
+        with patch("tools.nse_tools._nse_session", return_value=sess), \
+             patch("requests.get", return_value=xbrl_resp):
+            result = json.loads(get_mf_holdings.run(symbol="TCS"))
+        self.assertIn("error", result)
 
 
 class GetNseBasicRatiosTest(unittest.TestCase):
@@ -266,13 +317,14 @@ class GetNseBasicRatiosTest(unittest.TestCase):
 
     def test_parses_eps_from_xbrl_financial_results_filing(self) -> None:
         filings = [
-            {"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nse.example/results.xml"},
+            {"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nsearchives.nseindia.com/results.xml"},
         ]
         xbrl = '''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance">
           <BasicEarningsPerEquityShare contextRef="D1" unitRef="INR">42.5</BasicEarningsPerEquityShare>
         </xbrli:xbrl>'''
         xbrl_resp = MagicMock()
         xbrl_resp.content = xbrl.encode()
+        xbrl_resp.url = "https://nsearchives.nseindia.com/x.xml"
 
         with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
              patch("requests.get", return_value=xbrl_resp):
@@ -284,14 +336,15 @@ class GetNseBasicRatiosTest(unittest.TestCase):
 
     def test_prefers_financial_results_filing_over_other_categories(self) -> None:
         filings = [
-            {"date": "2026-02-01", "desc": "Board Meeting Intimation", "xbrl": "https://nse.example/board.xml"},
-            {"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nse.example/results.xml"},
+            {"date": "2026-02-01", "desc": "Board Meeting Intimation", "xbrl": "https://nsearchives.nseindia.com/board.xml"},
+            {"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nsearchives.nseindia.com/results.xml"},
         ]
         xbrl = '''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance">
           <BasicEarningsPerEquityShare contextRef="D1">10.0</BasicEarningsPerEquityShare>
         </xbrli:xbrl>'''
         xbrl_resp = MagicMock()
         xbrl_resp.content = xbrl.encode()
+        xbrl_resp.url = "https://nsearchives.nseindia.com/x.xml"
 
         with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
              patch("requests.get", return_value=xbrl_resp) as mock_get:
@@ -299,39 +352,56 @@ class GetNseBasicRatiosTest(unittest.TestCase):
 
         self.assertEqual(result["eps"], 10.0)
         mock_get.assert_called_once_with(
-            "https://nse.example/results.xml",
+            "https://nsearchives.nseindia.com/results.xml",
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
             timeout=20,
         )
 
     def test_unrecognized_tag_names_return_empty_dict(self) -> None:
-        filings = [{"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nse.example/results.xml"}]
+        filings = [{"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nsearchives.nseindia.com/results.xml"}]
         xbrl = '''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance">
           <SomeUnrelatedFact contextRef="D1">99</SomeUnrelatedFact>
         </xbrli:xbrl>'''
         xbrl_resp = MagicMock()
         xbrl_resp.content = xbrl.encode()
+        xbrl_resp.url = "https://nsearchives.nseindia.com/x.xml"
 
         with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
              patch("requests.get", return_value=xbrl_resp):
             self.assertEqual(get_nse_basic_ratios("TCS"), {})
 
     def test_non_numeric_eps_fact_does_not_raise(self) -> None:
-        filings = [{"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nse.example/results.xml"}]
+        filings = [{"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nsearchives.nseindia.com/results.xml"}]
         xbrl = '''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance">
           <BasicEarningsPerEquityShare contextRef="D1">not-a-number</BasicEarningsPerEquityShare>
         </xbrli:xbrl>'''
         xbrl_resp = MagicMock()
         xbrl_resp.content = xbrl.encode()
+        xbrl_resp.url = "https://nsearchives.nseindia.com/x.xml"
 
         with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
              patch("requests.get", return_value=xbrl_resp):
             self.assertEqual(get_nse_basic_ratios("TCS"), {})
 
     def test_xbrl_fetch_failure_returns_empty_dict_not_raise(self) -> None:
-        filings = [{"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nse.example/results.xml"}]
+        filings = [{"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nsearchives.nseindia.com/results.xml"}]
         with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
              patch("requests.get", side_effect=ConnectionError("boom")):
+            self.assertEqual(get_nse_basic_ratios("TCS"), {})
+
+    def test_xbrl_url_off_nseindia_host_is_rejected(self) -> None:
+        filings = [{"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://evil.example/x.xml"}]
+        with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
+             patch("requests.get") as mock_get:
+            self.assertEqual(get_nse_basic_ratios("TCS"), {})
+        mock_get.assert_not_called()
+
+    def test_xbrl_redirect_off_nseindia_host_is_rejected(self) -> None:
+        filings = [{"date": "2026-01-01", "desc": "Financial Results", "xbrl": "https://nsearchives.nseindia.com/results.xml"}]
+        xbrl_resp = MagicMock()
+        xbrl_resp.url = "https://evil.example/x.xml"
+        with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
+             patch("requests.get", return_value=xbrl_resp):
             self.assertEqual(get_nse_basic_ratios("TCS"), {})
 
     def test_picks_the_chronologically_newest_filing_not_lexically_last(self) -> None:
@@ -342,14 +412,15 @@ class GetNseBasicRatiosTest(unittest.TestCase):
         # lexically SMALLER ("0" < "2"), so a raw string sort would
         # (wrongly) treat the January filing as more recent.
         filings = [
-            {"date": "20-Jan-2026", "desc": "Financial Results", "xbrl": "https://nse.example/jan.xml"},
-            {"date": "05-Feb-2026", "desc": "Financial Results", "xbrl": "https://nse.example/feb.xml"},
+            {"date": "20-Jan-2026", "desc": "Financial Results", "xbrl": "https://nsearchives.nseindia.com/jan.xml"},
+            {"date": "05-Feb-2026", "desc": "Financial Results", "xbrl": "https://nsearchives.nseindia.com/feb.xml"},
         ]
         xbrl = '''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance">
           <BasicEarningsPerEquityShare contextRef="D1">99.0</BasicEarningsPerEquityShare>
         </xbrli:xbrl>'''
         xbrl_resp = MagicMock()
         xbrl_resp.content = xbrl.encode()
+        xbrl_resp.url = "https://nsearchives.nseindia.com/x.xml"
 
         with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
              patch("requests.get", return_value=xbrl_resp) as mock_get:
@@ -357,7 +428,7 @@ class GetNseBasicRatiosTest(unittest.TestCase):
 
         self.assertEqual(result["as_of_date"], "05-Feb-2026")
         mock_get.assert_called_once_with(
-            "https://nse.example/feb.xml",
+            "https://nsearchives.nseindia.com/feb.xml",
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
             timeout=20,
         )

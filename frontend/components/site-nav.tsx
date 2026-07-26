@@ -11,7 +11,8 @@ export type NavKey =
   | 'track-record'
   | 'watchlist'
   | 'portfolio'
-  | 'compare';
+  | 'compare'
+  | 'api-keys';
 
 const LINKS: { key: NavKey; href: string; label: string }[] = [
   { key: 'market-picks', href: '/market-picks',         label: 'Market Picks' },
@@ -21,6 +22,11 @@ const LINKS: { key: NavKey; href: string; label: string }[] = [
   { key: 'watchlist',    href: '/watchlist',              label: 'Watchlist' },
   { key: 'portfolio',    href: '/portfolio',              label: 'Portfolio' },
   { key: 'compare',      href: '/compare',                label: 'Compare' },
+  // A signed-out visitor previously had no navigational path to discover the
+  // API exists at all — it was reachable only through the account dropdown
+  // once signed in. Visible to everyone (like every other link here); the
+  // page itself already handles the signed-out state with its own prompt.
+  { key: 'api-keys',     href: '/api-keys',               label: 'API Keys' },
 ];
 
 interface Props {

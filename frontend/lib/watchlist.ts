@@ -85,6 +85,38 @@ export function refreshWatchlist(): Promise<WatchlistItem[]> {
   return fetchItems();
 }
 
+export interface ClaimResult {
+  claimed: number;
+  skippedOverCap: number;
+}
+
+/** Opt-in migration of the anonymous browser's watchlist onto the account
+ * that just signed in — the escape hatch for this app's deliberate "no
+ * migration on sign-in" default (see CLAUDE.md's "Watchlist flow"). Must be
+ * called with a session cookie already set (see app/auth/verify/page.tsx,
+ * the one caller) — the backend requires it and returns 401 without one.
+ * Returns null on any failure (network, 401, backend down) so the caller
+ * can show a generic "couldn't claim" message rather than crashing the
+ * sign-in flow over a non-critical step. */
+export async function claimWatchlist(clientId: string): Promise<ClaimResult | null> {
+  try {
+    const res = await fetch('/api/watchlist/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: clientId }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { claimed: number; skipped_over_cap: number; items: WatchlistItem[] };
+    generation++;
+    inFlight = null;
+    cachedItems = data.items;
+    notify();
+    return { claimed: data.claimed, skippedOverCap: data.skipped_over_cap };
+  } catch {
+    return null;
+  }
+}
+
 /** Shared cross-component watchlist state, backed by Postgres (watchlist_items,
  * keyed by an anonymous per-browser client_id — see getClientId above) or, once
  * signed in, an account (see refreshWatchlist above and CLAUDE.md's "Watchlist

@@ -188,7 +188,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -209,6 +209,14 @@ def _is_isin(s: str) -> bool:
 
 _TICKER_RE = re.compile(r"^[A-Z0-9&\-]{1,20}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Every REST endpoint already sanitizes an internal exception to this shape
+# before it reaches the client (see e.g. "Database error. See server logs.").
+# The two SSE streaming endpoints (/api/analyse, /api/market-picks) previously
+# embedded raw str(exc) text straight into the events a browser receives —
+# this is the same sanitization, reused there. The real message still reaches
+# log_event() at the call site, for server-side visibility.
+_SANITIZED_ERROR = "An internal error occurred. See server logs."
 
 
 def _load_isin_map() -> dict:
@@ -620,8 +628,16 @@ async def analyse(symbol: str, request: Request, force: bool = False):
                         await q.put({"event": "task_done", "task": name, "ok": True})
                         return name, normed
                     except Exception as exc:
-                        await q.put({"event": "task_done", "task": name, "ok": False, "error": str(exc)})
-                        return name, {"error": str(exc), "symbol": sym}
+                        log_event(LOGGER, "fetch_task_failed", level="error", run_id=run_id, symbol=sym, task=name, error=str(exc))
+                        # The SSE event reaches the browser directly — never echo
+                        # raw exception text there, same sanitization convention
+                        # every REST endpoint already follows. The dict returned
+                        # to the caller stays internal (feeds cache/report-building
+                        # logic that only checks for the presence of an "error"
+                        # key, per cache.py's _is_failed_payload()), but is
+                        # sanitized too rather than trusting that boundary forever.
+                        await q.put({"event": "task_done", "task": name, "ok": False, "error": _SANITIZED_ERROR})
+                        return name, {"error": _SANITIZED_ERROR, "symbol": sym}
 
                 tasks = [asyncio.create_task(fetch_one(n)) for n in stale]
                 for _ in stale:
@@ -767,7 +783,7 @@ async def analyse(symbol: str, request: Request, force: bool = False):
 
         except Exception as exc:
             log_event(LOGGER, "api_analysis_failed", level="error", run_id=run_id, symbol=sym, error=str(exc))
-            yield _sse({"event": "error", "message": str(exc)})
+            yield _sse({"event": "error", "message": _SANITIZED_ERROR})
         finally:
             if llm_slot_acquired:
                 _release_llm_slot()
@@ -872,7 +888,7 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
                     })
                 except Exception as exc:
                     log_event(LOGGER, "market_picks_failed", level="error", run_id=run_id, error=str(exc))
-                    loop.call_soon_threadsafe(q.put_nowait, {"event": "error", "message": str(exc)})
+                    loop.call_soon_threadsafe(q.put_nowait, {"event": "error", "message": _SANITIZED_ERROR})
                 finally:
                     _release_llm_slot()
                     if lock_acquired:
@@ -894,7 +910,7 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
             _release_llm_slot()
             if lock_acquired:
                 rate_limiter.release_lock(_MARKET_PICKS_REFRESH_LOCK_NAME)
-            yield _sse({"event": "error", "message": str(exc)})
+            yield _sse({"event": "error", "message": _SANITIZED_ERROR})
             return
 
         while True:
@@ -1311,6 +1327,8 @@ async def get_peers(request: Request, symbol: str):
 
         raw = json.loads(get_peer_comparison.run(symbol=sym))
         if raw.get("error"):
+            import scraper_error_counters
+            scraper_error_counters.record_scraper_error("peers", symbol=sym)
             return {
                 "symbol": sym, "self": None, "peers": [], "sector_median": None,
                 "percentiles": {}, "absolute_anchor": None,
@@ -1374,6 +1392,8 @@ async def get_financials(request: Request, symbol: str):
             # transient scrape failure should be retried on the next
             # request, not locked in as "this company has no financials"
             # for a full 24h TTL.
+            import scraper_error_counters
+            scraper_error_counters.record_scraper_error("financials", symbol=sym)
             return {"symbol": sym, "profit_loss": None, "balance_sheet": None, "cash_flow": None, "dcf": None, "concalls": []}
 
         stock_info = cache.load(sym, "stock_info") or {}
@@ -1436,18 +1456,34 @@ async def get_insider_activity(request: Request, symbol: str):
         # either one shouldn't be able to take down the *other* section, the
         # same per-section isolation _consolidated_payload uses.
         try:
+            import scraper_error_counters
             from tools.nse_insider_trades import fetch_insider_trades_for_symbol
 
-            return fetch_insider_trades_for_symbol(sym).get("trades", [])
+            raw = fetch_insider_trades_for_symbol(sym)
+            if raw.get("error"):
+                # These tool functions never raise (see "tools never raise"
+                # convention) — a scrape failure comes back as this "error"
+                # key, not an exception, so the except clause below alone
+                # would never catch it. Without this check, a real NSE
+                # failure and "no insider trades today" (the expected common
+                # case) both silently collapse to the same [].
+                scraper_error_counters.record_scraper_error("insider_trades", symbol=sym)
+                return []
+            return raw.get("trades", [])
         except Exception as exc:
             log_event(LOGGER, "insider_trades_fetch_failed", level="warning", symbol=sym, error=str(exc))
             return []
 
     def _fetch_bulk_block() -> list[dict]:
         try:
+            import scraper_error_counters
             from tools.nse_bulk_block_deals import fetch_bulk_block_deals_for_symbol
 
-            return fetch_bulk_block_deals_for_symbol(sym).get("deals", [])
+            raw = fetch_bulk_block_deals_for_symbol(sym)
+            if raw.get("error"):
+                scraper_error_counters.record_scraper_error("bulk_block_deals", symbol=sym)
+                return []
+            return raw.get("deals", [])
         except Exception as exc:
             log_event(LOGGER, "bulk_block_deals_fetch_failed", level="warning", symbol=sym, error=str(exc))
             return []
@@ -1515,9 +1551,14 @@ async def get_street_consensus(request: Request, symbol: str):
         # first-exception-wins behavior, same per-section isolation as
         # insider_activity's two independent sub-fetches.
         try:
+            import scraper_error_counters
             from tools.trendlyne_agent import fetch_trendlyne_consensus_for_symbol
 
-            return fetch_trendlyne_consensus_for_symbol(sym).get("articles", [])
+            raw = fetch_trendlyne_consensus_for_symbol(sym)
+            if raw.get("error"):
+                scraper_error_counters.record_scraper_error("trendlyne_articles", symbol=sym)
+                return []
+            return raw.get("articles", [])
         except Exception as exc:
             log_event(LOGGER, "trendlyne_articles_fetch_failed", level="warning", symbol=sym, error=str(exc))
             return []
@@ -1529,6 +1570,7 @@ async def get_street_consensus(request: Request, symbol: str):
         # to never raise anyway, but this endpoint doesn't lean on that
         # guarantee alone.
         try:
+            import scraper_error_counters
             from tools.trendlyne_scraper import fetch_trendlyne_numeric_consensus
 
             result = fetch_trendlyne_numeric_consensus(sym)
@@ -1539,6 +1581,8 @@ async def get_street_consensus(request: Request, symbol: str):
             # same "sanitized, no raw exception text" convention as every
             # other endpoint that surfaces a failure state (e.g. the
             # Watchlist flow's DB-unreachable 503 handling).
+            if result.get("error"):
+                scraper_error_counters.record_scraper_error("trendlyne_numeric_consensus", symbol=sym)
             result.pop("error", None)
             return result
         except Exception as exc:
@@ -2105,455 +2149,23 @@ async def refresh_screener(request: Request):
     return {"started": True}
 
 
-# ── Watchlist ─────────────────────────────────────────────────────────────────
-# Every row is owned by exactly one identity: either the anonymous per-browser
-# client_id (a UUID the frontend generates on first use and keeps in
-# localStorage — see frontend/lib/watchlist.ts) or, once signed in, the
-# account's user_id (see auth.py). A valid session always wins over client_id
-# when both are present in a request — that's the whole point of an account:
-# it doesn't depend on which browser sent the request. Signing in does NOT
-# claim/merge an existing client_id's rows onto the account (see
-# db/models.py's watchlist_items comment) — a freshly-signed-in user simply
-# starts seeing whatever their account already owns.
-_CLIENT_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,36}$")  # matches watchlist_items.client_id VARCHAR(36)
-_MAX_WATCHLIST_ITEMS_PER_CLIENT = 200
-_VALID_EXCHANGES = {"NSE", "BSE"}
-
-# (owner_type, owner_value) — owner_type is "user" (owner_value: int user id)
-# or "client" (owner_value: str client_id). Never constructed directly outside
-# _resolve_watchlist_owner, so owner_type is always one of exactly these two
-# literals wherever it's used to pick a column name below.
-WatchlistOwner = tuple
-
-
-def _resolve_watchlist_owner(token: str | None, client_id: str | None) -> WatchlistOwner:
-    """A valid session always takes priority over client_id. Runs inside the
-    same executor thread as the caller's other DB work, since checking the
-    session also hits the DB. Raises ValueError (-> 422) if neither a valid
-    session nor a well-formed client_id is available — this endpoint doesn't
-    otherwise require being signed in, so an expired/invalid token just falls
-    through to the client_id path rather than surfacing as a 401."""
-    if token:
-        import auth as _auth
-        user = _auth.get_user_for_session(token)
-        if user:
-            return ("user", user["id"])
-    if not client_id or not _CLIENT_ID_RE.match(client_id):
-        raise ValueError("Invalid client_id.")
-    return ("client", client_id)
-
-
-def _owner_column(owner: WatchlistOwner) -> str:
-    return "user_id" if owner[0] == "user" else "client_id"
-
-
-class WatchlistAddRequest(BaseModel):
-    client_id: str | None = None
-    symbol: str
-    company: str = Field(default="")
-    exchange: str = Field(default="NSE")
-
-
-def _watchlist_rows_sync(owner: WatchlistOwner) -> list[dict]:
-    from sqlalchemy import text as _text
-
-    column = _owner_column(owner)
-    engine = _get_db_engine()
-    with engine.connect() as conn:
-        rows = conn.execute(_text(f"""
-            SELECT symbol, company, exchange, added_at::text AS "addedAt"
-            FROM watchlist_items
-            WHERE {column} = :owner_value
-            ORDER BY added_at DESC
-        """), {"owner_value": owner[1]}).mappings().fetchall()
-    return [dict(r) for r in rows]
-
-
-@app.get("/api/watchlist")
-async def get_watchlist(request: Request, client_id: str | None = Query(None)):
-    _rate_limit(request, "watchlist_read", max_calls=120, window_seconds=60)
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
-    token = _bearer_token_from_request(request)
-
-    def _sync() -> list[dict]:
-        owner = _resolve_watchlist_owner(token, client_id)
-        return _watchlist_rows_sync(owner)
-
-    loop = asyncio.get_running_loop()
-    try:
-        items = await loop.run_in_executor(None, _sync)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        log_event(LOGGER, "watchlist_read_failed", level="error", error=str(exc))
-        raise HTTPException(status_code=503, detail="Database error. See server logs.")
-    return {"items": items}
-
-
-@app.get("/api/watchlist/calendar")
-async def get_watchlist_calendar(request: Request, symbols: str = Query(...)):
-    """Upcoming-and-notable roll-up across a set of watched symbols — two
-    independent sources, each best-effort and each optional per symbol:
-
-    1. A corporate-action calendar read straight off each symbol's
-       already-cached `filings` data, running the same classify_filings()
-       classifier main._build_report() already runs per-symbol for the
-       single-stock report's "Corporate Filings" card. No new scraping.
-    2. A same-day recommendation-change / price-move flag via
-       verdict_history.detect_recent_changes() — the same two conditions
-       watchlist_alerts.py's daily digest email already computes and sends,
-       now also reachable without waiting for that email to arrive. Degrades
-       to both `None` (not an error) when DATABASE_URL isn't set, same as
-       every other verdict_history-backed read in this app.
-
-    The caller (the watchlist page, which already has its own symbol list
-    from GET /api/watchlist) passes the symbols directly rather than this
-    endpoint re-querying ownership itself. A symbol contributes an entry
-    when it has *something* from either source — no cached filings and no
-    notable change means no entry, not an error.
-    """
-    _rate_limit(request, "watchlist_calendar", max_calls=30, window_seconds=60)
-    sym_list = [s.strip().upper() for s in symbols.split(",") if _TICKER_RE.match(s.strip())][:_MAX_WATCHLIST_ITEMS_PER_CLIENT]
-    if not sym_list:
-        return {"entries": []}
-
-    def _one(sym: str) -> dict | None:
-        import cache
-        import verdict_history
-        from signals.filings_classifier import classify_filings
-
-        cached = cache.load(sym, "filings")
-        filings_list = cached.get("filings", []) if cached else []
-        summary = classify_filings(filings_list) if isinstance(filings_list, list) and filings_list else {
-            "corporate_actions": [], "rating_action": None, "next_results_date": None,
-        }
-
-        changes = verdict_history.detect_recent_changes(sym)
-
-        has_filings_content = bool(summary.get("next_results_date") or summary.get("corporate_actions"))
-        has_notable_change = bool(changes["recommendation_change"] or changes["price_move"])
-        if not has_filings_content and not has_notable_change:
-            return None
-        return {
-            "symbol": sym,
-            **summary,
-            "recommendation_change": changes["recommendation_change"],
-            "price_move": changes["price_move"],
-        }
-
-    loop = asyncio.get_running_loop()
-    results = await asyncio.gather(*[loop.run_in_executor(None, _one, s) for s in sym_list])
-    entries = [r for r in results if r]
-    # A notable change (something to act on today) sorts first; within each
-    # group, symbols with no next_results_date sort after ones that have it
-    # rather than first — a corporate-action-only entry (e.g. a dividend
-    # filing with no upcoming results date) is still worth surfacing, just
-    # not ahead of an actual price move or recommendation flip.
-    entries.sort(key=lambda e: (
-        0 if (e["recommendation_change"] or e["price_move"]) else 1,
-        e.get("next_results_date") or "9999-99-99",
-    ))
-    return {"entries": entries}
-
-
-@app.post("/api/watchlist")
-async def add_to_watchlist(request: Request, body: WatchlistAddRequest):
-    _rate_limit(request, "watchlist_write", max_calls=60, window_seconds=60)
-    symbol = body.symbol.upper().strip()
-    if not _TICKER_RE.match(symbol):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
-    exchange = body.exchange.upper().strip()
-    if exchange not in _VALID_EXCHANGES:
-        raise HTTPException(status_code=422, detail="Invalid exchange.")
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
-    token = _bearer_token_from_request(request)
-
-    def _upsert_sync() -> list[dict]:
-        from sqlalchemy import text as _text
-
-        owner = _resolve_watchlist_owner(token, body.client_id)
-        column = _owner_column(owner)
-        # Distinct lock-key namespace per owner type so a client_id string and
-        # a user_id integer can never collide on the same advisory lock.
-        lock_key = f"watchlist:{owner[0]}:{owner[1]}"
-
-        engine = _get_db_engine()
-        with engine.begin() as conn:
-            # Advisory lock scoped to this transaction (released automatically on
-            # commit/rollback) serializes concurrent adds for the same owner, so
-            # the count-then-insert below can't race past _MAX_WATCHLIST_ITEMS_PER_CLIENT.
-            conn.execute(_text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"), {"lock_key": lock_key})
-            count = conn.execute(_text(
-                f"SELECT COUNT(*) FROM watchlist_items WHERE {column} = :owner_value"
-            ), {"owner_value": owner[1]}).scalar() or 0
-            if count >= _MAX_WATCHLIST_ITEMS_PER_CLIENT:
-                raise ValueError(f"Watchlist is capped at {_MAX_WATCHLIST_ITEMS_PER_CLIENT} stocks.")
-            conn.execute(_text(f"""
-                INSERT INTO watchlist_items ({column}, symbol, company, exchange)
-                VALUES (:owner_value, :symbol, :company, :exchange)
-                ON CONFLICT ({column}, symbol) DO NOTHING
-            """), {
-                "owner_value": owner[1], "symbol": symbol,
-                "company": body.company[:200], "exchange": exchange,
-            })
-        return _watchlist_rows_sync(owner)
-
-    loop = asyncio.get_running_loop()
-    try:
-        items = await loop.run_in_executor(None, _upsert_sync)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        log_event(LOGGER, "watchlist_write_failed", level="error", error=str(exc))
-        raise HTTPException(status_code=503, detail="Database error. See server logs.")
-    return {"items": items}
-
-
-@app.delete("/api/watchlist/{symbol}")
-async def remove_from_watchlist(request: Request, symbol: str, client_id: str | None = Query(None)):
-    _rate_limit(request, "watchlist_write", max_calls=60, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
-    token = _bearer_token_from_request(request)
-
-    def _delete_sync() -> list[dict]:
-        from sqlalchemy import text as _text
-
-        owner = _resolve_watchlist_owner(token, client_id)
-        column = _owner_column(owner)
-
-        engine = _get_db_engine()
-        with engine.begin() as conn:
-            conn.execute(_text(
-                f"DELETE FROM watchlist_items WHERE {column} = :owner_value AND symbol = :symbol"
-            ), {"owner_value": owner[1], "symbol": sym})
-        return _watchlist_rows_sync(owner)
-
-    loop = asyncio.get_running_loop()
-    try:
-        items = await loop.run_in_executor(None, _delete_sync)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        log_event(LOGGER, "watchlist_write_failed", level="error", error=str(exc))
-        raise HTTPException(status_code=503, detail="Database error. See server logs.")
-    return {"items": items}
-
-
-# ── Positions ("I bought this") ────────────────────────────────────────────────
-# Same ownership shape as watchlist_items above — an anonymous per-browser
-# client_id until the user signs in, then the account's user_id, resolved via
-# the same _resolve_watchlist_owner()/_owner_column() helpers (nothing about
-# that resolution logic is watchlist-specific; it just answers "which column
-# owns this request's rows"). Previously this feature was pure localStorage,
-# explicitly flagged as the one thing this app's account push hadn't reached —
-# these endpoints close that gap: positions now survive a browser switch once
-# signed in, the same way the watchlist already does. Signing in does NOT
-# migrate an existing client_id's positions onto the account, same documented
-# scope call as watchlist_items.
-_MAX_POSITIONS_PER_CLIENT = 200
-
-
-class PositionAddRequest(BaseModel):
-    client_id: str | None = None
-    symbol: str
-    company: str = Field(default="")
-    exchange: str = Field(default="NSE")
-    entry_price: float | None = None
-    target_price: float | None = None
-    stop_loss: float | None = None
-
-
-class PositionSharesRequest(BaseModel):
-    client_id: str | None = None
-    # None clears a previously-entered share count back to "unknown" — never
-    # invented, never defaulted to 0/1.
-    shares: float | None = None
-
-
-def _positions_rows_sync(owner: WatchlistOwner) -> list[dict]:
-    from sqlalchemy import text as _text
-
-    column = _owner_column(owner)
-    engine = _get_db_engine()
-    with engine.connect() as conn:
-        rows = conn.execute(_text(f"""
-            SELECT symbol, company, exchange,
-                   entry_price, target_price, stop_loss, shares,
-                   bought_at::text AS "bought_at"
-            FROM positions
-            WHERE {column} = :owner_value
-            ORDER BY bought_at DESC
-        """), {"owner_value": owner[1]}).mappings().fetchall()
-    return [dict(r) for r in rows]
-
-
-@app.get("/api/positions")
-async def get_positions(request: Request, client_id: str | None = Query(None)):
-    _rate_limit(request, "positions_read", max_calls=120, window_seconds=60)
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
-    token = _bearer_token_from_request(request)
-
-    def _sync() -> list[dict]:
-        owner = _resolve_watchlist_owner(token, client_id)
-        return _positions_rows_sync(owner)
-
-    loop = asyncio.get_running_loop()
-    try:
-        items = await loop.run_in_executor(None, _sync)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        log_event(LOGGER, "positions_read_failed", level="error", error=str(exc))
-        raise HTTPException(status_code=503, detail="Database error. See server logs.")
-    return {"items": items}
-
-
-@app.post("/api/positions")
-async def add_position(request: Request, body: PositionAddRequest):
-    _rate_limit(request, "positions_write", max_calls=60, window_seconds=60)
-    symbol = body.symbol.upper().strip()
-    if not _TICKER_RE.match(symbol):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
-    exchange = body.exchange.upper().strip()
-    if exchange not in _VALID_EXCHANGES:
-        raise HTTPException(status_code=422, detail="Invalid exchange.")
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
-    token = _bearer_token_from_request(request)
-
-    def _upsert_sync() -> list[dict]:
-        from sqlalchemy import text as _text
-
-        owner = _resolve_watchlist_owner(token, body.client_id)
-        column = _owner_column(owner)
-        lock_key = f"positions:{owner[0]}:{owner[1]}"
-
-        engine = _get_db_engine()
-        with engine.begin() as conn:
-            # Same advisory-lock-then-count pattern as watchlist's POST, scoped
-            # to its own "positions:" lock-key namespace so it can never
-            # collide with a concurrent watchlist add for the same owner.
-            conn.execute(_text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"), {"lock_key": lock_key})
-            count = conn.execute(_text(
-                f"SELECT COUNT(*) FROM positions WHERE {column} = :owner_value"
-            ), {"owner_value": owner[1]}).scalar() or 0
-            existing = conn.execute(_text(
-                f"SELECT 1 FROM positions WHERE {column} = :owner_value AND symbol = :symbol"
-            ), {"owner_value": owner[1], "symbol": symbol}).first()
-            if count >= _MAX_POSITIONS_PER_CLIENT and not existing:
-                raise ValueError(f"Positions are capped at {_MAX_POSITIONS_PER_CLIENT} stocks.")
-            # On conflict, refresh the market levels captured at this mark-time
-            # but leave `shares` and `bought_at` untouched — a user-entered
-            # share count or the original buy timestamp shouldn't be wiped by
-            # re-marking a pick as bought (the normal UI flow removes the row
-            # first, so this path is mostly a safety net, not the common case).
-            conn.execute(_text(f"""
-                INSERT INTO positions ({column}, symbol, company, exchange, entry_price, target_price, stop_loss)
-                VALUES (:owner_value, :symbol, :company, :exchange, :entry_price, :target_price, :stop_loss)
-                ON CONFLICT ({column}, symbol) DO UPDATE SET
-                    company = EXCLUDED.company,
-                    exchange = EXCLUDED.exchange,
-                    entry_price = EXCLUDED.entry_price,
-                    target_price = EXCLUDED.target_price,
-                    stop_loss = EXCLUDED.stop_loss
-            """), {
-                "owner_value": owner[1], "symbol": symbol,
-                "company": body.company[:200], "exchange": exchange,
-                "entry_price": body.entry_price, "target_price": body.target_price, "stop_loss": body.stop_loss,
-            })
-        return _positions_rows_sync(owner)
-
-    loop = asyncio.get_running_loop()
-    try:
-        items = await loop.run_in_executor(None, _upsert_sync)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        log_event(LOGGER, "positions_write_failed", level="error", error=str(exc))
-        raise HTTPException(status_code=503, detail="Database error. See server logs.")
-    return {"items": items}
-
-
-@app.patch("/api/positions/{symbol}")
-async def update_position_shares(request: Request, symbol: str, body: PositionSharesRequest):
-    """The one field a user fills in after the fact, from the Portfolio page
-    (see CLAUDE.md's "Positions" section for why this isn't asked for at
-    "I bought this" click-time) — a dedicated endpoint rather than folding
-    into POST, since this never touches company/exchange/entry/target/stop."""
-    _rate_limit(request, "positions_write", max_calls=60, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
-    if body.shares is not None and body.shares < 0:
-        raise HTTPException(status_code=422, detail="Shares cannot be negative.")
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
-    token = _bearer_token_from_request(request)
-
-    def _update_sync() -> list[dict]:
-        from sqlalchemy import text as _text
-
-        owner = _resolve_watchlist_owner(token, body.client_id)
-        column = _owner_column(owner)
-
-        engine = _get_db_engine()
-        with engine.begin() as conn:
-            conn.execute(_text(
-                f"UPDATE positions SET shares = :shares WHERE {column} = :owner_value AND symbol = :symbol"
-            ), {"shares": body.shares, "owner_value": owner[1], "symbol": sym})
-        return _positions_rows_sync(owner)
-
-    loop = asyncio.get_running_loop()
-    try:
-        items = await loop.run_in_executor(None, _update_sync)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        log_event(LOGGER, "positions_write_failed", level="error", error=str(exc))
-        raise HTTPException(status_code=503, detail="Database error. See server logs.")
-    return {"items": items}
-
-
-@app.delete("/api/positions/{symbol}")
-async def remove_position(request: Request, symbol: str, client_id: str | None = Query(None)):
-    _rate_limit(request, "positions_write", max_calls=60, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
-    token = _bearer_token_from_request(request)
-
-    def _delete_sync() -> list[dict]:
-        from sqlalchemy import text as _text
-
-        owner = _resolve_watchlist_owner(token, client_id)
-        column = _owner_column(owner)
-
-        engine = _get_db_engine()
-        with engine.begin() as conn:
-            conn.execute(_text(
-                f"DELETE FROM positions WHERE {column} = :owner_value AND symbol = :symbol"
-            ), {"owner_value": owner[1], "symbol": sym})
-        return _positions_rows_sync(owner)
-
-    loop = asyncio.get_running_loop()
-    try:
-        items = await loop.run_in_executor(None, _delete_sync)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        log_event(LOGGER, "positions_write_failed", level="error", error=str(exc))
-        raise HTTPException(status_code=503, detail="Database error. See server logs.")
-    return {"items": items}
-
+# ── Watchlist + Positions ─────────────────────────────────────────────────────
+# Extracted into routes/watchlist.py and routes/positions.py — see those
+# modules' own docstrings for the full ownership-resolution design (an
+# anonymous per-browser client_id until the user signs in, then the
+# account's user_id) and routes/_shared.py for the read/write wrapper both
+# domains share. Re-exported here (not just include_router'd) because
+# tests/test_api.py reads these two constants as plain values
+# (`api._MAX_WATCHLIST_ITEMS_PER_CLIENT`, `api._MAX_POSITIONS_PER_CLIENT`),
+# not just as patch targets -- moving the constants without a re-export would
+# silently break that existing test code.
+from routes.watchlist import router as _watchlist_router
+from routes.watchlist import _MAX_WATCHLIST_ITEMS_PER_CLIENT
+from routes.positions import router as _positions_router
+from routes.positions import _MAX_POSITIONS_PER_CLIENT
+
+app.include_router(_watchlist_router)
+app.include_router(_positions_router)
 
 # ── Consolidated view ──────────────────────────────────────────────────────────
 # "What does AlphaPulse think about X" spans three independently-run pipelines

@@ -3,7 +3,7 @@
 // — this suite never talks to a real FastAPI backend (see playwright.config.ts's
 // own comment on why).
 
-export function sseAnalysisBody(symbol: string): string {
+export function sseAnalysisBody(symbol: string, opts: { degraded?: boolean } = {}): string {
   const events = [
     { event: 'start', stale: ['stock_info', 'research', 'news', 'shareholding', 'mf_holdings'], cached: [] },
     { event: 'task_done', task: 'stock_info', ok: true },
@@ -52,6 +52,7 @@ export function sseAnalysisBody(symbol: string): string {
         news: [],
         holdings: {},
         filings: [],
+        degraded: opts.degraded ?? false,
       },
     },
   ];

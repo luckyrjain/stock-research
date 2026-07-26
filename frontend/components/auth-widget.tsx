@@ -62,14 +62,9 @@ export default function AuthWidget() {
           role="menu"
           className="absolute right-0 mt-2 w-44 rounded-lg bg-card border border-border shadow-lg py-1 z-20"
         >
-          <Link
-            href="/api-keys"
-            role="menuitem"
-            onClick={() => setOpen(false)}
-            className="block px-3 py-2 text-xs text-muted hover:text-accent hover:bg-accent/5 transition-colors"
-          >
-            API keys
-          </Link>
+          {/* API Keys now lives in the primary nav (SiteNav) so a
+              signed-out visitor can discover it too — no need to duplicate
+              the link here as well. */}
           <button
             role="menuitem"
             onClick={() => { setOpen(false); logout(); }}

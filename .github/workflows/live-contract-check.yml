@@ -1,0 +1,37 @@
+name: Live Scraper Contract Check
+
+on:
+  schedule:
+    # Weekly, not daily — this hits real third-party sites (Screener.in,
+    # Trendlyne, NSE, RBI) purely to check they still look the way this
+    # codebase's scrapers expect, independent of whether any user traffic
+    # happened to exercise that code path recently. A low frequency is
+    # deliberate: this isn't data collection, just an early-warning signal
+    # for the ~10 standalone scrapers outside schema_drift.py's own
+    # coverage (see tests_live/test_scraper_contracts.py's docstring).
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  live-contract-check:
+    name: Live scraper contract check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run live scraper contract checks
+        env:
+          # Opt-in gate — see tests_live/test_scraper_contracts.py. Every
+          # other place this repo runs pytest (ci.yml, local `pytest tests/`)
+          # deliberately never sets this, so no test anywhere else in the
+          # suite ever makes a live network call.
+          RUN_LIVE_TESTS: "1"
+        run: python -m pytest tests_live/ -v

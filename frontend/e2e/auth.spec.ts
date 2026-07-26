@@ -69,6 +69,53 @@ test.describe('Magic-link verification', () => {
     await expect(page.getByText('Sign-in failed')).toBeVisible();
     await expect(page.getByText('Missing sign-in token.')).toBeVisible();
   });
+
+  test('offers to claim anonymous watchlist/position data after sign-in, and claims on confirm', async ({ page }) => {
+    await page.route('**/api/auth/verify?token=**', route => route.fulfill({ json: { user: USER } }));
+    await page.route('**/api/auth/me', route => route.fulfill({ json: { user: USER } }));
+    // The pre-verify anonymous-count check and the post-verify
+    // refreshWatchlist()/refreshPositions() both hit these same GETs —
+    // fulfilling with non-empty lists is what makes the claim prompt appear.
+    await page.route('**/api/watchlist?client_id=**', route => route.fulfill({
+      json: { items: [{ symbol: 'TCS', company: 'TCS', exchange: 'NSE', addedAt: '2026-01-01' }] },
+    }));
+    await page.route('**/api/positions?client_id=**', route => route.fulfill({ json: { items: [] } }));
+    let claimed = false;
+    await page.route('**/api/watchlist/claim', route => {
+      claimed = true;
+      return route.fulfill({ json: { claimed: 1, skipped_over_cap: 0, items: [] } });
+    });
+    await page.route('**/api/positions/claim', route => route.fulfill({ json: { claimed: 0, skipped_over_cap: 0, items: [] } }));
+
+    await page.goto('/auth/verify?token=faketoken123');
+    await page.getByRole('button', { name: 'Complete sign-in' }).click();
+
+    await expect(page.getByText(/1 watchlist item.*from browsing anonymously/)).toBeVisible();
+    await page.getByRole('button', { name: 'Claim my data' }).click();
+
+    await expect(page).toHaveURL('/');
+    expect(claimed).toBe(true);
+  });
+
+  test('skipping the claim prompt still redirects home without calling claim', async ({ page }) => {
+    await page.route('**/api/auth/verify?token=**', route => route.fulfill({ json: { user: USER } }));
+    await page.route('**/api/auth/me', route => route.fulfill({ json: { user: USER } }));
+    await page.route('**/api/watchlist?client_id=**', route => route.fulfill({
+      json: { items: [{ symbol: 'TCS', company: 'TCS', exchange: 'NSE', addedAt: '2026-01-01' }] },
+    }));
+    await page.route('**/api/positions?client_id=**', route => route.fulfill({ json: { items: [] } }));
+    let claimCalled = false;
+    await page.route('**/api/watchlist/claim', () => { claimCalled = true; });
+
+    await page.goto('/auth/verify?token=faketoken123');
+    await page.getByRole('button', { name: 'Complete sign-in' }).click();
+
+    await expect(page.getByRole('button', { name: 'Skip' })).toBeVisible();
+    await page.getByRole('button', { name: 'Skip' }).click();
+
+    await expect(page).toHaveURL('/');
+    expect(claimCalled).toBe(false);
+  });
 });
 
 test.describe('API keys page', () => {
@@ -99,5 +146,39 @@ test.describe('API keys page', () => {
 
     await expect(page.getByText("Copy this key now — it won't be shown again.")).toBeVisible();
     await expect(page.getByText('ap_live_faketestkeyvalue')).toBeVisible();
+  });
+
+  test('is reachable from the primary nav, even when signed out', async ({ page }) => {
+    await page.goto('/watchlist');
+    await page.getByRole('link', { name: 'API Keys' }).click();
+    await expect(page).toHaveURL('/api-keys');
+  });
+
+  test('free-tier usage links to the pricing page', async ({ page }) => {
+    await page.route('**/api/auth/me', route => route.fulfill({ json: { user: USER } }));
+    await page.route('**/api/api-keys', route => route.fulfill({
+      json: { keys: [], tier: 'free', usage: { calls: 10, limit: 100, window_seconds: 3600 } },
+    }));
+
+    await page.goto('/api-keys');
+    await expect(page.getByRole('link', { name: 'Pricing' })).toBeVisible();
+    await page.getByRole('link', { name: 'Pricing' }).click();
+    await expect(page).toHaveURL('/pricing');
+  });
+});
+
+test.describe('Pricing page', () => {
+  test('shows both tiers and is honest about there being no self-serve checkout', async ({ page }) => {
+    await page.goto('/pricing');
+
+    await expect(page.getByRole('heading', { name: 'Free' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Pro' })).toBeVisible();
+    await expect(page.getByText('100', { exact: true })).toBeVisible();
+    await expect(page.getByText('1,000', { exact: true })).toBeVisible();
+    await expect(page.getByText(/no self-serve checkout/)).toBeVisible();
+    // .first() — the primary nav (present on every page) and this page's own
+    // usage-card link both render an "API Keys" link; either satisfies this
+    // check, so this isn't a strict-mode ambiguity worth disambiguating further.
+    await expect(page.getByRole('link', { name: 'API Keys' }).first()).toBeVisible();
   });
 });

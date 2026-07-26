@@ -95,7 +95,7 @@ export default function ApiKeysPage() {
     <main className="min-h-screen bg-bg text-tx">
       <div className="max-w-3xl mx-auto px-4 pt-8 pb-16">
 
-        <SiteNav extraLabel="API Keys" wrap />
+        <SiteNav active="api-keys" wrap />
 
         <div className="mb-6">
           <h1 className="text-xl font-black tracking-tight text-tx mb-1.5">API Keys</h1>
@@ -140,7 +140,11 @@ export default function ApiKeysPage() {
                   Applies across every key on this account, to{' '}
                   <code className="text-tx bg-surface px-1 py-0.5 rounded">GET /api/v1/*</code> calls only —
                   a sliding one-hour window, not a calendar-hour reset.
-                  {tier === 'free' && ' Higher-tier limits exist but aren’t self-serve yet.'}
+                  {tier === 'free' && (
+                    <> Higher-tier limits exist — see{' '}
+                      <Link href="/pricing" className="text-accent hover:underline">Pricing</Link>.
+                    </>
+                  )}
                 </p>
               </div>
             )}
