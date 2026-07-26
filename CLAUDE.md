@@ -660,6 +660,42 @@ same log line).
    EPS from NSE's own filings instead" note with just the EPS row when `ratios` is empty but
    `nse_fallback_ratios` is present — the ordinary ratios table renders as before in every other case.
 
+### Filings classification (`signals/filings_classifier.py`)
+
+The `filings` task's raw title/desc/category text was already fetched (and, since an earlier
+phase, already fed into the analyst prompt) but never structured — a rating downgrade or an
+upcoming results date sat unread in free text alongside routine newspaper-publication notices.
+This is pure text classification over the already-fetched `filings` list — no new scrape.
+
+1. `signals/filings_classifier.py` exports three independently-optional classifiers, all
+   keyword/regex-based over each filing's `title`/`desc`/`category`: `classify_corporate_actions()`
+   (dividend / split / bonus / buyback, one entry per matching filing, newest first),
+   `classify_rating_action()` (the single most recent credit-rating filing — known agency name +
+   upgrade/downgrade/reaffirmed, with best-effort `from_rating`/`to_rating` only when a clean
+   "from X to Y" phrase is present in the text), and `extract_next_results_date()` (a future date
+   parsed out of the most recent "board meeting to consider financial results" filing's own text
+   — rejected if it parses to before the filing's own date, since that's more likely an unrelated
+   date mentioned in the same text than the actual meeting date). `classify_filings()` combines all
+   three into one dict — the single call site both consumers below use, so the classification logic
+   itself is never duplicated between them.
+2. **Disclosed limitation**: the exact category/title vocabulary NSE uses for these filing types
+   was not verified against a live response in this sandbox (no outbound internet — same
+   disclosure pattern as every other NSE/BSE scraper in this codebase). Every field is `None`/`[]`
+   (never guessed) when nothing matches a known keyword — free-text classification over whatever
+   house style NSE wrote that day is expected to miss real instances, not just rare ones.
+3. **Signal engine**: `signals/filings.py::filings_signal()` calls `classify_rating_action()` on
+   the same filings list it already receives via `features["filings"]`, and folds the result in as
+   a small confirmation nudge (±0.15) on top of the existing keyword-hit score — upgrade nudges up,
+   downgrade nudges down, `reaffirmed` is neutral (no new directional information). Same
+   "confirmation signal layered on top, not a fourth primary component" pattern as the valuation
+   percentile nudge in `market_picks_pipeline.py::_compute_confidence()`.
+4. **Frontend**: `main._build_report()` (shared by both the CLI and `api.py`'s SSE endpoint) calls
+   `classify_filings()` once on the same `filings` list the report already returns, and adds the
+   result as a new sibling `filings_summary` field on the `Report` — `results-dashboard.tsx`'s
+   existing Corporate Filings card renders it as a row of small badges (each corporate action,
+   the rating action color-coded buy/sell/hold by direction, the next results date) above the
+   existing filing list, and renders nothing extra when `filings_summary` has nothing to show.
+
 ### Symbol validation flow (`GET /api/validate/{symbol}`)
 
 Handles three input forms:

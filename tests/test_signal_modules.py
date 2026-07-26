@@ -146,6 +146,39 @@ class FilingsSignalTest(unittest.TestCase):
         sig = filings_signal({"filings": [{"title": "New order received", "desc": None}]})
         self.assertEqual(sig.value, "WEAK_SIGNAL")
 
+    def test_rating_upgrade_nudges_score_up(self) -> None:
+        sig = filings_signal({"filings": [
+            {"title": "CRISIL upgrades rating", "desc": "", "date": "01-Jan-2026"},
+        ]})
+        self.assertEqual(sig.value, "NONE")  # no deal-flow keyword hits
+        self.assertAlmostEqual(sig.score, 0.15)
+        self.assertEqual(sig.meta["rating_action"]["action"], "upgrade")
+
+    def test_rating_downgrade_nudges_score_down(self) -> None:
+        sig = filings_signal({"filings": [
+            {"title": "ICRA downgrades rating", "desc": "", "date": "01-Jan-2026"},
+        ]})
+        self.assertAlmostEqual(sig.score, -0.15)
+
+    def test_rating_reaffirmed_does_not_move_score(self) -> None:
+        sig = filings_signal({"filings": [
+            {"title": "CARE reaffirms rating", "desc": "", "date": "01-Jan-2026"},
+        ]})
+        self.assertEqual(sig.score, 0.0)
+        self.assertEqual(sig.meta["rating_action"]["action"], "reaffirmed")
+
+    def test_rating_nudge_combines_with_deal_flow_score(self) -> None:
+        sig = filings_signal({"filings": [
+            {"title": "New order received", "desc": "", "date": "01-Jan-2026"},
+            {"title": "CRISIL upgrades rating", "desc": "", "date": "02-Jan-2026"},
+        ]})
+        self.assertEqual(sig.value, "WEAK_SIGNAL")
+        self.assertAlmostEqual(sig.score, 0.45)  # 0.3 base + 0.15 nudge
+
+    def test_no_rating_mention_leaves_meta_without_rating_action_key(self) -> None:
+        sig = filings_signal({"filings": [{"title": "New order received", "desc": ""}]})
+        self.assertNotIn("rating_action", sig.meta)
+
 
 class ToFloatTest(unittest.TestCase):
     def test_none_returns_none(self) -> None:

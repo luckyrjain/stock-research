@@ -45,6 +45,25 @@ class BuildReportTest(unittest.TestCase):
         report = _build_report("TCS", {}, {}, {})
         self.assertEqual(report["filings"], [])
 
+    def test_filings_summary_is_classified_from_the_same_filings_list(self) -> None:
+        all_data = {
+            "filings": {
+                "filings": [
+                    {"title": "Dividend declared", "desc": "", "date": "01-Jan-2026", "category": "", "attachment": None},
+                ],
+            },
+        }
+        report = _build_report("TCS", all_data, {}, {})
+        self.assertEqual(len(report["filings_summary"]["corporate_actions"]), 1)
+        self.assertEqual(report["filings_summary"]["corporate_actions"][0]["type"], "dividend")
+
+    def test_missing_filings_task_still_returns_empty_filings_summary_shape(self) -> None:
+        report = _build_report("TCS", {}, {}, {})
+        self.assertEqual(
+            report["filings_summary"],
+            {"corporate_actions": [], "rating_action": None, "next_results_date": None},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -71,6 +71,29 @@ export interface Filing {
   attachment: string | null;   // URL to the NSE PDF, when NSE provides one
 }
 
+// Best-effort text classification over the same `filings` list above — see
+// signals/filings_classifier.py. Every field is independently optional
+// (never guessed); a symbol with no matching filings in its fetch window
+// gets an empty/null shape here, not an error.
+export interface CorporateAction {
+  type:  'dividend' | 'split' | 'bonus' | 'buyback';
+  date:  string | null;
+  title: string | null;
+}
+export interface RatingAction {
+  agency:      string;
+  action:      'upgrade' | 'downgrade' | 'reaffirmed';
+  from_rating: string | null;   // only present when a clean "from X to Y" phrase was found
+  to_rating:   string | null;
+  date:        string | null;
+  title:       string | null;
+}
+export interface FilingsSummary {
+  corporate_actions:  CorporateAction[];
+  rating_action:      RatingAction | null;
+  next_results_date:  string | null;   // 'YYYY-MM-DD'
+}
+
 // Quarterly Sales/EPS/operating-margin mini-trend scraped from Screener's
 // Quarterly Results table — same page fundamentals already fetches, so it's
 // free. Oldest first, same convention as PriceHistory. revenue/eps are
@@ -111,6 +134,7 @@ export interface Report {
     pledge_pct?: number | null;   // promoter pledge %, from the same shareholding fetch
   };
   filings: Filing[];   // corporate announcements — also what signals.filings feeds on
+  filings_summary: FilingsSummary;
 }
 
 // Standalone daily-close series for sparklines — fetched separately from the

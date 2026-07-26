@@ -659,7 +659,7 @@ function summaryBullets(text: string): string[] {
 }
 
 export default function ResultsDashboard({ report, onHardRefresh }: Props) {
-  const { analysis: a, signals: sig, stock_info: s, research: r, news, holdings: h, filings } = report;
+  const { analysis: a, signals: sig, stock_info: s, research: r, news, holdings: h, filings, filings_summary: fs } = report;
 
   const peers = usePeerComparison(report.symbol);
   const percentileByNormalizedKey = useMemo(() => {
@@ -1003,6 +1003,34 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
       {/* ── 6b. Filings ── */}
       {filings && filings.length > 0 && (
         <Card title="Corporate Filings">
+          {fs && (fs.corporate_actions.length > 0 || fs.rating_action || fs.next_results_date) && (
+            <div className="flex flex-wrap gap-2 mb-3">
+              {fs.corporate_actions.slice(0, 3).map((ca, i) => (
+                <span key={i} className="text-[11px] px-2 py-1 rounded-full bg-surface border border-border text-tx capitalize">
+                  {ca.type}{ca.date ? ` · ${ca.date}` : ''}
+                </span>
+              ))}
+              {fs.rating_action && (
+                <span className={`text-[11px] px-2 py-1 rounded-full border capitalize ${
+                  fs.rating_action.action === 'upgrade'
+                    ? 'text-buy border-buy/40 bg-buy/10'
+                    : fs.rating_action.action === 'downgrade'
+                    ? 'text-sell border-sell/40 bg-sell/10'
+                    : 'text-hold border-hold/40 bg-hold/10'
+                }`}>
+                  {fs.rating_action.agency} {fs.rating_action.action}
+                  {fs.rating_action.from_rating && fs.rating_action.to_rating
+                    ? ` (${fs.rating_action.from_rating} → ${fs.rating_action.to_rating})`
+                    : ''}
+                </span>
+              )}
+              {fs.next_results_date && (
+                <span className="text-[11px] px-2 py-1 rounded-full bg-surface border border-border text-tx">
+                  Next results: {fs.next_results_date}
+                </span>
+              )}
+            </div>
+          )}
           <div className="divide-y divide-border">
             {filings.slice(0, 5).map((f, i) => {
               const meta = [f.category, f.date].filter(Boolean).join(' · ');
