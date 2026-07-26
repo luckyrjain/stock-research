@@ -10,7 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import market_picks_pipeline
 from market_picks_pipeline import (
@@ -168,6 +168,37 @@ class ComputeConfidenceTest(unittest.TestCase):
         score = _compute_confidence(1.0, sources, max_effective_signal=1.0, stock_info={})
         self.assertLessEqual(score, 100.0)
 
+    def test_cheap_valuation_percentile_nudges_score_up(self) -> None:
+        sources = [_source(credibility=0.5, article_age_days=3)]
+        without = _compute_confidence(0.0, sources, 1.0, {}, valuation_percentile=None)
+        cheap = _compute_confidence(0.0, sources, 1.0, {}, valuation_percentile=20.0)
+        self.assertAlmostEqual(cheap, without + 3.0, places=1)
+
+    def test_expensive_valuation_percentile_nudges_score_down(self) -> None:
+        sources = [_source(credibility=0.5, article_age_days=3)]
+        without = _compute_confidence(0.0, sources, 1.0, {}, valuation_percentile=None)
+        expensive = _compute_confidence(0.0, sources, 1.0, {}, valuation_percentile=80.0)
+        self.assertAlmostEqual(expensive, without - 3.0, places=1)
+
+    def test_mid_range_valuation_percentile_is_no_op(self) -> None:
+        sources = [_source(credibility=0.5, article_age_days=3)]
+        without = _compute_confidence(0.0, sources, 1.0, {}, valuation_percentile=None)
+        mid = _compute_confidence(0.0, sources, 1.0, {}, valuation_percentile=50.0)
+        self.assertEqual(mid, without)
+
+    def test_boundary_percentiles_are_inclusive(self) -> None:
+        sources = [_source(credibility=0.5, article_age_days=3)]
+        without = _compute_confidence(0.0, sources, 1.0, {}, valuation_percentile=None)
+        at_33 = _compute_confidence(0.0, sources, 1.0, {}, valuation_percentile=33.0)
+        at_67 = _compute_confidence(0.0, sources, 1.0, {}, valuation_percentile=67.0)
+        self.assertAlmostEqual(at_33, without + 3.0, places=1)
+        self.assertAlmostEqual(at_67, without - 3.0, places=1)
+
+    def test_valuation_nudge_does_not_push_score_past_100(self) -> None:
+        sources = [_source(credibility=1.0, article_age_days=0) for _ in range(20)]
+        score = _compute_confidence(1.0, sources, max_effective_signal=1.0, stock_info={}, valuation_percentile=10.0)
+        self.assertLessEqual(score, 100.0)
+
 
 class BuildRankingReasonsTest(unittest.TestCase):
     def test_three_or_more_brokerage_buys_gives_count_reason(self) -> None:
@@ -317,6 +348,48 @@ class PhaseExtractTickerAttributionTest(unittest.TestCase):
         ]})
         self.assertEqual(len(picks), 1)
         self.assertEqual(picks[0]["url"], "https://example.com/roundup")
+
+
+class PhaseResearchValuationPercentileTest(unittest.TestCase):
+    """_research_one() fetches get_peer_comparison() alongside stock_info/
+    research and folds the resulting valuation percentile into research_data
+    — closing the gap where peer/valuation data (already built and shipped
+    for the single-stock flow) never reached Market Picks scoring."""
+
+    def _run(self, peer_comparison_json: str):
+        fake_signal_result = MagicMock(final_score=0.5, verdict="BUY")
+        pipeline = MarketPicksPipeline()
+        with patch("main._fetch_task", return_value={}), \
+             patch("schemas.normalize", side_effect=lambda task, data: {}), \
+             patch("signals.engine.run_signal_engine", return_value=fake_signal_result), \
+             patch("signals.interpreter.interpret", return_value="insight"), \
+             patch("tools.screener_tools.get_peer_comparison") as mock_peers, \
+             patch("yfinance.Ticker") as mock_ticker:
+            mock_peers.run.return_value = peer_comparison_json
+            mock_ticker.return_value.history.return_value = [1] * 12  # not a recent IPO
+            return pipeline._phase_research([{"symbol": "TCS"}], emit=lambda p: None)
+
+    def test_cheap_valuation_is_populated_from_peer_comparison(self) -> None:
+        peer_json = json.dumps({
+            "self": {"values": {"P/E": "22"}},
+            "valuation_band": {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [20.0, 25.0, 30.0]},
+        })
+        result = self._run(peer_json)
+        self.assertIsNotNone(result["TCS"]["valuation_percentile"])
+        self.assertIsInstance(result["TCS"]["valuation_percentile"], float)
+
+    def test_screener_error_leaves_valuation_percentile_none_not_fatal(self) -> None:
+        result = self._run(json.dumps({"error": "boom"}))
+        self.assertIsNone(result["TCS"]["valuation_percentile"])
+        self.assertNotIn("error", result["TCS"])  # the rest of the research step still succeeds
+
+    def test_fewer_than_three_years_of_band_leaves_valuation_percentile_none(self) -> None:
+        peer_json = json.dumps({
+            "self": {"values": {"P/E": "22"}},
+            "valuation_band": {"years": ["Mar 2023", "Mar 2024"], "pe": [25.0, 30.0]},
+        })
+        result = self._run(peer_json)
+        self.assertIsNone(result["TCS"]["valuation_percentile"])
 
 
 class PruneExtractCacheTest(unittest.TestCase):

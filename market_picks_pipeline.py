@@ -598,11 +598,17 @@ def _effective_signal(sources: list[dict]) -> float:
     return total
 
 
+_VALUATION_NUDGE = 3.0       # small confirmation nudge, not a primary driver
+_CHEAP_PERCENTILE_MAX = 33.0  # vs. own P/E history — mirrors the ≤33rd/≥67th
+_EXPENSIVE_PERCENTILE_MIN = 67.0  # thresholds ResultsDashboard's ValuationAnchorBadge already uses
+
+
 def _compute_confidence(
     signal_score: float,
     sources: list[dict],
     max_effective_signal: float,
     stock_info: dict,
+    valuation_percentile: float | None = None,
 ) -> float:
     """
     Return 0–100 confidence score.
@@ -613,6 +619,15 @@ def _compute_confidence(
       50 % signal engine  (quant: valuation + growth + volume + filings)
       30 % consensus      (source breadth + credibility + conviction strength)
       20 % timing         (recency — credibility-weighted mean, not min)
+
+    `valuation_percentile` (0-100, where this stock's current P/E sits
+    within its own last 3-5 years — see _fetch_valuation_percentile) is a
+    confirmation signal layered on top, not a fourth primary component: it
+    can only nudge the already-computed 0-100 score by ±_VALUATION_NUDGE
+    points before the final clamp, rather than reallocating weight from the
+    three components above. Absent (None) when Screener didn't have a
+    parseable valuation band for this stock — contributes no nudge, not a
+    guessed neutral one.
     """
     # 50 % — quant signal engine (-1..1 → 0..50)
     signal_comp = ((signal_score + 1) / 2) * 50
@@ -639,7 +654,14 @@ def _compute_confidence(
     except Exception:
         pass
 
-    return round(min(100.0, max(0.0, signal_comp + mention_comp + recency_comp)), 1)
+    valuation_nudge = 0.0
+    if valuation_percentile is not None:
+        if valuation_percentile <= _CHEAP_PERCENTILE_MAX:
+            valuation_nudge = _VALUATION_NUDGE
+        elif valuation_percentile >= _EXPENSIVE_PERCENTILE_MIN:
+            valuation_nudge = -_VALUATION_NUDGE
+
+    return round(min(100.0, max(0.0, signal_comp + mention_comp + recency_comp + valuation_nudge)), 1)
 
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -1190,6 +1212,31 @@ Return ONLY this JSON (no markdown, no extra text):
 
         research_data: dict = {}
 
+        def _fetch_valuation_percentile(symbol: str) -> float | None:
+            """Where this stock's current P/E sits within its own last 3-5
+            years of Screener-published P/E (0-100, low = cheap) — the same
+            absolute_anchor GET /api/peers/{symbol} already computes for the
+            single-stock flow. Best-effort: None on any scrape/parse failure,
+            never guessed, matching this codebase's "never invent" convention.
+            Deliberately the *absolute* anchor (vs. own history) rather than
+            the peer-relative percentile — it needs only this stock's own
+            Screener page (already fetched for `research` above), not a
+            peer-group lookup, so it's cheap to add to every pick's research
+            step without a second round of peer scraping per stock."""
+            try:
+                import json as _json
+
+                from peer_analytics import compute_valuation_anchor
+                from tools.screener_tools import get_peer_comparison
+
+                raw = _json.loads(get_peer_comparison.run(symbol=symbol))
+                if raw.get("error"):
+                    return None
+                anchor = compute_valuation_anchor(raw.get("self"), raw.get("valuation_band") or {})
+                return anchor["percentile"] if anchor else None
+            except Exception:
+                return None
+
         def _research_one(symbol: str) -> tuple[str, dict]:
             try:
                 from main import _fetch_task
@@ -1199,11 +1246,13 @@ Return ONLY this JSON (no markdown, no extra text):
 
                 run_id = f"{self._run_id}_{symbol}"
 
-                with ThreadPoolExecutor(max_workers=2) as ex:
-                    f_info = ex.submit(_fetch_task, "stock_info", symbol, run_id)
-                    f_res  = ex.submit(_fetch_task, "research",    symbol, run_id)
+                with ThreadPoolExecutor(max_workers=3) as ex:
+                    f_info   = ex.submit(_fetch_task, "stock_info", symbol, run_id)
+                    f_res    = ex.submit(_fetch_task, "research",    symbol, run_id)
+                    f_anchor = ex.submit(_fetch_valuation_percentile, symbol)
                     raw_info = f_info.result()
                     raw_res  = f_res.result()
+                    valuation_percentile = f_anchor.result()
 
                 stock_info = schema_normalize("stock_info", raw_info)
                 research   = schema_normalize("research",   raw_res)
@@ -1226,12 +1275,13 @@ Return ONLY this JSON (no markdown, no extra text):
                     pass
 
                 return symbol, {
-                    "stock_info":     stock_info,
-                    "research":       research,
-                    "signal_score":   signal_result.final_score,
-                    "signal_verdict": signal_result.verdict,
-                    "signal_insight": signal_insight,
-                    "is_recent_ipo":  is_recent_ipo,
+                    "stock_info":            stock_info,
+                    "research":              research,
+                    "signal_score":          signal_result.final_score,
+                    "signal_verdict":        signal_result.verdict,
+                    "signal_insight":        signal_insight,
+                    "is_recent_ipo":         is_recent_ipo,
+                    "valuation_percentile":  valuation_percentile,
                 }
             except Exception as exc:
                 return symbol, {"error": str(exc)}
@@ -1370,7 +1420,8 @@ Return ONLY this JSON (no markdown):
             quant_verdict = rd.get("signal_verdict", "HOLD")
             sources       = item["sources"]
             mention_count = len(sources)
-            confidence    = _compute_confidence(signal_score, sources, max_eff_signal, si)
+            valuation_pct = rd.get("valuation_percentile")
+            confidence    = _compute_confidence(signal_score, sources, max_eff_signal, si, valuation_pct)
 
             # ── 4-tier recommendation (thresholded, not binary) ────────────────
             # combined_dir: clamped consensus + quant signal, range ≈ -1..1+
@@ -1448,6 +1499,7 @@ Return ONLY this JSON (no markdown):
                 "is_recent_ipo":    rd.get("is_recent_ipo", False),
                 "_sources_raw":     sources,
                 "sector":           (si.get("sector") or "Unknown"),
+                "valuation_percentile": valuation_pct,
             })
 
         # Sort: BUYs first, then WATCHLIST, HOLD, SELL; within tier by action_score DESC

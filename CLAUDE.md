@@ -48,6 +48,7 @@ stock-research/
 ├── observability.py        Structured JSON logging via log_event()
 ├── error_tracking.py       Optional Sentry-style hook, wired into log_event()'s error-level path
 ├── schema_drift.py         Type-drift detection for the six scraped data slices
+├── peer_analytics.py       Peer-percentile + absolute valuation-anchor math (api.py + market_picks_pipeline.py)
 ├── requirements.txt
 ├── .env.example
 ├── config/
@@ -168,9 +169,29 @@ These tool functions are decorated with `@tool` from `crewai.tools` purely for a
 | `_phase_scrape` | Parallel fetch from 20 sources (5 RSS + 12 GNews + 3 structured). 6 workers. |
 | `_phase_extract` | One LLM call per source (parallel, up to 6 workers). Checks extraction cache first. Detects syndicated articles (Jaccard ≥ 0.60) across sources to down-weight them. |
 | `_phase_consolidate` | Groups picks by ticker, validates against NSE equity master, confirms live price via yfinance (guards pre-IPO / unlisted names). Uses rapidfuzz for fuzzy company-name matching. |
-| `_phase_research` | Fetches `stock_info` + `research` + signal engine per stock (4 workers, up to `_MAX_STOCKS` stocks). |
+| `_phase_research` | Fetches `stock_info` + `research` + signal engine + a valuation percentile per stock (4 workers, up to `_MAX_STOCKS` stocks). |
 | `_phase_analyze` | Batched LLM calls (8 stocks/batch, parallel) for qualitative summary + bull/bear factors. Does NOT ask the LLM for prices. |
-| `_phase_score` | Deterministic confidence scoring (`_compute_confidence`: 50% signal engine + 30% consensus + 20% recency, 0–100). The 4-tier rec (BUY / WATCHLIST / HOLD / SELL) is a *separate* formula on top — `combined_dir = 0.55 × consensus + 0.45 × signal_score`, thresholded, with a quant-veto that demotes BUY → WATCHLIST on a strongly negative signal score. Entry/target/stop-loss computed from price and signal score — no LLM. Sector-balanced (`_apply_sector_balance()`): max 2 stocks per sector promoted to the primary list, excess deferred to the end — `sector` stays on every pick in the response (real, filterable data, not popped like the old internal-only `_sector`). Saves a daily snapshot to `output/_history/` for trend tracking. |
+| `_phase_score` | Deterministic confidence scoring (`_compute_confidence`: 50% signal engine + 30% consensus + 20% recency, 0–100, plus a small ±3-point valuation nudge layered on top — see below). The 4-tier rec (BUY / WATCHLIST / HOLD / SELL) is a *separate* formula on top — `combined_dir = 0.55 × consensus + 0.45 × signal_score`, thresholded, with a quant-veto that demotes BUY → WATCHLIST on a strongly negative signal score. Entry/target/stop-loss computed from price and signal score — no LLM. Sector-balanced (`_apply_sector_balance()`): max 2 stocks per sector promoted to the primary list, excess deferred to the end — `sector` stays on every pick in the response (real, filterable data, not popped like the old internal-only `_sector`). Saves a daily snapshot to `output/_history/` for trend tracking. |
+
+**Peer/valuation-anchor wired into scoring**: `GET /api/peers/{symbol}`'s `absolute_anchor` (where a
+stock's current P/E sits within its own last 3-5 years of Screener-published P/E — see "Absolute
+valuation anchor" below) previously only reached the single-stock analysis flow; Market Picks
+scoring had no valuation-quality input at all. `peer_analytics.py` (repo root) holds the pure
+percentile/anchor math (`compute_peer_percentiles`, `compute_valuation_anchor`) extracted out of
+`api.py` — both `api.py`'s `GET /api/peers/{symbol}` and `market_picks_pipeline.py`'s
+`_phase_research` now import from this one shared module rather than duplicating the math or
+having one pipeline module reach into the other. `_phase_research`'s `_fetch_valuation_percentile()`
+fetches `get_peer_comparison()` for each candidate stock (a third parallel fetch alongside
+`stock_info`/`research`, `ThreadPoolExecutor(max_workers=3)`) and computes only the *absolute*
+anchor (own P/E history), not the peer-relative percentile — it needs just that one stock's own
+Screener page, not a second peer-group lookup, so it's cheap to add to every candidate's research
+step. `None` (never guessed) when Screener didn't have a parseable current P/E or fewer than 3
+years of valuation-band history for that stock. `_compute_confidence()` folds this in as a
+confirmation signal, not a fourth primary component: ≤33rd percentile (cheap vs. own history) adds
++3, ≥67th percentile (expensive) subtracts 3, mid-range and `None` are both no-ops — bounded by the
+existing final `min(100, max(0, ...))` clamp rather than reallocating weight from the 50/30/20
+split. Surfaced on each pick as `valuation_percentile` (nullable) and rendered as a "Valuation"
+key-metric row in `market-picks-dashboard.tsx`'s expanded row.
 
 ---
 
