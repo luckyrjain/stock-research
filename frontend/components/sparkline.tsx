@@ -95,11 +95,12 @@ export default function Sparkline({
           </>
         )}
       </svg>
-      {hoverable && hoverIdx != null && (
+      {hoverable && hoverIdx != null && hovered && (
         <span
-          className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 z-20
+          className="pointer-events-none absolute bottom-full -translate-x-1/2 mb-1.5 z-20
                      whitespace-nowrap rounded-md border border-border bg-card px-2 py-1 text-[10px]
                      font-mono text-tx shadow-lg shadow-black/40"
+          style={{ left: Math.max(20, Math.min(width - 20, hovered.x)) }}
         >
           {formatValue(closes[hoverIdx])}
           <span className="block text-muted/70 font-sans">{formatDate(dates![hoverIdx])}</span>

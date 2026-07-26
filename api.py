@@ -964,24 +964,43 @@ def _fetch_nifty_closes(start_date: str, end_date: str) -> dict[str, float]:
     date — cheaper and just as complete, since a ranged history() call already
     returns every trading day's close in between. Cached via cache.py using
     'NSEI' as a pseudo-symbol (there's no real per-symbol subject here, just
-    one shared index series) — 24h TTL, keyed to the exact range requested so
-    a newly-added snapshot date (which grows the range) forces a fresh fetch
-    rather than serving a stale range that doesn't cover it yet.
+    one shared index series) — 24h TTL.
+
+    Coverage-based, not exact-range-keyed: the cache records the actual
+    [start, end] it covers, and a request is served from cache whenever that
+    stored range already contains the requested one — it does not need to
+    match exactly. Two independent callers now hit this (the picks-history
+    alpha stat, whose range is the full snapshot archive and only ever grows
+    over time, and the per-stock Nifty-benchmark endpoint, whose range is a
+    ~180-day trailing window that differs per stock) — exact-range keying
+    would mean these two essentially never agree on a range and evict each
+    other's entry on every request, defeating the 24h TTL and hammering
+    yfinance on every single call. A miss (nothing cached, or the cached
+    range doesn't fully cover this request) fetches the *union* of whatever
+    was cached and what's newly requested, so cached coverage only ever
+    grows, never shrinks or thrashes between callers.
+
     Best-effort: a yfinance outage degrades to {} so the endpoint still
     returns — the alpha column/stat is simply omitted, same as any other
     "a hiccup in one section must not fail the rest" section in this file.
     """
     import cache
 
-    range_key = f"{start_date}:{end_date}"
     cached = cache.load("NSEI", "index_history")
-    if cached and cached.get("range") == range_key:
+    if cached and cached.get("start", "9999-99-99") <= start_date and cached.get("end", "0000-00-00") >= end_date:
         return cached.get("closes", {})
+
+    # .get() with a fallback, not direct indexing — a cache file written
+    # before this coverage-based scheme existed (the old {"range", "closes"}
+    # shape) would otherwise KeyError here on its first read post-deploy,
+    # outside the try/except below.
+    fetch_start = min(start_date, cached.get("start", start_date)) if cached else start_date
+    fetch_end = max(end_date, cached.get("end", end_date)) if cached else end_date
 
     try:
         import yfinance as yf
-        end_exclusive = (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-        hist = yf.Ticker("^NSEI").history(start=start_date, end=end_exclusive, interval="1d")
+        end_exclusive = (datetime.strptime(fetch_end, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = yf.Ticker("^NSEI").history(start=fetch_start, end=end_exclusive, interval="1d")
         closes = {
             idx.strftime("%Y-%m-%d"): round(float(close), 2)
             for idx, close in hist["Close"].items()
@@ -990,7 +1009,7 @@ def _fetch_nifty_closes(start_date: str, end_date: str) -> dict[str, float]:
         return {}
 
     if closes:
-        cache.save("NSEI", "index_history", {"range": range_key, "closes": closes})
+        cache.save("NSEI", "index_history", {"start": fetch_start, "end": fetch_end, "closes": closes})
     return closes
 
 
@@ -1343,9 +1362,11 @@ async def get_financials(request: Request, symbol: str):
 
         raw = json.loads(get_financial_statements.run(symbol=sym))
         if raw.get("error"):
-            result = {"symbol": sym, "profit_loss": None, "balance_sheet": None, "cash_flow": None, "dcf": None}
-            cache.save(sym, "financials", result)
-            return result
+            # Not cached — same convention as GET /api/peers/{symbol}: a
+            # transient scrape failure should be retried on the next
+            # request, not locked in as "this company has no financials"
+            # for a full 24h TTL.
+            return {"symbol": sym, "profit_loss": None, "balance_sheet": None, "cash_flow": None, "dcf": None}
 
         stock_info = cache.load(sym, "stock_info") or {}
         from dcf_valuation import compute_dcf_estimate

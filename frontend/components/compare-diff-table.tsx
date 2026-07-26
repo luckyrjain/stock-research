@@ -44,6 +44,10 @@ const _HIGHER_BETTER_HINTS = ['roce', 'roe', 'margin', 'growth', 'yield', 'eps',
 
 function ratioDirection(label: string): Direction {
   const lower = label.toLowerCase();
+  // A "coverage" ratio (Interest Coverage, Debt Service Coverage) is always
+  // higher-is-better even though its label usually also contains "debt" —
+  // checked first so the generic lower-better "debt" hint below doesn't win.
+  if (lower.includes('coverage')) return 'higher';
   if (_LOWER_BETTER_HINTS.some(h => lower.includes(h))) return 'lower';
   if (_HIGHER_BETTER_HINTS.some(h => lower.includes(h))) return 'higher';
   return 'neutral';
@@ -71,6 +75,12 @@ function RecBadge({ rec }: { rec?: string }) {
 
 function winnerSide(a: number | null, b: number | null, direction: Direction): 'a' | 'b' | null {
   if (a == null || b == null || a === b || direction === 'neutral') return null;
+  // "Lower is better" only holds for a ratio that's meaningfully a cheapness
+  // measure when positive (P/E, P/B, a debt ratio) — a negative P/E signals
+  // a loss-making company, not a "cheap" one, so a negative value here would
+  // otherwise rank as falsely "cheaper" than a positive peer's. No highlight
+  // rather than a backwards one.
+  if (direction === 'lower' && (a < 0 || b < 0)) return null;
   if (direction === 'lower') return a < b ? 'a' : 'b';
   return a > b ? 'a' : 'b';
 }

@@ -1056,8 +1056,12 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                     : fmtVolume(s.volume)
                 }
                 colorClass={
-                  s.avg_volume_10d != null && s.avg_volume_10d > 0
-                    ? (s.volume > s.avg_volume_10d * 1.5 ? 'text-accent' : 'text-tx')
+                  // Elevated volume is a neutral "worth noting" signal, not
+                  // inherently bullish or bearish — text-hold (amber) is this
+                  // design system's "attention" tone; text-accent is reserved
+                  // for interactive elements, never data labels (design.md).
+                  s.avg_volume_10d != null && s.avg_volume_10d > 0 && s.volume > s.avg_volume_10d * 1.5
+                    ? 'text-hold'
                     : 'text-tx'
                 }
               />

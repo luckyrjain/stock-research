@@ -798,7 +798,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                           <span className={
                             pick.valuation_percentile <= 33 ? 'text-buy'
                               : pick.valuation_percentile >= 67 ? 'text-sell'
-                              : 'text-muted'
+                              : 'text-hold'
                           }>
                             {pick.valuation_percentile.toFixed(0)}th
                           </span>

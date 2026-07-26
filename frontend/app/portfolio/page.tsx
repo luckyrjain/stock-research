@@ -124,7 +124,7 @@ export default function PortfolioPage() {
     <main className="min-h-screen bg-bg text-tx">
       <div className="max-w-4xl mx-auto px-4 pt-8 pb-16">
 
-        <SiteNav active="portfolio" />
+        <SiteNav active="portfolio" wrap />
 
         {/* Header */}
         <div className="mb-8 animate-fade-up">

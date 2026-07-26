@@ -95,12 +95,10 @@ function ComparePageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams.get('symbols')]);
 
-  // Guards against an update loop: CompareColumn's effect re-fires whenever
-  // its `onReport` prop identity changes (which happens on every parent
-  // re-render, since this closure is recreated each time) — without the
-  // Object.is bail-out below, that would mean "report unchanged" still
-  // produces a new `reports` object every render, which re-renders the
-  // parent, which recreates the closure again.
+  // Stable across renders (empty dep array), so CompareColumn's own
+  // `[symbol, report, onReport]` effect only re-fires when its report
+  // actually changes. The Object.is bail-out is cheap extra safety against
+  // ever setting `reports` to an equivalent-but-new object.
   const handleReport = useCallback((symbol: string, report: Report | null) => {
     setReports(prev => (prev[symbol] === report ? prev : { ...prev, [symbol]: report }));
   }, []);

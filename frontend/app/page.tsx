@@ -50,14 +50,25 @@ function HomePageInner() {
     fetch(`/api/validate/${encodeURIComponent(sym)}`)
       .then(res => res.json())
       .then((data: { valid?: boolean; symbol?: string }) => {
+        // Stale-response guard: the user may have already navigated to a
+        // *different* `/?symbol=` (e.g. a Similar Stocks link needing no
+        // resolution, so it wins the race) before this validate call
+        // returns — `lastDeepLinkedSymbol` no longer being `sym` means a
+        // newer deep link has since superseded this one, so don't clobber
+        // whatever's now on screen with this stale result.
+        if (lastDeepLinkedSymbol.current !== sym) return;
         if (data.valid && data.symbol) {
           handleAnalyse(data.symbol);
         } else {
           setResolveError(`Couldn't resolve ${sym} to an analyzable ticker.`);
         }
       })
-      .catch(() => setResolveError(`Couldn't resolve ${sym} to an analyzable ticker.`))
-      .finally(() => setResolving(false));
+      .catch(() => {
+        if (lastDeepLinkedSymbol.current === sym) setResolveError(`Couldn't resolve ${sym} to an analyzable ticker.`);
+      })
+      .finally(() => {
+        if (lastDeepLinkedSymbol.current === sym) setResolving(false);
+      });
   }, [searchParams, handleAnalyse]);
 
   return (

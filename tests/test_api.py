@@ -499,6 +499,80 @@ class MarketPicksStatusEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 429)
 
 
+class FetchNiftyClosesCacheSharingTest(unittest.TestCase):
+    """_fetch_nifty_closes() is shared by two independent callers with very
+    different range shapes: the picks-history alpha stat (a range spanning
+    the whole snapshot archive, only ever growing) and the per-stock Nifty
+    benchmark endpoint (a ~180-day trailing window that differs per stock).
+    A naive exact-range cache key means these two essentially never agree on
+    a range and evict each other's entry on every single call — these tests
+    lock in the coverage-based fix (cached range must merely *contain* the
+    requested one, not match it) so that regression can't come back silently."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-nifty-cache-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
+        self._cache_patch.start()
+        self.addCleanup(self._cache_patch.stop)
+
+    def _fake_ticker(self, closes: dict[str, float]) -> MagicMock:
+        idx = pd.to_datetime(list(closes.keys()))
+        df = pd.DataFrame({"Close": list(closes.values())}, index=idx)
+        fake_ticker = MagicMock()
+        fake_ticker.history.return_value = df
+        return fake_ticker
+
+    def test_narrower_request_inside_cached_range_is_served_from_cache(self) -> None:
+        wide = {f"2026-01-{d:02d}": 20000.0 + d for d in range(1, 29)}
+        with patch("yfinance.Ticker", return_value=self._fake_ticker(wide)):
+            api._fetch_nifty_closes("2026-01-01", "2026-01-28")
+
+        # A different caller's narrower, non-identical range is fully
+        # contained by what's already cached — must NOT hit yfinance again.
+        with patch("yfinance.Ticker", side_effect=AssertionError("should be served from cache")):
+            result = api._fetch_nifty_closes("2026-01-10", "2026-01-20")
+        self.assertEqual(result["2026-01-10"], wide["2026-01-10"])
+        self.assertEqual(len(result), 28)
+
+    def test_uncovered_range_triggers_union_refetch_not_narrow_refetch(self) -> None:
+        first = {f"2026-01-{d:02d}": 20000.0 + d for d in range(10, 21)}
+        with patch("yfinance.Ticker", return_value=self._fake_ticker(first)):
+            api._fetch_nifty_closes("2026-01-10", "2026-01-20")
+
+        # A second caller's range only partially overlaps — extends earlier.
+        # The re-fetch must cover the UNION (2026-01-01..2026-01-20), not
+        # just the newly requested slice, so future requests for the middle
+        # of the old range stay servable from cache too.
+        second = {f"2026-01-{d:02d}": 20000.0 + d for d in range(1, 21)}
+        fake_ticker = self._fake_ticker(second)
+        with patch("yfinance.Ticker", return_value=fake_ticker):
+            result = api._fetch_nifty_closes("2026-01-01", "2026-01-15")
+        call_kwargs = fake_ticker.history.call_args.kwargs
+        self.assertEqual(call_kwargs["start"], "2026-01-01")
+        self.assertEqual(call_kwargs["end"], "2026-01-21")  # end-exclusive, one day past 2026-01-20
+        self.assertEqual(len(result), 20)
+
+    def test_yfinance_failure_returns_empty_dict(self) -> None:
+        with patch("yfinance.Ticker", side_effect=RuntimeError("outage")):
+            result = api._fetch_nifty_closes("2026-01-01", "2026-01-10")
+        self.assertEqual(result, {})
+
+    def test_old_shape_cache_entry_without_start_end_keys_does_not_crash(self) -> None:
+        # A cache file written before the coverage-based scheme existed (the
+        # old {"range": "...", "closes": {...}} shape) must not KeyError on
+        # its first read post-deploy — it should just be treated as
+        # non-covering and trigger a normal fresh fetch.
+        import cache as cache_module
+
+        cache_module.save("NSEI", "index_history", {"range": "2025-01-01:2025-01-10", "closes": {"2025-01-01": 100.0}})
+        fresh = {f"2026-01-{d:02d}": 20000.0 + d for d in range(1, 11)}
+        with patch("yfinance.Ticker", return_value=self._fake_ticker(fresh)):
+            result = api._fetch_nifty_closes("2026-01-01", "2026-01-10")
+        self.assertEqual(len(result), 10)
+        self.assertEqual(result["2026-01-01"], fresh["2026-01-01"])
+
+
 class MarketPicksHistoryEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-picks-history-test-")
@@ -1094,6 +1168,26 @@ class FinancialsEndpointTest(unittest.TestCase):
         self.assertIsNone(body["balance_sheet"])
         self.assertIsNone(body["cash_flow"])
         self.assertIsNone(body["dcf"])
+
+    def test_tool_error_is_not_cached_so_next_request_retries(self) -> None:
+        # Same convention as GET /api/peers/{symbol}: a transient scrape
+        # failure must not get locked in as "no financials" for the full
+        # 24h TTL — the very next request should hit the scraper again.
+        failing_tool = MagicMock()
+        failing_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
+        with patch("tools.screener_tools.get_financial_statements", failing_tool):
+            client.get("/api/financials/TCS")
+        failing_tool.run.assert_called_once()
+
+        succeeding_tool = MagicMock()
+        succeeding_tool.run.return_value = json.dumps({
+            "symbol": "TCS",
+            "profit_loss": {"years": ["Mar 2024"], "rows": [{"label": "Sales", "values": [100.0]}]},
+        })
+        with patch("tools.screener_tools.get_financial_statements", succeeding_tool):
+            resp = client.get("/api/financials/TCS")
+        succeeding_tool.run.assert_called_once()
+        self.assertIsNotNone(resp.json()["profit_loss"])
 
     def test_dcf_computed_when_stock_info_cached(self) -> None:
         cache.save("TCS", "stock_info", {"current_price": 500.0, "market_cap_cr": 50000.0})
