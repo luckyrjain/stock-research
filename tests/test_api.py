@@ -1076,27 +1076,53 @@ class StreetConsensusEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 429)
 
     def test_fetches_and_caches(self) -> None:
-        fake = {"symbol": "TCS", "articles": [{"title": "TCS gets Trendlyne buy upgrade", "url": "https://x/a"}]}
-        with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol", return_value=fake) as fn:
+        fake_articles = {"symbol": "TCS", "articles": [{"title": "TCS gets Trendlyne buy upgrade", "url": "https://x/a"}]}
+        fake_numeric = {
+            "symbol": "TCS", "analyst_count": 30, "consensus_rating": "BUY",
+            "mean_target_price": 4500.0, "target_upside_pct": 10.5, "source_url": "https://trendlyne.com/equity/1/TCS/tcs/",
+        }
+        with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol", return_value=fake_articles) as fn_articles, \
+             patch("tools.trendlyne_scraper.fetch_trendlyne_numeric_consensus", return_value=fake_numeric) as fn_numeric:
             resp = client.get("/api/street-consensus/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
-        self.assertEqual(body, fake)
-        fn.assert_called_once_with("TCS")
+        self.assertEqual(body["symbol"], "TCS")
+        self.assertEqual(body["articles"], fake_articles["articles"])
+        self.assertEqual(body["numeric_consensus"], fake_numeric)
+        fn_articles.assert_called_once_with("TCS")
+        fn_numeric.assert_called_once_with("TCS")
 
-        # Second call must be served from cache — the scraper doesn't rerun.
-        with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol") as should_not_run:
+        # Second call must be served from cache — neither scraper reruns.
+        with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol") as should_not_run_articles, \
+             patch("tools.trendlyne_scraper.fetch_trendlyne_numeric_consensus") as should_not_run_numeric:
             resp2 = client.get("/api/street-consensus/TCS")
         self.assertEqual(resp2.status_code, 200)
-        self.assertEqual(resp2.json(), fake)
-        should_not_run.assert_not_called()
+        self.assertEqual(resp2.json(), body)
+        should_not_run_articles.assert_not_called()
+        should_not_run_numeric.assert_not_called()
 
     def test_no_articles_returns_empty_list_not_error(self) -> None:
         with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol",
-                   return_value={"symbol": "TCS", "articles": []}):
+                   return_value={"symbol": "TCS", "articles": []}), \
+             patch("tools.trendlyne_scraper.fetch_trendlyne_numeric_consensus",
+                   return_value={"symbol": "TCS", "analyst_count": None, "consensus_rating": None,
+                                 "mean_target_price": None, "target_upside_pct": None, "source_url": None}):
             resp = client.get("/api/street-consensus/TCS")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["articles"], [])
+
+    def test_numeric_consensus_fetch_failure_does_not_break_articles(self) -> None:
+        # Isolated sub-fetch, same convention as insider_activity's two
+        # independent sources — a numeric-scrape exception must not take
+        # down the whole endpoint.
+        fake_articles = {"symbol": "TCS", "articles": [{"title": "x", "url": "https://x/a"}]}
+        with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol", return_value=fake_articles), \
+             patch("tools.trendlyne_scraper.fetch_trendlyne_numeric_consensus", side_effect=RuntimeError("boom")):
+            resp = client.get("/api/street-consensus/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["articles"], fake_articles["articles"])
+        self.assertIsNone(body["numeric_consensus"])
 
 
 class PeerPercentileHelperTest(unittest.TestCase):

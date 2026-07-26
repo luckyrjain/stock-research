@@ -589,20 +589,54 @@ difference in what it can honestly return:
    literally in prose the way journalists write company names, so this returns real
    coverage when Trendlyne got cited by name, not a guarantee of finding every article a
    human researcher would.
-2. **Deliberately never a numeric consensus rating or target price.** This module has never
-   scraped trendlyne.com's own aggregated numbers — only GNews articles that happen to
-   mention Trendlyne — so a "12 analysts rate BUY, target ₹X" figure isn't data this module
-   actually has. Returning one would violate this codebase's "never invent" convention the
-   same way guessing a missing scraped field would; the UI surfaces real article headlines
-   ("TCS gets Trendlyne buy upgrade") instead of a synthesized number.
-3. `GET /api/street-consensus/{symbol}` is cached (24 h TTL) but intentionally outside
-   `ALL_DATA_TASKS` — standalone and on-demand, same pattern as `peers`/`insider_activity`.
-   An empty `articles` list (never an error) is the expected common case for most stocks on
-   most days — both because most companies simply don't have recent Trendlyne-cited
-   coverage, and because of the query's own recall limits noted in point 1.
-4. `results-dashboard.tsx`'s `StreetConsensusCard` (via `useStreetConsensus()`) renders
-   nothing when `articles` is empty, and otherwise lists up to 6 recent article
-   titles/dates as external links — placed after `InsiderActivityCard` in the card grid.
+2. **`fetch_trendlyne_consensus_for_symbol()` itself is deliberately never a numeric
+   consensus rating or target price.** It has never scraped trendlyne.com's own aggregated
+   numbers — only GNews articles that happen to mention Trendlyne — so a "12 analysts rate
+   BUY, target ₹X" figure wasn't data this function actually had. Returning one would have
+   violated this codebase's "never invent" convention the same way guessing a missing
+   scraped field would.
+3. `tools/trendlyne_scraper.py::fetch_trendlyne_numeric_consensus(symbol)` closes that gap
+   for real, additively — it hits trendlyne.com's own company page directly (`requests` +
+   `BeautifulSoup`, never-raise convention like every other `tools/*.py` module) for
+   `analyst_count`, `consensus_rating`, `mean_target_price`, and `target_upside_pct`.
+   `_resolve_trendlyne_url()` tries a direct `/equity/{symbol}/` URL first (Trendlyne is
+   expected to redirect a bare symbol to its full `/equity/<id>/<symbol>/<slug>/` page),
+   falling back to Trendlyne's own search page and taking the first company-page-shaped
+   result link — same "direct URL, then search fallback" shape as
+   `screener_tools.py::_resolve_screener_slug`. Parsing is regex-over-the-page's-own-text
+   (`Consensus Recommendation: BUY`, `Mean Target Price ₹X`, `Y% Upside`) rather than narrow
+   CSS selectors, since textual labels are more likely to survive a markup change than any
+   specific selector guess. Every field is independently `None` (never guessed) when the
+   page can't be resolved or a value isn't cleanly present — a page with a rating but no
+   target price yields a partial result, not a discarded one. **Disclosed limitation**:
+   neither Trendlyne's symbol-to-company-page resolution path nor its exact DOM/label text
+   for these three numbers were verified against a live response in this sandbox (no
+   outbound internet to non-allowlisted hosts — same disclosure pattern as the FII/DII/RBI
+   scrapers, the NIFTY 500 constituent list, and every other unverified scraper already
+   documented in this file). A real-world mismatch on either point degrades every field to
+   `None`, never a wrong number — worth spot-checking against a live Trendlyne response
+   before this ships to a real deployment.
+4. `GET /api/street-consensus/{symbol}` fetches both sources concurrently
+   (`asyncio.gather`, same spirit as `_consolidated_payload`'s and
+   `GET /api/insider-activity/{symbol}`'s parallel lookups) and returns them as sibling
+   fields on one response — `{"symbol", "articles": [...], "numeric_consensus": {...} |
+   null}`. The numeric fetch is isolated in its own try/except, same per-section isolation
+   as insider activity's two independent sources: a `fetch_trendlyne_numeric_consensus`
+   failure degrades `numeric_consensus` to `null` without taking down `articles`. Cached
+   together (24 h TTL) but intentionally outside `ALL_DATA_TASKS` — standalone and
+   on-demand, same pattern as `peers`/`insider_activity`. An empty `articles` list / null
+   `numeric_consensus` fields (never an error) is the expected common case for most stocks
+   on most days — both because most companies simply don't have recent Trendlyne-cited
+   coverage or a resolvable Trendlyne page, and because of the GNews query's own recall
+   limits noted in point 1.
+5. `results-dashboard.tsx`'s `StreetConsensusCard` (via `useStreetConsensus()`) renders
+   nothing when there's neither `articles` nor a resolvable `numeric_consensus`. When
+   `numeric_consensus` has at least one non-null field, a `NumericConsensusRow` renders
+   above the article list — a rating badge (buy/hold/sell-toned by whether the rating
+   string contains "BUY"/"SELL"), analyst count, and mean target price with its upside/
+   downside %, linking out to the Trendlyne page it was scraped from. The article list
+   below it is unchanged — up to 6 recent titles/dates as external links, placed after
+   `InsiderActivityCard` in the card grid.
 
 ### NSE session consolidation + Screener.in fallback resilience
 

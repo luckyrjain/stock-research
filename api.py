@@ -1324,37 +1324,75 @@ async def get_insider_activity(request: Request, symbol: str):
 
 @app.get("/api/street-consensus/{symbol}")
 async def get_street_consensus(request: Request, symbol: str):
-    """Recent Trendlyne-cited analyst commentary for one symbol —
-    tools/trendlyne_agent.py already scrapes this (via targeted GNews
-    queries, not trendlyne.com directly) for the Market Picks pipeline;
-    this is the same per-stock, on-demand pattern as
-    GET /api/insider-activity/{symbol}. Deliberately a list of real
-    article titles/links/dates, never a fabricated consensus rating or
-    target price number — this module doesn't have that data, only
-    articles that mention it. Cached (24 h TTL) but intentionally outside
-    ALL_DATA_TASKS. Empty articles list (never an error) is the expected
-    common case for most stocks on most days.
+    """Recent Trendlyne-cited analyst commentary for one symbol, plus (see
+    `numeric_consensus` below) real numeric analyst consensus scraped
+    directly from Trendlyne's own company page — same per-stock, on-demand
+    pattern as GET /api/insider-activity/{symbol}.
+
+    `articles`: tools/trendlyne_agent.py already scrapes this (via targeted
+    GNews queries, not trendlyne.com directly) for the Market Picks
+    pipeline. Deliberately a list of real article titles/links/dates, never
+    a fabricated consensus rating or target price — that module doesn't
+    have that data, only articles that mention it.
+
+    `numeric_consensus`: tools/trendlyne_scraper.py hits trendlyne.com's
+    own company page directly for analyst_count/consensus_rating/
+    mean_target_price/target_upside_pct — additive to `articles`, not a
+    replacement. `None` (never guessed) when the page can't be resolved or
+    doesn't cleanly present a value.
+
+    Cached together (24 h TTL) but intentionally outside ALL_DATA_TASKS.
+    Empty articles list / null numeric_consensus fields (never an error) is
+    the expected common case for most stocks on most days.
     """
     _rate_limit(request, "street_consensus", max_calls=30, window_seconds=60)
     sym = symbol.upper().strip()
     if not _TICKER_RE.match(sym):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
 
-    def _fetch_sync() -> dict:
+    def _load_cached() -> dict | None:
         import cache
 
         cached = cache.load(sym, "street_consensus")
-        if cached is not None:
-            return {k: v for k, v in cached.items() if k != "_meta"}
-
-        from tools.trendlyne_agent import fetch_trendlyne_consensus_for_symbol
-
-        result = fetch_trendlyne_consensus_for_symbol(sym)
-        cache.save(sym, "street_consensus", result)
-        return result
+        return {k: v for k, v in cached.items() if k != "_meta"} if cached is not None else None
 
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _fetch_sync)
+    cached = await loop.run_in_executor(None, _load_cached)
+    if cached is not None:
+        return cached
+
+    def _fetch_articles() -> list[dict]:
+        from tools.trendlyne_agent import fetch_trendlyne_consensus_for_symbol
+
+        return fetch_trendlyne_consensus_for_symbol(sym).get("articles", [])
+
+    def _fetch_numeric() -> dict:
+        # Isolated in its own try/except like insider_activity's two
+        # sub-fetches — a numeric-scrape failure must not take down the
+        # article list, and fetch_trendlyne_numeric_consensus is documented
+        # to never raise anyway, but this endpoint doesn't lean on that
+        # guarantee alone.
+        try:
+            from tools.trendlyne_scraper import fetch_trendlyne_numeric_consensus
+
+            return fetch_trendlyne_numeric_consensus(sym)
+        except Exception as exc:
+            log_event(LOGGER, "trendlyne_numeric_consensus_fetch_failed", level="warning", symbol=sym, error=str(exc))
+            return None
+
+    articles, numeric_consensus = await asyncio.gather(
+        loop.run_in_executor(None, _fetch_articles),
+        loop.run_in_executor(None, _fetch_numeric),
+    )
+    result = {"symbol": sym, "articles": articles, "numeric_consensus": numeric_consensus}
+
+    def _save_cache() -> None:
+        import cache
+
+        cache.save(sym, "street_consensus", result)
+
+    await loop.run_in_executor(None, _save_cache)
+    return result
 
 
 def _score_verdict_history(history: list[dict], live_price: float | None) -> list[dict]:
