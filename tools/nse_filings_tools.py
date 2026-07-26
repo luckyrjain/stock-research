@@ -1,6 +1,5 @@
 # tools/nse_filings_tools.py
 
-import requests
 from datetime import datetime, timedelta
 from urllib.parse import quote
 from zoneinfo import ZoneInfo

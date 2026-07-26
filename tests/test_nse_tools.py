@@ -334,6 +334,46 @@ class GetNseBasicRatiosTest(unittest.TestCase):
              patch("requests.get", side_effect=ConnectionError("boom")):
             self.assertEqual(get_nse_basic_ratios("TCS"), {})
 
+    def test_picks_the_chronologically_newest_filing_not_lexically_last(self) -> None:
+        # Regression test: NSE's own dd-Mon-yyyy date format does not sort
+        # lexically in calendar order (same drift nse_insider_trades.py's
+        # _parse_pit_date already documents/fixes for its own date field).
+        # "05-Feb-2026" is chronologically newer than "20-Jan-2026" but
+        # lexically SMALLER ("0" < "2"), so a raw string sort would
+        # (wrongly) treat the January filing as more recent.
+        filings = [
+            {"date": "20-Jan-2026", "desc": "Financial Results", "xbrl": "https://nse.example/jan.xml"},
+            {"date": "05-Feb-2026", "desc": "Financial Results", "xbrl": "https://nse.example/feb.xml"},
+        ]
+        xbrl = '''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance">
+          <BasicEarningsPerEquityShare contextRef="D1">99.0</BasicEarningsPerEquityShare>
+        </xbrli:xbrl>'''
+        xbrl_resp = MagicMock()
+        xbrl_resp.content = xbrl.encode()
+
+        with patch("tools.nse_tools._nse_session", return_value=self._filings_session(filings)), \
+             patch("requests.get", return_value=xbrl_resp) as mock_get:
+            result = get_nse_basic_ratios("TCS")
+
+        self.assertEqual(result["as_of_date"], "05-Feb-2026")
+        mock_get.assert_called_once_with(
+            "https://nse.example/feb.xml",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=20,
+        )
+
+    def test_ampersand_in_symbol_is_url_encoded(self) -> None:
+        # Regression test: a real NSE ticker like "M&M" must not corrupt
+        # the query string — an unescaped "&" would silently truncate the
+        # "symbol" param and/or inject a bogus extra query parameter.
+        sess = self._filings_session([])
+        with patch("tools.nse_tools._nse_session", return_value=sess):
+            get_nse_basic_ratios("M&M")
+
+        requested_url = sess.get.call_args[0][0]
+        self.assertIn("symbol=M%26M", requested_url)
+        self.assertNotIn("symbol=M&M&", requested_url)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,9 @@
 import contextlib
 import io
 import json
+from datetime import datetime
+from urllib.parse import quote
+
 import requests
 import yfinance as yf
 from lxml import etree
@@ -232,6 +235,24 @@ _XBRL_EPS_TAGS = (
 )
 
 
+def _parse_filing_date(date_str: object) -> str | None:
+    """NSE's corporate-announcements `date` field is `dd-Mon-yyyy[ HH:MM]`,
+    which does NOT sort lexically in calendar order (the same drift
+    tools/nse_insider_trades.py::_parse_pit_date already documents and
+    fixes for its own date field) — a bare string sort of raw NSE dates
+    would silently pick the wrong "most recent" filing. Returns an
+    ISO-8601 string sortable in true chronological order, or None if the
+    format doesn't match any of these (never guessed)."""
+    if not isinstance(date_str, str):
+        return None
+    for fmt in ("%d-%b-%Y %H:%M", "%d-%b-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(date_str, fmt).isoformat()
+        except ValueError:
+            continue
+    return None
+
+
 def get_nse_basic_ratios(symbol: str) -> dict:
     """Best-effort fallback for a stock's basic EPS, sourced from NSE's own
     XBRL-tagged financial-results filings rather than Screener.in. Not a
@@ -271,7 +292,7 @@ def get_nse_basic_ratios(symbol: str) -> dict:
         sym = symbol.upper().strip()
         url = (
             f"{_NSE_BASE}/api/corporate-announcements?"
-            f"index=equities&symbol={sym}&reqXbrl=true"
+            f"index=equities&symbol={quote(sym)}&reqXbrl=true"
         )
         resp = session.get(url, timeout=10)
         resp.raise_for_status()
@@ -284,7 +305,11 @@ def get_nse_basic_ratios(symbol: str) -> dict:
             if isinstance(f, dict)
             and "financial results" in str(f.get("desc") or f.get("subject") or "").lower()
         ]
-        candidates = sorted(results_filings or filings, key=lambda f: f.get("date") or "", reverse=True)
+        candidates = sorted(
+            results_filings or filings,
+            key=lambda f: _parse_filing_date(f.get("date")) or "",
+            reverse=True,
+        )
 
         xbrl_url = None
         for f in candidates:
