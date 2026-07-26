@@ -312,7 +312,10 @@ export default function PortfolioPage() {
                               const raw = e.target.value.trim();
                               if (raw === '') { updateShares(row.position.symbol, null); return; }
                               const parsed = Number(raw);
-                              if (!Number.isNaN(parsed)) updateShares(row.position.symbol, parsed);
+                              // min={0} on the input only affects the spinner/validity state, not
+                              // typed input — a negative value would otherwise silently flow into
+                              // invested/currentValue and distort the capital-weighted totals.
+                              if (!Number.isNaN(parsed) && parsed >= 0) updateShares(row.position.symbol, parsed);
                             }}
                             placeholder="—"
                             aria-label={`Shares held of ${row.position.symbol}`}
