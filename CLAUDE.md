@@ -2211,3 +2211,59 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
 - **`output/_history/<date>.json` snapshot schema** (`symbol`, `confidence`, `effective_signal`, `mention_count`, `current_price`, `recommendation`) is read by two independent consumers: the in-pipeline `_load_trend()` (confidence trend) and `GET /api/market-picks/history` (price track record, `/market-picks/history` page). Snapshots written before `current_price`/`recommendation` were added won't have them — the history endpoint handles this by returning `change_pct: null` rather than guessing. Keep both consumers in mind if the snapshot shape changes.
 - **`GET /api/market-picks/history`** also computes an overall `win_rate` (share of tracked picks with `change_pct > 0`), a `tier_stats` breakdown keyed by `recommendation_then` (count/avg change/win rate per BUY/WATCHLIST/HOLD/SELL), and per-symbol `nifty_change_pct`/`alpha_pct` benchmarked against `^NSEI` over the same `first_seen` → `last_seen` window (`avg_alpha_pct` at the top level). The Nifty series is fetched once per request-range via `yfinance.Ticker("^NSEI").history()` — not once per snapshot date — and cached through `cache.py` using `"NSEI"` as a pseudo-symbol (`index_history`, 24 h TTL, re-fetched whenever a new snapshot date widens the needed range). A closed-market snapshot date (weekend/holiday) falls back to the nearest earlier trading day's close, never a later one. A yfinance outage degrades to `null` alpha fields, not a failed request.
 - **CORS** is restricted via `CORSMiddleware` to origins in `ALLOWED_ORIGINS` (comma-separated env var, defaults to `http://localhost:3000`). This is defense in depth, not something normal operation relies on — the Next.js proxy routes talk to the backend server-to-server, which CORS doesn't apply to. Add your production frontend's origin to `ALLOWED_ORIGINS` before deploying, or direct browser calls to the backend will be rejected.
+
+---
+
+## Explicitly out of scope: organizational, legal, and business decisions
+
+A cross-functional deep review (Engineering, Product, Testing, Security, Executive, CTO, and
+Investor lenses) surfaced three findings that no code change can close, because they aren't
+engineering problems — they're decisions only a human owner/operator of this project can make.
+Listed here explicitly, by name, rather than silently left off the phased-implementation list
+that addressed everything else the same review found — the same "disclosed limitation, not a
+silent gap" instinct this document already applies to every unverified scraper assumption.
+
+1. **Bus factor is one.** The Executive-lens finding, independently corroborated by the
+   Investor lens: this repository's entire commit history traces to a single human author (with
+   an AI pair-programmer co-authoring a portion of commits). The unusually thorough documentation
+   throughout this file is real engineering discipline, but it is not evidence a team exists —
+   if anything, the density reads as compensation for the absence of one, encoding tribal
+   knowledge so the same single person (or an AI agent picking the project back up) doesn't have
+   to hold it all in their head. **Not fixable in code.** Whoever owns this project should have a
+   real answer to "who is the second engineer, and when do they start" — or, short of that, a
+   written handoff plan (this document is a strong start, not a substitute) — before treating this
+   as a system a business depends on rather than one person's project.
+2. **The scraping surface has not had a legal/compliance review.** This codebase scrapes at
+   least the following external sites, on a recurring schedule, at a scale beyond casual/hobby
+   use, with no confirmed Terms-of-Service review by qualified counsel behind any of them:
+   `screener.in`, `nseindia.com` (+ `nsearchives.nseindia.com`), `bseindia.com` (+
+   `api.bseindia.com`), `trendlyne.com`, `rbi.org.in`, plus GNews-mediated search results that
+   surface (without directly scraping) `economictimes.indiatimes.com`, `livemint.com`, and
+   `thehindubusinessline.com` among others. The judgment already shown in this codebase — e.g.
+   declining to scrape IPO grey-market-premium data specifically because SEBI itself has warned
+   against relying on it (see "IPO grey-market premium (GMP) — explicitly out of scope for now"
+   above) — is genuinely good instinct, and every scraper here already follows a consistent,
+   defensive, "never fabricate on a failure" convention. None of that is a substitute for an
+   actual legal risk assessment, which requires a licensed professional reviewing each site's
+   actual ToS, applicable Indian data-protection/scraping case law, and this product's specific
+   redistribution model — none of which an AI agent or this document can perform or stand in for.
+   **Not fixable in code.** Commission that review before scaling traffic against any of these
+   sources materially beyond where it sits today.
+3. **No real payment processing exists, by design, pending a business decision — not an
+   oversight.** `users.tier` (`free`/`pro`) and the informational `/pricing` page (see
+   "Discoverability + pricing" above) were both built specifically to *stop short* of a real
+   checkout flow: there is no payment processor integration, no billing system, and no automated
+   path that ever sets a row to `'pro'` — that column is set by an operator, by hand, today. This
+   is disclosed rather than fixed because standing up real payment processing is itself a
+   business decision (which processor, what pricing actually is, tax/compliance handling in
+   India specifically, refund policy, and so on) that has to precede any engineering work, not
+   follow it — building a checkout flow against undecided pricing and undecided payment-provider
+   terms would be guessing at requirements nobody has actually set, the same "don't fabricate
+   what isn't there yet" instinct this codebase already applies to data it doesn't have.
+   **Not fixable in code** until those business decisions are made; at that point it's a
+   normal, scoped engineering task like everything else in this document.
+
+These three are the sole remaining items from the deep review's own priority ledger not
+addressed by the phased implementation work above — everything else the review flagged (P0
+security/testing fixes, P1 product/engineering cleanups, P2 architectural bets) was implemented
+in code and is documented in its own section above.
