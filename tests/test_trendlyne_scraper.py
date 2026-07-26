@@ -154,6 +154,21 @@ class FetchTrendlyneNumericConsensusTest(unittest.TestCase):
         self.assertIsNone(result["mean_target_price"])
         self.assertIn("error", result)
 
+    def test_final_fetch_redirected_off_host_returns_all_none_not_the_page(self) -> None:
+        # SSRF regression: _resolve_trendlyne_url() only host-checks the
+        # resolution step. If the already-resolved page's own fetch is
+        # itself redirected off trendlyne.com, that must not be silently
+        # parsed and returned as if it were real Trendlyne content.
+        page = _resp(200, text="irrelevant off-domain content", url="https://evil.example/phish")
+        with patch("tools.trendlyne_scraper._resolve_trendlyne_url", return_value="https://trendlyne.com/equity/1/TCS/tcs/"), \
+             patch("tools.trendlyne_scraper.requests.get", return_value=page):
+            result = fetch_trendlyne_numeric_consensus("TCS")
+
+        self.assertIsNone(result["analyst_count"])
+        self.assertIsNone(result["consensus_rating"])
+        self.assertIsNone(result["mean_target_price"])
+        self.assertIsNone(result["source_url"])
+
     def test_symbol_is_uppercased_and_stripped(self) -> None:
         with patch("tools.trendlyne_scraper._resolve_trendlyne_url", return_value=None):
             result = fetch_trendlyne_numeric_consensus("  infy  ")

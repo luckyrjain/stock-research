@@ -2,7 +2,7 @@ import contextlib
 import io
 import json
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 import yfinance as yf
@@ -18,9 +18,38 @@ _NSE_HEADERS = {
     "Referer": "https://www.nseindia.com",
 }
 
+_ALLOWED_XBRL_HOST = "nseindia.com"
+
 
 def _nse_session() -> requests.Session:
     return get_nse_session(timeout=10)
+
+
+def _is_nse_host(url: str) -> bool:
+    """Guards the two places this module fetches an XBRL attachment URL that
+    came out of NSE's own API response, not a hardcoded endpoint — same
+    reasoning as tools/trendlyne_scraper.py::_is_trendlyne_host: an
+    unvalidated absolute URL taken from a scraped/API payload and fetched
+    server-side is an SSRF vector regardless of how unlikely NSE's own
+    response is to actually carry one. Accepts any nseindia.com subdomain
+    (NSE serves attachments from more than one), never a bare host-suffix
+    match that a lookalike domain like "evilnseindia.com" could satisfy."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.netloc or "").lower()
+    return host == _ALLOWED_XBRL_HOST or host.endswith("." + _ALLOWED_XBRL_HOST)
+
+
+def _parse_xbrl_xml(content: bytes):
+    """Parses externally-fetched XBRL XML with entity resolution disabled —
+    defense in depth against an XXE/entity-expansion payload smuggled into
+    an attachment this module doesn't control the origin of, on top of the
+    host check in _is_nse_host. Never raises here; a malformed document
+    surfaces as the same XMLSyntaxError the bare etree.fromstring() call
+    would already raise, caught by each call site's own try/except."""
+    parser = etree.XMLParser(resolve_entities=False, no_network=True)
+    return etree.fromstring(content, parser=parser)
 
 
 def _percent_from_ambiguous_value(value: float | None, plausible_max: float) -> float | None:
@@ -148,12 +177,17 @@ def get_mf_holdings(symbol: str) -> str:
         # Pick the most recent record (last by date)
         latest = sorted(records, key=lambda r: r.get("date", ""), reverse=True)[0]
         xbrl_url = latest.get("xbrl", "")
-        if not xbrl_url:
+        if not xbrl_url or not _is_nse_host(xbrl_url):
             return json.dumps({"error": "No XBRL URL in shareholding record", "symbol": symbol})
 
         xbrl_resp = requests.get(xbrl_url, headers={"User-Agent": _NSE_HEADERS["User-Agent"]}, timeout=20)
         xbrl_resp.raise_for_status()
-        root = etree.fromstring(xbrl_resp.content)
+        # Re-check the post-redirect URL too, not just the one requested —
+        # a redirect encountered on this specific fetch could otherwise land
+        # off nseindia.com with no check at all.
+        if not _is_nse_host(xbrl_resp.url):
+            return json.dumps({"error": "XBRL URL redirected off nseindia.com", "symbol": symbol})
+        root = _parse_xbrl_xml(xbrl_resp.content)
 
         # Find MF context IDs: typedMember > scenario > context(id)
         ns_di = "http://xbrl.org/2006/xbrldi"
@@ -322,12 +356,14 @@ def get_nse_basic_ratios(symbol: str) -> dict:
                     break
             if xbrl_url:
                 break
-        if not xbrl_url:
+        if not xbrl_url or not _is_nse_host(xbrl_url):
             return {}
 
         xbrl_resp = requests.get(xbrl_url, headers={"User-Agent": _NSE_HEADERS["User-Agent"]}, timeout=20)
         xbrl_resp.raise_for_status()
-        root = etree.fromstring(xbrl_resp.content)
+        if not _is_nse_host(xbrl_resp.url):
+            return {}
+        root = _parse_xbrl_xml(xbrl_resp.content)
 
         eps = None
         for elem in root.iter():
