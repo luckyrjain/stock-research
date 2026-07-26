@@ -48,6 +48,26 @@ class SaveSnapshotTest(unittest.TestCase):
             mf_holdings_history.save_snapshot("TCS", {"error": "boom", "symbol": "TCS"})
         get_engine.assert_not_called()
 
+    def test_noop_on_error_payload_even_with_otherwise_valid_fields(self) -> None:
+        # Pins the error-key check specifically: this fixture is otherwise a
+        # fully valid payload (as_of_date + non-empty mutual_funds present),
+        # so only the error-key branch — not the missing-field branches
+        # exercised above — can be responsible for skipping the save here.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("mf_holdings_history._get_engine") as get_engine:
+            mf_holdings_history.save_snapshot("TCS", {
+                "error": "boom", "symbol": "TCS",
+                "as_of_date": "2026-03-31",
+                "mutual_funds": [{"fund": "HDFC MF", "holding_pct": 3.5}],
+            })
+        get_engine.assert_not_called()
+
+    def test_noop_on_non_dict_payload(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        with patch("mf_holdings_history._get_engine") as get_engine:
+            mf_holdings_history.save_snapshot("TCS", "not a dict")
+        get_engine.assert_not_called()
+
     def test_noop_without_as_of_date(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         with patch("mf_holdings_history._get_engine") as get_engine:

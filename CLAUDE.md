@@ -734,7 +734,13 @@ to see whether a fund was building or trimming its stake quarter over quarter.
 5. `results-dashboard.tsx`'s existing "Mutual Fund Holdings" card renders a small ▲/▼ delta next
    to each fund's live holding % (green up, red down, muted for exactly 0%) by matching fund name
    against `mf_holdings_trend` — funds with no computable delta (no prior snapshot, or a new
-   entrant) simply show no delta badge, the live percentage still renders as before.
+   entrant) simply show no delta badge, the live percentage still renders as before. **Undisclosed
+   risk worth flagging**: this match is exact-string on `fund` between the live-scraped
+   `holdings.mutual_funds` and the DB-stored `mf_holdings_trend` (both ultimately sourced from the
+   same Screener/NSE fund-name text, but fetched independently) — a fund renaming itself, or
+   Screener changing its formatting of the same fund's name between quarters, would silently show
+   no delta badge rather than a wrong one, same fail-open-to-"no data" instinct as everywhere else
+   in this doc, but unlike those cases this specific assumption wasn't previously written down.
 
 ### Symbol validation flow (`GET /api/validate/{symbol}`)
 

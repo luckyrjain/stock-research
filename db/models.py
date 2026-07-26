@@ -225,7 +225,7 @@ screener_stocks = Table(
 # stake in a stock as of NSE's quarterly shareholding disclosure, populated
 # by mf_holdings_history.save_snapshot() from main._fetch_task() (the one
 # choke point both the CLI and api.py's SSE endpoint already funnel every
-# data-slice fetch through — see CLAUDE.md's "Filings classification"
+# data-slice fetch through — see CLAUDE.md's "Schema-drift detection"
 # section for the same pattern applied to schema_drift). Only written on a
 # genuine fresh fetch (a cache hit never reaches _fetch_task at all), so
 # this table's cadence naturally follows however often mf_holdings actually
