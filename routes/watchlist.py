@@ -243,6 +243,23 @@ async def claim_watchlist(request: Request, body: ClaimRequest):
     "claim your data" prompt, which only ever fires once a session is
     already known to exist), so an absent/expired session here is a real
     401, not a silent fall-through to "nothing to do."
+
+    **Disclosed residual risk**: `client_id` was never a secret — any
+    request that knows it can already read/add/delete that browser's rows
+    (see `resolve_owner()` above), the same "grouping key, not a security
+    boundary" design this table has always had. This endpoint's effect is
+    more severe than a plain read/write, though: it *exclusively*
+    reassigns those rows to whichever account calls it, permanently
+    cutting off the original anonymous browser's access — a signed-in
+    attacker who obtains someone else's `client_id` (e.g. leaked in a
+    shared screenshot, a URL in browser history, or a server access log
+    entry — `client_id` already appears in plaintext query strings on
+    every other endpoint in this module) could claim their watchlist for
+    themselves. A tight, dedicated rate limit (below) meaningfully bounds
+    automated/brute-force abuse of this; it does not eliminate a single
+    targeted guess of a specific leaked ID, which would require proof of
+    possession (e.g. a signed token minted into the anonymous browser
+    itself) to fully close — a larger change not attempted in this pass.
     """
     if not body.client_id or not _CLIENT_ID_RE.match(body.client_id):
         raise HTTPException(status_code=422, detail="Invalid client_id.")
@@ -260,7 +277,15 @@ async def claim_watchlist(request: Request, body: ClaimRequest):
 
         claimed, skipped = claim_anonymous_rows_sync(
             api._get_db_engine(), "watchlist_items", "added_at",
-            body.client_id, user_id, _MAX_WATCHLIST_ITEMS_PER_CLIENT, "watchlist_claim",
+            body.client_id, user_id, _MAX_WATCHLIST_ITEMS_PER_CLIENT, "watchlist",
+        )
+        # Audit trail distinct from run_owned_db_call's own failure-only
+        # logging — a real, if imperfect, forensic signal for the residual
+        # risk disclosed above (e.g. spotting one account claiming an
+        # unusual number of distinct client_ids in a short window).
+        api.log_event(
+            api.LOGGER, "watchlist_claimed", user_id=user_id,
+            client_id=body.client_id, claimed=claimed, skipped_over_cap=skipped,
         )
         return {
             "claimed": claimed,
@@ -268,4 +293,11 @@ async def claim_watchlist(request: Request, body: ClaimRequest):
             "items": _watchlist_rows_sync(("user", user_id)),
         }
 
-    return await run_owned_db_call(request, "watchlist_write", 60, _claim_sync, "watchlist_claim")
+    # Dedicated, tight rate limit — not the same generous per-minute budget
+    # as an ordinary star/unstar (see this endpoint's own docstring above
+    # for why an exclusive-reassignment operation warrants a much smaller
+    # one, same per-address-not-just-per-IP precedent as the magic-link
+    # request-link endpoint's 5/hour).
+    return await run_owned_db_call(
+        request, "watchlist_claim", 5, _claim_sync, "watchlist_claim", window_seconds=3600,
+    )

@@ -19,7 +19,7 @@ plus a log line" convention as `scraper_error_counters.py`/
 import json
 import os
 import tempfile
-import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,7 +28,6 @@ from observability import get_logger, log_event
 LOGGER = get_logger("llm_cost")
 
 _COST_DIR = Path("output/_llm_cost")
-_lock = threading.Lock()
 
 
 def _today() -> str:
@@ -36,6 +35,36 @@ def _today() -> str:
     simulate a specific calendar day without sleeping in real time — same
     convention as source_health.py's own _today()."""
     return datetime.now(timezone.utc).date().isoformat()
+
+
+def _lock_path(date: str) -> Path:
+    return _COST_DIR / f".{date}.lock"
+
+
+@contextmanager
+def _locked(date: str):
+    """Advisory, blocking, cross-process exclusive lock guarding one day's
+    read-modify-write cycle — same `fcntl.flock` pattern as
+    source_health.py's own `_locked()`. Without this, two backend *worker
+    processes* (not just threads within one process — a plain
+    `threading.Lock` doesn't reach across processes at all) racing to
+    record a call on the same UTC day can both read the same prior
+    `call_count`, both increment locally, and the second write silently
+    overwrites the first — undercounting cost/calls with no warning logged,
+    exactly the multi-worker deployment this app's own docs already say
+    `REDIS_URL` makes supported. fcntl is POSIX-only, matching this
+    codebase's existing Linux-only deployment assumption; imported lazily
+    so a non-POSIX environment can still import this module's pure helpers."""
+    import fcntl
+
+    _COST_DIR.mkdir(parents=True, exist_ok=True)
+    fd = os.open(_lock_path(date), os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def estimate_cost_usd(response, model: str) -> float | None:
@@ -75,10 +104,11 @@ def record_call_cost(
         cost_usd=cost_usd, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
         run_id=run_id,
     )
+    date = _today()
     try:
         _COST_DIR.mkdir(parents=True, exist_ok=True)
-        path = _COST_DIR / f"{_today()}.json"
-        with _lock:
+        path = _COST_DIR / f"{date}.json"
+        with _locked(date):
             data = {"call_count": 0, "total_cost_usd": 0.0, "calls_with_unknown_cost": 0}
             if path.exists():
                 try:

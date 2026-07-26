@@ -210,7 +210,16 @@ user-facing 'degraded' signal and no attempt at a second configured provider."
    logs) and accumulated into a small running-total JSON file, `output/_llm_cost/<date>.json`
    (`call_count`, `total_cost_usd`, `calls_with_unknown_cost`) — the same "grep-able counter file
    plus a log line" convention as `scraper_error_counters.py`/`source_health.py`, a real answer to
-   "what's today's total LLM spend" without a second billing/observability platform.
+   "what's today's total LLM spend" without a second billing/observability platform. The daily
+   file's read-modify-write cycle is guarded by `_locked(date)`, an advisory `fcntl.flock`-based
+   cross-process lock (same pattern as `source_health.py`'s own `_locked()`) — an own-adversarial-
+   review pass caught that the first version of this module used only an in-process
+   `threading.Lock`, which does nothing to prevent two backend *worker processes* (the exact
+   multi-worker/`REDIS_URL` topology `docs/deployment.md`'s "Scaling" section documents as
+   supported) from both reading the same prior `call_count`, both incrementing locally, and the
+   second write silently overwriting the first — undercounting cost with no warning logged,
+   directly undermining the one thing this module exists to get right. Fixed and covered by a
+   `ConcurrencySafetyTest` in `tests/test_llm_cost.py`, mirroring `source_health.py`'s own.
 2. **Cross-provider failover** (`crew.py`) — `run_analysis_with_fallback()`'s single-provider LLM
    call is extracted into `_attempt_provider()` (its own guardrail retry once, rate-limit retry
    once — unchanged from before this existed), so a second, differently-configured provider can
@@ -218,13 +227,22 @@ user-facing 'degraded' signal and no attempt at a second configured provider."
    `_configured_providers()` returns every provider with a usable API key
    (`_API_KEY_ENV`, declared order); the primary is `_resolve_provider()` (respects
    `LLM_PROVIDER` if set, else the auto-detected first configured key), and the failover
-   candidate is the first *other* configured provider, if any. With only one key configured — the
-   common case per `.env.example`'s "set exactly one" instruction — this is a no-op: behavior is
-   byte-identical to before failover existed, and existing tests confirm it (no provider key is
-   set in this test environment, so `providers_to_try` has exactly one entry). `ANALYST_MODEL`
-   (if set) only ever overrides the *primary* provider's model — reusing it for a failover
-   attempt against a different provider would very likely be an invalid model string for that
-   provider, so the failover attempt always uses that provider's own `_ANALYST_DEFAULTS` entry.
+   candidate is the first *other* configured provider, if any — **but only when `LLM_PROVIDER`
+   itself was never explicitly set**. An explicit `LLM_PROVIDER` is this deployment's own
+   deliberate pin (e.g. a local-only Ollama setup kept off the cloud on purpose for data
+   residency), not merely "whichever key happened to be configured first" — a stray second
+   provider's key left in the same environment for an unrelated reason (shared with another
+   service, leftover from testing) must not silently send this analysis's fetched data to that
+   other provider on a transient failure of the pinned one. Caught in the same adversarial-review
+   pass as point 1 above; regression-tested
+   (`test_explicit_llm_provider_pin_disables_failover_even_with_a_second_key_present`). With only
+   one key configured at all — the common case per `.env.example`'s "set exactly one" instruction
+   — the distinction is moot and this is a no-op either way: behavior is byte-identical to before
+   failover existed, and existing tests confirm it (no provider key is set in this test
+   environment, so `providers_to_try` has exactly one entry). `ANALYST_MODEL` (if set) only ever
+   overrides the *primary* provider's model — reusing it for a failover attempt against a
+   different provider would very likely be an invalid model string for that provider, so the
+   failover attempt always uses that provider's own `_ANALYST_DEFAULTS` entry.
 3. **Visible degraded state** — previously, `crew._safe_analysis_fallback()` already set an
    internal `_degraded: True` marker, but `main._strip_meta()` dropped it (underscore-prefixed,
    same convention as `_meta`) before the report ever left the backend — a provider outage's
@@ -1836,11 +1854,36 @@ identity to one row per symbol).
       room under the existing per-owner cap (`_MAX_WATCHLIST_ITEMS_PER_CLIENT`/
       `_MAX_POSITIONS_PER_CLIENT`) — anything beyond that is left owned by `client_id` rather
       than silently exceeding the cap, and reported back as `skipped_over_cap` rather than
-      dropped. Guarded by the same per-account advisory-lock pattern (`pg_advisory_xact_lock`)
-      the add endpoints already use, under its own lock-key namespace so a claim can't race a
-      concurrent add for the same account. Verified end-to-end against a real local Postgres
-      instance in this sandbox (both the plain-claim and over-cap-partial-claim paths), not
-      just the mocked unit tests `tests/test_api.py` also carries.
+      dropped. Guarded by the exact same per-account advisory-lock **key** the add endpoint
+      already takes (`pg_advisory_xact_lock(hashtext("watchlist:user:<id>"))`, not a separate
+      `"watchlist_claim:<id>"` namespace) — an own-adversarial-review pass caught that an
+      earlier version of this function used a distinct lock-key prefix that *looked* like a
+      deliberate "own namespace per operation" choice but actually meant a concurrent claim and
+      add for the same account took two different locks and never serialized against each
+      other at all, letting both read the same pre-write row count and both commit, silently
+      exceeding `max_per_owner`. Fixed by matching the lock key exactly; re-verified end-to-end
+      against a real local Postgres instance with two real concurrent transactions racing (a
+      199-row account, cap 200, claiming 1 row while an add fires at the same instant) —
+      confirmed the account lands at exactly 200, never over, matching the invariant the docs
+      already claimed before the fix actually delivered it.
+    - **Disclosed residual risk**: `client_id` was never a secret — any request that knows it
+      can already read/add/delete that browser's rows (see "Identity resolution" in "Watchlist
+      flow" below), the same "grouping key, not a security boundary" design this table has
+      always had. Claiming is more severe than an ordinary read/write, though: it *exclusively*
+      reassigns those rows, permanently cutting off the original anonymous browser's access — a
+      signed-in attacker who obtains someone else's `client_id` (already visible in plaintext
+      query strings on every other endpoint here, so it can leak via a shared screenshot,
+      browser history, or a server access log) could claim their watchlist for themselves. Both
+      claim endpoints are rate-limited far tighter than this table's ordinary writes (5/hour,
+      not the 60/minute every other write here gets — same per-address-not-just-per-IP
+      precedent as the magic-link request-link endpoint's 5/hour) and log a `watchlist_claimed`/
+      `positions_claimed` audit event on every success, which meaningfully bounds
+      automated/brute-force abuse but does not eliminate a single targeted guess of one
+      specific leaked ID — that would need proof of possession (e.g. a signed token minted into
+      the anonymous browser itself), a larger change not attempted in this pass.
+      Verified end-to-end against a real local Postgres instance in this sandbox (both the
+      plain-claim and over-cap-partial-claim paths), not just the mocked unit tests
+      `tests/test_api.py` also carries.
     - **The one caller**: `frontend/app/auth/verify/page.tsx`, right before it calls
       `GET /api/auth/verify` (i.e. while the browser still has no session cookie, so
       `GET /api/watchlist`/`GET /api/positions` still resolve via `client_id`, not an

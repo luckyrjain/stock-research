@@ -182,6 +182,12 @@ async def claim_positions(request: Request, body: ClaimRequest):
     that module's docstring). Requires a valid session for the same reason:
     this endpoint's only caller is the post-sign-in "claim your data"
     prompt, so a missing/expired session is a real 401.
+
+    See `claim_watchlist()`'s own docstring for the disclosed residual risk
+    (`client_id` is a grouping key, not a security boundary — this endpoint
+    just makes its effect exclusive/permanent rather than merely
+    read/write) and why the rate limit below is deliberately much tighter
+    than this table's ordinary add/remove endpoints.
     """
     if not body.client_id or not _CLIENT_ID_RE.match(body.client_id):
         raise HTTPException(status_code=422, detail="Invalid client_id.")
@@ -199,7 +205,11 @@ async def claim_positions(request: Request, body: ClaimRequest):
 
         claimed, skipped = claim_anonymous_rows_sync(
             api._get_db_engine(), "positions", "bought_at",
-            body.client_id, user_id, _MAX_POSITIONS_PER_CLIENT, "positions_claim",
+            body.client_id, user_id, _MAX_POSITIONS_PER_CLIENT, "positions",
+        )
+        api.log_event(
+            api.LOGGER, "positions_claimed", user_id=user_id,
+            client_id=body.client_id, claimed=claimed, skipped_over_cap=skipped,
         )
         return {
             "claimed": claimed,
@@ -207,4 +217,6 @@ async def claim_positions(request: Request, body: ClaimRequest):
             "items": _positions_rows_sync(("user", user_id)),
         }
 
-    return await run_owned_db_call(request, "positions_write", 60, _claim_sync, "positions_claim")
+    return await run_owned_db_call(
+        request, "positions_claim", 5, _claim_sync, "positions_claim", window_seconds=3600,
+    )

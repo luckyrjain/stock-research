@@ -10,7 +10,9 @@ from fastapi import HTTPException
 import api
 
 
-async def run_owned_db_call(request, rate_limit_name: str, max_calls: int, sync_fn, event_prefix: str):
+async def run_owned_db_call(
+    request, rate_limit_name: str, max_calls: int, sync_fn, event_prefix: str, window_seconds: float = 60,
+):
     """Runs `sync_fn` (a zero-arg callable doing the actual DB work) off the
     event loop, with the exact shape every watchlist/positions endpoint
     needs: rate limit this call, 503 immediately if no DATABASE_URL is
@@ -19,8 +21,13 @@ async def run_owned_db_call(request, rate_limit_name: str, max_calls: int, sync_
     session on a session-required endpoint, e.g. the claim endpoints below)
     to a 401, and anything else to a sanitized 503 — never leaking raw
     exception text to the caller, logging the real one server-side
-    instead."""
-    api._rate_limit(request, rate_limit_name, max_calls=max_calls, window_seconds=60)
+    instead. `window_seconds` defaults to the same 60s every ordinary
+    read/write here already used; the claim endpoints pass a much longer
+    window with a much lower cap (same per-address-not-just-per-IP
+    precedent as the magic-link request-link endpoint's 5/hour) — a
+    sensitive, low-frequency, exclusive-reassignment operation shouldn't
+    share the same generous per-minute budget as an ordinary star/unstar."""
+    api._rate_limit(request, rate_limit_name, max_calls=max_calls, window_seconds=window_seconds)
     if not api.os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
 
@@ -50,6 +57,16 @@ def claim_anonymous_rows_sync(
     Screener's `sort` column interpolation elsewhere in this codebase, so
     f-string interpolation here is safe.
 
+    `lock_prefix` MUST be the exact same string the table's own add endpoint
+    uses for its own advisory lock (e.g. `"watchlist"`, matching
+    `routes/watchlist.py::add_to_watchlist`'s `f"watchlist:{owner[0]}:{owner[1]}"`)
+    — an earlier version of this function used a distinct `"<table>_claim"`
+    prefix, which looked like an intentional "own lock-key namespace" choice
+    but actually meant a concurrent claim and add for the same account took
+    two different advisory locks and never serialized against each other at
+    all, letting both read the same pre-claim/pre-add row count and both
+    commit, silently exceeding `max_per_owner`.
+
     A symbol the account already owns keeps the account's existing row; the
     anonymous duplicate is discarded (not left around as clutter — it can
     never be claimed anyway, since uq_{table}_user_symbol forbids two rows
@@ -67,10 +84,12 @@ def claim_anonymous_rows_sync(
     from sqlalchemy import text as _text
 
     with engine.begin() as conn:
-        # Advisory lock scoped to this account, distinct namespace per table
-        # via lock_prefix, so a claim can't race a concurrent add/claim for
-        # the same account.
-        conn.execute(_text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"), {"lock_key": f"{lock_prefix}:{user_id}"})
+        # Advisory lock scoped to this account — same key format and same
+        # "user" owner-type segment the add endpoint's own lock uses (see
+        # this function's docstring above), so a claim and a concurrent add
+        # for the same account actually serialize against each other rather
+        # than silently racing past max_per_owner.
+        conn.execute(_text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"), {"lock_key": f"{lock_prefix}:user:{user_id}"})
 
         conn.execute(_text(f"""
             DELETE FROM {table} t1

@@ -1,6 +1,8 @@
 import json
 import shutil
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -80,6 +82,88 @@ class LlmCostTest(unittest.TestCase):
 
         self.assertEqual(llm_cost.get_daily_totals("2026-01-01")["total_cost_usd"], 0.01)
         self.assertEqual(llm_cost.get_daily_totals("2026-01-02")["total_cost_usd"], 0.05)
+
+
+class ConcurrencySafetyTest(unittest.TestCase):
+    """Regression coverage for the cross-process lost-update race a plain
+    in-memory threading.Lock can't prevent: two backend *worker processes*
+    (the exact multi-worker/REDIS_URL topology docs/deployment.md's
+    "Scaling" section documents as supported) racing to record a call on
+    the same UTC day must not silently undercount call_count/total_cost_usd
+    — same fcntl.flock-based fix and same test shape as
+    tests/test_source_health.py's own ConcurrencySafetyTest."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-llm-cost-lock-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._patch = patch.object(llm_cost, "_COST_DIR", Path(self._tmpdir))
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+
+    def test_locked_excludes_concurrent_holders(self) -> None:
+        intervals = []
+        lock_guard = threading.Lock()
+
+        def hold(label: str) -> None:
+            with llm_cost._locked("2026-01-01"):
+                start = time.monotonic()
+                time.sleep(0.05)
+                end = time.monotonic()
+            with lock_guard:
+                intervals.append((label, start, end))
+
+        threads = [threading.Thread(target=hold, args=(f"t{i}",)) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(intervals), 4)
+        intervals.sort(key=lambda x: x[1])
+        for (_, _, end_a), (_, start_b, _) in zip(intervals, intervals[1:]):
+            self.assertLessEqual(end_a, start_b)  # no overlap between consecutive holders
+
+    def test_concurrent_record_call_cost_loses_no_calls(self) -> None:
+        # Regression test: an in-process threading.Lock alone can't prevent
+        # a lost update across two *processes* -- this exercises many
+        # threads racing for the same file to at least prove the
+        # file-level lock serializes correctly within one process; the
+        # real multi-process guarantee comes from fcntl.flock being keyed
+        # on the open file description, not the process.
+        with patch("llm_cost._today", return_value="2026-03-01"):
+            def worker() -> None:
+                llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)
+
+            threads = [threading.Thread(target=worker) for _ in range(30)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            totals = llm_cost.get_daily_totals("2026-03-01")
+
+        self.assertEqual(totals["call_count"], 30)
+        self.assertAlmostEqual(totals["total_cost_usd"], 0.30)
+
+    def test_concurrent_calls_never_corrupt_the_file(self) -> None:
+        errors = []
+
+        def worker(i: int) -> None:
+            try:
+                llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01 * i, 100, 50)
+            except Exception as exc:  # pragma: no cover
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        path = llm_cost._COST_DIR / f"{llm_cost._today()}.json"
+        data = json.loads(path.read_text())  # raises if corrupted
+        self.assertEqual(data["call_count"], 20)
 
 
 if __name__ == "__main__":

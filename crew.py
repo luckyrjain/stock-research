@@ -465,6 +465,21 @@ def run_analysis_with_fallback(
     included) before falling through to the safe fallback. With only one
     key configured — the common case — this is a no-op: behavior is
     unchanged from before failover existed.
+
+    Failover is skipped entirely when `LLM_PROVIDER` is explicitly set —
+    that env var is this deployment's own deliberate choice to pin one
+    provider (e.g. a local-only Ollama deployment kept off the cloud on
+    purpose for data residency), not merely "whichever key happened to be
+    configured first." A stray second provider's key left over in the same
+    environment for an unrelated reason (shared with another service,
+    leftover from testing) must not silently send this analysis's fetched
+    market/fundamentals/news/filings data to that other provider on a
+    transient failure of the pinned one — that would cross a boundary the
+    operator explicitly drew. Failover only ever engages when the primary
+    was auto-detected (no explicit `LLM_PROVIDER`), the same case where
+    "which provider is even primary" was already just "whichever key came
+    first," so trying a second one on failure is a resilience improvement,
+    not a boundary violation.
     """
     prompt = build_analysis_prompt(symbol, all_data)
 
@@ -485,7 +500,10 @@ def run_analysis_with_fallback(
     # Resolve model + key without going through CrewAI's LLM wrapper
     # (avoids optional native provider imports like google-genai)
     primary_provider = _resolve_provider()
-    fallback_provider = next(
+    # Only auto-detected primaries get a failover candidate — an explicit
+    # LLM_PROVIDER is a deliberate single-provider pin (see this function's
+    # own docstring above for why a stray second key must not override it).
+    fallback_provider = None if os.getenv("LLM_PROVIDER") else next(
         (p for p in _configured_providers() if p != primary_provider), None,
     )
     providers_to_try = [primary_provider] + ([fallback_provider] if fallback_provider else [])

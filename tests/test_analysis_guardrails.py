@@ -374,6 +374,21 @@ class CrossProviderFailoverTest(unittest.TestCase):
             model, _key = crew._resolve_model_and_key("openai", is_primary=False)
         self.assertEqual(model, crew._ANALYST_DEFAULTS["openai"])
 
+    def test_explicit_llm_provider_pin_disables_failover_even_with_a_second_key_present(self) -> None:
+        # Regression test: an operator setting LLM_PROVIDER (e.g. to pin a
+        # local-only Ollama deployment for data residency) is a deliberate
+        # single-provider choice, not "whichever key happened to be
+        # configured first." A stray second key left in the same
+        # environment for an unrelated reason must not cause this
+        # analysis's fetched data to silently be sent to that other
+        # provider on a transient failure of the pinned one.
+        with patch.dict("os.environ", {"LLM_PROVIDER": "anthropic"}, clear=False):
+            with patch("litellm.completion", side_effect=RuntimeError("anthropic is down")) as mock_completion:
+                analysis = crew.run_analysis_with_fallback("TCS", self.all_data)
+
+        self.assertEqual(mock_completion.call_count, 1)  # no failover attempt at all
+        self.assertTrue(analysis["_degraded"])
+
 
 if __name__ == "__main__":
     unittest.main()
