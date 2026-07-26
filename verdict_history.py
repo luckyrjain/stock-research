@@ -112,3 +112,39 @@ def load_history(symbol: str, limit: int = 60) -> list[dict]:
     except Exception as exc:  # pylint: disable=broad-exception-caught
         log_event(LOGGER, "verdict_history_load_failed", level="warning", symbol=symbol, error=str(exc))
         return []
+
+
+def detect_recent_changes(symbol: str, price_move_threshold_pct: float = 10.0) -> dict:
+    """One shared read of the two most recent stored snapshots for `symbol`,
+    returning both a recommendation-change flag and a price-move flag — the
+    same two conditions watchlist_alerts.py's daily digest already emails.
+    Single source of truth for "what counts as a notable change" so the
+    once-daily email and any same-day in-app surfacing (e.g. a watchlist
+    badge) can never disagree on the threshold.
+
+    Returns {"recommendation_change": {...} | None, "price_move": {...} | None}
+    — both None when there are fewer than 2 stored snapshots (nothing to
+    compare against yet), never guessed.
+    """
+    history = load_history(symbol, limit=2)
+    if len(history) < 2:
+        return {"recommendation_change": None, "price_move": None}
+    previous, current = history[0], history[1]
+
+    recommendation_change = None
+    new_rec = current.get("recommendation")
+    if new_rec and new_rec != previous.get("recommendation"):
+        recommendation_change = {
+            "old_recommendation": previous.get("recommendation"),
+            "new_recommendation": new_rec,
+            "confidence":         current.get("confidence"),
+        }
+
+    price_move = None
+    old_price, new_price = previous.get("current_price"), current.get("current_price")
+    if old_price is not None and new_price is not None and old_price:
+        change_pct = round((new_price - old_price) / old_price * 100, 1)
+        if abs(change_pct) >= price_move_threshold_pct:
+            price_move = {"old_price": old_price, "new_price": new_price, "change_pct": change_pct}
+
+    return {"recommendation_change": recommendation_change, "price_move": price_move}

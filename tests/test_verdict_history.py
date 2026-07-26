@@ -117,5 +117,68 @@ class LoadHistoryTest(unittest.TestCase):
             self.assertEqual(verdict_history.load_history("TCS"), [])
 
 
+class DetectRecentChangesTest(unittest.TestCase):
+    """Shared by watchlist_alerts.py's daily digest and
+    GET /api/watchlist/calendar's same-day in-app surfacing — one place
+    deciding what counts as a notable change."""
+
+    def test_both_none_with_fewer_than_two_snapshots(self) -> None:
+        with patch("verdict_history.load_history", return_value=[{"recommendation": "BUY"}]):
+            result = verdict_history.detect_recent_changes("TCS")
+        self.assertEqual(result, {"recommendation_change": None, "price_move": None})
+
+    def test_recommendation_change_detected(self) -> None:
+        history = [
+            {"recommendation": "HOLD", "confidence": "MEDIUM", "current_price": 100.0},
+            {"recommendation": "BUY", "confidence": "HIGH", "current_price": 101.0},
+        ]
+        with patch("verdict_history.load_history", return_value=history):
+            result = verdict_history.detect_recent_changes("TCS")
+        self.assertEqual(result["recommendation_change"], {
+            "old_recommendation": "HOLD", "new_recommendation": "BUY", "confidence": "HIGH",
+        })
+        self.assertIsNone(result["price_move"])
+
+    def test_price_move_detected_independent_of_recommendation(self) -> None:
+        # Recommendation stays HOLD, but the price still moved double digits —
+        # the recommendation-change check alone would never catch this.
+        history = [
+            {"recommendation": "HOLD", "confidence": "MEDIUM", "current_price": 100.0},
+            {"recommendation": "HOLD", "confidence": "MEDIUM", "current_price": 115.0},
+        ]
+        with patch("verdict_history.load_history", return_value=history):
+            result = verdict_history.detect_recent_changes("TCS")
+        self.assertIsNone(result["recommendation_change"])
+        self.assertEqual(result["price_move"], {"old_price": 100.0, "new_price": 115.0, "change_pct": 15.0})
+
+    def test_price_move_respects_custom_threshold(self) -> None:
+        history = [
+            {"recommendation": "HOLD", "current_price": 100.0},
+            {"recommendation": "HOLD", "current_price": 105.0},
+        ]
+        with patch("verdict_history.load_history", return_value=history):
+            under_default = verdict_history.detect_recent_changes("TCS")
+            over_custom = verdict_history.detect_recent_changes("TCS", price_move_threshold_pct=3.0)
+        self.assertIsNone(under_default["price_move"])
+        self.assertIsNotNone(over_custom["price_move"])
+
+    def test_both_can_fire_together(self) -> None:
+        history = [
+            {"recommendation": "HOLD", "confidence": "MEDIUM", "current_price": 100.0},
+            {"recommendation": "SELL", "confidence": "HIGH", "current_price": 80.0},
+        ]
+        with patch("verdict_history.load_history", return_value=history):
+            result = verdict_history.detect_recent_changes("TCS")
+        self.assertIsNotNone(result["recommendation_change"])
+        self.assertIsNotNone(result["price_move"])
+
+    def test_price_move_none_when_prior_price_missing_or_zero(self) -> None:
+        for prior_price in (None, 0.0):
+            history = [{"recommendation": "HOLD", "current_price": prior_price}, {"recommendation": "HOLD", "current_price": 200.0}]
+            with patch("verdict_history.load_history", return_value=history):
+                result = verdict_history.detect_recent_changes("TCS")
+            self.assertIsNone(result["price_move"])
+
+
 if __name__ == "__main__":
     unittest.main()

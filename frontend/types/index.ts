@@ -94,13 +94,31 @@ export interface FilingsSummary {
   next_results_date:  string | null;   // 'YYYY-MM-DD'
 }
 
+// Same two conditions watchlist_alerts.py's daily digest email already
+// computes (see verdict_history.detect_recent_changes) — surfaced here so a
+// notable move/verdict-flip doesn't only ever reach a user through email.
+export interface RecommendationChangeAlert {
+  old_recommendation: string | null;
+  new_recommendation: string;
+  confidence:          string | null;
+}
+export interface PriceMoveAlert {
+  old_price:  number;
+  new_price:  number;
+  change_pct: number;
+}
+
 // GET /api/watchlist/calendar?symbols=... — one entry per watched symbol that
-// has *something* to show (a next results date and/or a pending corporate
-// action), read straight off each symbol's already-cached filings. A symbol
-// with no cached filings, or nothing classifiable in them, contributes no
-// entry at all rather than a mostly-empty one.
+// has *something* to show: a next results date / pending corporate action
+// (read straight off each symbol's already-cached filings), and/or a same-day
+// recommendation change or price move (from verdict_history). Each of the
+// four fields is independently optional/null — a symbol with no cached
+// filings and no notable change contributes no entry at all, rather than a
+// mostly-empty one.
 export interface WatchlistCalendarEntry extends FilingsSummary {
   symbol: string;
+  recommendation_change: RecommendationChangeAlert | null;
+  price_move:             PriceMoveAlert | null;
 }
 
 export interface WatchlistCalendarResponse {

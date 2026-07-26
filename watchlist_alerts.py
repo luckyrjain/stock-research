@@ -128,21 +128,13 @@ def _analyze_symbol(symbol: str, run_id: str, force: bool = False) -> dict | Non
 def _detect_change(symbol: str) -> dict | None:
     """Compare today's freshly-saved verdict against the one immediately
     before it. None if there's no prior day to compare against yet, or the
-    recommendation didn't change."""
-    history = verdict_history.load_history(symbol, limit=2)
-    if len(history) < 2:
-        return None
-    previous, current = history[0], history[1]
-    new_rec = current.get("recommendation")
-    if not new_rec or new_rec == previous.get("recommendation"):
-        return None
-    return {
-        "kind": "recommendation_change",
-        "symbol": symbol,
-        "old_recommendation": previous.get("recommendation"),
-        "new_recommendation": new_rec,
-        "confidence": current.get("confidence"),
-    }
+    recommendation didn't change. Delegates the actual comparison to
+    verdict_history.detect_recent_changes() — the same function
+    GET /api/watchlist/calendar now calls for same-day in-app surfacing, so
+    the email digest and the watchlist page can never disagree on what
+    counts as a change."""
+    change = verdict_history.detect_recent_changes(symbol, _PRICE_MOVE_THRESHOLD_PCT)["recommendation_change"]
+    return {"kind": "recommendation_change", "symbol": symbol, **change} if change else None
 
 
 def _detect_price_move(symbol: str) -> dict | None:
@@ -152,24 +144,10 @@ def _detect_price_move(symbol: str) -> dict | None:
     percentage off it), or the move is under _PRICE_MOVE_THRESHOLD_PCT.
     Independent of _detect_change: a stock can move 12% in a day and still
     close as a HOLD, which the recommendation-change check alone would
-    never surface."""
-    history = verdict_history.load_history(symbol, limit=2)
-    if len(history) < 2:
-        return None
-    previous, current = history[0], history[1]
-    old_price, new_price = previous.get("current_price"), current.get("current_price")
-    if old_price is None or new_price is None or not old_price:
-        return None
-    change_pct = round((new_price - old_price) / old_price * 100, 1)
-    if abs(change_pct) < _PRICE_MOVE_THRESHOLD_PCT:
-        return None
-    return {
-        "kind": "price_move",
-        "symbol": symbol,
-        "old_price": old_price,
-        "new_price": new_price,
-        "change_pct": change_pct,
-    }
+    never surface. Delegates to verdict_history.detect_recent_changes(),
+    same reasoning as _detect_change above."""
+    move = verdict_history.detect_recent_changes(symbol, _PRICE_MOVE_THRESHOLD_PCT)["price_move"]
+    return {"kind": "price_move", "symbol": symbol, **move} if move else None
 
 
 def run(force: bool = False) -> bool:

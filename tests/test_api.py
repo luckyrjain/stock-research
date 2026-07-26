@@ -2125,10 +2125,11 @@ class WatchlistEndpointsTest(unittest.TestCase):
 
 
 class WatchlistCalendarEndpointTest(unittest.TestCase):
-    """Pure read-aggregation over each symbol's already-cached `filings` —
-    no DATABASE_URL involved at all, unlike the rest of the watchlist
-    endpoints, since the caller (the watchlist page) already has its own
-    symbol list from GET /api/watchlist and just passes it through."""
+    """Read-aggregation over each symbol's already-cached `filings` (no
+    DATABASE_URL needed for that half) plus, independently, a same-day
+    recommendation-change / price-move flag via
+    verdict_history.detect_recent_changes() (degrades to both None without
+    DATABASE_URL, same as every other verdict_history-backed read)."""
 
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-watchlist-calendar-test-")
@@ -2166,6 +2167,46 @@ class WatchlistCalendarEndpointTest(unittest.TestCase):
         entries = resp.json()["entries"]
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["symbol"], "TCS")
+        # No DATABASE_URL configured in this test — the verdict-history half
+        # degrades to null, not an error, and doesn't block the filings half.
+        self.assertIsNone(entries[0]["recommendation_change"])
+        self.assertIsNone(entries[0]["price_move"])
+
+    def test_symbol_with_notable_price_move_is_included_without_filings(self) -> None:
+        move = {"old_price": 100.0, "new_price": 115.0, "change_pct": 15.0}
+        with patch("verdict_history.detect_recent_changes", return_value={"recommendation_change": None, "price_move": move}):
+            resp = client.get("/api/watchlist/calendar?symbols=TCS")
+        self.assertEqual(resp.status_code, 200)
+        entries = resp.json()["entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["price_move"], move)
+        self.assertEqual(entries[0]["next_results_date"], None)
+        self.assertEqual(entries[0]["corporate_actions"], [])
+
+    def test_symbol_with_recommendation_change_is_included_without_filings(self) -> None:
+        change = {"old_recommendation": "HOLD", "new_recommendation": "SELL", "confidence": "HIGH"}
+        with patch("verdict_history.detect_recent_changes", return_value={"recommendation_change": change, "price_move": None}):
+            resp = client.get("/api/watchlist/calendar?symbols=TCS")
+        self.assertEqual(resp.status_code, 200)
+        entries = resp.json()["entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["recommendation_change"], change)
+
+    def test_notable_change_sorts_before_filings_only_entries(self) -> None:
+        cache.save("AAA", "filings", {"symbol": "AAA", "filings": [
+            {"title": "Board Meeting Intimation for considering financial results",
+             "desc": "The Board will meet on 15-08-2026 to consider financial results.",
+             "date": "2026-07-20", "category": "Board Meeting", "attachment": None},
+        ]})
+        move = {"old_price": 100.0, "new_price": 90.0, "change_pct": -10.0}
+
+        def fake_changes(sym, *_a, **_kw):
+            return {"recommendation_change": None, "price_move": move if sym == "ZZZ" else None}
+
+        with patch("verdict_history.detect_recent_changes", side_effect=fake_changes):
+            resp = client.get("/api/watchlist/calendar?symbols=AAA,ZZZ")
+        entries = resp.json()["entries"]
+        self.assertEqual([e["symbol"] for e in entries], ["ZZZ", "AAA"])
 
     def test_symbol_with_only_routine_filings_contributes_nothing(self) -> None:
         cache.save("TCS", "filings", {"symbol": "TCS", "filings": [
