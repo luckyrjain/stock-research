@@ -1222,17 +1222,42 @@ Return ONLY this JSON (no markdown, no extra text):
             the peer-relative percentile — it needs only this stock's own
             Screener page (already fetched for `research` above), not a
             peer-group lookup, so it's cheap to add to every pick's research
-            step without a second round of peer scraping per stock."""
+            step without a second round of peer scraping per stock.
+
+            Goes through the exact same cache.load/save(symbol, "peers")
+            entry and value shape GET /api/peers/{symbol} already uses
+            (24h TTL, shaped by peer_analytics.build_peer_result) —
+            without this, every Market Picks run (weekly cron or
+            ?force=true) would issue up to 2 * _MAX_STOCKS fresh, fully
+            uncached Screener.in requests (get_peer_comparison() does two
+            HTTP round trips per call) on top of the already-cached
+            `research` task's own Screener.in hit, directly contradicting
+            this codebase's documented NSE/Screener rate-limit caution.
+            Sharing both the cache key AND the cached value's shape means
+            the single-stock peers endpoint and this pipeline transparently
+            reuse one entry per symbol regardless of which one populates it
+            first — a shape mismatch between the two (e.g. one caching the
+            raw scrape, the other caching the computed result) would make
+            the other reader silently see missing fields instead of a
+            cache hit."""
             try:
                 import json as _json
 
-                from peer_analytics import compute_valuation_anchor
+                import cache
+                from peer_analytics import build_peer_result
                 from tools.screener_tools import get_peer_comparison
 
-                raw = _json.loads(get_peer_comparison.run(symbol=symbol))
-                if raw.get("error"):
-                    return None
-                anchor = compute_valuation_anchor(raw.get("self"), raw.get("valuation_band") or {})
+                cached = cache.load(symbol, "peers")
+                if cached is not None:
+                    result = cached
+                else:
+                    raw = _json.loads(get_peer_comparison.run(symbol=symbol))
+                    if raw.get("error"):
+                        return None
+                    result = build_peer_result(symbol, raw)
+                    cache.save(symbol, "peers", result)
+
+                anchor = result.get("absolute_anchor")
                 return anchor["percentile"] if anchor else None
             except Exception:
                 return None

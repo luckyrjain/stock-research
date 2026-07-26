@@ -12,6 +12,26 @@ relying on that).
 import statistics
 
 
+def build_peer_result(symbol: str, raw: dict) -> dict:
+    """Shape a get_peer_comparison() raw scrape into the response/cache
+    value GET /api/peers/{symbol} returns and caches under cache key
+    "peers" (24h TTL) — the single source of truth for that shape, so
+    api.py's endpoint and market_picks_pipeline.py's per-stock
+    valuation-percentile lookup (see _fetch_valuation_percentile) can
+    transparently share one cache.load/save(symbol, "peers") entry per
+    symbol, regardless of which caller populates it first. Assumes
+    raw.get("error") is already falsy — callers check that first, same
+    as they did before this was extracted."""
+    return {
+        "symbol":          raw.get("symbol", symbol),
+        "self":            raw.get("self"),
+        "peers":           raw.get("peers", []),
+        "sector_median":   raw.get("sector_median"),
+        "percentiles":     compute_peer_percentiles(raw.get("self"), raw.get("peers", [])),
+        "absolute_anchor": compute_valuation_anchor(raw.get("self"), raw.get("valuation_band") or {}),
+    }
+
+
 def _parse_peer_numeric(value) -> float | None:
     if value is None:
         return None

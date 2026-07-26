@@ -36,6 +36,7 @@ import rate_limiter
 # see peer_analytics.py's own docstring for why the math itself lives there.
 from peer_analytics import compute_peer_percentiles as _compute_peer_percentiles
 from peer_analytics import compute_valuation_anchor as _compute_valuation_anchor
+from peer_analytics import build_peer_result as _build_peer_result
 
 
 # ── Global LLM concurrency ceiling ───────────────────────────────────────────
@@ -1238,14 +1239,7 @@ async def get_peers(request: Request, symbol: str):
                 "percentiles": {}, "absolute_anchor": None,
             }
 
-        result = {
-            "symbol":          raw.get("symbol", sym),
-            "self":            raw.get("self"),
-            "peers":           raw.get("peers", []),
-            "sector_median":   raw.get("sector_median"),
-            "percentiles":     _compute_peer_percentiles(raw.get("self"), raw.get("peers", [])),
-            "absolute_anchor": _compute_valuation_anchor(raw.get("self"), raw.get("valuation_band") or {}),
-        }
+        result = _build_peer_result(sym, raw)
         cache.save(sym, "peers", result)
         return result
 

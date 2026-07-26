@@ -1,6 +1,6 @@
 import unittest
 
-from peer_analytics import compute_peer_percentiles, compute_valuation_anchor
+from peer_analytics import build_peer_result, compute_peer_percentiles, compute_valuation_anchor
 
 
 class ComputePeerPercentilesTest(unittest.TestCase):
@@ -34,6 +34,40 @@ class ComputeValuationAnchorTest(unittest.TestCase):
     def test_no_self_row_returns_none(self) -> None:
         band = {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [20.0, 22.0, 26.0]}
         self.assertIsNone(compute_valuation_anchor(None, band))
+
+
+class BuildPeerResultTest(unittest.TestCase):
+    """build_peer_result() is the single source of truth for the shape
+    cached under cache key "peers" — both api.py's GET /api/peers/{symbol}
+    and market_picks_pipeline.py's valuation-percentile fetch read/write
+    this exact shape so they can transparently share one cache entry."""
+
+    def test_shapes_a_raw_scrape_into_the_cached_response(self) -> None:
+        raw = {
+            "symbol": "TCS",
+            "self": {"values": {"P/E": "22"}},
+            "peers": [{"values": {"P/E": "20"}}],
+            "sector_median": {"values": {"P/E": "21"}},
+            "valuation_band": {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [20.0, 25.0, 30.0]},
+        }
+        result = build_peer_result("TCS", raw)
+        self.assertEqual(result["symbol"], "TCS")
+        self.assertEqual(result["self"], raw["self"])
+        self.assertEqual(result["peers"], raw["peers"])
+        self.assertEqual(result["sector_median"], raw["sector_median"])
+        self.assertIn("P/E", result["percentiles"])
+        self.assertEqual(result["absolute_anchor"]["percentile"], 33.3)
+
+    def test_missing_valuation_band_yields_null_anchor(self) -> None:
+        raw = {"symbol": "TCS", "self": {"values": {"P/E": "22"}}, "peers": []}
+        result = build_peer_result("TCS", raw)
+        self.assertIsNone(result["absolute_anchor"])
+
+    def test_falls_back_to_the_passed_symbol_when_raw_lacks_one(self) -> None:
+        result = build_peer_result("TCS", {})
+        self.assertEqual(result["symbol"], "TCS")
+        self.assertEqual(result["peers"], [])
+        self.assertIsNone(result["self"])
 
 
 if __name__ == "__main__":

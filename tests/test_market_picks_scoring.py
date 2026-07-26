@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import cache
 import market_picks_pipeline
 from market_picks_pipeline import (
     MarketPicksPipeline,
@@ -354,9 +355,24 @@ class PhaseResearchValuationPercentileTest(unittest.TestCase):
     """_research_one() fetches get_peer_comparison() alongside stock_info/
     research and folds the resulting valuation percentile into research_data
     — closing the gap where peer/valuation data (already built and shipped
-    for the single-stock flow) never reached Market Picks scoring."""
+    for the single-stock flow) never reached Market Picks scoring.
 
-    def _run(self, peer_comparison_json: str):
+    The fetch goes through cache.load/save(symbol, "peers") — the same
+    cache entry GET /api/peers/{symbol} uses — so every test here patches
+    cache.CACHE_DIR to an isolated tmpdir (matching this suite's existing
+    convention elsewhere for anything that touches the cache/output
+    directory), both to avoid polluting the real repo's output/ dir and
+    because a stale real cache entry would otherwise make these tests
+    order-dependent on whatever ran before them."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-valuation-pct-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
+        self._cache_patch.start()
+        self.addCleanup(self._cache_patch.stop)
+
+    def _run(self, peer_comparison_json: str, symbol: str = "TCS"):
         fake_signal_result = MagicMock(final_score=0.5, verdict="BUY")
         pipeline = MarketPicksPipeline()
         with patch("main._fetch_task", return_value={}), \
@@ -367,19 +383,20 @@ class PhaseResearchValuationPercentileTest(unittest.TestCase):
              patch("yfinance.Ticker") as mock_ticker:
             mock_peers.run.return_value = peer_comparison_json
             mock_ticker.return_value.history.return_value = [1] * 12  # not a recent IPO
-            return pipeline._phase_research([{"symbol": "TCS"}], emit=lambda p: None)
+            result = pipeline._phase_research([{"symbol": symbol}], emit=lambda p: None)
+            return result, mock_peers
 
     def test_cheap_valuation_is_populated_from_peer_comparison(self) -> None:
         peer_json = json.dumps({
             "self": {"values": {"P/E": "22"}},
             "valuation_band": {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [20.0, 25.0, 30.0]},
         })
-        result = self._run(peer_json)
+        result, _ = self._run(peer_json)
         self.assertIsNotNone(result["TCS"]["valuation_percentile"])
         self.assertIsInstance(result["TCS"]["valuation_percentile"], float)
 
     def test_screener_error_leaves_valuation_percentile_none_not_fatal(self) -> None:
-        result = self._run(json.dumps({"error": "boom"}))
+        result, _ = self._run(json.dumps({"error": "boom"}))
         self.assertIsNone(result["TCS"]["valuation_percentile"])
         self.assertNotIn("error", result["TCS"])  # the rest of the research step still succeeds
 
@@ -388,8 +405,50 @@ class PhaseResearchValuationPercentileTest(unittest.TestCase):
             "self": {"values": {"P/E": "22"}},
             "valuation_band": {"years": ["Mar 2023", "Mar 2024"], "pe": [25.0, 30.0]},
         })
-        result = self._run(peer_json)
+        result, _ = self._run(peer_json)
         self.assertIsNone(result["TCS"]["valuation_percentile"])
+
+    def test_second_call_hits_the_cache_instead_of_scraping_again(self) -> None:
+        """The High-severity review finding on this PR: without caching,
+        every pipeline run re-scrapes Screener.in for every stock. Two
+        research passes for the same symbol must only hit
+        get_peer_comparison() once."""
+        peer_json = json.dumps({
+            "self": {"values": {"P/E": "22"}},
+            "valuation_band": {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [20.0, 25.0, 30.0]},
+        })
+        fake_signal_result = MagicMock(final_score=0.5, verdict="BUY")
+        pipeline = MarketPicksPipeline()
+        with patch("main._fetch_task", return_value={}), \
+             patch("schemas.normalize", side_effect=lambda task, data: {}), \
+             patch("signals.engine.run_signal_engine", return_value=fake_signal_result), \
+             patch("signals.interpreter.interpret", return_value="insight"), \
+             patch("tools.screener_tools.get_peer_comparison") as mock_peers, \
+             patch("yfinance.Ticker") as mock_ticker:
+            mock_peers.run.return_value = peer_json
+            mock_ticker.return_value.history.return_value = [1] * 12
+            r1 = pipeline._phase_research([{"symbol": "TCS"}], emit=lambda p: None)
+            r2 = pipeline._phase_research([{"symbol": "TCS"}], emit=lambda p: None)
+
+        self.assertEqual(mock_peers.run.call_count, 1)
+        self.assertEqual(r1["TCS"]["valuation_percentile"], r2["TCS"]["valuation_percentile"])
+
+    def test_cached_entry_shares_shape_with_api_peers_endpoint(self) -> None:
+        """The cache entry this pipeline writes under cache key "peers"
+        must be readable by api.py's GET /api/peers/{symbol} (and vice
+        versa) — both must agree on the same value shape
+        (peer_analytics.build_peer_result), or one caller silently sees
+        missing fields instead of a real cache hit."""
+        peer_json = json.dumps({
+            "self": {"values": {"P/E": "22"}},
+            "valuation_band": {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [20.0, 25.0, 30.0]},
+        })
+        self._run(peer_json)
+        cached = cache.load("TCS", "peers")
+        self.assertIsNotNone(cached)
+        self.assertIn("absolute_anchor", cached)
+        self.assertIn("percentiles", cached)
+        self.assertEqual(cached["absolute_anchor"]["percentile"], 33.3)
 
 
 class PruneExtractCacheTest(unittest.TestCase):
