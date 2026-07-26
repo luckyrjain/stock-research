@@ -56,6 +56,8 @@ stock-research/
 ├── source_health.py        Freshness/volume monitoring for market-picks sources + macro overlay
 ├── scraper_error_counters.py  Error (not empty-result) counters for the 4 standalone per-symbol scrapers
 ├── requirements.txt
+├── alembic.ini             Schema-migration config (see "Schema migrations" below)
+├── migrations/             Alembic migration scripts — env.py + versions/0001_baseline_schema.py
 ├── .env.example
 ├── config/
 │   ├── analyst.json        Analyst role/goal/backstory + section labels (config.crew_tasks.ANALYST_SECTIONS)
@@ -331,7 +333,7 @@ Provider is auto-detected from whichever key is present (checked in the order ab
 | `ANALYST_MODEL` | provider default | Model for the analyst LLM call — the only model-selection env var that does anything; data fetching doesn't call an LLM (see "Agent architecture") |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Only needed when `LLM_PROVIDER=ollama` |
 | `LOG_LEVEL` | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`) |
-| `DATABASE_URL` | unset | PostgreSQL DSN — required for the SME signals pipeline (`/api/sme-signals`), the watchlist (`/api/watchlist`), the verdict timeline (`/api/verdict-history/{symbol}`), and account/magic-link auth (`/api/auth/*`) |
+| `DATABASE_URL` | unset | PostgreSQL DSN — required for the SME signals pipeline (`/api/sme-signals`), the watchlist (`/api/watchlist`), the verdict timeline (`/api/verdict-history/{symbol}`), account/magic-link auth (`/api/auth/*`), and Alembic schema migrations (see "Schema migrations" below — `migrations/env.py` reads this same env var) |
 | `FRONTEND_URL` | `http://localhost:3000` | Canonical frontend origin embedded in magic-link sign-in emails (`/auth/verify?token=...` must run in the browser to receive the session cookie, so it can't point at the FastAPI backend directly) |
 | `SMTP_HOST` | unset | SMTP server for magic-link emails. Without it, sign-in links are created and stored but never emailed (logged as a warning; the request still returns success) |
 | `SMTP_PORT` | `587` | SMTP port |
@@ -1560,6 +1562,101 @@ most duplicated: 8 endpoints total, each repeating the exact same rate-limit →
    `routes/*.py` modules is future work, the same disclosed "first increment, not the full
    file" scope call this codebase already makes elsewhere (e.g. `tests_live/`'s own coverage
    note). `api.py` is smaller after this pass, not fully decomposed.
+
+### Dashboard component extraction
+
+`results-dashboard.tsx` had grown to 1566 lines with ~35 top-level functions (fetch hooks,
+card components, and small formatting helpers all defined inline) — the same "one file keeps
+absorbing every new feature" pattern the `routes/` split above fixed on the backend, flagged by
+the same engineering-lens review. Every card added since this component was first written
+(Peer Comparison, Financials, Concalls, Insider Activity, Street Consensus, Valuation Summary,
+Verdict Timeline, Quarterly Trend...) became another inline function here rather than its own
+file.
+
+1. Extracted into standalone files under `frontend/components/`, one per card/domain, mirroring
+   this repo's existing flat `components/` convention (no new subdirectory):
+   `financial-statements-card.tsx` (`useFinancials`, `StatementTable`, `FinancialStatementsCard`,
+   `ConcallsCard`), `peer-comparison-card.tsx` (`usePeerComparison`, `PercentileBadge`,
+   `ValuationAnchorBadge`, `PeerTable`, `SimilarStocksRail`), `insider-activity-card.tsx`,
+   `street-consensus-card.tsx`, `verdict-timeline.tsx`, `valuation-summary-strip.tsx`,
+   `quarterly-trend-card.tsx`, and `price-sparkline.tsx` (the hero's price-history-fetching
+   wrapper — distinct from the pre-existing `sparkline.tsx`, the raw chart primitive it renders).
+2. `dashboard-format.ts` (plain `.ts`, no JSX) holds only the formatting helpers actually shared
+   across more than one card (`fmt`, `fmtCr`, `fmtVolume`, `fmtInr`, `normalizeRatioKey`,
+   `formatAge`, `humanizeMetaKey`, `formatMetaValue`, `fmtRatio`) — a helper used by exactly one
+   card (e.g. `fmtActivityDate`, `fmtConsensusDate`) stayed co-located with that card instead.
+   `dashboard-primitives.tsx` holds the small generic UI atoms reused across several cards
+   (`Card`, `MetricRow`, `ExchangeTable`, `RangeBar`).
+3. Each fetch hook (`usePeerComparison`, `useFinancials`, `useInsiderActivity`,
+   `useStreetConsensus`, `useVerdictHistory`) stayed co-located with the one card that calls it,
+   matching how they already read in the original file (defined immediately above their single
+   consumer) rather than moving into a separate hooks directory.
+4. `results-dashboard.tsx` itself is now 613 lines — the main `ResultsDashboard` component plus
+   the handful of helpers genuinely specific to its own JSX (`formatScalar`/`formatFactor` for
+   the bull/bear factor lists, `formatNewsHighlights`, `summaryBullets`, and the
+   `REC_CONFIG`/`CONF_COLOR`/`SENT_COLOR` tone tables) that no other card needs.
+5. Pure reorganization — same props, same JSX, same behavior; verified with both `npx tsc
+   --noEmit` and `npm run build` (this repo's documented verification bar for anything touching
+   `globals.css`-adjacent styling or requiring the production minifier to catch what `tsc` alone
+   won't).
+6. Every other reference to a specific card by name elsewhere in this document (e.g.
+   "`results-dashboard.tsx`'s `InsiderActivityCard`") still describes the same component and
+   behavior — it just now lives in its own file rather than inline in `results-dashboard.tsx`.
+
+### Schema migrations (Alembic)
+
+11 tables across `db/models.py`, kept in sync with `db/schema.sql`'s hand-written
+`CREATE TABLE IF NOT EXISTS`/`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` guards purely by
+convention (`tests/test_schema_sql_migrations.py` only checks 2 of the 11 tables for a missing
+guard) — a CTO/engineering-lens review flagged this directly: two hand-synced schema sources
+and no real migration tool is exactly the setup that produced `sme_ema_pipeline.py --reset-db`'s
+own documented mistake (dropping every table via the shared `MetaData()` object, not just its
+own, because nothing enforced a narrower blast radius).
+
+1. `alembic.ini` + `migrations/env.py` are configured at the repo root — `migrations/env.py`
+   imports `db.models.metadata` directly as `target_metadata` (the same SQLAlchemy Core
+   `MetaData()` object every table already declares against), so `alembic revision
+   --autogenerate` diffs a live database against the exact same table definitions this app's
+   code already uses — no second, Alembic-specific model layer to keep in sync. `env.py` reads
+   `DATABASE_URL` from the environment (same env var every other DB-backed module in this app
+   already reads, via `db/models.py::get_engine`) rather than `alembic.ini`'s own
+   `sqlalchemy.url`, which is deliberately left blank — one place to configure a connection
+   string, not two.
+2. `migrations/versions/0001_baseline_schema.py` is the one migration in the repo today —
+   autogenerated against a genuinely empty database and verified (in this sandbox, against a
+   real local Postgres instance) to both `alembic upgrade head` cleanly onto nothing and
+   `alembic downgrade base` cleanly back to nothing, producing exactly the same 11 tables,
+   indexes, and constraints `db/schema.sql`/`metadata.create_all()` already produce.
+3. **Existing deployments must `alembic stamp head`, not `alembic upgrade head`, for this first
+   revision** — every deployment of this app already has these 11 tables (created by hand via
+   `db/schema.sql`, or by one of the pipelines' own `--setup-db` flags calling
+   `metadata.create_all()`), so replaying `0001`'s `CREATE TABLE` statements against a database
+   that already has them would fail on the very first one. `alembic stamp head` records "this
+   database is already at revision 0001" without executing any DDL — verified in this sandbox by
+   creating the schema via `metadata.create_all()` (simulating an existing deployment), running
+   `alembic stamp head`, then confirming `alembic check` reports "No new upgrade operations
+   detected" (no drift between the stamped state and `db/models.py`).
+4. **From here on, schema changes should be authored as new Alembic revisions** —
+   `alembic revision --autogenerate -m "..."` after editing `db/models.py`, then `alembic
+   upgrade head` to apply. This is the replacement for the old workflow (hand-edit
+   `db/models.py`, hand-edit a matching `ALTER TABLE ADD COLUMN IF NOT EXISTS` into
+   `db/schema.sql`, hope `test_schema_sql_migrations.py` catches a missed guard on the 2 tables
+   it covers) — a generated revision has an explicit up AND down path, a real ordering (each
+   revision's `down_revision` chains to the last), and autogenerate diffs against the *actual*
+   live schema rather than trusting a hand-written guard was remembered.
+5. **`db/schema.sql` is kept, not deleted** — frozen as a reference for what the schema looked
+   like before Alembic, and because `tests/test_schema_sql_migrations.py` still exercises its
+   existing guard convention for the two tables it already covers. It is not expected to gain
+   any *new* `ALTER TABLE` guards going forward; new columns get a new Alembic revision instead.
+   Whether to eventually retire `schema.sql`/its test entirely once every current deployment has
+   migrated onto Alembic is a future decision, not made here.
+6. **Disclosed scope**: this establishes the tool and a verified, working baseline — it does not
+   itself add any new schema change (no new column, no new table). The two hand-synced-schema
+   and no-rollback-path gaps the review flagged are what's fixed; retroactively backfilling
+   individual historical Alembic revisions for every column `db/schema.sql` already added over
+   this app's history (e.g. `users.tier`, `watchlist_items.user_id`) was not attempted — `0001`
+   captures the schema as it exists today, in one shot, which is sufficient for both a fresh
+   install and an existing deployment's `stamp head` path.
 
 ### Watchlist flow
 
