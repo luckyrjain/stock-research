@@ -338,6 +338,9 @@ function ExpandedRow({ pick }: { pick: MarketPick }) {
                     ['Quant signal', pick.signal_verdict],
                     ['Market cap',   pick.market_cap_cr != null ? `₹${pick.market_cap_cr.toLocaleString('en-IN', { maximumFractionDigits: 0 })} Cr` : '—'],
                     ['P/E ratio',    pick.pe_ratio != null ? pick.pe_ratio.toFixed(1) : '—'],
+                    ['Valuation',    pick.valuation_percentile != null
+                                       ? `${pick.valuation_percentile.toFixed(0)}th pctl${pick.valuation_percentile <= 33 ? ' (cheap)' : pick.valuation_percentile >= 67 ? ' (rich)' : ''}`
+                                       : '—'],
                     ['Exchange',     pick.exchange],
                     ['Sector',       pick.sector],
                     ['Signal score', pick.signal_score.toFixed(2)],

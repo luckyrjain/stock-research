@@ -184,6 +184,9 @@ export interface MarketPick {
   is_recent_ipo: boolean;      // listed < 8 months ago (IPO momentum flag)
   horizon?: 'short' | 'medium' | 'long';  // investment horizon from LLM analysis
   sector: string;               // from stock_info; "Unknown" when NSE/yfinance doesn't report one
+  valuation_percentile: number | null;  // 0–100, where current P/E sits vs. this stock's own
+                                         // 3–5y Screener-published P/E history; null when Screener
+                                         // didn't have a parseable valuation band for this stock
 }
 
 export type MarketPicksPhase =
