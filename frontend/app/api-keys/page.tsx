@@ -49,7 +49,6 @@ export default function ApiKeysPage() {
     e.preventDefault();
     setCreating(true);
     setError('');
-    setJustCreated(null);
     try {
       const res = await fetch('/api/api-keys', {
         method: 'POST',
@@ -58,7 +57,15 @@ export default function ApiKeysPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || data.error || 'Could not create key.');
+      // Only replace the previously-shown secret (if any) once the new one
+      // has genuinely arrived — clearing it eagerly at the top of this
+      // function would blank an unrelated, not-yet-copied key's box the
+      // instant a second creation attempt starts, permanently losing it if
+      // that attempt then fails. `copied` is reset alongside it: it's tied
+      // to whichever key is currently shown, so a fresh key must not
+      // inherit an unrelated "Copied!" state left over from a previous one.
       setJustCreated(data as CreatedApiKey);
+      setCopied(false);
       setLabel('');
       await loadKeys();
     } catch (err) {

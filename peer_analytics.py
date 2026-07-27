@@ -94,7 +94,14 @@ def compute_valuation_anchor(self_row: dict | None, valuation_band: dict) -> dic
         if "p/e" in normalized or normalized == "pe":
             current_pe = _parse_peer_numeric(raw)
             break
-    if current_pe is None:
+    if current_pe is None or current_pe <= 0:
+        # A negative (or zero) P/E means the company is currently
+        # loss-making -- the ratio itself says nothing about over/under-
+        # valuation, so ranking it against a positive historical P/E band
+        # would always land near percentile 0 (arithmetically "cheapest"),
+        # misreading a loss-making company as maximally undervalued. Same
+        # guard as signals/valuation.py::valuation_signal()'s own
+        # `pe < 0` check, applied here for the same reason.
         return None
 
     below = sum(1 for v in pe_values if v < current_pe)

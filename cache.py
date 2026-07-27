@@ -172,8 +172,23 @@ def load(symbol: str, task_name: str) -> dict | None:
         return None
 
 
-def save(symbol: str, task_name: str, data: dict) -> None:
-    """Write a copy of data to cache, stamping _meta.fetched_at.
+def save(symbol: str, task_name: str, data: dict) -> dict | None:
+    """Write a copy of data to cache, stamping _meta.fetched_at. Returns the
+    `_meta` dict on success, or None if `data` was a failed payload (nothing
+    was written).
+
+    Deliberately does NOT mutate the caller's own `data` object — several
+    call sites (GET /api/peers/{symbol}, /financials, /insider-activity,
+    /street-consensus, /shareholding-detail, the analysis-result cache
+    write) build `result`, call save(symbol, task, result), and then return
+    that same `result` object straight to an HTTP client; an in-place
+    mutation here would leak the internal-only `_meta` field into those
+    JSON responses. A caller that DOES want `_meta` reflected onto its own
+    object (main.py's CLI, building `data_freshness` from
+    `freshly_fetched`/`all_data`, mirrored in api.py's SSE handler) stamps
+    it explicitly from this return value instead — see `_fetched_at()` in
+    main.py for why that matters: `data_freshness` is read from `_meta` on
+    the SAME dict this run, not from a separate cache.load() round trip.
 
     Written atomically to disk (tempfile + os.replace) rather than a direct
     write_text — every other cache write is symbol-scoped (one writer per
@@ -188,9 +203,10 @@ def save(symbol: str, task_name: str, data: dict) -> None:
     single-host deployment's persistent state is unaffected either way.
     """
     if _is_failed_payload(data):
-        return
+        return None
+    meta = {"fetched_at": datetime.now(timezone.utc).isoformat()}
     payload = dict(data)
-    payload["_meta"] = {"fetched_at": datetime.now(timezone.utc).isoformat()}
+    payload["_meta"] = meta
     serialized = json.dumps(payload, indent=2, ensure_ascii=False)
 
     client = _get_redis_client()
@@ -212,6 +228,7 @@ def save(symbol: str, task_name: str, data: dict) -> None:
     except Exception:
         Path(tmp_path).unlink(missing_ok=True)
         raise
+    return meta
 
 
 def is_fresh(symbol: str, task_name: str) -> bool:

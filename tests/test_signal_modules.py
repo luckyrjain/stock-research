@@ -170,6 +170,30 @@ class FilingsSignalTest(unittest.TestCase):
         sig = filings_signal({"filings": [{"title": "Board meeting intimation", "desc": "Routine"}]})
         self.assertEqual(sig.value, "NONE")
 
+    def test_in_order_to_filler_phrase_does_not_count_as_an_order_hit(self) -> None:
+        # Regression test for an adversarial-review finding: "order" was
+        # matched as a raw substring, so the extremely common English filler
+        # phrase "in order to" (e.g. routine compliance boilerplate) counted
+        # as a deal-flow keyword hit, misclassifying a routine filing with
+        # zero real deal content as WEAK_SIGNAL.
+        sig = filings_signal({"filings": [
+            {"title": "Compliance Update",
+             "desc": "In order to comply with SEBI regulations, the Board approved the resolution.",
+             "category": "Other"},
+        ]})
+        self.assertEqual(sig.value, "NONE")
+        self.assertEqual(sig.meta["hits"], [])
+
+    def test_genuine_order_mention_still_counts_as_a_hit(self) -> None:
+        # The filler-phrase fix above must not blanket-suppress "order" --
+        # a real business order (export/purchase/work order) still needs to
+        # register as a deal-flow signal.
+        sig = filings_signal({"filings": [
+            {"title": "Order Win", "desc": "The company has received a new export order worth Rs 50 crore."},
+        ]})
+        self.assertEqual(sig.value, "WEAK_SIGNAL")
+        self.assertEqual(sig.meta["hits"], ["order"])
+
     def test_none_title_or_desc_does_not_raise(self) -> None:
         # Regression test: NSE sometimes omits/nulls a filing's subject or
         # description, which used to reach here as an actual None (not
