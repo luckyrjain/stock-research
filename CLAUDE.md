@@ -893,6 +893,12 @@ same log line).
    `nse_filings_tools.py` still defines `_get_session()`) that delegates here with its own
    timeout/header needs, specifically so every existing test's `patch("tools.<module>._nse_session",
    ...)` target keeps working unchanged rather than needing a rewrite across seven test files.
+   **Still not fully collapsed**: a deep gap analysis noted each of the seven wrappers is still a
+   real, if thin, function definition rather than inheriting a shared default — an eighth NSE-
+   touching module would mean hand-writing a ninth near-duplicate one-liner. Not changed here since
+   the test-patch-compatibility constraint above is the actual reason these per-module wrappers
+   exist at all, not an oversight; collapsing further would need a different test-patching
+   convention across seven existing test files, a larger change than this note's own scope.
 2. **Resilience is standardized, not just deduplicated** — every priming attempt across all seven
    modules now uniformly swallows a failure and sleeps 0.5s on success (previously two modules
    let a priming exception propagate, and the sleep/swallow behavior varied module to module).
