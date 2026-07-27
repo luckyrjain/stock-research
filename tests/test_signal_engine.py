@@ -150,6 +150,24 @@ class RunSignalEngineTest(unittest.TestCase):
         )
         self.assertGreaterEqual(result2.final_score, -1.0)
 
+    def test_negative_clamp_actually_engages(self) -> None:
+        # test_final_score_is_clamped_to_documented_range's negative case
+        # above uses each signal's own real achievable floor, which sums to
+        # only ~-0.888 with the default weights (the engine's own asymmetry,
+        # documented in signals/engine.py) -- that assertion holds whether
+        # or not the clamp exists, so it can't actually prove the clamp
+        # engages on the negative side. This uses synthetic -1.0 scores for
+        # every signal (mirroring test_weighted_score_is_computed_correctly's
+        # +1.0 case above, which DOES exceed the -1..1 range pre-clamp) to
+        # force a raw weighted sum of -1.55, and asserts it reads back as
+        # exactly -1.0 -- if the clamp were removed or its bound flipped,
+        # this fails.
+        result = self._run(
+            volume=_sig(-1.0), valuation=_sig(-1.0), growth=_sig(-1.0), filings=_sig(-1.0),
+            technical=_sig(-1.0), macro=_sig(-1.0),
+        )
+        self.assertAlmostEqual(result.final_score, -1.0, places=2)
+
     def test_final_score_is_rounded_to_two_decimals(self) -> None:
         result = self._run(volume=_sig(0.333), valuation=_sig(0.111), growth=_sig(0.777), filings=_sig(0.222))
         self.assertEqual(result.final_score, round(result.final_score, 2))

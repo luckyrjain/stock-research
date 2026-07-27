@@ -321,9 +321,18 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
         # degrade by skipping the three quant-cross-check guards, not raise
         # a KeyError — which a broad try/except elsewhere would otherwise
         # silently misclassify as a provider outage.
+        #
+        # Uses a non-empty dict that's missing the key (not {}) — an empty
+        # dict is already falsy under the old buggy code's own `if
+        # signal_context:` guard, so it never actually reached the bracket
+        # access that raised KeyError and wouldn't have caught the original
+        # bug. A non-empty dict missing "final_score" is truthy, so it DOES
+        # reach (and previously broke) that access.
         payload = dict(self._VALID_PAYLOAD, recommendation="BUY", confidence="HIGH")
 
-        ok, validated = crew._validate_analysis_payload(payload, self.all_data, signal_context={})
+        ok, validated = crew._validate_analysis_payload(
+            payload, self.all_data, signal_context={"some_other_field": 1}
+        )
         self.assertTrue(ok)
         self.assertEqual(validated, payload)
 
