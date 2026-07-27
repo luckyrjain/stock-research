@@ -284,6 +284,21 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(message, "Recommendation contradicts strong negative signals")
 
+    def test_validate_analysis_payload_rejects_buy_at_the_exact_sell_tier_boundary(self) -> None:
+        # Regression test for an adversarial-review finding: signals/engine.py's
+        # own SELL tier is score <= -0.6 (inclusive — the `else` branch after
+        # `score > -0.6` for AVOID), and final_score is rounded to 2 decimals,
+        # so an exact -0.6 is a real, reachable value, not just a theoretical
+        # edge. A strict `<` here let a BUY at exactly -0.6 slip through
+        # untouched — the one boundary case this check exists to catch.
+        payload = dict(self._VALID_PAYLOAD, recommendation="BUY")
+
+        ok, message = crew._validate_analysis_payload(
+            payload, self.all_data, signal_context={"final_score": -0.6}
+        )
+        self.assertFalse(ok)
+        self.assertEqual(message, "Recommendation contradicts strong negative signals")
+
     def test_validate_analysis_payload_rejects_high_confidence_against_a_near_neutral_score(self) -> None:
         # Regression test for the deep gap analysis finding: the two checks
         # above only catch a *directional* contradiction (BUY/SELL vs. a
