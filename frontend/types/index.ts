@@ -692,6 +692,39 @@ export interface InsiderActivity {
   bulk_block_deals_unavailable:  boolean;
 }
 
+// One individually-named shareholder — a promoter, or a member of an
+// institutional/other category (see ShareholdingCategory below).
+export interface NamedShareholder {
+  name:         string;
+  holding_pct:  number;
+}
+
+// A group of named shareholders under one NSE XBRL filing category (e.g.
+// "Mutual Funds", "Foreign Portfolio Investors") — `category` is NSE's own
+// raw filing category, word-spaced for display, not a fixed enum this app
+// maintains (see tools/nse_tools.py::get_shareholding_detail's own
+// disclosed limitation on why the category set isn't hardcoded).
+export interface ShareholdingCategory {
+  category:  string;
+  holders:   NamedShareholder[];
+}
+
+// GET /api/shareholding-detail/{symbol} — every individually-named
+// shareholder in the company's most recent NSE shareholding XBRL filing:
+// named promoters with their own holding %, plus every other named-
+// shareholder category the filing contains. More granular than
+// `holdings.shareholding_pattern`'s aggregate category percentages or
+// `holdings.mutual_funds` (mutual funds only). `unavailable: true`
+// distinguishes a genuine scrape failure from a legitimately-thin filing —
+// same convention as InsiderActivity's own *_unavailable flags above.
+export interface ShareholdingDetail {
+  symbol:                   string;
+  as_of_date:               string | null;
+  promoters:                NamedShareholder[];
+  shareholder_categories:   ShareholdingCategory[];
+  unavailable:              boolean;
+}
+
 // Trendlyne-cited analyst commentary for one stock — real article
 // titles/links/dates, never a fabricated consensus rating or target price
 // (see tools/trendlyne_agent.py::fetch_trendlyne_consensus_for_symbol —

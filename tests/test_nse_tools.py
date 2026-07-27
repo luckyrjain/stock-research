@@ -6,10 +6,12 @@ from lxml import etree
 
 from tools.nse_tools import (
     _build_quote_payload,
+    _humanize_category,
     _is_nse_host,
     _is_valid_quote,
     get_mf_holdings,
     get_nse_basic_ratios,
+    get_shareholding_detail,
     get_stock_quote,
 )
 
@@ -284,6 +286,199 @@ class GetMfHoldingsTest(unittest.TestCase):
              patch("requests.get", return_value=xbrl_resp):
             result = json.loads(get_mf_holdings.run(symbol="TCS"))
         self.assertIn("error", result)
+
+
+class HumanizeCategoryTest(unittest.TestCase):
+    def test_splits_pascal_case_words(self) -> None:
+        self.assertEqual(_humanize_category("ForeignPortfolioInvestorsCategoryI"), "Foreign Portfolio Investors Category I")
+
+    def test_single_word_is_unchanged(self) -> None:
+        self.assertEqual(_humanize_category("MutualFunds"), "Mutual Funds")
+
+    def test_empty_string_falls_back_to_itself(self) -> None:
+        self.assertEqual(_humanize_category(""), "")
+
+    def test_acronym_categories_are_not_split_into_single_letters(self) -> None:
+        # Regression test for an adversarial-review finding: NSE shareholding
+        # categories commonly use short acronyms verbatim (FII, NRI, HUF,
+        # IEPF) — a naive "space before every capital" split would break
+        # these into "F I I" instead of keeping the acronym intact.
+        self.assertEqual(_humanize_category("FIIMember"), "FII")
+        self.assertEqual(_humanize_category("NRIMember"), "NRI")
+        self.assertEqual(_humanize_category("HUFMember"), "HUF")
+        self.assertEqual(_humanize_category("IEPFMember"), "IEPF")
+
+    def test_acronym_followed_by_titlecase_word_still_splits(self) -> None:
+        self.assertEqual(_humanize_category("NRIRepatriableMember"), "NRI Repatriable")
+
+
+class GetShareholdingDetailTest(unittest.TestCase):
+    def _mock_session_and_xbrl(self, xbrl: str):
+        sess = MagicMock()
+        master_resp = MagicMock()
+        master_resp.json.return_value = [{"date": "2026-01-01", "xbrl": "https://nsearchives.nseindia.com/x.xml"}]
+        sess.get.return_value = master_resp
+
+        xbrl_resp = MagicMock()
+        xbrl_resp.content = xbrl.encode()
+        xbrl_resp.url = "https://nsearchives.nseindia.com/x.xml"
+        return sess, xbrl_resp
+
+    def test_no_shareholding_records_returns_error(self) -> None:
+        sess = MagicMock()
+        master_resp = MagicMock()
+        master_resp.json.return_value = []
+        sess.get.return_value = master_resp
+        with patch("tools.nse_tools._nse_session", return_value=sess):
+            result = json.loads(get_shareholding_detail.run(symbol="TCS"))
+        self.assertIn("error", result)
+
+    def test_network_failure_returns_error_not_raise(self) -> None:
+        with patch("tools.nse_tools._nse_session", side_effect=ConnectionError("boom")):
+            result = json.loads(get_shareholding_detail.run(symbol="TCS"))
+        self.assertIn("error", result)
+
+    def test_xbrl_url_off_nseindia_host_is_rejected(self) -> None:
+        # SSRF regression: same shared _fetch_shareholding_xbrl helper
+        # get_mf_holdings already relies on — must reject before fetching.
+        sess = MagicMock()
+        master_resp = MagicMock()
+        master_resp.json.return_value = [{"date": "2026-01-01", "xbrl": "https://evil.example/x.xml"}]
+        sess.get.return_value = master_resp
+        with patch("tools.nse_tools._nse_session", return_value=sess), \
+             patch("requests.get") as mock_get:
+            result = json.loads(get_shareholding_detail.run(symbol="TCS"))
+        mock_get.assert_not_called()
+        self.assertIn("error", result)
+
+    def test_promoter_mutual_fund_and_other_category_are_grouped_correctly(self) -> None:
+        ns_di = "http://xbrl.org/2006/xbrldi"
+        xbrl = f'''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance" xmlns:di="{ns_di}">
+          <xbrli:context id="D_P1">
+            <xbrli:scenario><di:typedMember><IndividualPromotersMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <xbrli:context id="D_MF1">
+            <xbrli:scenario><di:typedMember><MutualFundsMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <xbrli:context id="D_FPI1">
+            <xbrli:scenario><di:typedMember><ForeignPortfolioInvestorsMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <NameOfTheShareholder contextRef="D_P1">Founder Family Trust</NameOfTheShareholder>
+          <ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="P1">0.55</ShareholdingAsAPercentageOfTotalNumberOfShares>
+          <NameOfTheShareholder contextRef="D_MF1">Sample Mutual Fund</NameOfTheShareholder>
+          <ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="MF1">0.035</ShareholdingAsAPercentageOfTotalNumberOfShares>
+          <NameOfTheShareholder contextRef="D_FPI1">Sample Foreign Fund</NameOfTheShareholder>
+          <ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="FPI1">0.021</ShareholdingAsAPercentageOfTotalNumberOfShares>
+        </xbrli:xbrl>'''
+        sess, xbrl_resp = self._mock_session_and_xbrl(xbrl)
+
+        with patch("tools.nse_tools._nse_session", return_value=sess), \
+             patch("requests.get", return_value=xbrl_resp):
+            result = json.loads(get_shareholding_detail.run(symbol="TCS"))
+
+        self.assertEqual(result["symbol"], "TCS")
+        self.assertEqual(result["as_of_date"], "2026-01-01")
+
+        self.assertEqual(len(result["promoters"]), 1)
+        self.assertEqual(result["promoters"][0]["name"], "Founder Family Trust")
+        self.assertAlmostEqual(result["promoters"][0]["holding_pct"], 55.0)
+
+        categories = {c["category"]: c["holders"] for c in result["shareholder_categories"]}
+        self.assertIn("Mutual Funds", categories)
+        self.assertEqual(categories["Mutual Funds"][0]["name"], "Sample Mutual Fund")
+        self.assertAlmostEqual(categories["Mutual Funds"][0]["holding_pct"], 3.5)
+        self.assertIn("Foreign Portfolio Investors", categories)
+        self.assertEqual(categories["Foreign Portfolio Investors"][0]["name"], "Sample Foreign Fund")
+        self.assertAlmostEqual(categories["Foreign Portfolio Investors"][0]["holding_pct"], 2.1)
+
+    def test_promoter_can_hold_up_to_100_percent_but_other_categories_capped_at_30(self) -> None:
+        # A promoter/promoter-group entity can plausibly hold a very large
+        # stake; any other single named holder above ~30% would be
+        # extraordinary and is dropped as an implausible format guess,
+        # same "never invent" reasoning get_mf_holdings already applies.
+        ns_di = "http://xbrl.org/2006/xbrldi"
+        xbrl = f'''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance" xmlns:di="{ns_di}">
+          <xbrli:context id="D_P1">
+            <xbrli:scenario><di:typedMember><IndividualPromotersMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <xbrli:context id="D_MF1">
+            <xbrli:scenario><di:typedMember><MutualFundsMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <NameOfTheShareholder contextRef="D_P1">Majority Promoter</NameOfTheShareholder>
+          <ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="P1">71.77</ShareholdingAsAPercentageOfTotalNumberOfShares>
+          <NameOfTheShareholder contextRef="D_MF1">Implausible Fund</NameOfTheShareholder>
+          <ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="MF1">71.77</ShareholdingAsAPercentageOfTotalNumberOfShares>
+        </xbrli:xbrl>'''
+        sess, xbrl_resp = self._mock_session_and_xbrl(xbrl)
+
+        with patch("tools.nse_tools._nse_session", return_value=sess), \
+             patch("requests.get", return_value=xbrl_resp):
+            result = json.loads(get_shareholding_detail.run(symbol="TCS"))
+
+        self.assertEqual(len(result["promoters"]), 1)
+        self.assertAlmostEqual(result["promoters"][0]["holding_pct"], 71.77)
+        # The implausible 71.77% mutual fund holding is dropped, leaving no
+        # Mutual Funds category at all rather than a fabricated entry.
+        categories = {c["category"] for c in result["shareholder_categories"]}
+        self.assertNotIn("Mutual Funds", categories)
+
+    def test_no_typed_members_returns_empty_not_error(self) -> None:
+        # A filing with no named-shareholder XBRL facts at all (or a
+        # category-tagging scheme this generalized walk doesn't recognize)
+        # degrades to an empty result, not an error — same "legitimately
+        # nothing here" distinction as every other standalone endpoint.
+        xbrl = '''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"></xbrli:xbrl>'''
+        sess, xbrl_resp = self._mock_session_and_xbrl(xbrl)
+
+        with patch("tools.nse_tools._nse_session", return_value=sess), \
+             patch("requests.get", return_value=xbrl_resp):
+            result = json.loads(get_shareholding_detail.run(symbol="TCS"))
+
+        self.assertEqual(result["promoters"], [])
+        self.assertEqual(result["shareholder_categories"], [])
+        self.assertNotIn("error", result)
+
+    def test_colliding_context_ids_across_categories_are_dropped_not_misattributed(self) -> None:
+        # Regression test for an adversarial-review finding: unlike
+        # get_mf_holdings (whose name/category dicts only ever collect
+        # MutualFunds-tagged contexts, so a foreign category's context id
+        # could never land in the same dict), this generalized walk is
+        # document-wide across every category — a context literally named
+        # "D_5" (Mutual Funds) and a different context literally named "5"
+        # (Insurance Companies) both reduce to the same base id "5" after
+        # stripping "D_", which a plain dict would let the later-processed
+        # category silently clobber. Both must be dropped — never guess
+        # which one the shared percentage fact actually belongs to.
+        ns_di = "http://xbrl.org/2006/xbrldi"
+        xbrl = f'''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance" xmlns:di="{ns_di}">
+          <xbrli:context id="D_5">
+            <xbrli:scenario><di:typedMember><MutualFundsMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <xbrli:context id="5">
+            <xbrli:scenario><di:typedMember><InsuranceCompaniesMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <xbrli:context id="D_9">
+            <xbrli:scenario><di:typedMember><MutualFundsMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <NameOfTheShareholder contextRef="D_5">Colliding MF</NameOfTheShareholder>
+          <NameOfTheShareholder contextRef="5">Colliding Insurer</NameOfTheShareholder>
+          <ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="5">0.02</ShareholdingAsAPercentageOfTotalNumberOfShares>
+          <NameOfTheShareholder contextRef="D_9">Unambiguous Fund</NameOfTheShareholder>
+          <ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="9">0.03</ShareholdingAsAPercentageOfTotalNumberOfShares>
+        </xbrli:xbrl>'''
+        sess, xbrl_resp = self._mock_session_and_xbrl(xbrl)
+
+        with patch("tools.nse_tools._nse_session", return_value=sess), \
+             patch("requests.get", return_value=xbrl_resp):
+            result = json.loads(get_shareholding_detail.run(symbol="TCS"))
+
+        all_names = {p["name"] for p in result["promoters"]}
+        for cat in result["shareholder_categories"]:
+            all_names |= {h["name"] for h in cat["holders"]}
+
+        self.assertNotIn("Colliding MF", all_names)
+        self.assertNotIn("Colliding Insurer", all_names)
+        self.assertIn("Unambiguous Fund", all_names)
 
 
 class GetNseBasicRatiosTest(unittest.TestCase):

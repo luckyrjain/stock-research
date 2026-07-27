@@ -1017,6 +1017,88 @@ to see whether a fund was building or trimming its stake quarter over quarter.
    no delta badge rather than a wrong one, same fail-open-to-"no data" instinct as everywhere else
    in this doc, but unlike those cases this specific assumption wasn't previously written down.
 
+### Detailed shareholding flow (`GET /api/shareholding-detail/{symbol}`)
+
+`holdings.shareholding_pattern` (aggregate Promoters/FIIs/DIIs/Public percentages, from
+Screener.in) and `holdings.mutual_funds` (mutual funds only, from the six-task `mf_holdings`
+slice) answer "how much of which broad category," never "who specifically." This closes that
+gap: every individually-named shareholder NSE's own quarterly shareholding XBRL filing discloses
+— named promoters with their own holding %, plus every other named-shareholder category the
+filing actually tags (mutual funds, foreign portfolio investors, insurance companies, whatever's
+really there) — surfaced as a standalone, on-demand endpoint, the same pattern as
+peers/financials/insider-activity/street-consensus.
+
+1. `tools/nse_tools.py::_fetch_shareholding_xbrl(symbol)` is the shared first half — locates the
+   most recent shareholding XBRL filing via NSE's `corporate-share-holdings-master` endpoint and
+   fetches+parses it (same SSRF host-check pre- and post-redirect, same `resolve_entities=False`
+   XXE hardening, as `get_mf_holdings` already established) — extracted so `get_mf_holdings` and
+   the new `get_shareholding_detail` don't each independently fetch the same document. Refactored
+   out of `get_mf_holdings` itself with its external behavior unchanged (verified by its own
+   existing test suite passing unmodified).
+2. `get_shareholding_detail(symbol)` reuses `get_mf_holdings`' own proven extraction mechanism
+   (`NameOfTheShareholder` + `ShareholdingAsAPercentageOfTotalNumberOfShares` XBRL facts, keyed
+   off the `typedMember` context an XBRL shareholder record lives under) but **generalized to
+   every category the filing has**, not filtered to contexts whose `typedMember` child tag
+   contains `"MutualFunds"`. This means it doesn't need to guess NSE's exact category tag
+   spellings for "Insurance Companies"/"Alternate Investment Funds"/etc. up front — it groups
+   named shareholders by whatever category label the filing actually uses. The only tag-name
+   assumption layered on top of the already-working MF extraction is that a promoter/promoter-
+   group category's XBRL tag contains the substring `"Promoter"` (case-insensitive) — the same
+   kind of substring match the MF filter already relies on for `"MutualFunds"`, not a new class
+   of guess. `_humanize_category()` turns a raw PascalCase XBRL localname (e.g.
+   `"ForeignPortfolioInvestorsMember"`) into a readable label (`"Foreign Portfolio Investors"`) —
+   stripping a trailing `"Member"` is a generic XBRL dimensional-modeling convention (explicit/
+   typed dimension member concepts are conventionally suffixed `"Member"` per the XBRL spec
+   itself), not a guess specific to NSE's own taxonomy.
+3. A promoter/promoter-group entity can plausibly hold up to (in principle) 100% of a closely-
+   held company; any other single named institutional/individual holder above ~30% would be
+   extraordinary — `get_mf_holdings`' own 30%-ceiling "drop rather than trust a wrong format
+   guess" reasoning (see `_percent_from_ambiguous_value`'s docstring) is applied to every
+   non-promoter category, with the ceiling raised to 100% only for entries already bucketed as
+   promoters.
+4. **Disclosed limitation**: like every other NSE/Screener/Trendlyne/RBI scraper in this
+   codebase, the exact XBRL category tag names NSE's real shareholding filings use beyond
+   `"MutualFunds"` (already proven correct by the existing `get_mf_holdings` code) were not
+   verified against a live filing in this sandbox (no outbound internet — same disclosure as
+   every other scraper here). If a real filing's promoter category tag doesn't contain
+   `"Promoter"`, those records fall through into `shareholder_categories` under their own raw
+   label instead of the dedicated `promoters` field — a degraded-but-not-wrong result (still a
+   real, named holder, just not specially flagged as a promoter), never a fabricated one.
+5. `GET /api/shareholding-detail/{symbol}` follows the exact caching/error convention `GET
+   /api/insider-activity/{symbol}`/`GET /api/street-consensus/{symbol}` established: a genuine
+   `{"error": ...}` result sets `unavailable: true` and is **not cached** (retried on the next
+   request rather than locking a transient NSE failure in for the full TTL), while a legitimately
+   thin filing (few/no individually-named holders above the plausibility threshold) is cached
+   normally with `unavailable: false`. Cached like `mf_holdings`/`shareholding` (168h / 7-day TTL
+   — the same quarterly regulatory filing cadence), not 24h like peers/financials, since this is
+   the same underlying filing type as `mf_holdings`. `scraper_error_counters.record_scraper_error`
+   fires only on the genuine-failure path, same "don't manufacture noise from the expected common
+   case" instinct as every other standalone endpoint's error-counter wiring.
+6. `results-dashboard.tsx`'s `ShareholdingDetailCard` renders "Promoters" and each other category
+   as its own labeled list of name/holding-% rows, placed right after the existing "Shareholding
+   Pattern"/"Mutual Fund Holdings" card pair — a complementary, more granular view, not a
+   replacement for either. Renders nothing when there's genuinely nothing to show (no error, no
+   named holders); renders a "temporarily unavailable" notice, not silence, when `unavailable` is
+   true — same distinction `InsiderActivityCard`/`StreetConsensusCard` already draw.
+7. **Adversarial-review-caught bug, fixed**: the first version of `get_shareholding_detail()`
+   collected every category's `NameOfTheShareholder` facts into one flat dict keyed only by the
+   `"D_"`-stripped context id, document-wide. This is safe in `get_mf_holdings()` (whose own
+   equivalent dict only ever collects `MutualFunds`-tagged contexts, so a different category's
+   context id can never land in the same dict) but not once generalized to every category — two
+   *different* shareholder records in *different* categories whose context ids happen to reduce
+   to the same base id after stripping `"D_"` (e.g. a context literally named `"D_5"` for one
+   category and a separate context literally named `"5"` for another) would silently overwrite
+   each other with no error, misattributing a name/category or dropping one entirely. Fixed by
+   collecting every `(name, category)` candidate seen per base id rather than overwriting, and
+   dropping (never guessing) any base id where more than one distinct candidate collided —
+   covered by `test_colliding_context_ids_across_categories_are_dropped_not_misattributed`, which
+   constructs exactly this scenario and confirms both colliding entries are absent from the
+   result while an unrelated, non-colliding entry still comes through cleanly. The same review
+   pass also caught `_humanize_category()` splitting short acronym categories NSE commonly uses
+   verbatim (FII, NRI, HUF, IEPF) into single spaced-out letters — fixed with a regex that splits
+   at a lowercase→uppercase boundary and at an acronym-run→Titlecase-word boundary, but not inside
+   a run of consecutive capitals.
+
 ### Symbol validation flow (`GET /api/validate/{symbol}`)
 
 Handles three input forms:

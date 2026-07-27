@@ -1464,6 +1464,70 @@ async def get_financials(request: Request, symbol: str):
     return await loop.run_in_executor(None, _fetch_sync)
 
 
+@app.get("/api/shareholding-detail/{symbol}")
+async def get_shareholding_breakdown(request: Request, symbol: str):
+    """Every individually-named shareholder disclosed in the company's most
+    recent NSE shareholding XBRL filing (see tools/nse_tools.py::
+    get_shareholding_detail) — a more granular view than `research.ratios`'
+    aggregate Promoters/FIIs/DIIs/Public percentages (from Screener) or
+    `holdings.mutual_funds` (mutual funds only, from the six-task pipeline's
+    own `mf_holdings` slice). Answers "who specifically owns this stock,"
+    not just "what fraction does each broad category own": named promoters
+    with their own individual holding %, plus every other named-shareholder
+    category the filing actually tags (mutual funds, FPIs, insurance
+    companies, whatever NSE's own filing contains — see that function's own
+    docstring for why this doesn't need to guess NSE's exact category tag
+    spellings up front).
+
+    `unavailable: true` distinguishes a genuine scrape failure from a
+    legitimately-thin filing (few/no individually-named holders above the
+    plausibility threshold) — same convention as insider-activity/street-
+    consensus below. Cached like mf_holdings/shareholding (168h / 7-day TTL
+    — same quarterly regulatory filing cadence) but intentionally outside
+    ALL_DATA_TASKS — standalone and on-demand, not part of the six-task
+    analysis pipeline.
+    """
+    _rate_limit(request, "shareholding_detail", max_calls=30, window_seconds=60)
+    sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+
+    def _fetch_sync() -> dict:
+        import cache
+
+        cached = cache.load(sym, "shareholding_detail")
+        if cached is not None:
+            # The stored cache blob itself never carries `unavailable` — it's
+            # only ever written on the success path a few lines below, so a
+            # cache hit unconditionally means False. Added here, not in the
+            # stored payload, since it's a response-shape concern, not a
+            # cached fact.
+            return {"unavailable": False, **{k: v for k, v in cached.items() if k != "_meta"}}
+
+        from tools.nse_tools import get_shareholding_detail as _fetch
+
+        raw = json.loads(_fetch.run(symbol=sym))
+        if raw.get("error"):
+            # Not cached — same "retry on next request, don't lock a
+            # transient failure in for the full 24h TTL" convention as
+            # GET /api/peers/{symbol} and GET /api/financials/{symbol}.
+            import scraper_error_counters
+            scraper_error_counters.record_scraper_error("shareholding_detail", symbol=sym)
+            return {"symbol": sym, "as_of_date": None, "promoters": [], "shareholder_categories": [], "unavailable": True}
+
+        result = {
+            "symbol":                 sym,
+            "as_of_date":             raw.get("as_of_date"),
+            "promoters":              raw.get("promoters", []),
+            "shareholder_categories": raw.get("shareholder_categories", []),
+        }
+        cache.save(sym, "shareholding_detail", result)
+        return {"unavailable": False, **result}
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _fetch_sync)
+
+
 @app.get("/api/insider-activity/{symbol}")
 async def get_insider_activity(request: Request, symbol: str):
     """Structured promoter/director insider trades and bulk/block deals for

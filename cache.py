@@ -58,6 +58,7 @@ TTL_HOURS: dict[str, float] = {
     "fii_dii_flow":     24,   # market-wide, published once per trading day
     "macro_context":    24,   # RBI repo rate / CPI — changes at most monthly, daily refresh is plenty
     "street_consensus": 24,   # Trendlyne-cited analyst commentary — a news search, not a live feed
+    "shareholding_detail": 168,  # same quarterly NSE XBRL filing as mf_holdings — 7 days
 }
 
 _REDIS_KEY_PREFIX = "cache"
