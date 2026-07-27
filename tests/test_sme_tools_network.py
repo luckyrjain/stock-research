@@ -94,6 +94,35 @@ class FetchNseEmergeStocksTest(SmeToolsNetworkTestBase):
             result = sme_tools.fetch_nse_emerge_stocks(force=True)
         self.assertEqual(result, stale)
 
+    def test_corrupt_fresh_cache_falls_through_to_a_live_fetch_instead_of_raising(self) -> None:
+        # Regression test for an adversarial-review finding: fetch_nse_emerge_stocks()
+        # is documented as "never raises," but the fast-path cache read had no
+        # guard at all -- a truncated/corrupt cache file (e.g. from an
+        # interrupted write, before _save_cache became atomic) crashed
+        # straight out of the function with a JSONDecodeError instead of
+        # degrading to a fresh fetch.
+        self.nse_cache.write_text('[{"symbol": "ABC"')  # truncated JSON
+
+        api_response = _FakeResponse(json_data={"data": [{"symbol": "def"}]})
+
+        def _session_get(self_, url, **kwargs):
+            if "live-analysis-emerge" in url:
+                return api_response
+            return _FakeResponse(json_data={})
+
+        with patch("requests.Session.get", _session_get), \
+             patch.object(sme_tools, "_NSE_EMERGE_MIN_COUNT", 1), \
+             patch.object(sme_tools, "_enrich_names", side_effect=lambda stocks: stocks):
+            result = sme_tools.fetch_nse_emerge_stocks()
+
+        self.assertEqual([s["symbol"] for s in result], ["DEF"])
+
+    def test_corrupt_stale_cache_with_failed_fetch_returns_empty_list_instead_of_raising(self) -> None:
+        self.nse_cache.write_text('[{"symbol": "OLD"')  # truncated JSON
+        with patch("requests.Session.get", side_effect=[_FakeResponse(), ConnectionError("boom")]):
+            result = sme_tools.fetch_nse_emerge_stocks(force=True)
+        self.assertEqual(result, [])
+
     def test_row_with_null_series_is_skipped_not_fatal_to_the_whole_fetch(self) -> None:
         # Regression test for an adversarial-review finding: `.get("series",
         # "SM")` only falls back to the default when the key is MISSING —
@@ -185,6 +214,25 @@ class FetchBseSmeStocksTest(SmeToolsNetworkTestBase):
         self.assertEqual(result, stale)
 
     def test_total_failure_with_no_cache_returns_empty_list(self) -> None:
+        with patch("requests.get", side_effect=ConnectionError("boom")):
+            result = sme_tools.fetch_bse_sme_stocks(force=True)
+        self.assertEqual(result, [])
+
+    def test_corrupt_fresh_cache_falls_through_to_a_live_fetch_instead_of_raising(self) -> None:
+        # Regression test for an adversarial-review finding: fetch_bse_sme_stocks()
+        # is documented as "never raises," but the fast-path cache read had no
+        # guard at all -- a truncated/corrupt cache file crashed straight out
+        # of the function with a JSONDecodeError instead of degrading to a
+        # fresh fetch.
+        self.bse_cache.write_text('[{"symbol": "543210"')  # truncated JSON
+        group_m = self._group_response([{"SCRIP_CD": "1", "Scrip_Name": "A", "ISIN_NUMBER": "X"}])
+        with patch("requests.get", side_effect=[group_m, self._group_response([])]), \
+             patch.object(sme_tools, "_BSE_SME_MIN_COUNT", 1):
+            result = sme_tools.fetch_bse_sme_stocks()
+        self.assertEqual([s["symbol"] for s in result], ["1"])
+
+    def test_corrupt_stale_cache_with_failed_fetch_returns_empty_list_instead_of_raising(self) -> None:
+        self.bse_cache.write_text('[{"symbol": "999"')  # truncated JSON
         with patch("requests.get", side_effect=ConnectionError("boom")):
             result = sme_tools.fetch_bse_sme_stocks(force=True)
         self.assertEqual(result, [])

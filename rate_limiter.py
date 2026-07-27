@@ -290,9 +290,23 @@ def release_lock(name: str) -> None:
 
 def is_locked(name: str) -> bool:
     client = _get_redis_client()
-    if client is not None:
-        try:
-            return bool(client.exists(f"lock:{name}"))
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            _warn_redis_failure("redis_lock_check_failed", exc)
-    return _memory_locks.get(name, False)
+    if client is None:
+        return _memory_locks.get(name, False)
+    try:
+        return bool(client.exists(f"lock:{name}"))
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        _warn_redis_failure("redis_lock_check_failed", exc)
+        # Unlike try_acquire_lock()/release_lock(), which fall back to
+        # _memory_locks on their OWN failure (keeping that dict internally
+        # consistent), this is a read-only peek: when Redis is configured,
+        # it's the one actually tracking this lock's real state, so
+        # _memory_locks was very likely never populated by whatever call
+        # genuinely acquired/released it. Falling back to that stale dict
+        # here would silently report "not locked" while a run is genuinely
+        # in progress via Redis. Fail closed (assume locked) instead --
+        # worst case a caller sees a spurious "already running" for the one
+        # request that lands during a transient Redis blip, self-correcting
+        # on the next successful read. That's safer than the reverse
+        # (reporting "not running" while one actually is, which could
+        # prompt a duplicate/overlapping run).
+        return True

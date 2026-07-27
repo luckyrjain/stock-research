@@ -34,4 +34,35 @@ test.describe('Market Picks page', () => {
     await expect(page.getByText('BUY', { exact: true }).first()).toBeVisible();
     await expect(page.getByText('WATCH', { exact: true }).first()).toBeVisible();
   });
+
+  test('shows "past target" instead of a garbled double sign once the live price clears the target', async ({ page }) => {
+    // Regression test for an adversarial-review finding: TradeBox's upside
+    // line was `+{upside}%` with a hardcoded "+" not conditional on sign.
+    // current_price is live (refreshed by this page's LTP-polling effect,
+    // mocked here via GET /api/prices) while target_price is static -- once
+    // the polled price clears the target (which the app explicitly expects,
+    // see PositionsStrip's own "At target" flag), upside goes negative and
+    // the old code rendered "+-2.3% upside" instead of a sensible label.
+    const picks = [marketPick('TCS', { target_price: 1400 })];
+
+    await page.route('**/api/market-picks/status', route => route.fulfill({
+      json: { last_run_at: null, cache_fresh: false, next_scheduled_at: new Date().toISOString() },
+    }));
+    await page.route('**/api/market-picks*', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS, body: marketPicksSseBody(picks),
+    }));
+    // Live price (1450) already above the static target_price (1400).
+    await page.route('**/api/prices*', route => route.fulfill({
+      json: { prices: { TCS: { price: 1450, change_pct: 20.8 } } },
+    }));
+
+    await page.goto('/market-picks');
+    await page.getByRole('button', { name: /See This Week.s Picks/ }).click();
+    await expect(page.getByText('TCS Limited')).toBeVisible({ timeout: 15000 });
+
+    await page.locator('tr[role="button"]', { hasText: 'TCS' }).click();
+
+    await expect(page.getByText(/past target/)).toBeVisible();
+    await expect(page.getByText('+-', { exact: false })).toHaveCount(0);
+  });
 });

@@ -39,6 +39,29 @@ class ExtractCompoundedGrowthTest(unittest.TestCase):
     def test_no_match_returns_empty_string(self) -> None:
         self.assertEqual(_extract_compounded_growth("nothing here", "Compounded Sales Growth", "3 Years"), "")
 
+    def test_other_labels_boundary_prevents_grabbing_a_different_blocks_value(self) -> None:
+        # Regression test for an adversarial-review finding: without an
+        # other_labels boundary, the lazy .*? between block_label and
+        # period_label has nothing stopping it from skipping straight past
+        # this block's own (missing) period and grabbing the NEXT block's
+        # value instead -- Sales Growth has no "3 Years" figure here, but
+        # Profit Growth does, and the old unbounded regex silently returned
+        # Profit Growth's 30% as if it were Sales Growth's own number.
+        text = "Compounded Sales Growth 5 Years: 19% Compounded Profit Growth 3 Years: 30%"
+        self.assertEqual(
+            _extract_compounded_growth(
+                text, "Compounded Sales Growth", "3 Years", other_labels=("Compounded Profit Growth",)
+            ),
+            "",
+        )
+        # The genuinely-present period is still found within the boundary.
+        self.assertEqual(
+            _extract_compounded_growth(
+                text, "Compounded Sales Growth", "5 Years", other_labels=("Compounded Profit Growth",)
+            ),
+            "19%",
+        )
+
 
 class ExtractGrowthMetricsTest(unittest.TestCase):
     def test_extracts_from_dedicated_block(self) -> None:
@@ -81,6 +104,32 @@ class ExtractGrowthMetricsTest(unittest.TestCase):
         metrics = _extract_growth_metrics(soup)
         self.assertEqual(metrics["Sales growth 3Y"], "22%")
         self.assertEqual(metrics["Sales growth 5Y"], "18%")
+        self.assertEqual(metrics["Profit growth 3Y"], "30%")
+        self.assertEqual(metrics["Profit growth 5Y"], "25%")
+
+    def test_fallback_path_does_not_borrow_a_different_blocks_value_for_a_missing_period(self) -> None:
+        # Regression test for an adversarial-review finding: a flat <ul><li>
+        # layout (neither a section/div/table wrapper around each block, nor
+        # a shared container satisfying the primary-path heuristics) forces
+        # the full-text-scan fallback. When Sales Growth genuinely has no
+        # "3 Years" figure but Profit Growth does, the old unbounded regex
+        # skipped straight past Sales Growth's own missing period and
+        # grabbed Profit Growth's 30% instead -- fabricating a number for a
+        # metric that simply isn't present, rather than omitting it.
+        html = """
+        <ul class="growth-widget">
+          <li>Compounded Sales Growth</li>
+          <li>5 Years: 19%</li>
+          <li>10 Years: 22%</li>
+          <li>Compounded Profit Growth</li>
+          <li>3 Years: 30%</li>
+          <li>5 Years: 25%</li>
+        </ul>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        metrics = _extract_growth_metrics(soup)
+        self.assertNotIn("Sales growth 3Y", metrics)
+        self.assertEqual(metrics["Sales growth 5Y"], "19%")
         self.assertEqual(metrics["Profit growth 3Y"], "30%")
         self.assertEqual(metrics["Profit growth 5Y"], "25%")
 

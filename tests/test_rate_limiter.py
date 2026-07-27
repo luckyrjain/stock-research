@@ -302,9 +302,17 @@ class LockRedisTest(_MemoryStateResetMixin, unittest.TestCase):
             self.assertTrue(rate_limiter.try_acquire_lock("job", ttl_seconds=60))
             self.assertFalse(rate_limiter.try_acquire_lock("job", ttl_seconds=60))
 
-    def test_is_locked_falls_back_to_memory_on_redis_error(self) -> None:
-        os.environ["REDIS_URL"] = "redis://localhost:6379/0"
-        rate_limiter._memory_locks["job"] = True
+    def test_is_locked_fails_closed_on_redis_error_even_when_memory_was_never_populated(self) -> None:
+        # Regression test for an adversarial-review finding: is_locked() used
+        # to fall back to _memory_locks on a Redis read failure -- but
+        # _memory_locks is only ever populated by try_acquire_lock()/
+        # release_lock()'s OWN fallback path, which never runs when those
+        # calls succeeded via Redis. A lock genuinely acquired via Redis (as
+        # here -- _memory_locks is deliberately left untouched, matching
+        # that real scenario) followed by a transient failure on the is_locked()
+        # peek itself used to silently report "not locked" (False, from the
+        # never-populated dict) while the lock was genuinely still held in
+        # Redis. Must fail closed (True) instead.
         fake_client = MagicMock()
         fake_client.exists.side_effect = ConnectionError("boom")
         with patch("rate_limiter._get_redis_client", return_value=fake_client):

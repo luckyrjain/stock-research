@@ -121,6 +121,66 @@ test.describe('Home page', () => {
     await expect(page.getByRole('link', { name: 'Screener', exact: true })).toBeVisible();
   });
 
+  test('formats a value just under a Cr/L boundary as the larger unit, not a false "100" of the smaller one', async ({ page }) => {
+    // Regression test for an adversarial-review finding: fmtCr()/fmtInr()
+    // compared the raw unrounded value against a unit threshold, but
+    // formatted via toFixed(), which rounds separately. A market cap of
+    // 99,998 Cr fails the ">= 1,00,000" (1L Cr) check and falls to the
+    // K-Cr branch, but (99998/1000).toFixed(2) itself rounds up to
+    // "100.00" -- displaying the nonsensical "₹100.00K Cr" instead of
+    // "₹1.00L Cr". Same bug shape for fmtInr() at the Cr/L boundary, used
+    // for insider-trade values.
+    const symbol = 'TCS';
+
+    await page.route(`**/api/validate/${symbol}`, route =>
+      route.fulfill({ json: validationResult(symbol) }));
+    await page.route(`**/api/analyse/${symbol}**`, route =>
+      route.fulfill({
+        status: 200, headers: SSE_HEADERS,
+        body: sseAnalysisBody(symbol, { stockInfoOverrides: { market_cap_cr: 99998 } }),
+      }));
+    await page.route('**/api/peers/**', route => route.fulfill({
+      json: { symbol, self: null, peers: [], sector_median: null, percentiles: {}, absolute_anchor: null },
+    }));
+    await page.route('**/api/insider-activity/**', route => route.fulfill({
+      json: {
+        symbol,
+        insider_trades: [{
+          person: 'Fixture Promoter', category: 'Promoter', action: 'BUY',
+          quantity: 1000, value: 9999960, date: '20-Jul-2026', date_iso: '2026-07-20',
+        }],
+        bulk_block_deals: [],
+        insider_trades_unavailable: false,
+        bulk_block_deals_unavailable: false,
+      },
+    }));
+    await page.route('**/api/street-consensus/**', route => route.fulfill({
+      json: { symbol, articles: [] },
+    }));
+    await page.route('**/api/prices/history/**', route => route.fulfill({
+      json: { symbol, exchange: 'NSE', dates: [], closes: [] },
+    }));
+    await page.route('**/api/verdict-history/**', route => route.fulfill({
+      json: { symbol, history: [], win_rate: null, scored_count: 0 },
+    }));
+
+    await page.goto('/');
+    const input = page.getByLabel('NSE or BSE stock ticker');
+    await input.fill(symbol);
+    await expect(page.getByText(validationResult(symbol).company)).toBeVisible({ timeout: 5000 });
+    await page.getByRole('button', { name: 'Analyse Stock' }).click();
+
+    await expect(page.getByText('BUY', { exact: true }).first()).toBeVisible({ timeout: 15000 });
+
+    // fmtCr(99998) via the Market Cap key metric.
+    await expect(page.getByText('₹1.00L Cr')).toBeVisible();
+    await expect(page.getByText('₹100.00K Cr')).toHaveCount(0);
+
+    // fmtInr(9999960) via the insider-trade value.
+    await expect(page.getByText('₹1.0 Cr')).toBeVisible();
+    await expect(page.getByText('₹100.0L')).toHaveCount(0);
+  });
+
   test('shows a degraded-analysis banner when every LLM provider failed', async ({ page }) => {
     // A full provider outage previously converged to a generic HOLD with no
     // visible signal that this wasn't a real analyst call — see crew.py's

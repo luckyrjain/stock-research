@@ -139,6 +139,37 @@ class GetNifty500ConstituentsTest(unittest.TestCase):
         self.assertEqual(len(stocks), 450)
         mock_save.assert_called_once()
 
+    def test_corrupt_fresh_cache_falls_through_to_a_live_fetch_instead_of_raising(self) -> None:
+        # Regression test for an adversarial-review finding: get_nifty500_constituents()
+        # is documented as "never raises," but the fast-path cache read had no
+        # guard at all -- a truncated/corrupt cache file (e.g. from an
+        # interrupted write) crashed straight out of the function with a
+        # JSONDecodeError instead of degrading to a fresh fetch.
+        csv_text = (
+            "Company Name,Industry,Symbol,Series,ISIN Code\n"
+            "Tata Consultancy Services Ltd.,Information Technology,TCS,EQ,INE467B01029\n"
+        )
+        session = MagicMock()
+        session.get.return_value = self._csv_response(csv_text)
+        with patch("tools.nifty500_tools._is_fresh", return_value=True), \
+             patch("tools.nifty500_tools._CACHE_PATH") as fake_path, \
+             patch("tools.nifty500_tools._nse_session", return_value=session), \
+             patch("tools.nifty500_tools._MIN_PLAUSIBLE_COUNT", 1), \
+             patch("tools.nifty500_tools._save_cache"):
+            fake_path.read_text.return_value = '[{"symbol": "TCS"'  # truncated JSON
+            stocks = get_nifty500_constituents()
+        self.assertEqual(len(stocks), 1)
+        self.assertEqual(stocks[0]["symbol"], "TCS")
+
+    def test_corrupt_stale_cache_with_failed_fetch_returns_empty_list_instead_of_raising(self) -> None:
+        with patch("tools.nifty500_tools._is_fresh", return_value=False), \
+             patch("tools.nifty500_tools._nse_session", side_effect=ConnectionError("boom")), \
+             patch("tools.nifty500_tools._CACHE_PATH") as fake_path:
+            fake_path.exists.return_value = True
+            fake_path.read_text.return_value = '[{"symbol": "STALE"'  # truncated JSON
+            stocks = get_nifty500_constituents(force=True)
+        self.assertEqual(stocks, [])
+
 
 if __name__ == "__main__":
     unittest.main()

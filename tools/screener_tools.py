@@ -50,10 +50,31 @@ def _clean(text: str) -> str:
     return text.strip().replace("₹", "").replace(",", "").strip()
 
 
-def _extract_compounded_growth(text: str, block_label: str, period_label: str) -> str:
-    """Extract CAGR-style growth percentages from Screener summary blocks."""
-    pattern = rf"{re.escape(block_label)}.*?{re.escape(period_label)}\s*:\s*([+-]?\d+(?:\.\d+)?%)"
-    match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+def _extract_compounded_growth(
+    text: str, block_label: str, period_label: str, other_labels: tuple[str, ...] = ()
+) -> str:
+    """Extract CAGR-style growth percentages from Screener summary blocks.
+
+    Bounded to the text between `block_label` and the next occurrence of any
+    `other_labels` entry (if given) -- an unbounded `.*?` up to `period_label`
+    would happily skip straight past this block's own missing period and
+    grab a completely different block's value instead, silently mislabeling
+    one growth metric with another's number (e.g. Sales growth 3Y ending up
+    populated with Profit growth's 3-year figure when Sales growth simply
+    has no 3-year figure in this page). `_extract_growth_metrics()`'s
+    fallback call site passes every *other* block's label here for exactly
+    this reason.
+    """
+    label_match = re.search(re.escape(block_label), text, flags=re.IGNORECASE)
+    if not label_match:
+        return ""
+    search_text = text[label_match.end():]
+    for other in other_labels:
+        boundary = re.search(re.escape(other), search_text, flags=re.IGNORECASE)
+        if boundary:
+            search_text = search_text[:boundary.start()]
+    pattern = rf"{re.escape(period_label)}\s*:\s*([+-]?\d+(?:\.\d+)?%)"
+    match = re.search(pattern, search_text, flags=re.IGNORECASE | re.DOTALL)
     return match.group(1) if match else ""
 
 
@@ -107,8 +128,9 @@ def _extract_growth_metrics(soup: BeautifulSoup) -> dict[str, str]:
 
         if not block_text:
             full_text = soup.get_text("\n", strip=True)
-            three_year = _extract_compounded_growth(full_text, block_label, "3 Years")
-            five_year = _extract_compounded_growth(full_text, block_label, "5 Years")
+            other_labels = tuple(lbl for lbl in block_map if lbl != block_label)
+            three_year = _extract_compounded_growth(full_text, block_label, "3 Years", other_labels)
+            five_year = _extract_compounded_growth(full_text, block_label, "5 Years", other_labels)
             if three_year:
                 metrics[f"{output_prefix} 3Y"] = three_year
             if five_year:

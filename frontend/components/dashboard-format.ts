@@ -15,8 +15,21 @@ export function fmt(n: number | null | undefined, decimals = 2) {
 export function fmtCr(n: number | null | undefined) {
   if (n == null) return '—';
   if (n >= 1_00_000) return `₹${(n / 1_00_000).toFixed(2)}L Cr`;
-  if (n >= 1_000)    return `₹${(n / 1_000).toFixed(2)}K Cr`;
-  return `₹${fmt(n)} Cr`;
+  if (n >= 1_000) {
+    // Checked against the ROUNDED value, not just the raw threshold below —
+    // a value just under 1_00_000 (e.g. 99998) fails the L-Cr check above
+    // but (n / 1_000).toFixed(2) itself rounds up to "100.00", which would
+    // otherwise display as the nonsensical "₹100.00K Cr" instead of
+    // escalating to "₹1.00L Cr" the way the raw threshold check intends.
+    const kCr = (n / 1_000).toFixed(2);
+    if (Number(kCr) >= 100) return `₹${(n / 1_00_000).toFixed(2)}L Cr`;
+    return `₹${kCr}K Cr`;
+  }
+  // Same rounding-boundary issue one tier down: a value just under 1_000
+  // (e.g. 999.996) can round up to "1,000.00" via fmt() below.
+  const plain = fmt(n);
+  if (Number(plain.replace(/,/g, '')) >= 1_000) return `₹${(n / 1_000).toFixed(2)}K Cr`;
+  return `₹${plain} Cr`;
 }
 
 export function fmtVolume(n: number | null | undefined) {
@@ -29,7 +42,15 @@ export function fmtVolume(n: number | null | undefined) {
 // (e.g. market_cap_cr) — these come off the wire as plain rupee amounts.
 export function fmtInr(n: number): string {
   if (n >= 1_00_00_000) return `₹${(n / 1_00_00_000).toFixed(1)} Cr`;
-  if (n >= 1_00_000) return `₹${(n / 1_00_000).toFixed(1)}L`;
+  if (n >= 1_00_000) {
+    // Same rounding-boundary fix as fmtCr() above: a value just under
+    // 1_00_00_000 (e.g. 9,999,960) fails the Cr check but
+    // (n / 1_00_000).toFixed(1) itself rounds up to "100.0", which would
+    // otherwise display as "₹100.0L" instead of escalating to "₹1.0 Cr".
+    const lakh = (n / 1_00_000).toFixed(1);
+    if (Number(lakh) >= 100) return `₹${(n / 1_00_00_000).toFixed(1)} Cr`;
+    return `₹${lakh}L`;
+  }
   return `₹${n.toLocaleString('en-IN')}`;
 }
 

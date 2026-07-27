@@ -120,7 +120,13 @@ async def get_watchlist_calendar(request: Request, symbols: str = Query(...)):
     one) and resolves no owner at all.
     """
     api._rate_limit(request, "watchlist_calendar", max_calls=30, window_seconds=60)
-    sym_list = [s.strip().upper() for s in symbols.split(",") if api._TICKER_RE.match(s.strip())][:_MAX_WATCHLIST_ITEMS_PER_CLIENT]
+    # Uppercase BEFORE matching against _TICKER_RE (case-sensitive,
+    # [A-Z0-9&-] only) -- matching first would silently drop a valid
+    # lowercase/mixed-case symbol like "tcs", unlike every other
+    # _TICKER_RE call site in this file/routes/positions.py, which all
+    # uppercase first.
+    upper_symbols = [s.strip().upper() for s in symbols.split(",")]
+    sym_list = [s for s in upper_symbols if api._TICKER_RE.match(s)][:_MAX_WATCHLIST_ITEMS_PER_CLIENT]
     if not sym_list:
         return {"entries": []}
 
