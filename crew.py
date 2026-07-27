@@ -208,6 +208,14 @@ def _analysis_support_issues(data: dict | None, all_data: dict[str, dict] | None
     return issues
 
 
+# Well inside signals/engine.py's own HOLD band (-0.3 to 0.1) — a score
+# with this small a magnitude means the quant engine found almost nothing
+# directional, so a HIGH-confidence call against it is a real inconsistency,
+# not a borderline judgment call. See _validate_analysis_payload's own
+# comment on this check.
+_MARGINAL_SCORE_ABS = 0.15
+
+
 def _validate_analysis_payload(  # pylint: disable=too-many-return-statements
     data: dict | None,
     all_data: dict[str, dict] | None = None,
@@ -244,6 +252,21 @@ def _validate_analysis_payload(  # pylint: disable=too-many-return-statements
         # previously passed validation untouched.
         if signal_context["final_score"] < -0.6 and data["recommendation"] == "BUY":
             return False, "Recommendation contradicts strong negative signals"
+        # A "HIGH confidence" claim against a near-neutral quant score is
+        # its own kind of unsupported claim — the two checks above catch a
+        # directional contradiction (BUY/SELL vs. a strongly opposite
+        # score), but say nothing about confidence *magnitude*: a HIGH-
+        # confidence BUY at final_score=0.11 (barely past the WATCHLIST
+        # threshold) and a HIGH-confidence BUY at 0.9 previously passed
+        # identical validation. _MARGINAL_SCORE_ABS is well inside
+        # signals/engine.py's own HOLD band (-0.3 to 0.1), so this only
+        # fires when the quant engine itself found almost nothing
+        # directional either way.
+        if abs(signal_context["final_score"]) < _MARGINAL_SCORE_ABS and data["confidence"] == "HIGH":
+            return False, (
+                "Confidence 'HIGH' is not supported by a near-neutral quant signal score "
+                f"({signal_context['final_score']}); use MEDIUM or LOW instead."
+            )
     support_issues = _analysis_support_issues(data, all_data)
     if support_issues:
         return False, f"Unsupported claims found: {'; '.join(support_issues)}."
