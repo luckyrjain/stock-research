@@ -2627,6 +2627,23 @@ class WatchlistCalendarEndpointTest(unittest.TestCase):
         resp = client.get("/api/watchlist/calendar?symbols=bad symbol!,TCS")
         self.assertEqual(resp.status_code, 200)  # invalid entries dropped, not a 422 — best-effort endpoint
 
+    def test_lowercase_symbol_is_uppercased_before_validation_not_dropped(self) -> None:
+        # Regression test for an adversarial-review finding: _TICKER_RE is
+        # case-sensitive ([A-Z0-9&-] only) and was previously matched
+        # against the symbol BEFORE uppercasing, so a valid lowercase
+        # symbol like "tcs" silently failed the regex and was dropped
+        # entirely — unlike every other _TICKER_RE call site in this file,
+        # which all uppercase first.
+        move = {"old_price": 100.0, "new_price": 90.0, "change_pct": -10.0}
+
+        def fake_changes(sym, *_a, **_kw):
+            return {"recommendation_change": None, "price_move": move if sym == "TCS" else None}
+
+        with patch("verdict_history.detect_recent_changes", side_effect=fake_changes):
+            resp = client.get("/api/watchlist/calendar?symbols=tcs")
+        entries = resp.json()["entries"]
+        self.assertEqual([e["symbol"] for e in entries], ["TCS"])
+
     def test_rate_limited_returns_429(self) -> None:
         rate_limiter._memory_calls["watchlist_calendar:testclient"] = [api.time.monotonic()] * 30
         resp = client.get("/api/watchlist/calendar?symbols=TCS")

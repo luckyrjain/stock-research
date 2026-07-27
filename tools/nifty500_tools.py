@@ -25,6 +25,8 @@ import csv
 import io
 import json
 import logging
+import os
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -59,8 +61,37 @@ def _is_fresh(path: Path) -> bool:
 
 
 def _save_cache(data: list[dict]) -> None:
+    # Written atomically (tempfile + os.replace), same convention as
+    # cache.py::save() -- a plain write_text() left a truncated/corrupt file
+    # behind on an interrupted write (process killed/OOM/container restart
+    # mid-write, or two cron-triggered pipeline runs racing on the same
+    # file), which every read site below then failed to parse.
     _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _CACHE_PATH.write_text(json.dumps(data))
+    fd, tmp_path = tempfile.mkstemp(dir=_CACHE_PATH.parent, prefix=f".{_CACHE_PATH.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data))
+        os.replace(tmp_path, _CACHE_PATH)
+    except Exception:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
+
+
+def _load_cache() -> list[dict] | None:
+    """Read the constituent-list cache file. Returns None (never raises) on
+    any parse/read failure -- get_nifty500_constituents() is documented as
+    "never raises," but the bare json.loads(path.read_text()) calls this
+    replaces had no guard at all, so a corrupt cache file (from an
+    interrupted write, before the atomic write above existed) crashed
+    straight out of that function. Callers treat None the same as "no
+    usable cache" -- the mtime-based freshness check doesn't validate
+    content, so without this guard a single corrupt file would keep raising
+    on every call until the 24h TTL expired."""
+    try:
+        return json.loads(_CACHE_PATH.read_text())
+    except Exception as exc:
+        logger.warning("NIFTY 500 cache at %s is unreadable, treating as absent: %s", _CACHE_PATH, exc)
+        return None
 
 
 def get_nifty500_constituents(force: bool = False) -> list[dict]:
@@ -69,7 +100,9 @@ def get_nifty500_constituents(force: bool = False) -> list[dict]:
     returns [] (or a stale cache, logged as such) on any failure. Cached 24 h.
     """
     if not force and _is_fresh(_CACHE_PATH):
-        return json.loads(_CACHE_PATH.read_text())
+        cached = _load_cache()
+        if cached is not None:
+            return cached
 
     try:
         session = _nse_session()
@@ -105,6 +138,8 @@ def get_nifty500_constituents(force: bool = False) -> list[dict]:
         logger.warning("NIFTY 500 fetch failed: %s", exc)
 
     if _CACHE_PATH.exists():
-        logger.warning("NIFTY 500: using stale cache")
-        return json.loads(_CACHE_PATH.read_text())
+        cached = _load_cache()
+        if cached is not None:
+            logger.warning("NIFTY 500: using stale cache")
+            return cached
     return []

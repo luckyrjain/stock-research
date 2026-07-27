@@ -213,9 +213,16 @@ function TradeBox({ pick }: { pick: MarketPick }) {
   const p = (n: number | null) =>
     n != null ? `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '—';
 
+  // Numeric, not pre-formatted -- current_price is live (refreshed every
+  // 30s by the page's LTP-polling effect) while target_price is static, so
+  // this can legitimately go negative once the live price clears the
+  // target (exactly what PositionsStrip's own "At target" flag expects to
+  // happen). Rendered below with an explicit sign check rather than a
+  // hardcoded "+" prefix, which used to produce a garbled "+-2.3% upside"
+  // once that happened.
   const upside =
     pick.target_price != null && pick.current_price != null && pick.current_price > 0
-      ? (((pick.target_price - pick.current_price) / pick.current_price) * 100).toFixed(1)
+      ? ((pick.target_price - pick.current_price) / pick.current_price) * 100
       : null;
 
   const riskReward =
@@ -253,7 +260,11 @@ function TradeBox({ pick }: { pick: MarketPick }) {
         <div className="px-4 py-3.5">
           <div className="text-[9px] text-muted/70 mb-1.5 uppercase tracking-widest">Target</div>
           <div className="text-sm font-black text-buy tabular-nums">{p(pick.target_price)}</div>
-          {upside && <div className="text-[10px] text-buy/60 mt-0.5">+{upside}% upside</div>}
+          {upside != null && (
+            upside >= 0
+              ? <div className="text-[10px] text-buy/60 mt-0.5">+{upside.toFixed(1)}% upside</div>
+              : <div className="text-[10px] text-buy/60 mt-0.5">{Math.abs(upside).toFixed(1)}% past target</div>
+          )}
         </div>
         <div className="px-4 py-3.5">
           <div className="text-[9px] text-muted/70 mb-1.5 uppercase tracking-widest">Stop Loss</div>

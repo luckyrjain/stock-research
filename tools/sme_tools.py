@@ -18,7 +18,9 @@ this is a best-effort dedup, not a guarantee.
 
 import json
 import logging
+import os
 import re
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -92,8 +94,37 @@ def _is_fresh(path: Path) -> bool:
 
 
 def _save_cache(path: Path, data: list[dict]) -> None:
+    # Written atomically (tempfile + os.replace), same convention as
+    # cache.py::save() -- a plain write_text() left a truncated/corrupt file
+    # behind on an interrupted write (process killed/OOM/container restart
+    # mid-write, or two cron-triggered pipeline runs racing on the same
+    # file), which every read site below then failed to parse.
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data))
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data))
+        os.replace(tmp_path, path)
+    except Exception:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
+
+
+def _load_cache(path: Path) -> list[dict] | None:
+    """Read a stock-list cache file. Returns None (never raises) on any
+    parse/read failure -- both fetch_nse_emerge_stocks() and
+    fetch_bse_sme_stocks() are documented as "never raises," but the bare
+    json.loads(path.read_text()) calls this replaces had no guard at all, so
+    a corrupt cache file (from an interrupted write, before the atomic write
+    above existed) crashed straight out of those functions. Callers treat
+    None the same as "no usable cache" -- the mtime-based freshness check
+    doesn't validate content, so without this guard a single corrupt file
+    would keep raising on every call until the 24h TTL expired."""
+    try:
+        return json.loads(path.read_text())
+    except Exception as exc:
+        logger.warning("SME cache at %s is unreadable, treating as absent: %s", path, exc)
+        return None
 
 
 def _enrich_names(stocks: list[dict]) -> list[dict]:
@@ -138,7 +169,9 @@ def _enrich_names(stocks: list[dict]) -> list[dict]:
 def fetch_nse_emerge_stocks(force: bool = False) -> list[dict]:
     """Return all NSE Emerge (SME) stocks via NSE's live-analysis API. Cached 24 h."""
     if not force and _is_fresh(_NSE_EMERGE_CACHE):
-        return json.loads(_NSE_EMERGE_CACHE.read_text())
+        cached = _load_cache(_NSE_EMERGE_CACHE)
+        if cached is not None:
+            return cached
 
     sess = _nse_session()
 
@@ -194,15 +227,19 @@ def fetch_nse_emerge_stocks(force: bool = False) -> list[dict]:
         logger.warning("NSE Emerge fetch failed: %s", exc)
 
     if _NSE_EMERGE_CACHE.exists():
-        logger.warning("NSE Emerge: using stale cache")
-        return json.loads(_NSE_EMERGE_CACHE.read_text())
+        cached = _load_cache(_NSE_EMERGE_CACHE)
+        if cached is not None:
+            logger.warning("NSE Emerge: using stale cache")
+            return cached
     return []
 
 
 def fetch_bse_sme_stocks(force: bool = False) -> list[dict]:
     """Return all BSE SME stocks (Groups M + MS). Cached 24 h."""
     if not force and _is_fresh(_BSE_SME_CACHE):
-        return json.loads(_BSE_SME_CACHE.read_text())
+        cached = _load_cache(_BSE_SME_CACHE)
+        if cached is not None:
+            return cached
 
     base_url = "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w/"
     base_params = "Scripcode=&segment=Equity&status=Active&industrycode=&isincode=&maskstatus="
@@ -256,8 +293,10 @@ def fetch_bse_sme_stocks(force: bool = False) -> list[dict]:
         )
 
     if _BSE_SME_CACHE.exists():
-        logger.warning("BSE SME: using stale cache")
-        return json.loads(_BSE_SME_CACHE.read_text())
+        cached = _load_cache(_BSE_SME_CACHE)
+        if cached is not None:
+            logger.warning("BSE SME: using stale cache")
+            return cached
     return []
 
 
