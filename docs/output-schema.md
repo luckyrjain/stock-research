@@ -2,19 +2,31 @@
 
 ## Per-symbol cache files
 
-Each symbol gets its own folder under `output/<SYMBOL>/`:
+Each symbol gets its own folder under `output/<SYMBOL>/` (or, when `REDIS_URL` is set, the same
+data lives in Redis and disk becomes a fast local mirror/fallback — see `cache.py` and CLAUDE.md's
+"Redis-backed cache for multi-host deployments" section). One file per cache "task", each with its
+own TTL (`cache.TTL_HOURS`):
 
 ```text
 output/TCS/
-├── stock_info.json
-├── research.json
-├── news.json
-├── shareholding.json
-├── mf_holdings.json
-├── filings.json
-├── analysis.json
+├── stock_info.json        # 1h
+├── research.json          # 24h
+├── news.json              # 1h
+├── shareholding.json      # 168h (7 days)
+├── mf_holdings.json       # 168h (7 days)
+├── filings.json           # 1h (default TTL — not in TTL_HOURS)
+├── analysis.json          # 24h
+├── price_history.json     # 6h  — shared sparkline/technical-signal series
+├── peers.json             # 24h — standalone, outside ALL_DATA_TASKS
+├── financials.json        # 24h — standalone
+├── insider_activity.json  # 24h — standalone
+├── street_consensus.json  # 24h — standalone
 └── report_2026-05-06.json
 ```
+
+`fii_dii_flow` and `macro_context` (both 24h) are cached under a fixed `"_MACRO"` pseudo-symbol
+(market-wide, not per-symbol), and `index_history` (24h) under a `"NSEI"` pseudo-symbol — neither
+lives under a real ticker's folder.
 
 Each per-task cache file includes `_meta.fetched_at`:
 
@@ -28,22 +40,36 @@ Each per-task cache file includes `_meta.fetched_at`:
 }
 ```
 
-The merged `report_<DATE>.json` strips `_meta` from all nested sections.
+The merged `report_<DATE>.json` strips `_meta` from all nested sections, but surfaces each
+task's own real fetch timestamp separately via the top-level `data_freshness` field (see below) —
+`generated_at` alone is stamped fresh on every report-assembly call regardless of whether any
+underlying task was actually refetched, so a 7-day-stale `shareholding` table would otherwise
+still read as "updated today."
 
 ---
 
 ## Merged report shape
 
+This is `main._build_report()`'s return value — produced by both the CLI (`main.py`) and
+`api.py`'s `/api/analyse/{symbol}` SSE endpoint's final `done` event (`frontend/types/index.ts`'s
+`Report` interface is the canonical TypeScript mirror; the two are kept in lockstep by
+convention, see CLAUDE.md's "Important Rules for Claude").
+
 ```json
 {
   "symbol": "TCS",
   "generated_at": "2026-05-06",
+  "data_freshness": {},
   "analysis": {},
+  "degraded": false,
   "signals": {},
   "stock_info": {},
   "research": {},
   "news": [],
-  "holdings": {}
+  "holdings": {},
+  "filings": [],
+  "filings_summary": {},
+  "mf_holdings_trend": []
 }
 ```
 
@@ -52,13 +78,18 @@ The merged `report_<DATE>.json` strips `_meta` from all nested sections.
 | Field | Type | Description |
 |---|---|---|
 | `symbol` | string | Uppercased stock symbol |
-| `generated_at` | string | Run date in `YYYY-MM-DD` format |
-| `analysis` | object | Final LLM analyst output |
-| `signals` | object | Quantitative signal engine output |
+| `generated_at` | string | Run date in `YYYY-MM-DD` format — stamped fresh on every assembly, not a per-task freshness signal (see `data_freshness`) |
+| `data_freshness` | object | `{stock_info, research, news, shareholding, mf_holdings, filings}` — each task's own real `_meta.fetched_at` ISO timestamp (or `null`), captured before `_meta` is stripped |
+| `analysis` | object | Final LLM analyst output (see below) |
+| `degraded` | boolean | `true` when every configured LLM provider failed (or failed guardrails past its retry) and `analysis` is `crew.py`'s generic safe-fallback HOLD, not a real analyst call. A sibling of `analysis` (not nested inside it) so it isn't subject to the four-file analyst-schema lockstep rule — the LLM never produces this field. See CLAUDE.md's "LLM cost instrumentation + cross-provider failover" point 3 |
+| `signals` | object | Quantitative signal engine output (see below) |
 | `stock_info` | object | Quote and company information |
-| `research` | object | Fundamental ratios and about text |
+| `research` | object | Fundamental ratios, about text, quarterly trend |
 | `news` | array | News article list |
-| `holdings` | object | Shareholding pattern + MF holdings |
+| `holdings` | object | Shareholding pattern + MF holdings + promoter pledge % |
+| `filings` | array | Raw corporate filings list (`[{title, desc, date, category, attachment}]`) — also what `signals.filings` and `filings_summary` are both derived from |
+| `filings_summary` | object | Best-effort classification of `filings` — see below |
+| `mf_holdings_trend` | array | Per-fund stake deltas vs. the prior stored quarterly snapshot — see below |
 
 ---
 
@@ -90,6 +121,9 @@ The merged `report_<DATE>.json` strips `_meta` from all nested sections.
 - `confidence`: `HIGH` | `MEDIUM` | `LOW`
 - `bull_factors` and `bear_factors` may contain plain strings or structured objects — the frontend normalizes both
 - `news_highlights` may be a string or array of strings
+- Adding/removing any field here requires updating `config/analyst.json`'s `output_schema`,
+  `crew._validate_analysis_payload()`, `main._build_report()`, and `frontend/types/index.ts`'s
+  `Analysis` interface in lockstep — see CLAUDE.md's "Important Rules for Claude"
 
 ---
 
@@ -100,21 +134,35 @@ The merged `report_<DATE>.json` strips `_meta` from all nested sections.
   "final_score": 0.42,
   "verdict": "BUY",
   "signals": {
-    "valuation": {
-      "name": "valuation",
-      "value": "Fairly Valued",
-      "score": 0.3,
-      "meta": { "pe_ratio": 17.6, "industry_pe": 22.0 }
-    },
-    "growth": { "name": "growth", "value": "Strong", "score": 0.8, "meta": {} },
-    "volume":  { "name": "volume",  "value": "Above Average", "score": 0.5, "meta": {} },
-    "filings": { "name": "filings", "value": "Neutral", "score": 0.0, "meta": {} }
+    "valuation":  { "name": "valuation", "value": "Fairly Valued", "score": 0.3, "meta": {} },
+    "growth":     { "name": "growth",    "value": "Strong",        "score": 0.8, "meta": {} },
+    "volume":     { "name": "volume",    "value": "Above Average", "score": 0.5, "meta": {} },
+    "filings":    { "name": "filings",   "value": "Neutral",       "score": 0.0, "meta": {} },
+    "technical":  { "name": "technical", "value": "Bullish",       "score": 0.4, "meta": {} },
+    "macro":      { "name": "macro",     "value": "Tailwind",      "score": 0.2, "meta": {} }
   }
 }
 ```
 
-- `final_score`: –1 (strong sell) to +1 (strong buy)
-- `verdict`: `BUY` | `HOLD` | `SELL`
+- `final_score`: –1 (strong sell) to +1 (strong buy), a weighted sum of all six signals
+- `verdict`: `BUY` | `WATCHLIST` | `HOLD` | `AVOID` | `SELL` (`signals/engine.py::run_signal_engine`'s
+  thresholds: `>0.5` BUY, `>0.1` WATCHLIST, `>-0.3` HOLD, `>-0.6` AVOID, else SELL — a 5-tier
+  scale, not the 3-tier `BUY`/`HOLD`/`SELL` the `analysis.recommendation` field uses; the frontend's
+  `SignalSummary.verdict` type is `'BUY' | 'SELL' | 'HOLD' | string` to accommodate this)
+- `signals.technical` and `signals.macro` are the two signals that do their own I/O (RSI14/EMA20/50
+  off the cached `price_history` series, and market-wide FII/DII flow + RBI rate/inflation,
+  respectively — see `docs/tools.md`) rather than reading only from already-fetched data
+- **Sector-aware weight tilts**: the baseline weights (`valuation` 0.4, `growth` 0.4, `volume` 0.2,
+  `filings` 0.2, `technical` 0.2, `macro` 0.15) are tilted per `stock_info.sector` for three
+  economically-similar groups (`signals/engine.py::_weights_for_sector`) — rate-sensitive
+  (`Financial Services`/`Real Estate`/`Utilities`: valuation + macro up, growth down), growth
+  (`Technology`/`Communication Services`/`Healthcare`: growth up, macro down), and cyclical
+  (`Basic Materials`/`Energy`/`Industrials`/`Consumer Cyclical`: technical + volume up, valuation +
+  growth down). Every override reallocates weight from other signals so each group's weights still
+  sum to the baseline 1.55. Any other/missing sector uses the unchanged default weights. See
+  CLAUDE.md's "Sector-aware signal weights" section for the full disclosed-limitation writeup
+  (whether yfinance's `sector` field is actually GICS-taxonomy-shaped for NSE/BSE symbols was never
+  verified against a live response).
 
 ---
 
@@ -152,9 +200,24 @@ The merged `report_<DATE>.json` strips `_meta` from all nested sections.
     "ROCE": "76.7",
     "ROE": "65.2"
   },
+  "quarterly_trend": {
+    "quarters": ["Jun 2025", "Sep 2025", "Dec 2025", "Mar 2026"],
+    "revenue": [61237, 62612, 63973, 64479],
+    "eps": [30.2, 31.1, 32.4, 33.0],
+    "operating_margin": [24.3, 24.8, 24.1, 24.5]
+  },
+  "nse_fallback_ratios": null,
   "about": "Company description..."
 }
 ```
+
+- `quarterly_trend` (optional, omitted when absent) — oldest-first Sales/EPS/(optional)
+  operating-margin mini-trend, capped at 8 quarters, from Screener's Quarterly Results table.
+  `operating_margin` is independently optional (several sectors, e.g. banks/NBFCs, routinely omit
+  Screener's OPM % row even when Sales/EPS are present).
+- `nse_fallback_ratios` (optional, omitted when absent) — `{eps, source: "nse_xbrl",
+  as_of_date}`, present only when Screener's own `ratios` came back completely empty and NSE's own
+  XBRL results filings had a usable EPS. Deliberately EPS-only (see `docs/tools.md`).
 
 ---
 
@@ -186,11 +249,68 @@ The merged report flattens `news.json.articles` into a top-level array:
     "DIIs": 13.34,
     "Public": 5.16
   },
+  "pledge_pct": 0.0,
   "mutual_funds": [
     { "fund": "SBI Nifty 50 ETF", "holding_pct": 1.25 }
   ]
 }
 ```
+
+`pledge_pct` (optional) is promoter pledge %, parsed as its own field rather than folded into
+`shareholding_pattern`.
+
+---
+
+### `filings_summary`
+
+Best-effort keyword/regex classification of the raw `filings` list — see
+`signals/filings_classifier.py::classify_filings()`. Never guesses; every field is `None`/`[]`
+when nothing in the fetch window matches a known pattern.
+
+```json
+{
+  "corporate_actions": [
+    { "type": "dividend", "date": "2026-05-10", "title": "Board recommends final dividend" }
+  ],
+  "rating_action": {
+    "agency": "CRISIL",
+    "action": "upgrade",
+    "from_rating": "AA",
+    "to_rating": "AA+",
+    "date": "2026-04-02",
+    "title": "CRISIL upgrades long-term rating"
+  },
+  "next_results_date": "2026-07-15"
+}
+```
+
+- `corporate_actions`: one entry per matching filing (dividend/split/bonus/buyback), newest first
+- `rating_action`: the single most recent credit-rating filing (or `null`); `from_rating`/
+  `to_rating` are only present when a clean "from X to Y" phrase was found
+- `next_results_date`: a future `YYYY-MM-DD` parsed from the most recent "board meeting to
+  consider financial results" filing, or `null`
+
+---
+
+### `mf_holdings_trend`
+
+Per-fund stake deltas vs. the prior stored quarterly snapshot — see `mf_holdings_history.py`
+(PostgreSQL-backed; empty array when `DATABASE_URL` isn't set or no prior snapshot exists).
+
+```json
+[
+  {
+    "fund": "SBI Nifty 50 ETF",
+    "holding_pct": 1.25,
+    "delta_pct": 0.08,
+    "as_of_date": "2026-06-30",
+    "prior_as_of_date": "2026-03-31"
+  }
+]
+```
+
+`delta_pct` is `null` (never guessed) when there's no prior snapshot, or the fund is a new
+entrant absent from it.
 
 ---
 
@@ -216,38 +336,202 @@ Each item in `picks`:
 | `symbol` | string | NSE/BSE ticker |
 | `company` | string | Company name |
 | `exchange` | string | `NSE` or `BSE` |
+| `sector` | string | From `stock_info`; `"Unknown"` when NSE/yfinance doesn't report one — real, filterable data (see the sector-balance note below) |
 | `mention_count` | number | Total source mentions |
 | `sources` | array | See below |
 | `confidence_score` | number | 0–100 |
 | `action_score` | number | 0–1 directional conviction magnitude |
 | `signal_score` | number | –1 to +1 (quant signal engine) |
 | `signal_verdict` | string | `BUY` / `HOLD` / `SELL` |
-| `recommendation` | string | `BUY` / `WATCHLIST` / `HOLD` / `SELL` |
+| `recommendation` | string | `BUY` / `WATCHLIST` / `HOLD` / `SELL` — a **separate** 4-tier formula from `signal_verdict` (`combined_dir = 0.55×consensus + 0.45×signal_score`, thresholded, with a quant-veto demoting BUY→WATCHLIST on a strongly negative signal score) |
 | `trend` | string | `rising` / `falling` / `stable` / `new` |
 | `trend_delta` | number\|null | Confidence delta vs prior 3-day average |
 | `current_price` | number\|null | Last traded price |
 | `change_pct` | number | % change today |
 | `pe_ratio` | number\|null | Trailing P/E |
 | `market_cap_cr` | number\|null | Market cap in crores |
+| `valuation_percentile` | number\|null | 0–100, where current P/E sits vs. this stock's own 3–5y Screener-published P/E history (absolute anchor, not peer-relative); `null` when Screener didn't have a parseable band. Also folded into `confidence_score` as a small ±3-point nudge (≤33rd percentile +3, ≥67th percentile −3) |
 | `summary` | string | LLM-generated investment thesis |
 | `bull_factors` | string[] | Specific positive catalysts |
 | `bear_factors` | string[] | Key risks |
-| `entry_price` | number\|null | Suggested entry (deterministic) |
+| `entry_price` | number\|null | Suggested entry (deterministic, never LLM-generated) |
 | `target_price` | number\|null | Analyst target or formula-derived |
 | `stop_loss` | number\|null | Formula-derived stop (7–15 % range) |
 | `upside_pct` | number\|null | `(target - price) / price × 100` |
 | `ranking_reasons` | string[] | Up to 4 plain-English reasons for the rank |
 | `is_recent_ipo` | boolean | Listed < 8 months ago |
+| `horizon` | string | *(optional)* `short` / `medium` / `long` — investment horizon from LLM analysis |
+
+`sector` also drives `_apply_sector_balance()`: max 2 stocks per sector are promoted to the
+primary list; excess picks of an over-represented sector are deferred to the end of the list
+(not dropped).
 
 #### `sources` items
 
 | Field | Type | Description |
 |---|---|---|
-| `name` | string | Source name (e.g. `Morgan Stanley / JPMorgan`) |
+| `name` | string | Source name (e.g. `Morgan Stanley / JPMorgan`) — see `docs/tools.md`'s 20-source registry |
 | `type` | string | `news` or `brokerage` |
 | `url` | string | Article URL |
 | `headline` | string | Analyst reason / rating text |
 | `direction` | string | `BUY` / `SELL` / `NEUTRAL` |
+
+---
+
+## Standalone endpoint response shapes
+
+These endpoints are outside the six-task analysis pipeline — fetched on demand by the frontend,
+independently cached (24h TTL each, `cache.py`'s `peers`/`financials`/`insider_activity`/
+`street_consensus` tasks). See `docs/tools.md` for the underlying tool functions.
+
+### `GET /api/peers/{symbol}`
+
+```json
+{
+  "symbol": "TCS",
+  "self": { "name": "TCS", "slug": "TCS", "values": { "P/E": "17.6", "...": "..." } },
+  "peers": [ { "name": "Infosys", "slug": "INFY", "values": {} } ],
+  "sector_median": { "name": "Median", "slug": "", "values": {} },
+  "percentiles": { "P/E": 42.0 },
+  "absolute_anchor": {
+    "current_pe": 17.6,
+    "years": ["2022", "2023", "2024", "2025", "2026"],
+    "pe_history": [24.1, 22.8, 20.5, 19.0, 17.6],
+    "low": 17.6,
+    "median": 20.5,
+    "high": 24.1,
+    "percentile": 8.0
+  }
+}
+```
+
+`percentiles` ranks the company against its peers per shared ratio column (mean-rank percentile,
+0-100) — a column absent from a sector's table or that no peer reports simply doesn't appear.
+`absolute_anchor` is `null` when there's no parseable current P/E or fewer than 3 years of yearly
+P/E history — it answers "cheap/expensive vs. its own history," distinct from `percentiles`
+("cheap/expensive vs. peers").
+
+### `GET /api/financials/{symbol}`
+
+```json
+{
+  "symbol": "TCS",
+  "profit_loss":   { "years": ["2022", "...", "2026"], "rows": [ { "label": "Sales", "values": [178000, null, 245000] } ] },
+  "balance_sheet": { "years": [], "rows": [] },
+  "cash_flow":     { "years": [], "rows": [] },
+  "dcf": {
+    "fair_value_per_share": 2650.4,
+    "current_price": 2396.9,
+    "upside_pct": 10.6,
+    "verdict": "Fair",
+    "growth_rate_used": 8.2,
+    "discount_rate": 12.0,
+    "terminal_growth": 5.0,
+    "latest_ocf_cr": 45000.0
+  },
+  "concalls": [
+    { "date": "Apr 2026", "transcript_url": "https://...", "ppt_url": "https://..." }
+  ]
+}
+```
+
+`profit_loss`/`balance_sheet`/`cash_flow`/`dcf` are each independently `null` when Screener
+doesn't have that table, or (for `dcf`) `compute_dcf_estimate()`'s own preconditions aren't met
+(see `docs/tools.md`). `concalls` is `[]` (never `null`) when Screener has no calls on record. A
+`null` value inside a statement row's `values` array is a genuine per-year gap (e.g. a line item
+that didn't exist pre-IPO), not a parse failure. A scrape failure isn't cached (unlike a genuine
+"no data" result) — retried on the next request rather than locked in for the full 24h TTL.
+
+### `GET /api/insider-activity/{symbol}`
+
+```json
+{
+  "symbol": "TCS",
+  "insider_trades": [
+    { "person": "N. Chandrasekaran", "category": "Director", "action": "BUY", "quantity": 5000, "value": 15000000, "date": "02-Jul-2026", "date_iso": "2026-07-02T00:00:00+00:00" }
+  ],
+  "bulk_block_deals": [
+    { "client": "HDFC Mutual Fund", "action": "BUY", "quantity": 200000, "price": 2390.5, "deal_type": "Bulk Deal", "date": "01-Jul-2026", "date_iso": "2026-07-01T00:00:00+00:00" }
+  ],
+  "insider_trades_unavailable": false,
+  "bulk_block_deals_unavailable": false
+}
+```
+
+`insider_trades`/`bulk_block_deals` are `[]` (never `null`) for the expected common case of no
+recent activity. The two `*_unavailable` flags distinguish a genuine scrape failure from that
+common empty case — both previously collapsed to the same empty list with no way for the UI to
+tell them apart; a card renders "temporarily unavailable" only when the corresponding flag is
+`true`. The whole payload is only cached when **both** sections succeeded — a fetch failure isn't
+cached as "no activity" (same "don't cache a failure" convention as `/api/peers`).
+
+### `GET /api/street-consensus/{symbol}`
+
+```json
+{
+  "symbol": "TCS",
+  "articles": [
+    { "title": "Trendlyne: TCS upgraded to Buy", "summary": "...", "url": "https://...", "published_at": "2026-06-20T09:00:00+00:00" }
+  ],
+  "numeric_consensus": {
+    "symbol": "TCS",
+    "analyst_count": 38,
+    "consensus_rating": "BUY",
+    "mean_target_price": 2650.0,
+    "target_upside_pct": 10.6,
+    "source_url": "https://trendlyne.com/equity/12345/TCS/tata-consultancy-services/"
+  },
+  "articles_unavailable": false,
+  "numeric_consensus_unavailable": false
+}
+```
+
+`articles` is `[]` and `numeric_consensus` is `null` for the expected common case (no
+Trendlyne-cited coverage, or the page couldn't be resolved) — the same `*_unavailable`-flag
+pattern as insider activity distinguishes that from a genuine fetch failure. Each sub-fetch
+(`fetch_trendlyne_consensus_for_symbol`, `fetch_trendlyne_numeric_consensus`) is isolated in its
+own try/except, so one failing doesn't blank out the other.
+
+### `GET /api/verdict-history/{symbol}`
+
+```json
+{
+  "symbol": "TCS",
+  "history": [
+    { "date": "2026-06-01", "recommendation": "HOLD", "confidence": "MEDIUM", "current_price": 2410.0, "signal_score": 0.12, "return_since_pct": -0.5, "outcome": null },
+    { "date": "2026-06-15", "recommendation": "BUY", "confidence": "HIGH", "current_price": 2380.0, "signal_score": 0.55, "return_since_pct": 0.7, "outcome": "win" }
+  ],
+  "win_rate": 100.0,
+  "scored_count": 1
+}
+```
+
+One row per day the analysis pipeline actually ran (both CLI and web, same-day re-runs upsert
+rather than duplicate) — see `verdict_history.py`. `return_since_pct`/`outcome` grade each entry
+against **today's** live price; `outcome` is only ever `'win'`/`'loss'` for `BUY`/`SELL` calls (a
+`HOLD` makes no directional claim, so it's never graded) and `null` when ungraded or the live
+price fetch failed. Degrades to `{"symbol", "history": [], "win_rate": null, "scored_count": 0}`
+(200, not 503) when `DATABASE_URL` is unset or the query fails.
+
+### `GET /api/consolidated/{symbol}` (and the API-key-gated `GET /api/v1/consolidated/{symbol}`)
+
+Pure read-aggregation, no new fetching/scraping/LLM calls — three independently-`null`-able
+sections, fetched concurrently:
+
+```json
+{
+  "symbol": "TCS",
+  "analysis":    { "recommendation": "HOLD", "confidence": "MEDIUM", "summary": "...", "as_of": "2026-07-27T09:00:00+00:00" },
+  "market_pick": { "rank": 4, "recommendation": "BUY", "confidence_score": 78.0, "summary": "...", "generated_at": "2026-07-21T01:30:00+00:00" },
+  "sme":         { "trade_date": "2026-07-24", "cross": "golden", "in_golden_cross": true, "name": "Example Corp", "exchange": "NSE" }
+}
+```
+
+`analysis` comes from the same 24h `analysis` cache the stock-analysis flow writes to; `market_pick`
+from the current `output/_market_picks/picks.json` cache; `sme` from the latest stored
+`ema_signals`/`sme_stocks` row. Each is `null` independently — "not yet analyzed" / "not on the
+picks list" / "no SME data" / a DB hiccup on the `sme` section alone — never an error for the
+whole response.
 
 ---
 
@@ -256,8 +540,12 @@ Each item in `picks`:
 | Path | TTL | Key | Description |
 |---|---|---|---|
 | `output/_extract_cache/<hash>.json` | 6 h | SHA-256 of source name + article titles/URLs | LLM extraction result per source |
-| `output/_history/<YYYY-MM-DD>.json` | Permanent | Date | Daily pick snapshot (symbol, confidence, effective_signal, mention_count) |
+| `output/_history/<YYYY-MM-DD>.json` | Permanent | Date | Daily pick snapshot (symbol, confidence, effective_signal, mention_count, current_price, recommendation) |
 | `output/_nse_master.txt` | 24 h | — | Newline-separated set of valid NSE equity symbols from EQUITY_L.csv |
+| `output/_nifty500_master.json` | 24 h | — | NIFTY 500 constituent list (`{symbol, company_name, industry, isin}[]`) — screener_pipeline.py's universe |
+| `output/_llm_cost/<date>.json` | Daily | Date | Running LLM cost/token counter (`call_count`, `total_cost_usd`, `calls_with_unknown_cost`) |
+| `output/_source_health/<source>.json` | — | Source name | Per-source daily ok/not-ok history for market-picks sources + macro overlay fetches |
+| `output/_scraper_error_counters/<name>.json` | — | Scraper name (`peers`, `financials`, `insider_trades`, `bulk_block_deals`, `trendlyne_articles`, `trendlyne_numeric_consensus`) | Error counter for the standalone per-symbol scrapers |
 
 ---
 
@@ -272,4 +560,8 @@ If a task fails, the tool returns an error object:
 }
 ```
 
-Other tasks can still succeed. The pipeline degrades per-section rather than failing as a whole batch.
+Other tasks can still succeed. The pipeline degrades per-section rather than failing as a whole
+batch. Standalone endpoints follow the same instinct but surface it differently per endpoint —
+e.g. `/api/insider-activity` and `/api/street-consensus` use explicit `*_unavailable` boolean
+flags (see above) rather than a top-level `error` key, so a genuine scrape failure is
+distinguishable from the equally-common "nothing to report" empty case.
