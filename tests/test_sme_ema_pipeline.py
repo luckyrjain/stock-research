@@ -190,6 +190,20 @@ class ComputeLiquidityTest(unittest.TestCase):
     def test_empty_dataframe_returns_none(self) -> None:
         self.assertIsNone(_compute_liquidity(_make_result([], [])))
 
+    def test_fewer_than_20_days_of_history_returns_none(self) -> None:
+        # Regression test for an adversarial-review finding: a newly-listed
+        # NSE Emerge/BSE SME stock (this pipeline's own target universe)
+        # routinely has well under 20 days of history. Averaging over
+        # whatever's there (previously df.tail(20) with no floor check)
+        # silently mislabeled a short average as a "20d" figure -- e.g. a
+        # 3-day-old stock's listing-day volume spike dominating what gets
+        # stored and rendered as avg_volume_20d/avg_turnover_20d. Same
+        # min-periods convention _compute_volume_spike() already applies.
+        closes  = [100.0, 102.0, 105.0]
+        volumes = [5_000_000.0, 200_000.0, 180_000.0]
+        result = _compute_liquidity(_make_result(closes, volumes))
+        self.assertIsNone(result)
+
 
 class ComputeRsiTest(unittest.TestCase):
     def test_first_period_rows_are_nan(self) -> None:

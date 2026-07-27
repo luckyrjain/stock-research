@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, Suspense } from 'react';
+import { useCallback, useEffect, useState, Suspense } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import ProgressTracker    from '@/components/progress-tracker';
@@ -40,11 +40,23 @@ function CompareColumn({ symbol, onReport }: { symbol: string; onReport: (symbol
     phase, taskStatus, report, error,
     handleAnalyse, handleHardRefresh,
   } = useStockAnalysis();
-  const started = useRef(false);
 
+  // No "already started" ref guard here (there used to be one) — it was a
+  // liability, not a safety net. This effect's own trigger (handleAnalyse)
+  // already closes any previous EventSource at its own start, so it's safe
+  // to call on every firing; a one-way "started" boolean that never resets
+  // instead permanently broke a real scenario this codebase's own E2E
+  // suite (which runs against `next dev`, per playwright.config.ts) can
+  // reproduce: adding a new symbol to an existing /compare session causes
+  // React to run this effect, clean up, then run it again before paint.
+  // With the guard, the first run opened a real EventSource that the
+  // interleaved cleanup (useStockAnalysis's own unmount-effect) then closed
+  // before it ever completed, and the guard blocked the second run from
+  // ever retrying -- that column was stuck at "Fetching Data" forever, with
+  // no user-visible error and nothing to retry it. Without the guard, the
+  // second run opens a fresh EventSource that survives, exactly matching
+  // how effects are meant to behave under a mount -> cleanup -> mount cycle.
   useEffect(() => {
-    if (started.current) return;
-    started.current = true;
     handleAnalyse(symbol);
   }, [symbol, handleAnalyse]);
 
@@ -107,7 +119,24 @@ function ComparePageInner() {
 
   useEffect(() => {
     setInputValue(urlSymbols.join(', '));
-    setReports({});
+    // Prune to just the symbols still in the new list, keeping whatever was
+    // already lifted for a symbol that persists across the change, rather
+    // than blindly wiping everything to {}. A persisting symbol's
+    // CompareColumn instance is the same one (React preserves it via
+    // key={sym}), so its report-lifting effect (`[symbol, report,
+    // onReport]`) never re-fires here -- none of its deps change -- and a
+    // blind reset left that symbol's entry permanently missing, which
+    // silently killed CompareDiffTable for good even though both dashboard
+    // columns kept rendering fine. A symbol that's leaving unmounts anyway
+    // (dropped below); a genuinely new symbol has no entry yet regardless,
+    // and gets one once its own fresh column's fetch completes.
+    setReports(prev => {
+      const next: Record<string, Report | null> = {};
+      for (const sym of urlSymbols) {
+        if (sym in prev) next[sym] = prev[sym];
+      }
+      return next;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams.get('symbols')]);
 

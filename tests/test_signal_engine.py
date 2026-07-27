@@ -1,8 +1,11 @@
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
+import signals.engine as engine
 from signals.features import extract_features
-from signals.engine import _DEFAULT_WEIGHTS, _weights_for_sector, run_signal_engine
+from signals.engine import _DEFAULT_WEIGHTS, _log_unmatched_sector_once, _weights_for_sector, run_signal_engine
 from signals.models import Signal
 
 
@@ -270,6 +273,76 @@ class RunSignalEngineTest(unittest.TestCase):
             result.signals,
             {"volume": v, "valuation": val, "growth": g, "filings": f, "technical": t, "macro": m},
         )
+
+
+class _PausingSet(set):
+    """A set whose .add() pauses (via an Event handshake) after being called
+    but before the mutation actually lands — used to force a deterministic
+    interleaving of two threads racing on _log_unmatched_sector_once()'s
+    check-then-act sequence. A plain threading.Barrier-plus-sleep approach
+    doesn't reliably reproduce this race: a membership check plus a single
+    set.add() is pure Python with no I/O, so CPython's GIL essentially never
+    yields mid-sequence in practice, and a statistical race test can pass
+    against genuinely unsynchronized code run after run (confirmed directly
+    against this codebase's own reverted, pre-fix version: 15/15 runs of a
+    50-thread barrier-based version of this test passed). This class inserts
+    an explicit synchronization point exactly between "checked" and
+    "mutated" so a second thread's own check can be deterministically landed
+    inside that window instead of relying on scheduler luck."""
+
+    def __init__(self):
+        super().__init__()
+        self.reached_add = threading.Event()
+        self.release_add = threading.Event()
+
+    def add(self, item):
+        self.reached_add.set()
+        self.release_add.wait(timeout=2)
+        super().add(item)
+
+
+class LogUnmatchedSectorOnceConcurrencyTest(unittest.TestCase):
+    """Regression test for an adversarial-review finding: _log_unmatched_
+    sector_once()'s check-then-act sequence (membership check, then .add(),
+    then log_event()) had no lock, while run_signal_engine() runs inside
+    ThreadPoolExecutor workers from several concurrent call sites in this
+    codebase. Two threads first encountering the same never-before-seen
+    sector at the same moment could both pass the membership check before
+    either added it, producing a duplicate warning log instead of the
+    documented one-time-per-process behavior."""
+
+    def setUp(self) -> None:
+        engine._unmatched_sectors_logged.clear()
+        self.addCleanup(engine._unmatched_sectors_logged.clear)
+
+    def test_two_concurrent_callers_for_the_same_new_sector_log_exactly_once(self) -> None:
+        pausing_set = _PausingSet()
+
+        def _call():
+            _log_unmatched_sector_once("Some Never-Before-Seen Sector")
+
+        with patch("signals.engine._unmatched_sectors_logged", pausing_set), \
+                patch("signals.engine.log_event") as mock_log:
+            t1 = threading.Thread(target=_call)
+            t1.start()
+            # Wait until thread 1 has passed its own membership check and
+            # called add() — add() itself is paused before the mutation
+            # lands, so the item isn't actually in the set yet. Starting
+            # thread 2's own check now lands it exactly in the pre-add
+            # window this race depends on (in the unfixed version — with
+            # the fix's lock in place, thread 2 instead blocks acquiring
+            # the lock and never reaches its own check at this point).
+            self.assertTrue(pausing_set.reached_add.wait(timeout=2))
+
+            t2 = threading.Thread(target=_call)
+            t2.start()
+            time.sleep(0.1)  # let thread 2 reach its own check/add if unlocked
+            pausing_set.release_add.set()
+
+            t1.join(timeout=2)
+            t2.join(timeout=2)
+
+        self.assertEqual(mock_log.call_count, 1)
 
 
 if __name__ == "__main__":

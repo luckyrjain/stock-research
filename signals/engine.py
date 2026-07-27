@@ -1,5 +1,7 @@
 """Signal engine orchestration for scoring and verdict generation."""
 
+import threading
+
 from observability import get_logger, log_event
 from signals.features import extract_features
 from signals.volume import volume_signal
@@ -82,6 +84,15 @@ _SECTOR_WEIGHT_OVERRIDES = {
 }
 
 _unmatched_sectors_logged: set[str] = set()
+# run_signal_engine() runs inside ThreadPoolExecutor workers from several
+# concurrent call sites (api.py's SSE handler, market_picks_pipeline.py's
+# _phase_research, watchlist_alerts.py's batch loop) — without this lock, two
+# threads that both first encounter the same never-before-seen sector at the
+# same moment can each pass the membership check below before either calls
+# .add(), producing a duplicate warning log instead of the documented
+# one-time-per-process behavior. Log noise only (no scoring impact), but a
+# real, concretely triggerable violation of that guarantee.
+_unmatched_sectors_lock = threading.Lock()
 
 
 def _log_unmatched_sector_once(sector: str) -> None:
@@ -94,9 +105,10 @@ def _log_unmatched_sector_once(sector: str) -> None:
     engine exists to apply), and a "debug" line is invisible in this
     codebase's default INFO-level deployments — nobody would ever see this
     fire without deliberately turning debug logging on first."""
-    if sector in _unmatched_sectors_logged:
-        return
-    _unmatched_sectors_logged.add(sector)
+    with _unmatched_sectors_lock:
+        if sector in _unmatched_sectors_logged:
+            return
+        _unmatched_sectors_logged.add(sector)
     log_event(LOGGER, "sector_weight_override_unmatched", level="warning", sector=sector)
 
 
@@ -166,14 +178,20 @@ def run_signal_engine(symbol: str, all_data: dict) -> SignalResult:
     # Clamp to the documented -1..1 contract (docs/output-schema.md, every
     # frontend consumer of `signals.final_score`, and GET /api/v1's
     # external surface all treat this as a hard bound). The per-signal
-    # score/weight combination isn't actually symmetric — verified: with
-    # the default weights, the achievable maximum is ~1.18 and the
-    # achievable minimum is ~-0.89, i.e. structurally easier to reach a
-    # strong BUY reading than an equally strong SELL one, since a few
-    # signals' positive ceilings (e.g. volume's 1.0, filings' 0.95) are
-    # larger in magnitude than their own negative floors (volume's -0.5,
-    # filings' -0.15). That asymmetry is a real, disclosed characteristic
-    # of this engine's current per-signal magnitudes — fixing it would mean
+    # score/weight combination isn't actually symmetric — verified by
+    # summing each signal's own worst/best-case score × its default weight:
+    # the achievable maximum is ~1.18 (valuation 0.24, volume 0.2, growth
+    # 0.36, filings 0.19, technical 0.12, macro 0.066) and the achievable
+    # minimum is ~-0.99 (valuation -0.4, volume -0.2, growth -0.2, filings
+    # -0.03, technical -0.08, macro -0.078), i.e. still somewhat easier to
+    # reach a strong BUY reading than an equally strong SELL one, though
+    # each signal's OWN ceiling/floor asymmetry doesn't point the same
+    # direction uniformly (e.g. filings' ceiling of 0.95 dwarfs its own
+    # -0.15 floor, but valuation's floor of -1.0 is itself larger in
+    # magnitude than its own 0.6 ceiling) — the net BUY/SELL skew comes from
+    # the sum across all six signals, not any single one. That asymmetry is
+    # a real, disclosed characteristic of this engine's current per-signal
+    # magnitudes — fixing it would mean
     # re-calibrating individual signals' score constants, which (like the
     # sector-weight tilt above) would need real backtest data behind it to
     # do responsibly rather than substituting one unverified magnitude

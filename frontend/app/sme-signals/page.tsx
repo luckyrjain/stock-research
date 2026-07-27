@@ -182,13 +182,31 @@ export default function SmeSignalsPage() {
   const [volumeSpikeOnly, setVolumeSpikeOnly] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
+  // Expand/collapse state is keyed by "<symbol>::<trade_date>", not bare
+  // symbol -- the default "crosses" view can legitimately show more than
+  // one row for the same stock (a stock can cross more than once within
+  // the lookback window), each with its own row key
+  // `${s.symbol}-${s.trade_date}-${i}` below. Keying by symbol alone meant
+  // both rows shared one expand/collapse toggle, so expanding either row
+  // for that symbol expanded (and collapsed) both simultaneously. The
+  // "regime" view is unaffected -- its own query guarantees one row per
+  // symbol (DISTINCT ON (s.symbol)), so a bare symbol key was never wrong
+  // there, but using the same composite key for both views is simpler than
+  // branching on view type and is still correct for regime (trade_date is
+  // just along for the ride, still unique per symbol there too).
+  const [expandedRowKey, setExpandedRowKey] = useState<string | null>(null);
   const [historyBySymbol, setHistoryBySymbol] = useState<Record<string, SmeSignalHistoryResponse | 'loading' | 'error'>>({});
   const abortRef = useRef<AbortController | null>(null);
 
-  const toggleExpand = useCallback((symbol: string) => {
-    setExpandedSymbol(prev => (prev === symbol ? null : symbol));
+  const toggleExpand = useCallback((rowKey: string) => {
+    setExpandedRowKey(prev => (prev === rowKey ? null : rowKey));
   }, []);
+
+  // The EMA history series itself is symbol-scoped (GET /api/sme-signals/
+  // {symbol}/history), not per-cross-event, so fetching/caching it only
+  // ever needs the symbol -- derived from the row key's own "<symbol>::..."
+  // prefix rather than tracked as separate state.
+  const expandedSymbol = expandedRowKey?.split('::')[0] ?? null;
 
   // Fetch (and cache) the EMA history series the first time a row is expanded.
   useEffect(() => {
@@ -554,17 +572,23 @@ export default function SmeSignalsPage() {
                   ) : (
                     displayedSignals.map((s, i) => {
                       const rowKey = `${s.symbol}-${s.trade_date}-${i}`;
-                      const isExpanded = expandedSymbol === s.symbol;
+                      // Deliberately excludes the array index `i` (unlike
+                      // rowKey above) -- re-sorting/re-filtering shifts a
+                      // row's index without it being a different row, and
+                      // an index-inclusive key would silently reset the
+                      // expand state on a sort change.
+                      const expandKey = `${s.symbol}::${s.trade_date}`;
+                      const isExpanded = expandedRowKey === expandKey;
                       const history = historyBySymbol[s.symbol];
                       return (
                       <Fragment key={rowKey}>
                       <tr
-                        onClick={() => toggleExpand(s.symbol)}
+                        onClick={() => toggleExpand(expandKey)}
                         onKeyDown={e => {
                           // Ignore keydowns bubbled up from a nested interactive element
                           // (e.g. the NSE symbol link) — only the row itself should toggle.
                           if (e.target !== e.currentTarget) return;
-                          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(s.symbol); }
+                          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(expandKey); }
                         }}
                         role="button"
                         tabIndex={0}

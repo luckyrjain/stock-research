@@ -145,12 +145,29 @@ export default function PortfolioPage() {
   // Capital-weighted view — only over rows where the user has actually
   // entered a share count (see the Row/updateShares plumbing above). A
   // position with no share count contributes nothing here, not a guessed
-  // "1 share" fallback.
-  const withShares = rows.filter(r => r.invested != null && r.currentValue != null);
+  // "1 share" fallback. Knowing how much capital went in (`invested`) only
+  // needs `shares` + `entry_price` — it must NOT also require a live quote
+  // to be available right now (a documented real failure mode of
+  // GET /api/prices), so this is scoped to "has a share count," not "has a
+  // share count AND is currently priced." A position that has a share
+  // count but a momentarily-unavailable live price still contributes its
+  // known invested amount here and still counts toward the "N of M
+  // positions have a share count" label below.
+  const withShares = rows.filter(r => r.shares != null);
   const totalInvested = withShares.reduce((sum, r) => sum + (r.invested ?? 0), 0);
-  const totalCurrentValue = withShares.reduce((sum, r) => sum + (r.currentValue ?? 0), 0);
-  const totalPnl = totalCurrentValue - totalInvested;
-  const totalPnlPct = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : null;
+
+  // Current value and P&L, unlike the invested total above, genuinely
+  // can't be known without a live price — scoped to the (possibly smaller)
+  // subset that's both share-tracked AND currently priced, using that
+  // subset's own invested sum for the P&L subtraction rather than the
+  // broader totalInvested above. Mixing populations there would silently
+  // treat an unpriced position's current value as ₹0, understating the
+  // portfolio's real value and overstating loss for no real reason.
+  const pricedWithShares = withShares.filter(r => r.currentValue != null);
+  const totalCurrentValue = pricedWithShares.reduce((sum, r) => sum + (r.currentValue ?? 0), 0);
+  const pricedInvested = pricedWithShares.reduce((sum, r) => sum + (r.invested ?? 0), 0);
+  const totalPnl = totalCurrentValue - pricedInvested;
+  const totalPnlPct = pricedInvested > 0 ? (totalPnl / pricedInvested) * 100 : null;
 
   return (
     <main className="min-h-screen bg-bg text-tx">
@@ -264,16 +281,34 @@ export default function PortfolioPage() {
                     <div className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1">Invested</div>
                     <div className="text-xl font-black text-tx font-mono">{fmtInr(totalInvested)}</div>
                   </div>
+                  {/* Current Value/P&L genuinely can't be known without at
+                      least one currently-priced position (pricedWithShares)
+                      -- unlike Invested above, which only needs share count
+                      + entry price. Showing a numeric ₹0/+₹0 here when
+                      nothing is priced yet (e.g. the GET /api/prices poll
+                      hasn't resolved, or failed outright) would read as "your
+                      portfolio is worth zero and flat" rather than "we don't
+                      have prices yet" -- the same "absent, not a guessed
+                      zero" principle the block's own comment above already
+                      states for the Invested case. */}
                   <div className="rounded-xl border border-border bg-card px-4 py-3">
                     <div className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1">Current Value</div>
-                    <div className="text-xl font-black text-tx font-mono">{fmtInr(totalCurrentValue)}</div>
+                    <div className="text-xl font-black text-tx font-mono">
+                      {pricedWithShares.length > 0 ? fmtInr(totalCurrentValue) : '—'}
+                    </div>
                   </div>
                   <div className="rounded-xl border border-border bg-card px-4 py-3">
                     <div className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1">P&amp;L</div>
-                    <div className={`text-xl font-black font-mono ${pnlColor(totalPnl)}`}>
-                      {totalPnl >= 0 ? '+' : ''}{fmtInr(totalPnl)}
-                    </div>
-                    <div className={`text-[10px] ${pnlColor(totalPnlPct)}`}>{fmtPct(totalPnlPct)}</div>
+                    {pricedWithShares.length > 0 ? (
+                      <>
+                        <div className={`text-xl font-black font-mono ${pnlColor(totalPnl)}`}>
+                          {totalPnl >= 0 ? '+' : ''}{fmtInr(totalPnl)}
+                        </div>
+                        <div className={`text-[10px] ${pnlColor(totalPnlPct)}`}>{fmtPct(totalPnlPct)}</div>
+                      </>
+                    ) : (
+                      <div className="text-xl font-black text-muted font-mono">—</div>
+                    )}
                   </div>
                 </div>
               </div>

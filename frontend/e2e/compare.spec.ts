@@ -72,4 +72,35 @@ test.describe('Compare page', () => {
     await expect(page).toHaveURL('/compare?symbols=TCS%2CINFY');
     await expect(page.getByText(/tickers are compared/)).toHaveCount(0);
   });
+
+  test('diff table reappears after re-comparing with a symbol that stays in the list', async ({ page }) => {
+    // Regression test for an adversarial-review finding: CompareColumn's
+    // report-lifting effect (`[symbol, report, onReport]`) never re-fires
+    // for a symbol React preserves across a re-comparison (same `key={sym}`
+    // -> same component instance, unchanged report). The parent's URL-change
+    // effect used to blindly reset `reports` to `{}`, so a persisting
+    // symbol's entry was wiped and never repopulated -- CompareDiffTable's
+    // `reports[a] && reports[b]` guard then failed forever for that symbol,
+    // even though both dashboard columns rendered fine.
+    for (const symbol of ['TCS', 'INFY', 'RELIANCE']) {
+      await page.route(`**/api/analyse/${symbol}**`, route =>
+        route.fulfill({ status: 200, headers: SSE_HEADERS, body: sseAnalysisBody(symbol) }));
+      await mockAddOnCards(page, symbol);
+    }
+
+    await page.goto('/compare?symbols=TCS,INFY');
+    for (const symbol of ['TCS', 'INFY']) {
+      await expect(page.getByText(`${symbol} Limited`).first()).toBeVisible({ timeout: 15000 });
+    }
+    await expect(page.getByText('P/E (cheaper)')).toBeVisible({ timeout: 15000 });
+
+    // Re-compare, keeping TCS (its column is preserved, not remounted) and
+    // swapping INFY out for RELIANCE.
+    await page.getByLabel('Tickers to compare, comma-separated').fill('tcs, reliance');
+    await page.getByRole('button', { name: 'Compare' }).click();
+    await expect(page).toHaveURL('/compare?symbols=TCS%2CRELIANCE');
+
+    await expect(page.getByText('RELIANCE Limited').first()).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('P/E (cheaper)')).toBeVisible({ timeout: 15000 });
+  });
 });
