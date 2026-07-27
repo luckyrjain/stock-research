@@ -233,6 +233,39 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
         # lock must still be released here too, not just on the success path.
         self.assertFalse(rate_limiter.is_locked("market_picks_refresh"))
 
+    def test_cache_miss_without_force_also_acquires_the_single_flight_lock(self) -> None:
+        # Regression test: previously the single-flight lock was only ever
+        # acquired inside the `if force:` branch — a cold/expired cache (no
+        # ?force=true at all) reached the full pipeline run with the lock
+        # never even attempted, so several concurrent visitors hitting a
+        # cold cache could each launch a full, expensive duplicate pipeline
+        # run. This confirms an ordinary cache-miss request now acquires
+        # and cleanly releases the same lock as an explicit ?force=true.
+        picks = [{"symbol": "TCS", "confidence_score": 80}]
+        with patch("market_picks_pipeline.MarketPicksPipeline", self._fake_pipeline(picks, healthy=True)):
+            resp = client.get("/api/market-picks")
+
+        events = _parse_sse(resp.text)
+        self.assertEqual(events[-1]["event"], "done")
+        self.assertFalse(events[-1]["from_cache"])
+        self.assertFalse(rate_limiter.is_locked("market_picks_refresh"))
+
+    def test_concurrent_cache_miss_without_force_is_rejected_not_double_run(self) -> None:
+        # The other half of the same regression: with the lock already
+        # held (simulating a concurrent request that got there first), a
+        # second cache-miss request must be rejected with a clear SSE error
+        # rather than silently launching its own redundant pipeline run.
+        self.assertTrue(rate_limiter.try_acquire_lock("market_picks_refresh", 60))
+        self.addCleanup(rate_limiter.release_lock, "market_picks_refresh")
+
+        with patch("market_picks_pipeline.MarketPicksPipeline") as mock_pipeline_cls:
+            resp = client.get("/api/market-picks")
+
+        events = _parse_sse(resp.text)
+        self.assertEqual(events[-1]["event"], "error")
+        self.assertIn("already in progress", events[-1]["message"].lower())
+        mock_pipeline_cls.assert_not_called()
+
     def test_pipeline_failure_sanitizes_the_sse_error_message(self) -> None:
         # Security regression: same sanitization as the analyse endpoint's
         # equivalent test — a pipeline exception must never reach the

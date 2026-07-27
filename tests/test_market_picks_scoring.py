@@ -19,10 +19,13 @@ from market_picks_pipeline import (
     _apply_sector_balance,
     _build_ranking_reasons,
     _compute_confidence,
+    _dedup_key,
     _effective_signal,
     _parse_targets_from_sources,
     _prune_extract_cache,
     _reason_strength,
+    _resolve_symbol_via_fuzzy_match,
+    _select_target_price,
     _title_words,
     _trade_levels,
     picks_cache_status,
@@ -116,6 +119,131 @@ class ParseTargetsFromSourcesTest(unittest.TestCase):
     def test_handles_rupee_symbol_and_commas(self) -> None:
         sources = [_source(reason="TP ₹3,250", credibility=1.0)]
         self.assertEqual(_parse_targets_from_sources(sources), 3250)
+
+
+class SelectTargetPriceTest(unittest.TestCase):
+    """Regression tests for an adversarial-review finding: a regex-parsed
+    analyst target from _parse_targets_from_sources() was previously trusted
+    at face value with no sanity check against the stock's actual price — a
+    false-positive regex match (e.g. "target 2027 revenue growth" capturing
+    "2027" as a price for a ₹50 stock) or a stale figure could land wildly
+    far from reality, violating the stop < entry < target invariant the
+    deterministic formula path (_trade_levels) always guarantees."""
+
+    def test_plausible_analyst_target_within_band_is_used(self) -> None:
+        # 1500 is 1.5x the 1000 price -- comfortably inside the 0.5x-3x band.
+        self.assertEqual(_select_target_price(1500, 1100, 1000), 1500)
+
+    def test_implausible_analyst_target_falls_back_to_formula(self) -> None:
+        # A regex false-positive (e.g. "target 2027 revenue growth" matched
+        # against a ~₹500 stock) is way outside the 0.5x-3x plausibility band
+        # and must not be trusted, even though it "parsed".
+        self.assertEqual(_select_target_price(2027, 550, 500), 550)
+
+    def test_analyst_target_below_min_multiple_falls_back_to_formula(self) -> None:
+        # 400 is 0.4x the 1000 price -- just under the 0.5x floor.
+        self.assertEqual(_select_target_price(400, 1100, 1000), 1100)
+
+    def test_analyst_target_above_max_multiple_falls_back_to_formula(self) -> None:
+        # 3001 is just over the 3x ceiling on a 1000 price.
+        self.assertEqual(_select_target_price(3001, 1100, 1000), 1100)
+
+    def test_boundary_multiples_are_inclusive(self) -> None:
+        self.assertEqual(_select_target_price(500, 1100, 1000), 500)   # exactly 0.5x
+        self.assertEqual(_select_target_price(3000, 1100, 1000), 3000)  # exactly 3.0x
+
+    def test_no_analyst_target_uses_formula(self) -> None:
+        self.assertEqual(_select_target_price(None, 1100, 1000), 1100)
+
+    def test_missing_price_falls_back_to_formula(self) -> None:
+        # No current price to sanity-check against -- never trust the
+        # analyst target blindly just because it parsed.
+        self.assertEqual(_select_target_price(1500, 1100, None), 1100)
+        self.assertEqual(_select_target_price(1500, 1100, 0), 1100)
+
+    def test_zero_or_negative_analyst_target_falls_back_to_formula(self) -> None:
+        self.assertEqual(_select_target_price(0, 1100, 1000), 1100)
+        self.assertEqual(_select_target_price(-500, 1100, 1000), 1100)
+
+
+class DedupKeyTest(unittest.TestCase):
+    """Regression tests for an adversarial-review finding: the consolidation
+    dedup key used to truncate the normalized-company-name fallback to 12
+    characters, so two different companies sharing the same first 12
+    normalized characters would silently collide onto one group and have
+    their source mentions merged."""
+
+    def test_ticker_is_used_verbatim_when_present(self) -> None:
+        self.assertEqual(_dedup_key("TCS", "Tata Consultancy Services"), "TCS")
+
+    def test_falls_back_to_normalized_company_name_without_ticker(self) -> None:
+        self.assertEqual(_dedup_key("", "Reliance Industries Ltd."), "RELIANCEINDUSTRIESLTD")
+
+    def test_two_companies_sharing_a_12_char_prefix_no_longer_collide(self) -> None:
+        # Both names normalize to the same first 12 characters
+        # ("RELIANCEINDU...") but are genuinely different companies once the
+        # full name is considered -- the old [:12] truncation would have
+        # merged these into a single dedup group.
+        key_a = _dedup_key("", "Reliance Industrial Infrastructure")
+        key_b = _dedup_key("", "Reliance Industries Limited")
+        self.assertEqual(key_a[:12], key_b[:12])  # confirms the shared-prefix premise
+        self.assertNotEqual(key_a, key_b)
+
+    def test_empty_ticker_and_company_yields_empty_key(self) -> None:
+        self.assertEqual(_dedup_key("", ""), "")
+
+
+class ResolveSymbolViaFuzzyMatchTest(unittest.TestCase):
+    """Regression tests for an adversarial-review finding: the rapidfuzz
+    match in consolidation's Path B2 used to be re-resolved via
+    `[n for _, n in sym_names].index(best_match[0])` instead of using
+    `best_match[2]` (the index rapidfuzz's own extractOne() already
+    returns) -- `.index()` always finds the FIRST list entry with that
+    matched string, which silently resolves to the wrong symbol whenever
+    two different candidates share the same display name."""
+
+    def test_uses_extractones_own_index_not_a_rederived_first_occurrence(self) -> None:
+        # Two candidates share the exact same display name at indices 0 and
+        # 1, but only index 1's ticker is the one that should be resolved to
+        # (simulated by patching extractOne to report it matched index 1).
+        # A naive `.index(best_match[0])` re-derivation would always find
+        # index 0 instead, since the two names are byte-identical strings.
+        symbols = [
+            {"symbol": "OLDCO", "symbol_info": "Shared Name Ltd"},
+            {"symbol": "NEWCO", "symbol_info": "Shared Name Ltd"},
+        ]
+        with patch("rapidfuzz.process.extractOne", return_value=("Shared Name Ltd", 92.0, 1)):
+            result = _resolve_symbol_via_fuzzy_match("Shared Name", symbols)
+        self.assertEqual(result, symbols[1])
+        self.assertEqual(result["symbol"], "NEWCO")
+
+    def test_returns_none_with_only_one_candidate(self) -> None:
+        # No disambiguation needed/possible with a single candidate --
+        # short-circuits before ever calling rapidfuzz.
+        with patch("rapidfuzz.process.extractOne") as mock_extract:
+            result = _resolve_symbol_via_fuzzy_match("Anything", [{"symbol": "SOLO", "symbol_info": "Solo Ltd"}])
+        self.assertIsNone(result)
+        mock_extract.assert_not_called()
+
+    def test_real_rapidfuzz_resolves_the_correct_symbol(self) -> None:
+        # End-to-end against the real rapidfuzz library (no mocking) --
+        # confirms the extracted index is actually plumbed through correctly
+        # to select the matching entry, not just that a mock was obeyed.
+        symbols = [
+            {"symbol": "ABC", "symbol_info": "Totally Different Industries"},
+            {"symbol": "SAILIFE", "symbol_info": "Sai Life Sciences Limited"},
+        ]
+        result = _resolve_symbol_via_fuzzy_match("Sai Life Sciences", symbols)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["symbol"], "SAILIFE")
+
+    def test_real_rapidfuzz_returns_none_below_score_cutoff(self) -> None:
+        symbols = [
+            {"symbol": "ABC", "symbol_info": "Totally Different Industries"},
+            {"symbol": "XYZ", "symbol_info": "Another Unrelated Company"},
+        ]
+        result = _resolve_symbol_via_fuzzy_match("Sai Life Sciences", symbols)
+        self.assertIsNone(result)
 
 
 class EffectiveSignalTest(unittest.TestCase):
@@ -489,6 +617,60 @@ class PhaseScrapeSourceHealthTest(unittest.TestCase):
         # against a raising health tracker — it relies on record_and_check's
         # own never-raise contract. If that contract is ever loosened, this
         # test will catch the regression here rather than in production.
+
+
+class ExtractionCacheSetTest(unittest.TestCase):
+    """Regression tests for an adversarial-review finding:
+    _extraction_cache_set() used a plain write_text() instead of the
+    tempfile+os.replace atomic-write convention cache.py::save() and
+    source_health.py already use — an overlapping pipeline run (e.g. a
+    manual ?force=true firing while a scheduled run is still in flight)
+    racing on the same (source, article-batch) cache key could leave a
+    torn/partial JSON file on disk for the next reader."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-extract-cache-set-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        patch.object(market_picks_pipeline, "_EXTRACT_CACHE_DIR", Path(self._tmpdir)).start()
+        self.addCleanup(patch.stopall)
+
+    def test_writes_readable_json_round_trip(self) -> None:
+        picks = [{"symbol": "TCS", "reason": "Strong buy"}]
+        market_picks_pipeline._extraction_cache_set("mykey", picks)
+
+        cache_file = market_picks_pipeline._EXTRACT_CACHE_DIR / "mykey.json"
+        self.assertTrue(cache_file.exists())
+        data = json.loads(cache_file.read_text())
+        self.assertEqual(data["picks"], picks)
+
+    def test_no_leftover_tmp_file_after_a_successful_write(self) -> None:
+        market_picks_pipeline._extraction_cache_set("mykey", [{"a": 1}])
+        cache_dir = market_picks_pipeline._EXTRACT_CACHE_DIR
+        leftover_tmp_files = [p for p in cache_dir.iterdir() if p.suffix == ".tmp"]
+        self.assertEqual(leftover_tmp_files, [])
+
+    def test_a_second_write_atomically_replaces_the_first_no_partial_file(self) -> None:
+        # Simulates two overlapping pipeline runs racing on the same key —
+        # the final file on disk must always be one complete, valid JSON
+        # write (either the first or the second), never a torn mix of both.
+        market_picks_pipeline._extraction_cache_set("mykey", [{"batch": 1}])
+        market_picks_pipeline._extraction_cache_set("mykey", [{"batch": 2}])
+
+        cache_file = market_picks_pipeline._EXTRACT_CACHE_DIR / "mykey.json"
+        data = json.loads(cache_file.read_text())
+        self.assertEqual(data["picks"], [{"batch": 2}])
+
+    def test_missing_directory_is_created_and_write_still_succeeds(self) -> None:
+        shutil.rmtree(self._tmpdir)
+        market_picks_pipeline._extraction_cache_set("mykey", [{"a": 1}])
+        cache_file = market_picks_pipeline._EXTRACT_CACHE_DIR / "mykey.json"
+        self.assertTrue(cache_file.exists())
+
+    def test_stored_value_is_retrievable_via_extraction_cache_get(self) -> None:
+        picks = [{"symbol": "INFY"}]
+        market_picks_pipeline._extraction_cache_set("mykey", picks)
+        result = market_picks_pipeline._extraction_cache_get("mykey")
+        self.assertEqual(result, picks)
 
 
 class PruneExtractCacheTest(unittest.TestCase):

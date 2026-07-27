@@ -863,6 +863,7 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
     run_id = uuid.uuid4().hex[:12]
 
     async def stream():
+        nonlocal lock_acquired
         # ── Serve from cache if fresh and caller didn't force a rescan ──
         if not force:
             cached = _load_picks_cache()
@@ -876,6 +877,24 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
                     "from_cache":   True,
                 })
                 return
+
+            # A cold/expired cache means every concurrent visitor reaches
+            # this same branch at once (not just an explicit ?force=true
+            # click racing the weekly cron, which is the only case the
+            # force-path lock above already covers) — without the same
+            # single-flight lock here, several full pipeline runs (each
+            # dozens of LLM calls + a 20-source scrape) could launch
+            # simultaneously. Whoever loses the race gets a clear "try
+            # again shortly" rather than silently running a redundant,
+            # expensive duplicate pipeline.
+            if not rate_limiter.try_acquire_lock(_MARKET_PICKS_REFRESH_LOCK_NAME, _MARKET_PICKS_REFRESH_LOCK_TTL_SECONDS):
+                log_event(LOGGER, "market_picks_concurrent_run_rejected", run_id=run_id)
+                yield _sse({
+                    "event": "error",
+                    "message": "A market-picks scan is already in progress — please try again in a moment.",
+                })
+                return
+            lock_acquired = True
 
         # ── Full pipeline run ─────────────────────────────────────────────
         # A market-picks run makes dozens of LLM calls (one per source's extraction,
@@ -1239,17 +1258,26 @@ def _fetch_live_price_sync(sym: str) -> dict:
     then .BO suffix. Returns {} (never raises) if neither resolves — shared by
     GET /api/prices (bulk) and GET /api/verdict-history/{symbol} (single-symbol,
     for scoring past verdicts against today's price)."""
-    try:
-        import yfinance as yf
-        for suffix in (".NS", ".BO"):
+    import yfinance as yf
+    for suffix in (".NS", ".BO"):
+        # Each suffix attempt is independently guarded — a genuine BSE-only
+        # symbol (never listed on NSE, or delisted from it) can make the
+        # .NS attempt raise outright rather than just return empty data; a
+        # shared try/except around the whole loop would abort before .BO is
+        # even tried, silently losing a real, resolvable price.
+        try:
             fi = yf.Ticker(sym + suffix).fast_info
             price = getattr(fi, "last_price", None)
             prev  = getattr(fi, "previous_close", None)
             if price and price > 0:
-                chg = round((price - prev) / prev * 100, 2) if prev else 0.0
+                # None (never a fabricated 0.0 "flat today") when prev isn't
+                # available — same "never invent" convention as everywhere
+                # else in this codebase; a real flat day and a missing
+                # previous-close aren't the same fact.
+                chg = round((price - prev) / prev * 100, 2) if prev else None
                 return {"price": round(price, 2), "change_pct": chg}
-    except Exception:
-        pass
+        except Exception:
+            continue
     return {}
 
 

@@ -215,6 +215,46 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
         ok, result = crew._validate_analysis_payload(payload, all_data_with_filings)
         self.assertTrue(ok, result)
 
+    def test_regulatory_risk_check_does_not_false_trigger_on_a_neutral_mention(self) -> None:
+        # Regression test for an adversarial-review finding: the regulatory-
+        # risk entry in crew._analysis_support_issues's grounded_checks list
+        # previously reused the exact same six-word list
+        # ("regulatory", "regulation", "regulator", "rbi", "usfda", "fda")
+        # as BOTH its trigger_phrases and its source_terms (a copy-paste
+        # bug) — unlike the customer-concentration/competition entries,
+        # which always used specific multi-word trigger phrases paired with
+        # broader single-word source terms. That meant ANY bare mention of
+        # "regulatory" anywhere in the analyst's own text — even a neutral,
+        # non-risk statement like "regulatory filings are up to date" —
+        # tripped the trigger and, absent identical wording in the source
+        # data, got misclassified as an "unsupported regulatory risk claim"
+        # and rejected. This payload's key_risks entry mentions "regulatory"
+        # in a neutral context (not a risk assertion), and self.all_data has
+        # no regulatory-related source text at all — with the fix, this
+        # must validate cleanly since the text never actually asserts a
+        # specific regulatory risk.
+        payload = {
+            "symbol": "SAILIFE",
+            "recommendation": "HOLD",
+            "confidence": "LOW",
+            "summary": "Sentence one. Sentence two. Sentence three. Sentence four.",
+            "valuation": {"verdict": "Fairly Valued", "comment": "P/E 64.8, P/B 9.4, ROCE 14.1, ROE 11.0."},
+            "business_quality": "ROCE is 14.1 and ROE is 11.0.",
+            "bull_factors": ["P/E is 64.8.", "ROCE is 14.1.", "DIIs hold 31.54%."],
+            "bear_factors": ["P/B is 9.4.", "Promoters hold 34.61%."],
+            "key_risks": [
+                "Regulatory filings are up to date.",
+                "The stock trades at 64.8 times earnings.",
+                "News flow is limited to one recent article.",
+            ],
+            "news_highlights": "One RSI-based headline was available.",
+            "institutional_trend": "Promoters hold 34.61%, FIIs 21.17%, and DIIs 31.54%; trend data is unavailable from this snapshot.",
+            "news_sentiment": "Neutral",
+        }
+
+        ok, result = crew._validate_analysis_payload(payload, self.all_data)
+        self.assertTrue(ok, result)
+
     def test_parse_json_object_extracts_balanced_payload_from_wrapper_text(self) -> None:
         raw = """
         tool log: starting analysis
@@ -274,6 +314,27 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertEqual(message, "Recommendation contradicts strong positive signals")
+
+    def test_validate_analysis_payload_tolerates_a_signal_context_missing_final_score(self) -> None:
+        # Regression test: a signal_context dict without a "final_score" key
+        # (a differently-shaped dict from some future/other caller) must
+        # degrade by skipping the three quant-cross-check guards, not raise
+        # a KeyError — which a broad try/except elsewhere would otherwise
+        # silently misclassify as a provider outage.
+        #
+        # Uses a non-empty dict that's missing the key (not {}) — an empty
+        # dict is already falsy under the old buggy code's own `if
+        # signal_context:` guard, so it never actually reached the bracket
+        # access that raised KeyError and wouldn't have caught the original
+        # bug. A non-empty dict missing "final_score" is truthy, so it DOES
+        # reach (and previously broke) that access.
+        payload = dict(self._VALID_PAYLOAD, recommendation="BUY", confidence="HIGH")
+
+        ok, validated = crew._validate_analysis_payload(
+            payload, self.all_data, signal_context={"some_other_field": 1}
+        )
+        self.assertTrue(ok)
+        self.assertEqual(validated, payload)
 
     def test_validate_analysis_payload_rejects_buy_against_strong_negative_signals(self) -> None:
         payload = dict(self._VALID_PAYLOAD, recommendation="BUY")

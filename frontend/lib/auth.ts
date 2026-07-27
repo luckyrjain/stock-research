@@ -28,8 +28,17 @@ function notify(): void {
 }
 
 async function fetchMe(): Promise<AuthUser | null> {
-  if (inFlight) return inFlight;
+  // Capture the generation BEFORE checking/joining an in-flight fetch —
+  // same ordering as lib/watchlist.ts's fetchItems()/lib/positions.ts's
+  // fetchPositions(). Not currently a live bug here (no caller of fetchMe()
+  // or refreshAuth() actually consumes their resolved return value — every
+  // caller relies on the cachedUser/notify() side effect below instead, so
+  // a joining caller returning a stale value directly would be discarded
+  // anyway), but keeping the same shape as the other two hooks avoids this
+  // becoming a real bug the moment a future caller DOES start using the
+  // return value directly.
   const myGeneration = generation;
+  if (inFlight) return inFlight;
   inFlight = fetch('/api/auth/me', { cache: 'no-store' })
     .then(res => (res.ok ? res.json() : { user: null }))
     .then((data: { user?: AuthUser | null }) => data.user ?? null)

@@ -5,7 +5,7 @@ import type { MfHoldingsStakeDelta, Report, StockInfo } from '@/types';
 import InfoTooltip from './info-tooltip';
 import WatchlistButton from './watchlist-button';
 import { Card, MetricRow, ExchangeTable, RangeBar } from './dashboard-primitives';
-import { fmt, fmtCr, fmtVolume, fmtRatio, formatAge, formatDataAge, oldestDataFreshness, DATA_FRESHNESS_LABELS, humanizeMetaKey, formatMetaValue, normalizeRatioKey } from './dashboard-format';
+import { fmt, fmtCr, fmtVolume, fmtRatio, formatAge, formatDataAge, oldestDataFreshness, DATA_FRESHNESS_LABELS, humanizeMetaKey, formatMetaValue, normalizeRatioKey, safeExternalHref } from './dashboard-format';
 import { usePeerComparison, PeerTable, SimilarStocksRail } from './peer-comparison-card';
 import { useFinancials, FinancialStatementsCard, ConcallsCard } from './financial-statements-card';
 import { InsiderActivityCard } from './insider-activity-card';
@@ -546,16 +546,19 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
       {news && news.length > 0 && (
         <Card title="Recent News">
           <div className="divide-y divide-border">
-            {news.slice(0, 5).map((n, i) => (
-              <a key={i} href={n.url} target="_blank" rel="noopener noreferrer"
-                className="flex flex-col gap-1 py-3 first:pt-0 last:pb-0 group"
-              >
-                <span className="text-sm text-tx group-hover:text-accent transition-colors leading-snug">
-                  {n.title}
-                </span>
-                <span className="text-[11px] text-muted">{n.source} · {n.published_at} ↗</span>
-              </a>
-            ))}
+            {news.slice(0, 5).map((n, i) => {
+              const safeUrl = safeExternalHref(n.url);
+              return (
+                <a key={i} href={safeUrl} target={safeUrl ? '_blank' : undefined} rel={safeUrl ? 'noopener noreferrer' : undefined}
+                  className="flex flex-col gap-1 py-3 first:pt-0 last:pb-0 group"
+                >
+                  <span className="text-sm text-tx group-hover:text-accent transition-colors leading-snug">
+                    {n.title}
+                  </span>
+                  <span className="text-[11px] text-muted">{n.source} · {n.published_at} ↗</span>
+                </a>
+              );
+            })}
           </div>
         </Card>
       )}
@@ -602,20 +605,21 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
           <div className="divide-y divide-border">
             {filings.slice(0, 5).map((f, i) => {
               const meta = [f.category, f.date].filter(Boolean).join(' · ');
+              const safeAttachment = safeExternalHref(f.attachment);
               const titleRow = (
                 <>
                   <span className="text-sm text-tx group-hover:text-accent transition-colors leading-snug">
                     {f.title ?? 'Untitled filing'}
                   </span>
-                  {(meta || f.attachment) && (
-                    <span className="text-[11px] text-muted">{meta}{f.attachment ? ' ↗' : ''}</span>
+                  {(meta || safeAttachment) && (
+                    <span className="text-[11px] text-muted">{meta}{safeAttachment ? ' ↗' : ''}</span>
                   )}
                 </>
               );
               return (
                 <div key={i} className="py-3 first:pt-0 last:pb-0">
-                  {f.attachment ? (
-                    <a href={f.attachment} target="_blank" rel="noopener noreferrer" className="flex flex-col gap-1 group">
+                  {safeAttachment ? (
+                    <a href={safeAttachment} target="_blank" rel="noopener noreferrer" className="flex flex-col gap-1 group">
                       {titleRow}
                     </a>
                   ) : (

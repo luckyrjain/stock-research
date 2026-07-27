@@ -46,7 +46,20 @@ def save_snapshot(symbol: str, analysis: dict, signal_context: dict | None, stoc
     a client-visible conflict signal), which is more infrastructure than a
     once-daily-digest timeline currently needs; flagged as a known gap
     rather than silently accepted, same "disclosed, not silently accepted"
-    instinct as this codebase's other documented residual risks."""
+    instinct as this codebase's other documented residual risks.
+
+    This same race also has a consequence beyond UI consistency: detect_
+    recent_changes() (used by both watchlist_alerts.py's own daily digest
+    and GET /api/watchlist/calendar) diffs whichever row happens to have
+    won this upsert against the row before it. If an ordinary visitor's
+    same-day re-analysis loses the race against watchlist_alerts.py's own
+    save_snapshot() call for that symbol, the row watchlist_alerts.py reads
+    back moments later to detect a change may already be the visitor's
+    (different) result rather than its own just-saved one — potentially
+    masking or fabricating an apparent recommendation/price change that
+    neither run actually produced on its own. This is an existing
+    consequence of the race documented above, not a new/separate bug — it
+    isn't fixed here for the same infrastructure-cost reason."""
     if not os.environ.get("DATABASE_URL"):
         return
     recommendation = analysis.get("recommendation")

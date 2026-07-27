@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import type { Concall, FinancialStatement, FinancialStatementsResponse } from '@/types';
 import InfoTooltip from './info-tooltip';
 import { Card } from './dashboard-primitives';
-import { fmt } from './dashboard-format';
+import { fmt, safeExternalHref } from './dashboard-format';
 
 export function useFinancials(symbol: string): FinancialStatementsResponse | null {
   const [data, setData] = useState<FinancialStatementsResponse | null>(null);
@@ -121,10 +121,12 @@ export function ConcallsCard({ concalls }: { concalls: Concall[] | undefined }) 
               {_CONCALL_LINK_LABELS.map(({ key, label }) => {
                 const url = c[key];
                 if (typeof url !== 'string') return null;
+                const safeUrl = safeExternalHref(url);
+                if (!safeUrl) return null;
                 return (
                   <a
                     key={key}
-                    href={url}
+                    href={safeUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-[11px] font-semibold px-2 py-0.5 rounded-full border border-border text-muted hover:text-accent hover:border-accent/40 transition-colors"

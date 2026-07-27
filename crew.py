@@ -173,10 +173,35 @@ def _analysis_support_issues(data: dict | None, all_data: dict[str, dict] | None
     if re.search(r"\b(sector average|peer average|industry average|benchmark|peers)\b", benchmark_fields):
         issues.append("analysis referenced external benchmarks or peers that were not provided")
 
+    # Each entry is (label, trigger_phrases, source_terms): trigger_phrases
+    # are the specific risk-*assertion* wording the LLM would actually write
+    # when making this kind of claim (e.g. "faces regulatory scrutiny"),
+    # deliberately more specific than source_terms — the broader topic
+    # words that count as this claim having *some* grounding in the
+    # fetched data. The regulatory-risk entry previously reused the exact
+    # same six-word list for both roles (a copy-paste bug, unlike the
+    # customer-concentration/competition entries below, which were always
+    # written with genuinely distinct trigger vs. source lists) — that made
+    # it trivially satisfied by routine "Regulation 30" SEBI-disclosure
+    # boilerplate appearing anywhere in a stock's filings/news, which says
+    # nothing about whether the LLM's specific asserted risk (e.g. "facing
+    # intensifying FDA scrutiny") is actually evidenced. Fixed to match the
+    # sibling entries' pattern.
+    #
+    # Disclosed limitation shared by all three checks: this is still
+    # keyword/phrase matching, not real claim verification — it can't
+    # confirm the SPECIFIC substance of a claim (a named agency, client, or
+    # competitor) is what the source text actually supports, only that the
+    # general topic isn't completely absent from it. Same "approximate
+    # heuristic, not a claim-verification model" instinct as this
+    # codebase's other keyword-based classifiers (e.g.
+    # signals/filings_classifier.py).
     grounded_checks = [
         (
             "regulatory risk",
-            ("regulatory", "regulation", "regulator", "rbi", "usfda", "fda"),
+            ("regulatory risk", "regulatory scrutiny", "regulatory action", "regulatory change",
+             "regulatory hurdle", "regulatory challenge", "regulatory headwind", "faces regulation",
+             "compliance risk", "under investigation"),
             ("regulatory", "regulation", "regulator", "rbi", "usfda", "fda"),
         ),
         (
@@ -242,8 +267,16 @@ def _validate_analysis_payload(  # pylint: disable=too-many-return-statements
 
     if len(data.get("key_risks", [])) < 3:
         return False, "Field 'key_risks' must contain at least 3 items."
-    if signal_context:
-        if signal_context["final_score"] > 0.5 and data["recommendation"] == "SELL":
+    # .get(), not signal_context["final_score"] — this function is called
+    # from more than one independent pipeline (main.py, watchlist_alerts.py,
+    # api.py), and a signal_context dict missing the key (a future caller
+    # passing a differently-shaped dict, a partial signal-engine failure)
+    # must degrade by skipping these three quant-cross-check guards, not
+    # raise a KeyError that a broad try/except elsewhere would silently
+    # misclassify as a provider outage and burn a failover attempt on.
+    final_score = signal_context.get("final_score") if signal_context else None
+    if final_score is not None:
+        if final_score > 0.5 and data["recommendation"] == "SELL":
             return False, "Recommendation contradicts strong positive signals"
         # Symmetric check — the SELL-vs-strong-positive-signals guard above
         # had no negative-side counterpart, so a BUY against a quant score
@@ -253,7 +286,7 @@ def _validate_analysis_payload(  # pylint: disable=too-many-return-statements
         # since it rounds final_score to 2 decimals, an exact -0.6 is a
         # real value this needs to catch, not just an unreachable edge)
         # previously passed validation untouched.
-        if signal_context["final_score"] <= -0.6 and data["recommendation"] == "BUY":
+        if final_score <= -0.6 and data["recommendation"] == "BUY":
             return False, "Recommendation contradicts strong negative signals"
         # A "HIGH confidence" claim against a near-neutral quant score is
         # its own kind of unsupported claim — the two checks above catch a
@@ -265,10 +298,10 @@ def _validate_analysis_payload(  # pylint: disable=too-many-return-statements
         # signals/engine.py's own HOLD band (-0.3 to 0.1), so this only
         # fires when the quant engine itself found almost nothing
         # directional either way.
-        if abs(signal_context["final_score"]) < _MARGINAL_SCORE_ABS and data["confidence"] == "HIGH":
+        if abs(final_score) < _MARGINAL_SCORE_ABS and data["confidence"] == "HIGH":
             return False, (
                 "Confidence 'HIGH' is not supported by a near-neutral quant signal score "
-                f"({signal_context['final_score']}); use MEDIUM or LOW instead."
+                f"({final_score}); use MEDIUM or LOW instead."
             )
     support_issues = _analysis_support_issues(data, all_data)
     if support_issues:

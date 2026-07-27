@@ -22,7 +22,7 @@ with no log line to grep for" gap this closes.
 import json
 import os
 import tempfile
-import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from observability import get_logger, log_event
@@ -30,10 +30,6 @@ from observability import get_logger, log_event
 LOGGER = get_logger("scraper_error_counters")
 
 _COUNTERS_DIR = Path("output/_scraper_error_counters")
-_lock = threading.Lock()  # in-process only — one counter file per scraper,
-                           # per-request-endpoint traffic doesn't need the
-                           # cross-process fcntl locking source_health.py
-                           # uses for its higher-concurrency batch callers
 
 
 def _safe_name(scraper_name: str) -> str:
@@ -42,6 +38,42 @@ def _safe_name(scraper_name: str) -> str:
 
 def _path(scraper_name: str) -> Path:
     return _COUNTERS_DIR / f"{_safe_name(scraper_name)}.json"
+
+
+def _lock_path(scraper_name: str) -> Path:
+    return _COUNTERS_DIR / f".{_safe_name(scraper_name)}.lock"
+
+
+@contextmanager
+def _locked(scraper_name: str):
+    """Advisory, blocking, cross-process exclusive lock guarding one
+    scraper's entire read-modify-write cycle — same fcntl.flock-based
+    primitive as source_health.py's own _locked(). An earlier version of
+    this module used only an in-process threading.Lock, reasoning that
+    "per-request-endpoint traffic doesn't need cross-process locking" — a
+    claim about request *volume*, not about whether more than one process
+    actually touches the same counter file. This app's own documented
+    multi-worker/multi-replica deployment topology (see CLAUDE.md's
+    "Shared-state rate limiting" section — the same REDIS_URL-backed
+    scaling story llm_cost.py was patched for after an adversarial-review
+    pass found the identical gap there) means two backend worker processes
+    handling two different requests can race on the *same* scraper's
+    counter file at the same instant, each reading the same prior
+    error_count, both incrementing locally, and the second os.replace()
+    silently clobbering the first — permanently undercounting with no
+    warning logged, undermining the one thing this module exists to get
+    right. fcntl.flock is POSIX-only — matches this codebase's existing
+    Linux-only deployment assumption."""
+    import fcntl
+
+    _COUNTERS_DIR.mkdir(parents=True, exist_ok=True)
+    fd = os.open(_lock_path(scraper_name), os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def record_scraper_error(scraper_name: str, **context) -> None:
@@ -58,7 +90,7 @@ def record_scraper_error(scraper_name: str, **context) -> None:
     try:
         _COUNTERS_DIR.mkdir(parents=True, exist_ok=True)
         path = _path(scraper_name)
-        with _lock:
+        with _locked(scraper_name):
             data = {"error_count": 0}
             if path.exists():
                 try:

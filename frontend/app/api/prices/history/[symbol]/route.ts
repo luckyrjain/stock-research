@@ -17,7 +17,7 @@ export async function GET(
 
   let upstream: Response;
   try {
-    upstream = await fetch(`${API}/api/prices/history/${symbol}${qs}`, { headers: clientIpHeaders(req), cache: 'no-store' });
+    upstream = await fetch(`${API}/api/prices/history/${encodeURIComponent(symbol)}${qs}`, { headers: clientIpHeaders(req), cache: 'no-store' });
   } catch {
     return Response.json({ symbol, exchange: null, dates: [], closes: [] }, { status: 503 });
   }

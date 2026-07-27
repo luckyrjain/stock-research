@@ -182,8 +182,12 @@ def _fetch_shareholding_xbrl(symbol: str):
     if not records:
         raise ValueError("No shareholding records found")
 
-    # Pick the most recent record (last by date)
-    latest = sorted(records, key=lambda r: r.get("date", ""), reverse=True)[0]
+    # Pick the most recent record — a bare string sort of NSE's raw `date`
+    # field would not sort in calendar order if it's in dd-Mon-yyyy form
+    # (the same drift _parse_filing_date's own docstring documents and
+    # get_nse_basic_ratios already avoids below); reuse that same parser
+    # rather than repeating the bug this codebase already fixed once.
+    latest = sorted(records, key=lambda r: _parse_filing_date(r.get("date")) or "", reverse=True)[0]
     xbrl_url = latest.get("xbrl", "")
     if not xbrl_url or not _is_nse_host(xbrl_url):
         raise ValueError("No XBRL URL in shareholding record")

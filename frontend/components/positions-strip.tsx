@@ -6,7 +6,7 @@ import { usePositions } from '@/lib/positions';
 
 interface LivePrice {
   price: number;
-  change_pct: number;
+  change_pct: number | null;
 }
 
 function fmtPrice(n: number | null): string {

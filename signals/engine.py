@@ -163,6 +163,25 @@ def run_signal_engine(symbol: str, all_data: dict) -> SignalResult:
             continue
         score += sig.score * weight
 
+    # Clamp to the documented -1..1 contract (docs/output-schema.md, every
+    # frontend consumer of `signals.final_score`, and GET /api/v1's
+    # external surface all treat this as a hard bound). The per-signal
+    # score/weight combination isn't actually symmetric — verified: with
+    # the default weights, the achievable maximum is ~1.18 and the
+    # achievable minimum is ~-0.89, i.e. structurally easier to reach a
+    # strong BUY reading than an equally strong SELL one, since a few
+    # signals' positive ceilings (e.g. volume's 1.0, filings' 0.95) are
+    # larger in magnitude than their own negative floors (volume's -0.5,
+    # filings' -0.15). That asymmetry is a real, disclosed characteristic
+    # of this engine's current per-signal magnitudes — fixing it would mean
+    # re-calibrating individual signals' score constants, which (like the
+    # sector-weight tilt above) would need real backtest data behind it to
+    # do responsibly rather than substituting one unverified magnitude
+    # guess for another. This clamp only prevents the documented contract
+    # itself from being silently violated; it does not correct the
+    # underlying skew.
+    score = max(-1.0, min(1.0, score))
+
     if score > 0.5:
         verdict = "BUY"
     elif score > 0.1:
