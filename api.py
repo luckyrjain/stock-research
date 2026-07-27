@@ -1497,9 +1497,11 @@ async def get_shareholding_breakdown(request: Request, symbol: str):
 
         cached = cache.load(sym, "shareholding_detail")
         if cached is not None:
-            # A response cached before `unavailable` existed won't have the
-            # key — backfill False (a cached entry only exists because the
-            # fetch succeeded, see the "not cached on error" note below).
+            # The stored cache blob itself never carries `unavailable` — it's
+            # only ever written on the success path a few lines below, so a
+            # cache hit unconditionally means False. Added here, not in the
+            # stored payload, since it's a response-shape concern, not a
+            # cached fact.
             return {"unavailable": False, **{k: v for k, v in cached.items() if k != "_meta"}}
 
         from tools.nse_tools import get_shareholding_detail as _fetch

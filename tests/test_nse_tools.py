@@ -298,6 +298,19 @@ class HumanizeCategoryTest(unittest.TestCase):
     def test_empty_string_falls_back_to_itself(self) -> None:
         self.assertEqual(_humanize_category(""), "")
 
+    def test_acronym_categories_are_not_split_into_single_letters(self) -> None:
+        # Regression test for an adversarial-review finding: NSE shareholding
+        # categories commonly use short acronyms verbatim (FII, NRI, HUF,
+        # IEPF) — a naive "space before every capital" split would break
+        # these into "F I I" instead of keeping the acronym intact.
+        self.assertEqual(_humanize_category("FIIMember"), "FII")
+        self.assertEqual(_humanize_category("NRIMember"), "NRI")
+        self.assertEqual(_humanize_category("HUFMember"), "HUF")
+        self.assertEqual(_humanize_category("IEPFMember"), "IEPF")
+
+    def test_acronym_followed_by_titlecase_word_still_splits(self) -> None:
+        self.assertEqual(_humanize_category("NRIRepatriableMember"), "NRI Repatriable")
+
 
 class GetShareholdingDetailTest(unittest.TestCase):
     def _mock_session_and_xbrl(self, xbrl: str):
@@ -424,6 +437,48 @@ class GetShareholdingDetailTest(unittest.TestCase):
         self.assertEqual(result["promoters"], [])
         self.assertEqual(result["shareholder_categories"], [])
         self.assertNotIn("error", result)
+
+    def test_colliding_context_ids_across_categories_are_dropped_not_misattributed(self) -> None:
+        # Regression test for an adversarial-review finding: unlike
+        # get_mf_holdings (whose name/category dicts only ever collect
+        # MutualFunds-tagged contexts, so a foreign category's context id
+        # could never land in the same dict), this generalized walk is
+        # document-wide across every category — a context literally named
+        # "D_5" (Mutual Funds) and a different context literally named "5"
+        # (Insurance Companies) both reduce to the same base id "5" after
+        # stripping "D_", which a plain dict would let the later-processed
+        # category silently clobber. Both must be dropped — never guess
+        # which one the shared percentage fact actually belongs to.
+        ns_di = "http://xbrl.org/2006/xbrldi"
+        xbrl = f'''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance" xmlns:di="{ns_di}">
+          <xbrli:context id="D_5">
+            <xbrli:scenario><di:typedMember><MutualFundsMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <xbrli:context id="5">
+            <xbrli:scenario><di:typedMember><InsuranceCompaniesMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <xbrli:context id="D_9">
+            <xbrli:scenario><di:typedMember><MutualFundsMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <NameOfTheShareholder contextRef="D_5">Colliding MF</NameOfTheShareholder>
+          <NameOfTheShareholder contextRef="5">Colliding Insurer</NameOfTheShareholder>
+          <ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="5">0.02</ShareholdingAsAPercentageOfTotalNumberOfShares>
+          <NameOfTheShareholder contextRef="D_9">Unambiguous Fund</NameOfTheShareholder>
+          <ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="9">0.03</ShareholdingAsAPercentageOfTotalNumberOfShares>
+        </xbrli:xbrl>'''
+        sess, xbrl_resp = self._mock_session_and_xbrl(xbrl)
+
+        with patch("tools.nse_tools._nse_session", return_value=sess), \
+             patch("requests.get", return_value=xbrl_resp):
+            result = json.loads(get_shareholding_detail.run(symbol="TCS"))
+
+        all_names = {p["name"] for p in result["promoters"]}
+        for cat in result["shareholder_categories"]:
+            all_names |= {h["name"] for h in cat["holders"]}
+
+        self.assertNotIn("Colliding MF", all_names)
+        self.assertNotIn("Colliding Insurer", all_names)
+        self.assertIn("Unambiguous Fund", all_names)
 
 
 class GetNseBasicRatiosTest(unittest.TestCase):

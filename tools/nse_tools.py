@@ -287,7 +287,13 @@ def _humanize_category(raw: str) -> str:
     taxonomy) and the remainder is word-spaced rather than shown as
     unbroken PascalCase."""
     trimmed = raw[:-len("Member")] if raw.endswith("Member") and len(raw) > len("Member") else raw
-    spaced = re.sub(r"(?<!^)(?=[A-Z])", " ", trimmed)
+    # Splits at a lowercase/digit→uppercase boundary ("Portfolio" + "Investors")
+    # and at an acronym-run→Titlecase-word boundary ("FII" + "Category" in
+    # "FIICategory"), but NOT inside a run of consecutive capitals — NSE
+    # shareholding categories commonly use short acronyms verbatim (FII,
+    # NRI, HUF, IEPF), which a plain "space before every capital" split
+    # would otherwise break into single spaced-out letters.
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", trimmed)
     return spaced.strip() or raw
 
 
@@ -350,8 +356,23 @@ def get_shareholding_detail(symbol: str) -> str:
                     category_by_ctx[ctx_id] = category_raw
                     break
 
-        ctx_name: dict[str, str] = {}
-        ctx_category: dict[str, str] = {}
+        # Unlike get_mf_holdings — where ctx_name only ever collects
+        # MF-tagged contexts, so a foreign category's context id could
+        # never land in the same dict — this walk is document-wide across
+        # every category, which reopens a real (if rare) hazard: NSE's own
+        # "D_" dimensional-context-id convention only guarantees a context
+        # literally named "D_<n>" pairs with a plain "<n>" sibling; nothing
+        # guarantees two DIFFERENT shareholder records across two DIFFERENT
+        # categories can't independently reduce to the same "<n>" after
+        # stripping "D_". A plain dict would let the later-processed
+        # category silently clobber the earlier one's name/category
+        # attribution with no error. Collect every (name, category) pair
+        # seen per base id instead of overwriting, so a genuine collision
+        # can be detected and the ambiguous entries dropped below — never
+        # invent which candidate the shared percentage fact actually
+        # belongs to, same "drop rather than guess" convention
+        # _percent_from_ambiguous_value's own plausibility ceiling uses.
+        ctx_candidates: dict[str, list[tuple[str, str]]] = {}
         ctx_pct: dict[str, float] = {}
 
         for elem in root.iter():
@@ -362,8 +383,7 @@ def get_shareholding_detail(symbol: str) -> str:
 
             if ctx_ref in category_by_ctx and local == "NameOfTheShareholder" and elem.text:
                 base_id = ctx_ref.removeprefix("D_")
-                ctx_name[base_id] = elem.text.strip()
-                ctx_category[base_id] = category_by_ctx[ctx_ref]
+                ctx_candidates.setdefault(base_id, []).append((elem.text.strip(), category_by_ctx[ctx_ref]))
 
             if local == "ShareholdingAsAPercentageOfTotalNumberOfShares" and elem.text:
                 # One non-numeric fact anywhere in a document that can carry
@@ -376,11 +396,19 @@ def get_shareholding_detail(symbol: str) -> str:
 
         promoters = []
         by_category: dict[str, list[dict]] = {}
-        for base_id, name in ctx_name.items():
+        for base_id, candidates in ctx_candidates.items():
+            # More than one distinct (name, category) pair reduced to the
+            # same base id — a genuine context-id collision this
+            # generalized walk can't safely resolve (which candidate does
+            # the one shared percentage fact actually belong to?). Drop
+            # both/all rather than silently picking whichever was
+            # processed last.
+            if len(set(candidates)) != 1:
+                continue
+            name, category_raw = candidates[0]
             pct = ctx_pct.get(base_id)
             if pct is None:
                 continue
-            category_raw = ctx_category.get(base_id, "")
             is_promoter = "promoter" in category_raw.lower()
             # A promoter/promoter-group entity can plausibly hold up to (in
             # principle) 100% of a closely-held company; any other single

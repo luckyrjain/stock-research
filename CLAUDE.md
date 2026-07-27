@@ -1080,6 +1080,24 @@ peers/financials/insider-activity/street-consensus.
    replacement for either. Renders nothing when there's genuinely nothing to show (no error, no
    named holders); renders a "temporarily unavailable" notice, not silence, when `unavailable` is
    true — same distinction `InsiderActivityCard`/`StreetConsensusCard` already draw.
+7. **Adversarial-review-caught bug, fixed**: the first version of `get_shareholding_detail()`
+   collected every category's `NameOfTheShareholder` facts into one flat dict keyed only by the
+   `"D_"`-stripped context id, document-wide. This is safe in `get_mf_holdings()` (whose own
+   equivalent dict only ever collects `MutualFunds`-tagged contexts, so a different category's
+   context id can never land in the same dict) but not once generalized to every category — two
+   *different* shareholder records in *different* categories whose context ids happen to reduce
+   to the same base id after stripping `"D_"` (e.g. a context literally named `"D_5"` for one
+   category and a separate context literally named `"5"` for another) would silently overwrite
+   each other with no error, misattributing a name/category or dropping one entirely. Fixed by
+   collecting every `(name, category)` candidate seen per base id rather than overwriting, and
+   dropping (never guessing) any base id where more than one distinct candidate collided —
+   covered by `test_colliding_context_ids_across_categories_are_dropped_not_misattributed`, which
+   constructs exactly this scenario and confirms both colliding entries are absent from the
+   result while an unrelated, non-colliding entry still comes through cleanly. The same review
+   pass also caught `_humanize_category()` splitting short acronym categories NSE commonly uses
+   verbatim (FII, NRI, HUF, IEPF) into single spaced-out letters — fixed with a regex that splits
+   at a lowercase→uppercase boundary and at an acronym-run→Titlecase-word boundary, but not inside
+   a run of consecutive capitals.
 
 ### Symbol validation flow (`GET /api/validate/{symbol}`)
 
