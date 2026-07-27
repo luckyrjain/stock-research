@@ -159,8 +159,43 @@ def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: f
 _EXECUTOR_MAX_WORKERS = int(os.getenv("EXECUTOR_MAX_WORKERS", "16"))
 
 
+def _log_startup_config_warnings() -> None:
+    """A handful of misconfigurations previously degraded silently — no log
+    line, no crash, just a quietly-wrong runtime behavior discovered only
+    by noticing rate limits or LLM calls behave oddly (see the deep gap
+    analysis finding this closes). Logged once at process startup so an
+    operator has a fighting chance of catching them before a user does.
+    """
+    from crew import _configured_providers
+
+    providers = _configured_providers()
+    if not providers:
+        log_event(
+            LOGGER, "startup_no_llm_provider_configured", level="warning",
+            detail="No ANTHROPIC/OPENAI/GROQ/GOOGLE/OPENROUTER_API_KEY set — every "
+                   "analysis will silently fall through to the safe HOLD fallback.",
+        )
+
+    # TRUSTED_PROXY_SECRET has no handshake — it's a value this process and
+    # the Next.js frontend must agree on independently, so a mismatch or a
+    # forgotten-to-set value can't be *detected* here, only flagged as a
+    # plausible risk: if this deployment isn't just the default local dev
+    # origin, every per-IP rate limiter silently collapses onto
+    # request.client.host (the Next.js server's own IP) without the
+    # secret, i.e. one shared bucket for the entire site.
+    non_default_origin = _ALLOWED_ORIGINS != ["http://localhost:3000"]
+    if non_default_origin and not _TRUSTED_PROXY_SECRET:
+        log_event(
+            LOGGER, "startup_trusted_proxy_secret_unset", level="warning",
+            detail="ALLOWED_ORIGINS looks like a non-default deployment but "
+                   "TRUSTED_PROXY_SECRET is unset — every per-IP rate limiter will "
+                   "key off the Next.js proxy's own IP, not real visitor IPs.",
+        )
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    _log_startup_config_warnings()
     executor = ThreadPoolExecutor(max_workers=_EXECUTOR_MAX_WORKERS, thread_name_prefix="api-worker")
     asyncio.get_running_loop().set_default_executor(executor)
     try:

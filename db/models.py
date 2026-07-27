@@ -288,3 +288,44 @@ positions = Table(
 def get_engine(database_url: str | None = None):
     url = database_url or os.environ["DATABASE_URL"]
     return _create_engine(url)
+
+
+def stamp_alembic_head() -> None:
+    """Records "this database is already at the latest Alembic revision"
+    without executing any DDL — the same one-time step CLAUDE.md's Alembic
+    section documents for an *existing* deployment migrating onto Alembic
+    for the first time (`alembic stamp head`).
+
+    Both sme_ema_pipeline.py's and screener_pipeline.py's own --setup-db
+    call metadata.create_all(engine) directly, bypassing Alembic entirely —
+    a fresh database set up this way ends up with all 11 tables but no
+    `alembic_version` row, so a subsequent `alembic upgrade head` fails
+    (the tables Alembic wants to CREATE already exist). Calling this right
+    after create_all() closes that drift vector: the CLI path and the
+    Alembic-migration path always agree on "what revision is this database
+    at" from the moment the database is created, not just for deployments
+    that happened to run `alembic upgrade head` first.
+
+    Reads DATABASE_URL from the environment, same as migrations/env.py's own
+    `_database_url()` (which always wins over any Config-object URL in
+    online mode) — so the caller's DATABASE_URL must already be set, same
+    requirement get_engine() above already has.
+
+    Never raises — a stamp failure (e.g. alembic.ini not found when running
+    from an unusual working directory) is logged and swallowed rather than
+    failing the whole --setup-db command, since the tables themselves were
+    already created successfully by the caller before this runs.
+    """
+    import logging
+
+    from alembic import command
+    from alembic.config import Config
+
+    logger = logging.getLogger("stock_research.db")
+    try:
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cfg = Config(os.path.join(repo_root, "alembic.ini"))
+        cfg.set_main_option("script_location", os.path.join(repo_root, "migrations"))
+        command.stamp(cfg, "head")
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("alembic_stamp_head_failed error=%s", exc)

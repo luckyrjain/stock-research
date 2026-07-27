@@ -136,8 +136,14 @@ def _upsert_stocks(engine, rows: list[dict]) -> None:
 
 
 def setup_db(engine) -> None:
-    """Create tables and indexes (idempotent)."""
+    """Create tables and indexes (idempotent). Also stamps the database as
+    already being at Alembic's latest revision — see
+    db.models.stamp_alembic_head's own docstring for why: without this, a
+    database set up via --setup-db has every table but no `alembic_version`
+    row, so a subsequent `alembic upgrade head` fails."""
     metadata.create_all(engine)
+    from db.models import stamp_alembic_head
+    stamp_alembic_head()
     log_event(LOGGER, "screener_db_tables_created")
 
 

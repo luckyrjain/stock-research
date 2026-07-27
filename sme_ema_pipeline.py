@@ -408,8 +408,15 @@ def _print_summary(engine, lookback_days: int) -> None:
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
 def setup_db(engine) -> None:
-    """Create tables and indexes (idempotent)."""
+    """Create tables and indexes (idempotent). Also stamps the database as
+    already being at Alembic's latest revision — without this, a database
+    set up via --setup-db (bypassing `alembic upgrade head` entirely) has
+    every table but no `alembic_version` row, so a subsequent `alembic
+    upgrade head` fails because the tables it wants to CREATE already
+    exist. See db.models.stamp_alembic_head's own docstring."""
     metadata.create_all(engine)
+    from db.models import stamp_alembic_head
+    stamp_alembic_head()
     log_event(LOGGER, "sme_db_tables_created")
 
 
@@ -508,6 +515,8 @@ def main() -> None:
         engine = get_engine()
         metadata.drop_all(engine)
         metadata.create_all(engine)
+        from db.models import stamp_alembic_head
+        stamp_alembic_head()
         log_event(LOGGER, "sme_db_tables_reset")
         return
 

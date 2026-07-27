@@ -84,6 +84,24 @@ class FetchOneTest(unittest.TestCase):
         self.assertIsNone(result["ema_trend"])
 
 
+class SetupDbStampsAlembicHeadTest(unittest.TestCase):
+    """--setup-db bypasses Alembic entirely (metadata.create_all directly) —
+    without stamping head afterward, a fresh database ends up with every
+    table but no alembic_version row, so a subsequent `alembic upgrade
+    head` fails. See db.models.stamp_alembic_head's own docstring. Unlike
+    --reset-db (ResetDbScopeTest below, scoped to just screener_stocks),
+    --setup-db calls metadata.create_all() for the full schema, so it's the
+    one that needs the stamp."""
+
+    def test_setup_db_calls_create_all_then_stamps_head(self) -> None:
+        engine = MagicMock()
+        with patch.object(screener_pipeline, "metadata") as mock_metadata, \
+             patch("db.models.stamp_alembic_head") as mock_stamp:
+            screener_pipeline.setup_db(engine)
+        mock_metadata.create_all.assert_called_once_with(engine)
+        mock_stamp.assert_called_once_with()
+
+
 class ResetDbScopeTest(unittest.TestCase):
     """--reset-db must only touch this pipeline's own table — db/models.py's
     MetaData() is shared across every table in the app (users, sessions,
