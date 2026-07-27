@@ -309,15 +309,6 @@ def _validate_analysis_payload(  # pylint: disable=too-many-return-statements
     return True, data
 
 
-def _guard_analysis(all_data: dict[str, dict] | None = None):
-    """Validates the analyst JSON: correct enum values and required fields."""
-    def guard(output) -> Tuple[bool, Any]:
-        raw = output.raw if hasattr(output, "raw") else str(output)
-        data = parse_json_object(raw)
-        return _validate_analysis_payload(data, all_data)
-    return guard
-
-
 def _safe_analysis_fallback(symbol: str, reason: str) -> dict:  # pylint: disable=unused-argument
     # `reason` is already logged server-side (see analyst_llm_failed events) with the
     # run_id for correlation — it's deliberately not echoed into this client-facing

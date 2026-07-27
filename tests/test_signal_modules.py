@@ -55,6 +55,41 @@ class VolumeSignalTest(unittest.TestCase):
         # ratio == 0.5 should NOT be DRYING_VOLUME (strict <)
         self.assertEqual(volume_signal({"volume": 500, "avg_volume": 1000}).value, "NORMAL")
 
+    def test_high_volume_on_a_down_day_is_distribution_not_accumulation(self) -> None:
+        # Regression test for an adversarial-review finding: a volume spike
+        # alone doesn't say which direction the volume was on — heavy
+        # buying and heavy panic-selling/distribution both show up as an
+        # above-average ratio. Previously this signal had no visibility
+        # into price direction at all, so a stock crashing on 3x average
+        # volume (a classic distribution/capitulation pattern) scored the
+        # same maximally bullish STRONG_ACCUMULATION as a genuine rally on
+        # heavy volume.
+        sig = volume_signal({"volume": 3100, "avg_volume": 1000, "change_pct": -5.0})
+        self.assertEqual(sig.value, "DISTRIBUTION")
+        self.assertEqual(sig.score, -1.0)
+
+        sig = volume_signal({"volume": 2500, "avg_volume": 1000, "change_pct": -2.0})
+        self.assertEqual(sig.value, "DISTRIBUTION")
+        self.assertEqual(sig.score, -0.7)
+
+    def test_high_volume_on_an_up_day_is_still_accumulation(self) -> None:
+        sig = volume_signal({"volume": 3100, "avg_volume": 1000, "change_pct": 4.0})
+        self.assertEqual(sig.value, "STRONG_ACCUMULATION")
+        self.assertEqual(sig.score, 1.0)
+
+    def test_missing_change_pct_defaults_to_accumulation_not_a_guess(self) -> None:
+        # No price-direction data available (e.g. a caller that never
+        # passed change_pct) must not guess a direction -- preserves the
+        # pre-existing "assume accumulation on a spike" behavior rather
+        # than defaulting to DISTRIBUTION or UNKNOWN.
+        sig = volume_signal({"volume": 3100, "avg_volume": 1000})
+        self.assertEqual(sig.value, "STRONG_ACCUMULATION")
+
+    def test_flat_day_with_high_volume_is_still_accumulation_not_distribution(self) -> None:
+        # change_pct == 0.0 (a flat day) is not a "down day".
+        sig = volume_signal({"volume": 3100, "avg_volume": 1000, "change_pct": 0.0})
+        self.assertEqual(sig.value, "STRONG_ACCUMULATION")
+
 
 class ValuationSignalTest(unittest.TestCase):
     def test_missing_pe_returns_unknown(self) -> None:
@@ -244,6 +279,18 @@ class GrowthSignalTest(unittest.TestCase):
         sig = growth_signal({"ratios": {"Sales growth 3Y": "5%", "Profit growth 3Y": "2%"}})
         self.assertEqual(sig.value, "LOW_GROWTH")
         self.assertEqual(sig.score, -0.5)
+
+    def test_decent_sales_growth_with_collapsing_profit_is_not_moderate_growth(self) -> None:
+        # Regression test for an adversarial-review finding: the
+        # MODERATE_GROWTH tier only checked sales_3y, never profit_3y — a
+        # company growing revenue while its profit is collapsing (margin
+        # compression, an unsustainable growth push, one-off costs) used to
+        # score the same positive +0.3 as a genuinely healthy moderate
+        # grower. +15% sales with -90% profit must not read as a positive
+        # growth signal.
+        sig = growth_signal({"ratios": {"Sales growth 3Y": "15%", "Profit growth 3Y": "-90%"}})
+        self.assertNotEqual(sig.value, "MODERATE_GROWTH")
+        self.assertLessEqual(sig.score, 0)
 
     def test_negative_growth_is_low_growth_not_a_crash(self) -> None:
         sig = growth_signal({"ratios": {"Sales growth 3Y": "-10%", "Profit growth 3Y": "-20%"}})

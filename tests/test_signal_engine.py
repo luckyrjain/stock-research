@@ -36,6 +36,27 @@ class ExtractFeaturesTest(unittest.TestCase):
         self.assertEqual(features["ratios"], {})
         self.assertEqual(features["filings"], [])
 
+    def test_wrong_type_ratios_degrades_to_empty_dict_not_a_crash(self) -> None:
+        # Regression test for an adversarial-review finding: schemas.py's
+        # own contract check only validates FIELD PRESENCE, not type — a
+        # scraped/cached "ratios" value present but of the wrong type (a
+        # list instead of a dict, e.g. from schema drift or a malformed
+        # cache entry) used to pass through normalize() unchanged and reach
+        # every signal module's own ratios.get(...) call, which raised
+        # AttributeError ('list' object has no attribute 'get') and crashed
+        # the entire signal engine — and, since api.py's call site has no
+        # local try/except around run_signal_engine(), the whole
+        # /api/analyse/{symbol} request, not just this one degraded signal.
+        all_data = {"research": {"ratios": ["not", "a", "dict"]}}
+        features = extract_features(all_data)
+        self.assertEqual(features["ratios"], {})
+
+    def test_wrong_type_filings_list_degrades_to_empty_list_not_a_crash(self) -> None:
+        # Same failure mode as the ratios case above, for the filings list.
+        all_data = {"filings": {"filings": {"not": "a list"}}}
+        features = extract_features(all_data)
+        self.assertEqual(features["filings"], [])
+
 
 class WeightsForSectorTest(unittest.TestCase):
     def test_unknown_or_missing_sector_uses_default_weights(self) -> None:
