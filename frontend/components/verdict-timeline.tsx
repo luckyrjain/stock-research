@@ -75,7 +75,13 @@ export default function VerdictTimeline({ symbol }: { symbol: string }) {
                 >
                   {h.recommendation ?? '—'}
                   <span className="font-normal opacity-70">
-                    {new Date(h.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+                    {/* h.date is a bare 'YYYY-MM-DD' string, which Date parses
+                        as UTC midnight -- rendering without an explicit
+                        timeZone would use the browser's LOCAL timezone and
+                        silently shift the displayed date back by one day for
+                        any visitor west of UTC. timeZone: 'UTC' keeps the
+                        render matching the calendar date the string encodes. */}
+                    {new Date(h.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' })}
                   </span>
                   {outcomeMark && (
                     <span

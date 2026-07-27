@@ -36,10 +36,17 @@ def growth_signal(features: dict) -> Signal:
             "profit": profit_3y
         })
 
-    # Moderate growth
-    if sales_3y > 10:
+    # Moderate growth — sales growth alone isn't enough; a company growing
+    # revenue while profit is collapsing (margin compression, an
+    # unsustainable growth push, one-off costs) is a red flag, not a
+    # positive signal. Requiring profit_3y > 0 (profit actually growing,
+    # even modestly) keeps this tier from scoring a company with e.g. +15%
+    # sales growth but -90% profit growth as a positive "MODERATE_GROWTH"
+    # the same way it would a genuinely healthy moderate grower.
+    if sales_3y > 10 and profit_3y > 0:
         return Signal("growth", "MODERATE_GROWTH", 0.3, {
-            "sales": sales_3y
+            "sales": sales_3y,
+            "profit": profit_3y,
         })
 
     return Signal("growth", "LOW_GROWTH", -0.5, {

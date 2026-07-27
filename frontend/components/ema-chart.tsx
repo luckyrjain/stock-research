@@ -12,7 +12,12 @@ interface Props {
 function fmtDate(d: string): string {
   const parsed = new Date(d);
   if (Number.isNaN(parsed.getTime())) return d;
-  return parsed.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  // trade_date is a bare 'YYYY-MM-DD' string, which Date parses as UTC
+  // midnight -- rendering without an explicit timeZone would use the
+  // browser's LOCAL timezone and silently shift the displayed date back by
+  // one day for any visitor west of UTC. timeZone: 'UTC' keeps the render
+  // matching the calendar date the string encodes.
+  return parsed.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
 }
 
 function fmtVal(v: number | null): string {
