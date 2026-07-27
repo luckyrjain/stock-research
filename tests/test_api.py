@@ -84,6 +84,56 @@ class CorsTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
 
 
+class StartupConfigWarningsTest(unittest.TestCase):
+    """A handful of misconfigurations (no LLM provider key, a non-default
+    ALLOWED_ORIGINS with no TRUSTED_PROXY_SECRET) previously degraded with
+    zero log signal — see api._log_startup_config_warnings's own docstring
+    for the deep gap analysis finding this closes."""
+
+    def test_warns_when_no_llm_provider_is_configured(self) -> None:
+        with patch("crew._configured_providers", return_value=[]), \
+             patch("api.log_event") as mock_log:
+            api._log_startup_config_warnings()
+        events = [c.args[1] for c in mock_log.call_args_list]
+        self.assertIn("startup_no_llm_provider_configured", events)
+
+    def test_no_warning_when_a_provider_is_configured(self) -> None:
+        with patch("crew._configured_providers", return_value=["anthropic"]), \
+             patch("api.log_event") as mock_log:
+            api._log_startup_config_warnings()
+        events = [c.args[1] for c in mock_log.call_args_list]
+        self.assertNotIn("startup_no_llm_provider_configured", events)
+
+    def test_warns_when_non_default_origin_has_no_proxy_secret(self) -> None:
+        with patch("crew._configured_providers", return_value=["anthropic"]), \
+             patch("api._ALLOWED_ORIGINS", ["https://alphapulse.example.com"]), \
+             patch("api._TRUSTED_PROXY_SECRET", None), \
+             patch("api.log_event") as mock_log:
+            api._log_startup_config_warnings()
+        events = [c.args[1] for c in mock_log.call_args_list]
+        self.assertIn("startup_trusted_proxy_secret_unset", events)
+
+    def test_no_warning_when_proxy_secret_is_set(self) -> None:
+        with patch("crew._configured_providers", return_value=["anthropic"]), \
+             patch("api._ALLOWED_ORIGINS", ["https://alphapulse.example.com"]), \
+             patch("api._TRUSTED_PROXY_SECRET", "shared-secret"), \
+             patch("api.log_event") as mock_log:
+            api._log_startup_config_warnings()
+        events = [c.args[1] for c in mock_log.call_args_list]
+        self.assertNotIn("startup_trusted_proxy_secret_unset", events)
+
+    def test_no_warning_for_default_localhost_origin_even_without_secret(self) -> None:
+        # The default single-host local-dev setup never needed the secret —
+        # only flag deployments that look non-default.
+        with patch("crew._configured_providers", return_value=["anthropic"]), \
+             patch("api._ALLOWED_ORIGINS", ["http://localhost:3000"]), \
+             patch("api._TRUSTED_PROXY_SECRET", None), \
+             patch("api.log_event") as mock_log:
+            api._log_startup_config_warnings()
+        events = [c.args[1] for c in mock_log.call_args_list]
+        self.assertNotIn("startup_trusted_proxy_secret_unset", events)
+
+
 class LlmConcurrencyCeilingTest(unittest.TestCase):
     def setUp(self) -> None:
         rate_limiter._memory_slots.clear()
@@ -240,6 +290,15 @@ class ValidateSymbolEndpointTest(unittest.TestCase):
     yfinance fallback), the BSE-forced path, and the NSE/BSE/Screener fallback chain.
     All network-touching helpers are mocked at the api.* boundary.
     """
+
+    def test_overlong_symbol_returns_422(self) -> None:
+        # This endpoint deliberately accepts more input shapes than
+        # _TICKER_RE (ISINs, numeric BSE codes, hyphenated Screener slugs),
+        # so it can't apply that same regex — but it previously had no
+        # length bound at all before passing the value to yfinance/
+        # Screener/NSE lookups below.
+        resp = client.get(f"/api/validate/{'A' * 41}")
+        self.assertEqual(resp.status_code, 422)
 
     def test_isin_resolved_via_nse_master_falls_through_to_nse_lookup(self) -> None:
         with patch("api._load_isin_map", return_value={"INE009A01021": {"symbol": "TCS"}}), \
@@ -1028,13 +1087,33 @@ class PeersEndpointTest(unittest.TestCase):
     def test_tool_error_returns_empty_payload_not_500(self) -> None:
         fake_tool = MagicMock()
         fake_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
-        with patch("tools.screener_tools.get_peer_comparison", fake_tool):
+        with patch("tools.screener_tools.get_peer_comparison", fake_tool), \
+             patch("scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/peers/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertIsNone(body["self"])
         self.assertEqual(body["peers"], [])
         self.assertEqual(body["percentiles"], {})
+        # A real scrape failure must be counted — this is the one thing
+        # that tells "Screener.in broke" apart from "this symbol has no
+        # peer data", since both otherwise return the exact same shape.
+        mock_record.assert_called_once_with("peers", symbol="TCS")
+
+    def test_a_real_result_never_touches_the_error_counter(self) -> None:
+        # The flip side of the test above — don't manufacture noise from
+        # the expected common case (a real, successful scrape).
+        raw = json.dumps({
+            "symbol": "TCS", "self": {"name": "TCS", "slug": "TCS", "values": {}},
+            "peers": [], "sector_median": None,
+        })
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = raw
+        with patch("tools.screener_tools.get_peer_comparison", fake_tool), \
+             patch("scraper_error_counters.record_scraper_error") as mock_record:
+            resp = client.get("/api/peers/TCS")
+        self.assertEqual(resp.status_code, 200)
+        mock_record.assert_not_called()
 
     def test_no_peers_yields_no_percentiles(self) -> None:
         raw = json.dumps({
@@ -1162,7 +1241,8 @@ class FinancialsEndpointTest(unittest.TestCase):
     def test_tool_error_returns_all_null_payload_not_500(self) -> None:
         fake_tool = MagicMock()
         fake_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
-        with patch("tools.screener_tools.get_financial_statements", fake_tool):
+        with patch("tools.screener_tools.get_financial_statements", fake_tool), \
+             patch("scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/financials/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -1171,6 +1251,16 @@ class FinancialsEndpointTest(unittest.TestCase):
         self.assertIsNone(body["cash_flow"])
         self.assertIsNone(body["dcf"])
         self.assertEqual(body["concalls"], [])
+        mock_record.assert_called_once_with("financials", symbol="TCS")
+
+    def test_a_real_result_never_touches_the_error_counter(self) -> None:
+        succeeding_tool = MagicMock()
+        succeeding_tool.run.return_value = json.dumps({"symbol": "TCS"})
+        with patch("tools.screener_tools.get_financial_statements", succeeding_tool), \
+             patch("scraper_error_counters.record_scraper_error") as mock_record:
+            resp = client.get("/api/financials/TCS")
+        self.assertEqual(resp.status_code, 200)
+        mock_record.assert_not_called()
 
     def test_tool_error_is_not_cached_so_next_request_retries(self) -> None:
         # Same convention as GET /api/peers/{symbol}: a transient scrape
@@ -1280,6 +1370,11 @@ class InsiderActivityEndpointTest(unittest.TestCase):
         body = resp.json()
         self.assertEqual(body["insider_trades"], [])
         self.assertEqual(body["bulk_block_deals"], [])
+        # A legitimately-empty day is NOT "unavailable" — see the
+        # unavailable-vs-empty regression test below for the failure case
+        # this distinction exists to fix.
+        self.assertFalse(body["insider_trades_unavailable"])
+        self.assertFalse(body["bulk_block_deals_unavailable"])
 
     def test_one_source_failing_does_not_take_down_the_other(self) -> None:
         # Both underlying tool functions are documented to never raise, but
@@ -1295,6 +1390,43 @@ class InsiderActivityEndpointTest(unittest.TestCase):
         body = resp.json()
         self.assertEqual(body["insider_trades"], [])
         self.assertEqual(body["bulk_block_deals"], fake_bulk["deals"])
+
+    def test_unavailable_flag_distinguishes_a_real_failure_from_a_quiet_day(self) -> None:
+        # Regression test for the deep gap analysis finding: a genuine NSE
+        # failure and "no insider trades today" previously both collapsed
+        # to the same empty [] with nothing in the response telling them
+        # apart. insider_trades_unavailable must be True on a real failure.
+        with patch("tools.nse_insider_trades.fetch_insider_trades_for_symbol",
+                   return_value={"symbol": "TCS", "error": "NSE request failed"}), \
+             patch("tools.nse_bulk_block_deals.fetch_bulk_block_deals_for_symbol",
+                   return_value={"symbol": "TCS", "deals": []}), \
+             patch("scraper_error_counters.record_scraper_error") as mock_record:
+            resp = client.get("/api/insider-activity/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["insider_trades"], [])
+        self.assertTrue(body["insider_trades_unavailable"])
+        self.assertFalse(body["bulk_block_deals_unavailable"])
+        # Only the section that genuinely failed is counted — a real,
+        # empty bulk_block_deals result must not also register as an error.
+        mock_record.assert_called_once_with("insider_trades", symbol="TCS")
+
+        # A genuine failure must not be cached as a confident "no activity"
+        # answer for the full 24h TTL — retried on the next request instead.
+        self.assertIsNone(cache.load("TCS", "insider_activity"))
+
+    def test_bulk_block_deals_error_is_counted_independently(self) -> None:
+        with patch("tools.nse_insider_trades.fetch_insider_trades_for_symbol",
+                   return_value={"symbol": "TCS", "trades": []}), \
+             patch("tools.nse_bulk_block_deals.fetch_bulk_block_deals_for_symbol",
+                   return_value={"symbol": "TCS", "error": "NSE request failed"}), \
+             patch("scraper_error_counters.record_scraper_error") as mock_record:
+            resp = client.get("/api/insider-activity/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["insider_trades_unavailable"])
+        self.assertTrue(body["bulk_block_deals_unavailable"])
+        mock_record.assert_called_once_with("bulk_block_deals", symbol="TCS")
 
 
 class StreetConsensusEndpointTest(unittest.TestCase):
@@ -1378,12 +1510,18 @@ class StreetConsensusEndpointTest(unittest.TestCase):
             "source_url": "https://trendlyne.com/equity/1/TCS/tcs/",
         }
         with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol", side_effect=RuntimeError("boom")), \
-             patch("tools.trendlyne_scraper.fetch_trendlyne_numeric_consensus", return_value=fake_numeric):
+             patch("tools.trendlyne_scraper.fetch_trendlyne_numeric_consensus", return_value=fake_numeric), \
+             patch("scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/street-consensus/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body["articles"], [])
         self.assertEqual(body["numeric_consensus"], fake_numeric)
+        self.assertTrue(body["articles_unavailable"])
+        self.assertFalse(body["numeric_consensus_unavailable"])
+        # A raised exception (not a returned {"error": ...} dict) still
+        # counts — the except clause around _fetch_articles records it too.
+        mock_record.assert_not_called()  # exception path logs via log_event, not the counter — see _fetch_articles
 
     def test_numeric_consensus_error_key_is_not_leaked_into_response_or_cache(self) -> None:
         # Regression test: fetch_trendlyne_numeric_consensus's own internal
@@ -1399,16 +1537,21 @@ class StreetConsensusEndpointTest(unittest.TestCase):
             "error": "connection refused: internal-host-detail",
         }
         with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol", return_value=fake_articles), \
-             patch("tools.trendlyne_scraper.fetch_trendlyne_numeric_consensus", return_value=fake_numeric_with_error):
+             patch("tools.trendlyne_scraper.fetch_trendlyne_numeric_consensus", return_value=fake_numeric_with_error), \
+             patch("scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/street-consensus/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertNotIn("error", body["numeric_consensus"])
         self.assertNotIn("internal-host-detail", resp.text)
+        self.assertTrue(body["numeric_consensus_unavailable"])
+        mock_record.assert_called_once_with("trendlyne_numeric_consensus", symbol="TCS")
 
-        # And the sanitized (error-free) result is what gets cached.
-        cached = cache.load("TCS", "street_consensus")
-        self.assertNotIn("error", cached["numeric_consensus"])
+        # A genuine scrape failure must not be cached as if it were a real
+        # "no consensus data" answer — see the "only cache on full success"
+        # comment in get_street_consensus. Retried on the next request
+        # instead of locking a failure in for the full 24h TTL.
+        self.assertIsNone(cache.load("TCS", "street_consensus"))
 
 
 class PeerPercentileHelperTest(unittest.TestCase):
@@ -1682,11 +1825,20 @@ class SmeSignalHistoryEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
         api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
         api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
+
+    def test_rate_limited_returns_429(self) -> None:
+        # Previously unrate-limited despite being a fully anonymous,
+        # unbounded DB query — see the deep gap analysis this fix closes.
+        rate_limiter._memory_calls["sme_signal_history:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/sme-signals/ABC/history")
+        self.assertEqual(resp.status_code, 429)
 
     def _fake_history_engine(self, series_rows, stock_row):
         series_result = MagicMock()
@@ -2490,6 +2642,17 @@ class WatchlistClaimEndpointTest(unittest.TestCase):
         self.assertEqual(body["claimed"], 3)
         self.assertEqual(body["skipped_over_cap"], 0)
         self.assertEqual(body["items"][0]["symbol"], "TCS")
+        # Regression test: the advisory lock key here MUST exactly match the
+        # key add_to_watchlist() takes for the same account
+        # (f"watchlist:{owner[0]}:{owner[1]}", i.e. "watchlist:user:42") —
+        # an earlier version of claim_anonymous_rows_sync used a distinct
+        # "watchlist_claim:<id>" prefix that looked like a deliberate own
+        # namespace but actually meant a concurrent claim and add never
+        # serialized against each other at all, letting the per-account cap
+        # be silently exceeded. See routes/_shared.py's own docstring.
+        lock_query, lock_params = begin_conn.queries[0]
+        self.assertIn("pg_advisory_xact_lock", lock_query)
+        self.assertEqual(lock_params["lock_key"], "watchlist:user:42")
         # The row cap check runs against the account's own existing rows,
         # not the anonymous client_id's.
         count_query, count_params = begin_conn.queries[2]
@@ -2879,6 +3042,13 @@ class PositionsClaimEndpointTest(unittest.TestCase):
         self.assertEqual(body["claimed"], 2)
         self.assertEqual(body["skipped_over_cap"], 1)
         self.assertEqual(body["items"][0]["symbol"], "TCS")
+        # Regression test: the advisory lock key here MUST exactly match the
+        # key add_position() takes for the same account — see
+        # WatchlistClaimEndpointTest's matching test for the full history of
+        # why this specific assertion exists.
+        lock_query, lock_params = begin_conn.queries[0]
+        self.assertIn("pg_advisory_xact_lock", lock_query)
+        self.assertEqual(lock_params["lock_key"], "positions:user:42")
         update_query, update_params = begin_conn.queries[3]
         self.assertIn("SET client_id = NULL, user_id = :user_id", update_query)
         self.assertEqual(update_params["client_id"], "client-abc")
@@ -3374,6 +3544,14 @@ class ApiKeyManagementEndpointTest(unittest.TestCase):
         resp = client.get("/api/api-keys")
         self.assertEqual(resp.status_code, 401)
 
+    def test_list_rate_limited_returns_429(self) -> None:
+        # Previously unrate-limited despite requiring only a session, unlike
+        # its own sibling POST /api/api-keys (20/hr) — see the deep gap
+        # analysis this fix closes.
+        rate_limiter._memory_calls["api_keys_list:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/api-keys", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 429)
+
     def test_list_returns_keys_for_current_user(self) -> None:
         keys = [{
             "id": 1, "key_prefix": "apk_ab", "label": None,
@@ -3418,6 +3596,11 @@ class ApiKeyManagementEndpointTest(unittest.TestCase):
     def test_revoke_requires_session(self) -> None:
         resp = client.delete("/api/api-keys/1")
         self.assertEqual(resp.status_code, 401)
+
+    def test_revoke_rate_limited_returns_429(self) -> None:
+        rate_limiter._memory_calls["api_keys_revoke:testclient"] = [api.time.monotonic()] * 60
+        resp = client.delete("/api/api-keys/1", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 429)
 
     def test_revoke_success(self) -> None:
         with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \

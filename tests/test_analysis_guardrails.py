@@ -275,6 +275,75 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(message, "Recommendation contradicts strong positive signals")
 
+    def test_validate_analysis_payload_rejects_buy_against_strong_negative_signals(self) -> None:
+        payload = dict(self._VALID_PAYLOAD, recommendation="BUY")
+
+        ok, message = crew._validate_analysis_payload(
+            payload, self.all_data, signal_context={"final_score": -0.8}
+        )
+        self.assertFalse(ok)
+        self.assertEqual(message, "Recommendation contradicts strong negative signals")
+
+    def test_validate_analysis_payload_rejects_buy_at_the_exact_sell_tier_boundary(self) -> None:
+        # Regression test for an adversarial-review finding: signals/engine.py's
+        # own SELL tier is score <= -0.6 (inclusive — the `else` branch after
+        # `score > -0.6` for AVOID), and final_score is rounded to 2 decimals,
+        # so an exact -0.6 is a real, reachable value, not just a theoretical
+        # edge. A strict `<` here let a BUY at exactly -0.6 slip through
+        # untouched — the one boundary case this check exists to catch.
+        payload = dict(self._VALID_PAYLOAD, recommendation="BUY")
+
+        ok, message = crew._validate_analysis_payload(
+            payload, self.all_data, signal_context={"final_score": -0.6}
+        )
+        self.assertFalse(ok)
+        self.assertEqual(message, "Recommendation contradicts strong negative signals")
+
+    def test_validate_analysis_payload_rejects_high_confidence_against_a_near_neutral_score(self) -> None:
+        # Regression test for the deep gap analysis finding: the two checks
+        # above only catch a *directional* contradiction (BUY/SELL vs. a
+        # strongly opposite score) — neither says anything about confidence
+        # *magnitude*. A "HIGH confidence" BUY/SELL against a score the
+        # quant engine itself found almost nothing directional in (well
+        # inside its own HOLD band) previously passed identical validation
+        # to a HIGH-confidence call backed by a strong score.
+        payload = dict(self._VALID_PAYLOAD, recommendation="BUY", confidence="HIGH")
+
+        ok, message = crew._validate_analysis_payload(
+            payload, self.all_data, signal_context={"final_score": 0.05}
+        )
+        self.assertFalse(ok)
+        self.assertIn("near-neutral quant signal score", message)
+
+    def test_validate_analysis_payload_allows_medium_confidence_against_a_near_neutral_score(self) -> None:
+        # The check is specifically about confidence == HIGH — MEDIUM/LOW
+        # calls against a marginal score are exactly what "not very
+        # confident" should look like, not a violation.
+        payload = dict(self._VALID_PAYLOAD, recommendation="BUY", confidence="MEDIUM")
+
+        ok, _ = crew._validate_analysis_payload(
+            payload, self.all_data, signal_context={"final_score": 0.05}
+        )
+        self.assertTrue(ok)
+
+    def test_validate_analysis_payload_allows_high_confidence_against_a_strong_score(self) -> None:
+        payload = dict(self._VALID_PAYLOAD, recommendation="BUY", confidence="HIGH")
+
+        ok, _ = crew._validate_analysis_payload(
+            payload, self.all_data, signal_context={"final_score": 0.7}
+        )
+        self.assertTrue(ok)
+
+    def test_validate_analysis_payload_allows_hold_against_strong_negative_signals(self) -> None:
+        # The guard is specifically BUY-vs-negative and SELL-vs-positive —
+        # HOLD is never rejected by either direction of this check.
+        payload = dict(self._VALID_PAYLOAD, recommendation="HOLD")
+
+        ok, _ = crew._validate_analysis_payload(
+            payload, self.all_data, signal_context={"final_score": -0.8}
+        )
+        self.assertTrue(ok)
+
     def test_run_analysis_passes_signal_context_to_guardrail(self) -> None:
         sell_payload = dict(self._VALID_PAYLOAD, recommendation="SELL")
         responses = [

@@ -159,8 +159,43 @@ def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: f
 _EXECUTOR_MAX_WORKERS = int(os.getenv("EXECUTOR_MAX_WORKERS", "16"))
 
 
+def _log_startup_config_warnings() -> None:
+    """A handful of misconfigurations previously degraded silently — no log
+    line, no crash, just a quietly-wrong runtime behavior discovered only
+    by noticing rate limits or LLM calls behave oddly (see the deep gap
+    analysis finding this closes). Logged once at process startup so an
+    operator has a fighting chance of catching them before a user does.
+    """
+    from crew import _configured_providers
+
+    providers = _configured_providers()
+    if not providers:
+        log_event(
+            LOGGER, "startup_no_llm_provider_configured", level="warning",
+            detail="No ANTHROPIC/OPENAI/GROQ/GOOGLE/OPENROUTER_API_KEY set — every "
+                   "analysis will silently fall through to the safe HOLD fallback.",
+        )
+
+    # TRUSTED_PROXY_SECRET has no handshake — it's a value this process and
+    # the Next.js frontend must agree on independently, so a mismatch or a
+    # forgotten-to-set value can't be *detected* here, only flagged as a
+    # plausible risk: if this deployment isn't just the default local dev
+    # origin, every per-IP rate limiter silently collapses onto
+    # request.client.host (the Next.js server's own IP) without the
+    # secret, i.e. one shared bucket for the entire site.
+    non_default_origin = _ALLOWED_ORIGINS != ["http://localhost:3000"]
+    if non_default_origin and not _TRUSTED_PROXY_SECRET:
+        log_event(
+            LOGGER, "startup_trusted_proxy_secret_unset", level="warning",
+            detail="ALLOWED_ORIGINS looks like a non-default deployment but "
+                   "TRUSTED_PROXY_SECRET is unset — every per-IP rate limiter will "
+                   "key off the Next.js proxy's own IP, not real visitor IPs.",
+        )
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    _log_startup_config_warnings()
     executor = ThreadPoolExecutor(max_workers=_EXECUTOR_MAX_WORKERS, thread_name_prefix="api-worker")
     asyncio.get_running_loop().set_default_executor(executor)
     try:
@@ -415,6 +450,15 @@ async def health():
 async def validate_symbol(symbol: str, request: Request, exchange: str = ""):
     _rate_limit(request, "validate", max_calls=30, window_seconds=60)
     sym = symbol.upper().strip()
+    # Deliberately not the strict _TICKER_RE every sibling endpoint applies
+    # — this one legitimately accepts more input shapes than a plain ticker
+    # (a 12-char ISIN, a numeric BSE scrip code, a hyphenated Screener slug
+    # like "TAPARIA-TOOLS"), so a character-class-restrictive regex here
+    # would reject real inputs. A generous length cap still closes the gap
+    # of having no bound at all before this value gets passed to
+    # yfinance/Screener/NSE lookups below.
+    if not sym or len(sym) > 40:
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
     loop = asyncio.get_running_loop()
 
     # ── ISIN PATH ─────────────────────────────────────────────
@@ -1443,18 +1487,31 @@ async def get_insider_activity(request: Request, symbol: str):
         import cache
 
         cached = cache.load(sym, "insider_activity")
-        return {k: v for k, v in cached.items() if k != "_meta"} if cached is not None else None
+        if cached is None:
+            return None
+        # A response cached before the *_unavailable flags existed won't
+        # have them at all — backfill False (a cached entry only exists
+        # because both sections succeeded, see the "only cache on full
+        # success" comment below) rather than leaving the keys absent.
+        return {
+            "insider_trades_unavailable": False, "bulk_block_deals_unavailable": False,
+            **{k: v for k, v in cached.items() if k != "_meta"},
+        }
 
     loop = asyncio.get_running_loop()
     cached = await loop.run_in_executor(None, _load_cached)
     if cached is not None:
         return cached
 
-    def _fetch_insider() -> list[dict]:
+    def _fetch_insider() -> tuple[list[dict], bool]:
         # Both underlying tool functions are documented to never raise, but
         # this endpoint doesn't lean on that alone — a future change to
         # either one shouldn't be able to take down the *other* section, the
-        # same per-section isolation _consolidated_payload uses.
+        # same per-section isolation _consolidated_payload uses. Returns
+        # (trades, unavailable) — `unavailable` distinguishes a real scrape
+        # failure from "no insider trades today" (the expected common case),
+        # both of which previously collapsed to the same empty list with no
+        # way for the UI to tell them apart.
         try:
             import scraper_error_counters
             from tools.nse_insider_trades import fetch_insider_trades_for_symbol
@@ -1464,17 +1521,15 @@ async def get_insider_activity(request: Request, symbol: str):
                 # These tool functions never raise (see "tools never raise"
                 # convention) — a scrape failure comes back as this "error"
                 # key, not an exception, so the except clause below alone
-                # would never catch it. Without this check, a real NSE
-                # failure and "no insider trades today" (the expected common
-                # case) both silently collapse to the same [].
+                # would never catch it.
                 scraper_error_counters.record_scraper_error("insider_trades", symbol=sym)
-                return []
-            return raw.get("trades", [])
+                return [], True
+            return raw.get("trades", []), False
         except Exception as exc:
             log_event(LOGGER, "insider_trades_fetch_failed", level="warning", symbol=sym, error=str(exc))
-            return []
+            return [], True
 
-    def _fetch_bulk_block() -> list[dict]:
+    def _fetch_bulk_block() -> tuple[list[dict], bool]:
         try:
             import scraper_error_counters
             from tools.nse_bulk_block_deals import fetch_bulk_block_deals_for_symbol
@@ -1482,26 +1537,35 @@ async def get_insider_activity(request: Request, symbol: str):
             raw = fetch_bulk_block_deals_for_symbol(sym)
             if raw.get("error"):
                 scraper_error_counters.record_scraper_error("bulk_block_deals", symbol=sym)
-                return []
-            return raw.get("deals", [])
+                return [], True
+            return raw.get("deals", []), False
         except Exception as exc:
             log_event(LOGGER, "bulk_block_deals_fetch_failed", level="warning", symbol=sym, error=str(exc))
-            return []
+            return [], True
 
     # Two independent NSE endpoints — fetch concurrently rather than one
     # after the other, same spirit as _consolidated_payload's parallel lookups.
-    insider_trades, bulk_block_deals = await asyncio.gather(
+    (insider_trades, insider_unavailable), (bulk_block_deals, bulk_unavailable) = await asyncio.gather(
         loop.run_in_executor(None, _fetch_insider),
         loop.run_in_executor(None, _fetch_bulk_block),
     )
-    result = {"symbol": sym, "insider_trades": insider_trades, "bulk_block_deals": bulk_block_deals}
+    result = {
+        "symbol": sym, "insider_trades": insider_trades, "bulk_block_deals": bulk_block_deals,
+        "insider_trades_unavailable": insider_unavailable,
+        "bulk_block_deals_unavailable": bulk_unavailable,
+    }
 
-    def _save_cache() -> None:
-        import cache
+    # Only cache a result where both sections genuinely succeeded — caching
+    # a fetch failure as "no activity" would lock a real NSE outage in as a
+    # confident-looking empty answer for the full 24h TTL, same "don't cache
+    # a failure" convention GET /api/peers/{symbol} already follows.
+    if not insider_unavailable and not bulk_unavailable:
+        def _save_cache() -> None:
+            import cache
 
-        cache.save(sym, "insider_activity", result)
+            cache.save(sym, "insider_activity", result)
 
-    await loop.run_in_executor(None, _save_cache)
+        await loop.run_in_executor(None, _save_cache)
     return result
 
 
@@ -1537,19 +1601,30 @@ async def get_street_consensus(request: Request, symbol: str):
         import cache
 
         cached = cache.load(sym, "street_consensus")
-        return {k: v for k, v in cached.items() if k != "_meta"} if cached is not None else None
+        if cached is None:
+            return None
+        # Backfill for entries cached before the *_unavailable flags
+        # existed — a cached entry only exists because both sections
+        # succeeded (see the "only cache on full success" comment below).
+        return {
+            "articles_unavailable": False, "numeric_consensus_unavailable": False,
+            **{k: v for k, v in cached.items() if k != "_meta"},
+        }
 
     loop = asyncio.get_running_loop()
     cached = await loop.run_in_executor(None, _load_cached)
     if cached is not None:
         return cached
 
-    def _fetch_articles() -> list[dict]:
+    def _fetch_articles() -> tuple[list[dict], bool]:
         # Isolated in its own try/except, symmetric with _fetch_numeric
         # below — an articles-fetch failure must not take down a
         # successful numeric_consensus result via asyncio.gather's
         # first-exception-wins behavior, same per-section isolation as
-        # insider_activity's two independent sub-fetches.
+        # insider_activity's two independent sub-fetches. Returns
+        # (articles, unavailable) so the UI can distinguish a real scrape
+        # failure from "no Trendlyne-cited coverage today" (the expected
+        # common case) — both previously collapsed to the same [].
         try:
             import scraper_error_counters
             from tools.trendlyne_agent import fetch_trendlyne_consensus_for_symbol
@@ -1557,13 +1632,13 @@ async def get_street_consensus(request: Request, symbol: str):
             raw = fetch_trendlyne_consensus_for_symbol(sym)
             if raw.get("error"):
                 scraper_error_counters.record_scraper_error("trendlyne_articles", symbol=sym)
-                return []
-            return raw.get("articles", [])
+                return [], True
+            return raw.get("articles", []), False
         except Exception as exc:
             log_event(LOGGER, "trendlyne_articles_fetch_failed", level="warning", symbol=sym, error=str(exc))
-            return []
+            return [], True
 
-    def _fetch_numeric() -> dict | None:
+    def _fetch_numeric() -> tuple[dict | None, bool]:
         # Isolated in its own try/except like insider_activity's two
         # sub-fetches — a numeric-scrape failure must not take down the
         # article list, and fetch_trendlyne_numeric_consensus is documented
@@ -1581,26 +1656,35 @@ async def get_street_consensus(request: Request, symbol: str):
             # same "sanitized, no raw exception text" convention as every
             # other endpoint that surfaces a failure state (e.g. the
             # Watchlist flow's DB-unreachable 503 handling).
-            if result.get("error"):
+            had_error = bool(result.get("error"))
+            if had_error:
                 scraper_error_counters.record_scraper_error("trendlyne_numeric_consensus", symbol=sym)
             result.pop("error", None)
-            return result
+            return result, had_error
         except Exception as exc:
             log_event(LOGGER, "trendlyne_numeric_consensus_fetch_failed", level="warning", symbol=sym, error=str(exc))
-            return None
+            return None, True
 
-    articles, numeric_consensus = await asyncio.gather(
+    (articles, articles_unavailable), (numeric_consensus, numeric_unavailable) = await asyncio.gather(
         loop.run_in_executor(None, _fetch_articles),
         loop.run_in_executor(None, _fetch_numeric),
     )
-    result = {"symbol": sym, "articles": articles, "numeric_consensus": numeric_consensus}
+    result = {
+        "symbol": sym, "articles": articles, "numeric_consensus": numeric_consensus,
+        "articles_unavailable": articles_unavailable,
+        "numeric_consensus_unavailable": numeric_unavailable,
+    }
 
-    def _save_cache() -> None:
-        import cache
+    # Only cache on full success — see the matching comment in
+    # get_insider_activity() for why a scrape failure must not get locked
+    # in as a confident-looking empty answer for the full 24h TTL.
+    if not articles_unavailable and not numeric_unavailable:
+        def _save_cache() -> None:
+            import cache
 
-        cache.save(sym, "street_consensus", result)
+            cache.save(sym, "street_consensus", result)
 
-    await loop.run_in_executor(None, _save_cache)
+        await loop.run_in_executor(None, _save_cache)
     return result
 
 
@@ -1882,7 +1966,7 @@ def _compute_cross_events(series: list[dict]) -> list[dict]:
 
 
 @app.get("/api/sme-signals/{symbol}/history")
-async def get_sme_signal_history(symbol: str):
+async def get_sme_signal_history(request: Request, symbol: str):
     """Return the stored EMA20/EMA50/close series for one SME stock, for charting
     around a golden/death cross. Up to ~63 trading days (sme_ema_pipeline._STORE_DAYS).
     Also returns cross_events: every cross in that window with its forward
@@ -1891,6 +1975,10 @@ async def get_sme_signal_history(symbol: str):
     """
     import os
 
+    # Same 60/min budget as the sibling /api/sme-signals list endpoint —
+    # this one was previously unrated-limited despite being a fully
+    # anonymous, unbounded DB query, unlike every other DB-backed GET here.
+    _rate_limit(request, "sme_signal_history", max_calls=60, window_seconds=60)
     sym = symbol.upper().strip()
     if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the SME pipeline first.")
@@ -2420,6 +2508,7 @@ async def list_api_keys(request: Request):
     user managing their keys is exactly who wants to see this. `usage.calls`
     is a non-mutating peek (rate_limiter.get_usage_count) — checking it never
     itself counts as a call against the limit it's reporting on."""
+    _rate_limit(request, "api_keys_list", max_calls=60, window_seconds=60)
     user = await _require_session_user(request)
 
     import auth as _auth
@@ -2445,6 +2534,7 @@ async def list_api_keys(request: Request):
 
 @app.delete("/api/api-keys/{key_id}")
 async def revoke_api_key(request: Request, key_id: int):
+    _rate_limit(request, "api_keys_revoke", max_calls=60, window_seconds=60)
     user = await _require_session_user(request)
 
     import auth as _auth

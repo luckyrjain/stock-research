@@ -51,6 +51,25 @@ test.describe('Compare page', () => {
     await page.getByLabel('Tickers to compare, comma-separated').fill('tcs, infy, reliance');
     await page.getByRole('button', { name: 'Compare' }).click();
 
+    // The URL carries the full typed list (RELIANCE included) so the
+    // truncation message below can detect the drop — only the rendered
+    // columns/fetches are capped at two, via parseSymbols().
+    await expect(page).toHaveURL('/compare?symbols=TCS%2CINFY%2CRELIANCE');
+    await expect(page.getByRole('link', { name: 'TCS' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'INFY' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'RELIANCE' })).toHaveCount(0);
+    // Regression test for the deep gap analysis finding: pasting 3 tickers
+    // previously silently dropped the third with zero indication anything
+    // was cut off.
+    await expect(page.getByText('Only the first 2 tickers are compared — 1 more was dropped.')).toBeVisible();
+  });
+
+  test('shows no truncation message when exactly two symbols are given', async ({ page }) => {
+    await page.goto('/compare');
+    await page.getByLabel('Tickers to compare, comma-separated').fill('tcs, infy');
+    await page.getByRole('button', { name: 'Compare' }).click();
+
     await expect(page).toHaveURL('/compare?symbols=TCS%2CINFY');
+    await expect(page.getByText(/tickers are compared/)).toHaveCount(0);
   });
 });

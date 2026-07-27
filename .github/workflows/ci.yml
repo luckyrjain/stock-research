@@ -14,6 +14,23 @@ jobs:
   backend:
     name: Backend (pytest)
     runs-on: ubuntu-latest
+    services:
+      # Only used by the dedicated Alembic step below — the main `pytest
+      # tests/` step runs exactly as before, with DATABASE_URL unset, same
+      # as any contributor's local run without Postgres configured.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: stockresearch
+          POSTGRES_PASSWORD: stockresearch
+          POSTGRES_DB: stockresearch_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -27,6 +44,14 @@ jobs:
 
       - name: Run tests
         run: python -m pytest tests/ -v
+
+      - name: Verify Alembic migrations against a real Postgres
+        # DATABASE_URL scoped to this one step only — see
+        # tests/test_alembic_migrations.py's own docstring for why it isn't
+        # set for the main `pytest tests/` step above.
+        env:
+          DATABASE_URL: postgresql://stockresearch:stockresearch@localhost:5432/stockresearch_ci
+        run: python -m pytest tests/test_alembic_migrations.py -v
 
   frontend:
     name: Frontend (tsc + build)

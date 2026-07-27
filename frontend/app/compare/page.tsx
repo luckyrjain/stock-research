@@ -12,7 +12,13 @@ import type { Report } from '@/types';
 
 const MAX_SYMBOLS = 2;
 
-function parseSymbols(raw: string): string[] {
+// No MAX_SYMBOLS cap — the raw, deduped ticker list a user typed/pasted or
+// put in a shared link. parseSymbols() below is the capped view every
+// other call site actually uses; this one exists only so the URL can carry
+// the user's full input and the page can tell whether parseSymbols()
+// dropped something, instead of the capped URL silently discarding it at
+// the point of submission and leaving no way to detect the drop later.
+function parseAllSymbols(raw: string): string[] {
   const seen = new Set<string>();
   const symbols: string[] = [];
   for (const part of raw.split(',')) {
@@ -21,9 +27,12 @@ function parseSymbols(raw: string): string[] {
       seen.add(sym);
       symbols.push(sym);
     }
-    if (symbols.length === MAX_SYMBOLS) break;
   }
   return symbols;
+}
+
+function parseSymbols(raw: string): string[] {
+  return parseAllSymbols(raw).slice(0, MAX_SYMBOLS);
 }
 
 function CompareColumn({ symbol, onReport }: { symbol: string; onReport: (symbol: string, report: Report | null) => void }) {
@@ -88,6 +97,13 @@ function ComparePageInner() {
 
   const [inputValue, setInputValue] = useState(urlSymbols.join(', '));
   const [reports, setReports] = useState<Record<string, Report | null>>({});
+  // Derived from the URL's full raw symbol list (not form-submit-only
+  // state) so this also covers a direct/shared link with more than
+  // MAX_SYMBOLS tickers in it, not just typing them into the form on this
+  // page. Requires handleSubmit below to push the *un*-capped list into
+  // the URL — otherwise the cap would already have discarded the extra
+  // ticker before this could ever see it.
+  const truncatedCount = Math.max(0, parseAllSymbols(searchParams.get('symbols') ?? '').length - urlSymbols.length);
 
   useEffect(() => {
     setInputValue(urlSymbols.join(', '));
@@ -105,7 +121,10 @@ function ComparePageInner() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const symbols = parseSymbols(inputValue);
+    // Pushes the full (uncapped) list — urlSymbols above still applies
+    // MAX_SYMBOLS via parseSymbols() for actual rendering/fetching, but the
+    // URL needs the un-truncated list so truncatedCount can detect a drop.
+    const symbols = parseAllSymbols(inputValue);
     router.push(symbols.length ? `/compare?symbols=${encodeURIComponent(symbols.join(','))}` : '/compare');
   };
 
@@ -123,7 +142,7 @@ function ComparePageInner() {
           </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="flex items-center gap-2 mb-8 max-w-md">
+        <form onSubmit={handleSubmit} className="flex items-center gap-2 mb-2 max-w-md">
           <input
             value={inputValue}
             onChange={e => setInputValue(e.target.value)}
@@ -144,6 +163,12 @@ function ComparePageInner() {
             Compare
           </button>
         </form>
+
+        {truncatedCount > 0 && (
+          <p className="text-xs text-hold mb-6">
+            Only the first {MAX_SYMBOLS} tickers are compared — {truncatedCount} more {truncatedCount === 1 ? 'was' : 'were'} dropped.
+          </p>
+        )}
 
         {urlSymbols.length === 0 ? (
           <div className="rounded-xl border border-border bg-card px-6 py-16 text-center">

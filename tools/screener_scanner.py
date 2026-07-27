@@ -70,7 +70,20 @@ def _parse_screen_html(html: str, criterion_label: str) -> list[dict]:
 
             link = name_cell.find("a")
             href = (link.get("href") or "") if link else ""
-            url  = f"https://www.screener.in{href}" if href.startswith("/") else (href or "https://www.screener.in")
+            # A relative href is reconstructed against the known screener.in
+            # domain, same "don't trust an arbitrary href" instinct as
+            # tools/trendlyne_scraper.py's _is_trendlyne_host — these URLs
+            # are only ever returned as article links (rendered client-side,
+            # never fetched server-side by this module), but there's no
+            # reason to accept an absolute off-domain href here either, for
+            # the same "closed set, not raw scraped text" convention this
+            # codebase applies to every other scraped URL.
+            if href.startswith("/"):
+                url = f"https://www.screener.in{href}"
+            elif href.startswith("https://www.screener.in/") or href.startswith("http://www.screener.in/"):
+                url = href
+            else:
+                url = "https://www.screener.in"
 
             metrics = [
                 f"{headers[i]}: {cells[i].get_text(strip=True)}"

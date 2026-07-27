@@ -91,7 +91,9 @@ function NumericConsensusRow({ numeric }: { numeric: NonNullable<StreetConsensus
 export function StreetConsensusCard({ consensus }: { consensus: StreetConsensus | null }) {
   const numeric = consensus?.numeric_consensus;
   const hasNumeric = numeric != null && (numeric.analyst_count != null || numeric.consensus_rating != null || numeric.mean_target_price != null || numeric.target_upside_pct != null);
-  if (!consensus || (consensus.articles.length === 0 && !hasNumeric)) return null;
+  const articlesUnavailable = consensus?.articles_unavailable ?? false;
+  const numericUnavailable = consensus?.numeric_consensus_unavailable ?? false;
+  if (!consensus || (consensus.articles.length === 0 && !hasNumeric && !articlesUnavailable && !numericUnavailable)) return null;
 
   return (
     <Card title={<>
@@ -101,6 +103,12 @@ export function StreetConsensusCard({ consensus }: { consensus: StreetConsensus 
         <p>Every field is independently blank when Trendlyne doesn&apos;t cleanly present it — AlphaPulse never invents a benchmark it doesn&apos;t actually have.</p>
       </InfoTooltip>
     </>}>
+      {!hasNumeric && numericUnavailable && (
+        <p className="text-xs text-muted italic mb-2">Numeric consensus temporarily unavailable — Trendlyne fetch failed, try again shortly.</p>
+      )}
+      {consensus.articles.length === 0 && articlesUnavailable && (
+        <p className="text-xs text-muted italic mb-2">Recent coverage temporarily unavailable — fetch failed, try again shortly.</p>
+      )}
       {hasNumeric && numeric && <NumericConsensusRow numeric={numeric} />}
       <div className="space-y-2.5">
         {consensus.articles.slice(0, 6).map((a, i) => {

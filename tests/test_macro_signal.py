@@ -1,6 +1,7 @@
 import shutil
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -89,6 +90,43 @@ class MacroSignalTest(unittest.TestCase):
         calls = {c.args[0]: c.args[1] for c in mock_record.call_args_list}
         self.assertEqual(calls, {"fii_dii_flow": True, "macro_context": True})
         self.assertEqual(mock_record.call_count, 2)  # one per source, not one per macro_signal() call
+
+    def test_stale_flow_date_is_excluded_from_scoring(self) -> None:
+        # Regression test for the deep gap analysis finding: cache.py's own
+        # freshness check only knows when the HTTP call succeeded, not
+        # whether NSE's response actually carried a current-session row —
+        # a stale (e.g. pre-long-weekend) flow figure must not be blended
+        # into the score as if it were today's.
+        stale_date = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%d-%b-%Y")
+        sig = self._run({"date": stale_date, "fii_net_cr": 5000.0, "dii_net_cr": 5000.0}, {})
+        self.assertEqual(sig.value, "UNKNOWN")
+        self.assertEqual(sig.score, 0)
+        self.assertIn("flow_status", sig.meta)
+        self.assertEqual(sig.meta["flow_date"], stale_date)
+
+    def test_fresh_flow_date_scores_normally(self) -> None:
+        fresh_date = datetime.now(timezone.utc).strftime("%d-%b-%Y")
+        sig = self._run({"date": fresh_date, "fii_net_cr": 4000.0}, {})
+        self.assertEqual(sig.value, "SUPPORTIVE")
+        self.assertNotIn("flow_status", sig.meta)
+
+    def test_stale_flow_still_lets_macro_context_score_on_its_own(self) -> None:
+        stale_date = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%d-%b-%Y")
+        sig = self._run(
+            {"date": stale_date, "fii_net_cr": 5000.0},
+            {"cpi_inflation_pct": 7.5},
+        )
+        self.assertLess(sig.score, 0)
+        self.assertIn("flow_status", sig.meta)
+        self.assertNotIn("net_institutional_flow_cr", sig.meta)
+
+    def test_unparseable_flow_date_does_not_trigger_staleness_check(self) -> None:
+        # Never guessed further than the known NSE date formats — an
+        # unrecognized string fails open (uses the data as before) rather
+        # than being treated as "definitely stale".
+        sig = self._run({"date": "not-a-real-date", "fii_net_cr": 4000.0}, {})
+        self.assertEqual(sig.value, "SUPPORTIVE")
+        self.assertNotIn("flow_status", sig.meta)
 
     def test_health_reports_not_ok_when_fetch_returns_no_usable_fields(self) -> None:
         with patch("signals.macro.get_fii_dii_flow", return_value={"error": "boom"}), \

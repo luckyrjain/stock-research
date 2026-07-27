@@ -143,6 +143,19 @@ def run_signal_engine(symbol: str, all_data: dict) -> SignalResult:
 
     weights = _weights_for_sector(features.get("sector"))
 
+    # Disclosed limitation: an UNKNOWN signal (score 0 — e.g. technical for
+    # a recent IPO with too little price history, or macro when both its
+    # fetches failed) still keeps its full weight in this sum, contributing
+    # a neutral 0 rather than being excluded and having the remaining
+    # signals' weights renormalized. For a stock with more than one
+    # UNKNOWN signal, this shrinks the achievable score range below what
+    # the fixed, sector-independent BUY/SELL thresholds below assume,
+    # systematically biasing such stocks toward HOLD regardless of how
+    # strong its other signals (e.g. valuation/growth) actually are. Not
+    # fixed here — reweighting on the fly would need its own calibration
+    # pass (same "not a back-tested calibration" caveat the sector-weight
+    # tilt above already carries), so this is flagged as a known gap
+    # rather than silently accepted.
     score = 0
     for name, weight in weights.items():
         sig = signals.get(name)

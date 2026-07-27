@@ -32,7 +32,21 @@ def _get_engine():
 
 def save_snapshot(symbol: str, analysis: dict, signal_context: dict | None, stock_info: dict) -> None:
     """Upsert today's verdict row for `symbol`. No-ops if DATABASE_URL isn't
-    set or `analysis` has no recommendation (e.g. an empty/degraded payload)."""
+    set or `analysis` has no recommendation (e.g. an empty/degraded payload).
+
+    Disclosed limitation: this is a plain `ON CONFLICT (symbol, verdict_date)
+    DO UPDATE` — last write wins, with no session/request correlation. Two
+    concurrent analyses of the same symbol on the same day (an ordinary
+    visitor and watchlist_alerts.py --force racing each other, or two
+    browser tabs) can legitimately produce two different LLM outputs;
+    whichever commits last silently overwrites the other. VerdictTimeline
+    then shows a "history" that may not match what an earlier visitor saw
+    in their own session that same day. Not fixed here — a real fix would
+    need per-request/session-scoped storage (or optimistic concurrency with
+    a client-visible conflict signal), which is more infrastructure than a
+    once-daily-digest timeline currently needs; flagged as a known gap
+    rather than silently accepted, same "disclosed, not silently accepted"
+    instinct as this codebase's other documented residual risks."""
     if not os.environ.get("DATABASE_URL"):
         return
     recommendation = analysis.get("recommendation")

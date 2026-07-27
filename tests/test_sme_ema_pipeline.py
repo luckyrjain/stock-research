@@ -27,6 +27,34 @@ def _fake_yf_history(**cols) -> pd.DataFrame:
     return pd.DataFrame(cols, index=idx)
 
 
+class SetupDbStampsAlembicHeadTest(unittest.TestCase):
+    """--setup-db bypasses Alembic entirely (metadata.create_all directly) —
+    without stamping head afterward, a fresh database ends up with every
+    table but no alembic_version row, so a subsequent `alembic upgrade
+    head` fails because the tables it wants to CREATE already exist. See
+    db.models.stamp_alembic_head's own docstring and the deep gap analysis
+    finding this closes."""
+
+    def test_setup_db_calls_create_all_then_stamps_head(self) -> None:
+        engine = MagicMock()
+        with patch("sme_ema_pipeline.metadata") as mock_metadata, \
+             patch("db.models.stamp_alembic_head") as mock_stamp:
+            sme_ema_pipeline.setup_db(engine)
+        mock_metadata.create_all.assert_called_once_with(engine)
+        mock_stamp.assert_called_once_with()
+
+    def test_reset_db_also_stamps_head_after_recreating_tables(self) -> None:
+        with patch("sme_ema_pipeline.get_engine", return_value=MagicMock()), \
+             patch("sme_ema_pipeline.metadata") as mock_metadata, \
+             patch("db.models.stamp_alembic_head") as mock_stamp, \
+             patch("sys.argv", ["sme_ema_pipeline.py", "--reset-db"]), \
+             patch("sme_ema_pipeline.init_error_tracking"):
+            sme_ema_pipeline.main()
+        mock_metadata.drop_all.assert_called_once()
+        mock_metadata.create_all.assert_called_once()
+        mock_stamp.assert_called_once_with()
+
+
 class FetchOhlcvTest(unittest.TestCase):
     """EMA/cross detection must keep working even if yfinance ever omits
     Volume for some ticker — only the liquidity figure should be lost, not

@@ -3,6 +3,8 @@
 // insider-activity-card.tsx's fmtActivityDate, street-consensus-card.tsx's
 // fmtConsensusDate).
 
+import type { DataFreshness } from '@/types';
+
 export function fmt(n: number | null | undefined, decimals = 2) {
   if (n == null) return '—';
   return n.toLocaleString('en-IN', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
@@ -43,6 +45,49 @@ export function formatAge(dateStr: string): string {
   if (dateStr === today)     return 'Updated today';
   if (dateStr === yesterday) return 'Updated yesterday';
   return `Updated ${new Date(dateStr).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`;
+}
+
+// Human-friendly "how long ago" for a real fetch timestamp (data_freshness),
+// distinct from formatAge() above — that one describes report.generated_at
+// (when the report was assembled, stamped fresh on every call regardless of
+// whether anything was actually refetched); this describes when a specific
+// task's underlying data was actually last fetched, which can lag well
+// behind "today" for a long-TTL task (shareholding/mf_holdings, 168h).
+export function formatDataAge(iso: string | null): string {
+  if (!iso) return 'unknown';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return 'unknown';
+  const hours = ms / 3_600_000;
+  if (hours < 1) return 'just now';
+  if (hours < 24) return `${Math.round(hours)}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+export const DATA_FRESHNESS_LABELS: Record<string, string> = {
+  stock_info: 'Price',
+  research: 'Fundamentals',
+  news: 'News',
+  shareholding: 'Shareholding',
+  mf_holdings: 'MF Holdings',
+  filings: 'Filings',
+};
+
+// The oldest of the six tasks' own fetch timestamps — the true bottleneck
+// on "how fresh is everything shown on this page", since a report can be
+// "generated" (assembled) today while its stalest constituent (typically
+// shareholding/mf_holdings, 168h TTL) is up to a week old.
+export function oldestDataFreshness(
+  freshness: DataFreshness | undefined,
+): { task: string; iso: string } | null {
+  if (!freshness) return null;
+  let oldest: { task: string; iso: string; ts: number } | null = null;
+  for (const [task, iso] of Object.entries(freshness)) {
+    if (!iso) continue;
+    const ts = new Date(iso).getTime();
+    if (!Number.isFinite(ts)) continue;
+    if (!oldest || ts < oldest.ts) oldest = { task, iso, ts };
+  }
+  return oldest ? { task: oldest.task, iso: oldest.iso } : null;
 }
 
 // Humanizes a SignalItem.meta key ("fii_dii_flow_cr" -> "Fii Dii Flow Cr") for

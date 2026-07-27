@@ -15,6 +15,12 @@ type SortDir = 'asc' | 'desc';
 
 const _RSI_OVERSOLD = 30;
 const _RSI_OVERBOUGHT = 70;
+// GET /api/screener already supports offset/limit + returns a real `total`
+// count, but this page previously hardcoded limit=200 and never read
+// `total` or offered a way to see past it — a broad, unfiltered sort over
+// the full NIFTY 500 universe (>200 stocks) silently showed only the
+// top-200 slice with no indication anything was cut off.
+const _PAGE_SIZE = 200;
 
 // Filters reset to defaults on every reload otherwise — a screen this
 // configurable (7 independent filter/sort dimensions) is worth remembering
@@ -148,11 +154,16 @@ export default function ScreenerPage() {
     return () => clearTimeout(t);
   }, [marketCapMin]);
 
-  const fetchStocks = useCallback(async (silent = false) => {
+  const [offset, setOffset] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  const fetchStocks = useCallback(async (opts: { silent?: boolean; targetOffset?: number; append?: boolean } = {}) => {
+    const { silent = false, targetOffset = 0, append = false } = opts;
     abortRef.current?.abort();
     const ac = new AbortController();
     abortRef.current = ac;
-    if (!silent) setLoading(true);
+    if (!silent && !append) setLoading(true);
+    if (append) setLoadingMore(true);
     setError(null);
     try {
       const params = new URLSearchParams({
@@ -160,7 +171,8 @@ export default function ScreenerPage() {
         ema_trend: emaTrend,
         sort: sortKey,
         order: sortDir,
-        limit: '200',
+        limit: String(_PAGE_SIZE),
+        offset: String(targetOffset),
       });
       if (rsiFilter === 'oversold') params.set('rsi_max', String(_RSI_OVERSOLD));
       if (rsiFilter === 'overbought') params.set('rsi_min', String(_RSI_OVERBOUGHT));
@@ -171,23 +183,35 @@ export default function ScreenerPage() {
       const json = await res.json() as ScreenerResponse & { error?: string };
       if (!res.ok) {
         setError(json.error ?? `Error ${res.status}`);
-        setData(null);
+        if (!append) setData(null);
+      } else if (append) {
+        // Appends the next page onto the already-loaded rows rather than
+        // replacing them — a filter/sort change always goes through the
+        // non-append path below instead, which resets to a clean offset-0 fetch.
+        setData(prev => (prev ? { ...json, stocks: [...prev.stocks, ...json.stocks] } : json));
       } else {
         setData(json);
       }
     } catch (e) {
       if ((e as Error).name === 'AbortError') return;
       setError('Could not reach the backend. Is the server running?');
-      setData(null);
+      if (!append) setData(null);
     } finally {
-      if (abortRef.current === ac) setLoading(false);
+      if (abortRef.current === ac) { setLoading(false); setLoadingMore(false); }
     }
   }, [industry, emaTrend, rsiFilter, debouncedPeMax, debouncedMarketCapMin, sortKey, sortDir]);
 
   useEffect(() => {
     if (!hydrated) return;
-    fetchStocks();
+    setOffset(0);
+    fetchStocks({ targetOffset: 0 });
   }, [fetchStocks, hydrated]);
+
+  const loadMore = useCallback(() => {
+    const next = offset + _PAGE_SIZE;
+    setOffset(next);
+    fetchStocks({ targetOffset: next, append: true });
+  }, [offset, fetchStocks]);
 
   useEffect(() => {
     if (data) setRefreshing(data.refreshing);
@@ -195,7 +219,10 @@ export default function ScreenerPage() {
 
   useEffect(() => {
     if (!refreshing) return;
-    const t = setInterval(() => fetchStocks(true), 10000);
+    // Resets back to the first page — the underlying data is changing
+    // server-side while a refresh runs, so preserving a deep "loaded more"
+    // offset across polls would just misalign with what's now on the server.
+    const t = setInterval(() => { setOffset(0); fetchStocks({ silent: true, targetOffset: 0 }); }, 10000);
     return () => clearInterval(t);
   }, [refreshing, fetchStocks]);
 
@@ -255,7 +282,7 @@ export default function ScreenerPage() {
               {refreshing ? 'Refreshing data…' : '⟳ Refresh Data'}
             </button>
             <button
-              onClick={() => fetchStocks()}
+              onClick={() => { setOffset(0); fetchStocks({ targetOffset: 0 }); }}
               disabled={loading}
               className="text-xs text-muted hover:text-tx transition-colors disabled:opacity-40"
             >
@@ -389,6 +416,24 @@ export default function ScreenerPage() {
             </table>
           </div>
         </div>
+
+        {!loading && !error && data && (
+          <div className="flex flex-col items-center gap-2 mt-4">
+            <p className="text-xs text-muted">
+              Showing {stocks.length} of {data.total} matching stock{data.total === 1 ? '' : 's'}
+            </p>
+            {stocks.length < data.total && (
+              <button
+                onClick={loadMore}
+                disabled={loadingMore}
+                className="px-4 py-1.5 rounded-lg text-xs font-semibold border border-border text-tx
+                           hover:bg-surface/60 transition-colors disabled:opacity-40"
+              >
+                {loadingMore ? 'Loading…' : `Load ${Math.min(_PAGE_SIZE, data.total - stocks.length)} more`}
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </main>
   );

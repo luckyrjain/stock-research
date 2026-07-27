@@ -191,6 +191,18 @@ These tool functions are decorated with `@tool` from `crewai.tools` purely for a
 | `_phase_analyze` | Batched LLM calls (8 stocks/batch, parallel) for qualitative summary + bull/bear factors. Does NOT ask the LLM for prices. |
 | `_phase_score` | Deterministic confidence scoring (`_compute_confidence`: 50% signal engine + 30% consensus + 20% recency, 0–100, plus a small ±3-point valuation nudge layered on top — see below). The 4-tier rec (BUY / WATCHLIST / HOLD / SELL) is a *separate* formula on top — `combined_dir = 0.55 × consensus + 0.45 × signal_score`, thresholded, with a quant-veto that demotes BUY → WATCHLIST on a strongly negative signal score. Entry/target/stop-loss computed from price and signal score — no LLM. Sector-balanced (`_apply_sector_balance()`): max 2 stocks per sector promoted to the primary list, excess deferred to the end — `sector` stays on every pick in the response (real, filterable data, not popped like the old internal-only `_sector`). Saves a daily snapshot to `output/_history/` for trend tracking. |
 
+**Deliberately not decomposed in this pass**: at ~1,600 lines, `market_picks_pipeline.py` is the
+single largest Python module in this repo, and `_phase_extract`/`_phase_consolidate` are each
+150-200+ lines mixing scraping, LLM calls, fuzzy matching, and validation — the same
+maintainability gap the `routes/` split (below) and the `results-dashboard.tsx` component
+extraction (further below) already closed for their own respective files. Flagged directly by a
+deep gap analysis but not attempted here: unlike those two prior extractions (each a mechanical,
+behavior-preserving reorganization with an existing test suite to lean on), this pipeline's six
+phases share mutable state and threading/async coordination that make a safe split materially
+riskier to get right without a much larger, dedicated verification pass — the same
+"disclosed, not silently dropped" instinct as `routes/` split's own "future work" note just below,
+not a claim this doesn't need doing.
+
 ### LLM cost instrumentation + cross-provider failover
 
 Two related gaps a CTO/investor-lens review flagged directly: "no per-analysis LLM cost
@@ -424,6 +436,18 @@ Provider is auto-detected from whichever key is present (checked in the order ab
 |---|---|---|
 | `API_URL` | `http://localhost:8000` | FastAPI backend URL (set in Next.js env) |
 | `TRUSTED_PROXY_SECRET` | unset | Same value as the backend's env var of the same name — see "Trusted client IP for per-IP rate limiting" below. Server-only (never exposed to the browser) |
+
+**No central config module.** Roughly 20 backend env vars are read via scattered `os.getenv`/
+`os.environ` calls across `api.py` and the standalone pipelines — this table (and the equivalent
+prose throughout this file) is the closest thing to a schema, not a typed, validated module a
+future reader could import and trust. `api.py::_log_startup_config_warnings()` (see "Trusted
+client IP" above and the LLM-provider-count check next to it) covers the two highest-value cases a
+deep gap analysis flagged — zero/multiple LLM provider keys, a non-default `ALLOWED_ORIGINS` with
+no `TRUSTED_PROXY_SECRET` — as targeted, low-risk startup warnings, deliberately not as a first
+step toward a full `config.py` typed-dataclass rewrite: touching every existing `os.getenv` call
+site to route through one is a larger, more speculative refactor than the two concrete
+misconfigurations that prompted this in the first place. Flagged here rather than silently
+assumed solved.
 
 ---
 
@@ -869,6 +893,12 @@ same log line).
    `nse_filings_tools.py` still defines `_get_session()`) that delegates here with its own
    timeout/header needs, specifically so every existing test's `patch("tools.<module>._nse_session",
    ...)` target keeps working unchanged rather than needing a rewrite across seven test files.
+   **Still not fully collapsed**: a deep gap analysis noted each of the seven wrappers is still a
+   real, if thin, function definition rather than inheriting a shared default — an eighth NSE-
+   touching module would mean hand-writing a ninth near-duplicate one-liner. Not changed here since
+   the test-patch-compatibility constraint above is the actual reason these per-module wrappers
+   exist at all, not an oversight; collapsing further would need a different test-patching
+   convention across seven existing test files, a larger change than this note's own scope.
 2. **Resilience is standardized, not just deduplicated** — every priming attempt across all seven
    modules now uniformly swallows a failure and sleeps 0.5s on success (previously two modules
    let a priming exception propagate, and the sleep/swallow behavior varied module to module).
