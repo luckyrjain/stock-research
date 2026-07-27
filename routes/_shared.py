@@ -67,6 +67,24 @@ def claim_anonymous_rows_sync(
     all, letting both read the same pre-claim/pre-add row count and both
     commit, silently exceeding `max_per_owner`.
 
+    A second advisory lock, scoped to the *source* `client_id` rather than
+    the target account, is also taken (see below) — without it, two
+    different accounts racing to claim the identical `client_id` (a leaked
+    id claimed by two people, or the same browser signing into two accounts
+    in quick succession) take two different user-scoped locks and never
+    serialize against each other at all. The final UPDATE below matches by
+    row `id` (computed from an earlier, unlocked snapshot of which rows
+    currently have this client_id), not by a live re-check of `client_id` —
+    so a second transaction that starts after the first has already
+    reassigned those same row ids still matches them by id and blindly
+    re-assigns them again, silently overwriting the first claim. Both
+    transactions report `claimed=1`; the true final owner is whichever
+    committed last — a false-positive success for the loser, verified
+    against a real concurrent-transaction repro. Locking the client_id too
+    forces the second transaction's own `ranked` CTE to re-read the table
+    only after the first has committed, at which point it correctly finds
+    zero remaining rows for that client_id.
+
     A symbol the account already owns keeps the account's existing row; the
     anonymous duplicate is discarded (not left around as clutter — it can
     never be claimed anyway, since uq_{table}_user_symbol forbids two rows
@@ -90,6 +108,13 @@ def claim_anonymous_rows_sync(
         # for the same account actually serialize against each other rather
         # than silently racing past max_per_owner.
         conn.execute(_text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"), {"lock_key": f"{lock_prefix}:user:{user_id}"})
+        # Second advisory lock scoped to the *source* client_id (see this
+        # function's docstring above) — serializes two different accounts
+        # racing to claim the same anonymous identity. Always acquired in
+        # this fixed order (user lock, then client lock) by every caller of
+        # this function, so this can never deadlock against another call
+        # acquiring the same two lock types in the opposite order.
+        conn.execute(_text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"), {"lock_key": f"{lock_prefix}:client:{client_id}"})
 
         conn.execute(_text(f"""
             DELETE FROM {table} t1

@@ -129,6 +129,42 @@ class ClassifyRatingActionTest(unittest.TestCase):
     def test_empty_filings_returns_none(self) -> None:
         self.assertIsNone(classify_rating_action([]))
 
+    def test_bare_care_alias_does_not_match_healthcare_or_customer_care(self) -> None:
+        # Regression test for an adversarial-review finding: the bare "care"
+        # alias in _RATING_AGENCIES (a short form of CARE Ratings) previously
+        # matched as a plain substring, so it fired on any text containing
+        # "care" anywhere -- including inside completely unrelated words like
+        # "healthcare". Combined with "upgrade" (both a rating-action keyword
+        # and an ordinary English word), a routine filing about a facility
+        # upgrade to improve employee healthcare was fabricated into a fake
+        # "CARE upgraded" credit-rating action -- a direct violation of this
+        # codebase's "never invent" convention.
+        filings = [{
+            "title": "Company announces facility upgrade to improve healthcare delivery for employees",
+            "desc": "",
+            "category": "",
+            "date": "20-10-2025",
+        }]
+        self.assertIsNone(classify_rating_action(filings))
+
+        filings2 = [{
+            "title": "Company expands customer care center capacity",
+            "desc": "The upgrade will improve response times.",
+            "category": "",
+            "date": "20-10-2025",
+        }]
+        self.assertIsNone(classify_rating_action(filings2))
+
+    def test_bare_care_alias_still_matches_when_rating_context_present(self) -> None:
+        # The disambiguation guard must not break the legitimate case this
+        # alias exists for -- a filing mentioning just "CARE" (not the full
+        # "CARE Ratings") alongside an actual rating action.
+        filings = [{"title": "CARE reaffirms rating", "desc": "", "category": "", "date": "01-Jan-2026"}]
+        result = classify_rating_action(filings)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["agency"], "Care")
+        self.assertEqual(result["action"], "reaffirmed")
+
 
 class ExtractNextResultsDateTest(unittest.TestCase):
     def test_extracts_slash_date_after_filing_date(self) -> None:
@@ -181,6 +217,27 @@ class ExtractNextResultsDateTest(unittest.TestCase):
             "date": "15-Aug-2026",
         }]
         self.assertIsNone(extract_next_results_date(filings))
+
+    def test_second_date_match_used_when_first_predates_filing_date(self) -> None:
+        # Regression test for an adversarial-review finding: a real NSE
+        # board-meeting intimation conventionally mentions the (past)
+        # quarter-end date the results cover before the (future) meeting
+        # date, in the same numeric DD-MM-YYYY format. Only checking the
+        # first regex match found the quarter-end date, correctly rejected
+        # it as earlier than the filing's own date, then gave up on the
+        # whole pattern instead of trying the second match -- silently
+        # returning None even though the real meeting date is right there.
+        filings = [{
+            "title": "Board Meeting Intimation",
+            "desc": (
+                "Board Meeting will be held to consider the un-audited "
+                "financial results for the quarter ended 30-09-2025, and "
+                "the meeting is scheduled on 05-11-2025."
+            ),
+            "category": "",
+            "date": "20-10-2025",
+        }]
+        self.assertEqual(extract_next_results_date(filings), "2025-11-05")
 
     def test_most_recent_board_meeting_filing_is_used(self) -> None:
         filings = [

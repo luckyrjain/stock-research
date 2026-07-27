@@ -103,6 +103,26 @@ def classify_corporate_actions(filings: list[dict]) -> list[dict]:
     return actions
 
 
+def _match_rating_agency(text: str) -> str | None:
+    """Find the first `_RATING_AGENCIES` alias present in `text`, with one
+    disambiguation: the bare "care" alias (short for CARE Ratings, for
+    filings that mention just "CARE" without the full "CARE Ratings") is
+    also a common English word/word-fragment ("healthcare", "customer
+    care") and matches as a plain substring even inside those unrelated
+    words. A genuine CARE Ratings mention is always accompanied by the
+    word "rating"/"ratings" somewhere in the same filing text (NSE's own
+    "Rating Action"/"Credit Rating" convention), so require that too for
+    this one ambiguous alias — never for the other, already-distinctive
+    agency names, which don't share this false-positive risk."""
+    for agency in _RATING_AGENCIES:
+        if agency not in text:
+            continue
+        if agency == "care" and "rating" not in text:
+            continue
+        return agency
+    return None
+
+
 def classify_rating_action(filings: list[dict]) -> dict | None:
     """The single most recent credit-rating filing, or None if this
     symbol's filings window has no rating-agency mention at all. `from_`/
@@ -113,7 +133,7 @@ def classify_rating_action(filings: list[dict]) -> dict | None:
         if not isinstance(f, dict):
             continue
         text = _filing_text(f)
-        agency = next((a for a in _RATING_AGENCIES if a in text), None)
+        agency = _match_rating_agency(text)
         if not agency:
             continue
         action = next(
@@ -168,19 +188,27 @@ def extract_next_results_date(filings: list[dict]) -> str | None:
     text = " ".join(str(latest.get(k) or "") for k in ("title", "desc"))
 
     for pattern, fmt in _DATE_PATTERNS:
-        match = pattern.search(text)
-        if not match:
-            continue
-        try:
-            if fmt == "%d-%m-%Y":
-                candidate = datetime.strptime(f"{match.group(1)}-{match.group(2)}-{match.group(3)}", "%d-%m-%Y")
-            else:
-                candidate = datetime.strptime(f"{match.group(1)}-{match.group(2)}-{match.group(3)}", "%d-%b-%Y")
-        except ValueError:
-            continue
-        if filing_date is not None and candidate.date() < filing_date.date():
-            continue
-        return candidate.date().isoformat()
+        # A board-meeting intimation commonly mentions TWO dates in the same
+        # numeric format: the (past) quarter-end the results cover, followed
+        # by the (future) meeting date itself — e.g. "...results for the
+        # quarter ended 30-09-2025... meeting is scheduled on 05-11-2025."
+        # Only checking the first match (pattern.search) would find the
+        # quarter-end date, correctly reject it as earlier than the filing's
+        # own date, and then give up on this pattern entirely rather than
+        # trying the second, later match where the real meeting date is —
+        # silently returning None even though a valid date is present.
+        # finditer() tries every match in order instead.
+        for match in pattern.finditer(text):
+            try:
+                if fmt == "%d-%m-%Y":
+                    candidate = datetime.strptime(f"{match.group(1)}-{match.group(2)}-{match.group(3)}", "%d-%m-%Y")
+                else:
+                    candidate = datetime.strptime(f"{match.group(1)}-{match.group(2)}-{match.group(3)}", "%d-%b-%Y")
+            except ValueError:
+                continue
+            if filing_date is not None and candidate.date() < filing_date.date():
+                continue
+            return candidate.date().isoformat()
 
     return None
 

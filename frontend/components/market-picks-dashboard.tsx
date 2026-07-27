@@ -440,8 +440,18 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
     if (capFilter !== 'all')     out = out.filter(p => capBucket(p.market_cap_cr) === capFilter);
     if (sortKey) {
       out = [...out].sort((a, b) => {
-        const av = (a[sortKey] ?? -Infinity) as number;
-        const bv = (b[sortKey] ?? -Infinity) as number;
+        const av = a[sortKey] as number | null | undefined;
+        const bv = b[sortKey] as number | null | undefined;
+        // Unknown values (pe_ratio/valuation_percentile are both legitimately
+        // nullable, rendered as "—") always sort to the bottom regardless of
+        // direction. Mapping null to -Infinity for both directions (the
+        // previous approach) put every unknown at the very TOP in ascending
+        // mode -- e.g. clicking "P/E" a second time to find the cheapest
+        // stock instead surfaced every "—" row first, ahead of real low-P/E
+        // stocks, since -Infinity is always the smallest ascending value.
+        if (av == null && bv == null) return 0;
+        if (av == null) return 1;
+        if (bv == null) return -1;
         return sortDir === 'desc' ? bv - av : av - bv;
       });
     }
