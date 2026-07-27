@@ -465,6 +465,38 @@ tell them apart; a card renders "temporarily unavailable" only when the correspo
 `true`. The whole payload is only cached when **both** sections succeeded — a fetch failure isn't
 cached as "no activity" (same "don't cache a failure" convention as `/api/peers`).
 
+### `GET /api/shareholding-detail/{symbol}`
+
+```json
+{
+  "symbol": "TCS",
+  "as_of_date": "2026-06-30",
+  "promoters": [
+    { "name": "Tata Sons Private Limited", "holding_pct": 71.77 }
+  ],
+  "shareholder_categories": [
+    { "category": "Mutual Funds", "holders": [
+      { "name": "SBI Nifty 50 ETF", "holding_pct": 1.25 }
+    ] },
+    { "category": "Foreign Portfolio Investors", "holders": [
+      { "name": "Government of Singapore", "holding_pct": 1.02 }
+    ] }
+  ],
+  "unavailable": false
+}
+```
+
+Every individually-named shareholder NSE's own shareholding XBRL filing discloses — a more
+granular view than `research.ratios`'/`holdings.shareholding_pattern`'s aggregate category
+percentages or `holdings.mutual_funds`' mutual-fund-only list. `promoters` and each
+`shareholder_categories[].category` are `[]` (never `null`) for a filing with no individually-
+named holders above the plausibility threshold — the expected common case for a thinly-disclosed
+filing, not an error. `category` is NSE's own raw filing category, cleaned up for display — not a
+fixed enum this app maintains (see `tools/nse_tools.py::get_shareholding_detail`'s own disclosed
+limitation). `unavailable: true` distinguishes a genuine scrape failure from that legitimately-
+thin case, same convention as insider activity/street consensus below; a failure isn't cached
+(retried on the next request instead of locking in for the full 7-day TTL).
+
 ### `GET /api/street-consensus/{symbol}`
 
 ```json

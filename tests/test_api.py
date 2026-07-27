@@ -1316,6 +1316,104 @@ class FinancialsEndpointTest(unittest.TestCase):
         self.assertIsNone(resp.json()["dcf"])
 
 
+class ShareholdingDetailEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-shareholding-detail-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
+        self._cache_patch.start()
+        self.addCleanup(self._cache_patch.stop)
+        rate_limiter._memory_calls.clear()
+
+    def tearDown(self) -> None:
+        rate_limiter._memory_calls.clear()
+
+    def test_invalid_symbol_returns_422(self) -> None:
+        resp = client.get("/api/shareholding-detail/bad symbol")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_rate_limited_returns_429(self) -> None:
+        rate_limiter._memory_calls["shareholding_detail:testclient"] = [api.time.monotonic()] * 30
+        resp = client.get("/api/shareholding-detail/TCS")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_returns_promoters_and_categories_and_caches(self) -> None:
+        raw = json.dumps({
+            "symbol": "TCS",
+            "as_of_date": "2026-06-30",
+            "promoters": [{"name": "Tata Sons Private Limited", "holding_pct": 71.77}],
+            "shareholder_categories": [
+                {"category": "Mutual Funds", "holders": [{"name": "SBI Nifty 50 ETF", "holding_pct": 1.25}]},
+            ],
+        })
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = raw
+        with patch("tools.nse_tools.get_shareholding_detail", fake_tool):
+            resp = client.get("/api/shareholding-detail/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["symbol"], "TCS")
+        self.assertFalse(body["unavailable"])
+        self.assertEqual(body["promoters"][0]["name"], "Tata Sons Private Limited")
+        self.assertEqual(body["shareholder_categories"][0]["category"], "Mutual Funds")
+        fake_tool.run.assert_called_once()
+
+        # Second call must be served from cache — the scraper must not run again.
+        with patch("tools.nse_tools.get_shareholding_detail") as should_not_run:
+            resp2 = client.get("/api/shareholding-detail/TCS")
+        self.assertEqual(resp2.status_code, 200)
+        self.assertFalse(resp2.json()["unavailable"])
+        should_not_run.run.assert_not_called()
+
+    def test_tool_error_returns_unavailable_flag_not_500(self) -> None:
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
+        with patch("tools.nse_tools.get_shareholding_detail", fake_tool), \
+             patch("scraper_error_counters.record_scraper_error") as mock_record:
+            resp = client.get("/api/shareholding-detail/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["unavailable"])
+        self.assertEqual(body["promoters"], [])
+        self.assertEqual(body["shareholder_categories"], [])
+        mock_record.assert_called_once_with("shareholding_detail", symbol="TCS")
+
+    def test_a_real_result_never_touches_the_error_counter(self) -> None:
+        succeeding_tool = MagicMock()
+        succeeding_tool.run.return_value = json.dumps({"symbol": "TCS", "promoters": [], "shareholder_categories": []})
+        with patch("tools.nse_tools.get_shareholding_detail", succeeding_tool), \
+             patch("scraper_error_counters.record_scraper_error") as mock_record:
+            resp = client.get("/api/shareholding-detail/TCS")
+        self.assertEqual(resp.status_code, 200)
+        mock_record.assert_not_called()
+
+    def test_tool_error_is_not_cached_so_next_request_retries(self) -> None:
+        failing_tool = MagicMock()
+        failing_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
+        with patch("tools.nse_tools.get_shareholding_detail", failing_tool):
+            client.get("/api/shareholding-detail/TCS")
+        failing_tool.run.assert_called_once()
+
+        succeeding_tool = MagicMock()
+        succeeding_tool.run.return_value = json.dumps({
+            "symbol": "TCS", "promoters": [{"name": "Promoter X", "holding_pct": 50.0}], "shareholder_categories": [],
+        })
+        with patch("tools.nse_tools.get_shareholding_detail", succeeding_tool):
+            resp = client.get("/api/shareholding-detail/TCS")
+        succeeding_tool.run.assert_called_once()
+        self.assertEqual(resp.json()["promoters"][0]["name"], "Promoter X")
+
+    def test_cached_entry_predating_unavailable_flag_backfills_false(self) -> None:
+        # A response cached before `unavailable` existed must still read
+        # back as unavailable: false, not an absent/undefined key.
+        cache.save("TCS", "shareholding_detail", {
+            "symbol": "TCS", "as_of_date": "2026-01-01", "promoters": [], "shareholder_categories": [],
+        })
+        resp = client.get("/api/shareholding-detail/TCS")
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["unavailable"])
+
+
 class InsiderActivityEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-insider-test-")

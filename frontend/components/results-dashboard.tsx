@@ -9,6 +9,7 @@ import { fmt, fmtCr, fmtVolume, fmtRatio, formatAge, formatDataAge, oldestDataFr
 import { usePeerComparison, PeerTable, SimilarStocksRail } from './peer-comparison-card';
 import { useFinancials, FinancialStatementsCard, ConcallsCard } from './financial-statements-card';
 import { InsiderActivityCard } from './insider-activity-card';
+import { ShareholdingDetailCard } from './shareholding-detail-card';
 import { useStreetConsensus, StreetConsensusCard } from './street-consensus-card';
 import ValuationSummaryStrip from './valuation-summary-strip';
 import PriceSparkline from './price-sparkline';
@@ -538,6 +539,8 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
           </Card>
         )}
       </div>
+
+      <ShareholdingDetailCard symbol={report.symbol} />
 
       {/* ── 6. News ── */}
       {news && news.length > 0 && (

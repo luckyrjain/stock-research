@@ -181,6 +181,41 @@ it (SSRF defense — see the module's own comment). `holding_pct` is passed thro
 
 ---
 
+### `get_shareholding_detail`
+
+- File: `tools/nse_tools.py`
+- Source: same NSE shareholding XBRL filing as `get_mf_holdings` (shares `_fetch_shareholding_xbrl()`, a common fetch helper, so both don't independently re-fetch the same document)
+
+Every individually-named shareholder the filing discloses — not just mutual funds. Generalizes
+`get_mf_holdings`' own proven extraction (same `NameOfTheShareholder`/
+`ShareholdingAsAPercentageOfTotalNumberOfShares` XBRL facts) to every `typedMember` category the
+filing actually has, rather than filtering to ones whose tag contains `"MutualFunds"`.
+
+Returns:
+
+| Field | Type | Description |
+|---|---|---|
+| `symbol` | string | Ticker |
+| `as_of_date` | string | Reporting date |
+| `promoters` | array | `[{ name, holding_pct }]` — entries whose XBRL category tag contains `"Promoter"`, top 20 by stake |
+| `shareholder_categories` | array | `[{ category, holders: [{ name, holding_pct }] }]` — every other named-shareholder category the filing contains (mutual funds, FPIs, insurance companies, whatever's really there), `category` a human-readable label derived from NSE's own raw XBRL tag |
+
+A promoter/promoter-group entity can plausibly hold up to 100% of a closely-held company; any
+other single named holder above ~30% is dropped as an implausible format guess (same
+`_percent_from_ambiguous_value` reasoning as `get_mf_holdings`, ceiling raised only for entries
+already bucketed as promoters). `_humanize_category()` strips a trailing `"Member"` (a generic
+XBRL dimensional-modeling convention, not a guess specific to NSE) and word-spaces the remainder
+for display.
+
+**Disclosed limitation**: the exact XBRL category tag names NSE's real filings use beyond
+`"MutualFunds"` (already proven correct by `get_mf_holdings`) were not verified against a live
+filing in this sandbox — same disclosure as every other scraper in this doc. A filing whose
+promoter tag doesn't contain `"Promoter"` degrades those records into `shareholder_categories`
+under their own raw label rather than the `promoters` field — a real, named holder either way,
+never a fabricated one.
+
+---
+
 ### `get_latest_news`
 
 - File: `tools/news_tools.py`

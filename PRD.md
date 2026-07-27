@@ -75,9 +75,11 @@ Layered on top of the core report: peer comparison + absolute valuation-anchor (
 multi-year financial statements + a deterministic DCF estimate, concalls (management commentary
 links), insider/institutional activity (PIT filings + bulk/block deals), street consensus
 (Trendlyne-sourced numeric analyst consensus + cited coverage), a verdict timeline with
-win/loss scoring against live price, MF-holdings quarter-over-quarter stake deltas, filings
-classification (corporate actions / rating actions / next-results date), stock-vs-Nifty relative
-performance, and hoverable price/quarterly sparklines.
+win/loss scoring against live price, MF-holdings quarter-over-quarter stake deltas, detailed
+shareholding (every individually-named promoter/institutional holder from NSE's own shareholding
+filing, not just aggregate category percentages), filings classification (corporate actions /
+rating actions / next-results date), stock-vs-Nifty relative performance, and hoverable price/
+quarterly/EMA sparklines.
 
 *Depth: `CLAUDE.md` §"Stock analysis flow" onward through §"Verdict history flow" (the bulk of
 the document).*

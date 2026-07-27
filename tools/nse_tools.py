@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import re
 from datetime import datetime
 from urllib.parse import quote, urlparse
 
@@ -159,35 +160,52 @@ def get_stock_quote(symbol: str) -> str:
     return json.dumps({"error": last_err or f"No market data found for {sym}", "symbol": sym})
 
 
+def _fetch_shareholding_xbrl(symbol: str):
+    """Shared first half of get_mf_holdings/get_shareholding_detail — locates
+    the most recent shareholding XBRL filing on NSE's corporate-share-
+    holdings-master endpoint and fetches+parses it. Returns (root, as_of_date).
+    Raises on any failure (missing records, missing/off-host XBRL URL, fetch
+    error, malformed XML) — every caller wraps this in its own try/except and
+    turns the exception into its own {"error": ...} payload, same "tools
+    never raise past their own public surface" convention as the rest of
+    this module. Extracted so a genuinely new consumer of this same NSE
+    filing (see get_shareholding_detail) doesn't have to re-fetch the same
+    document a second time within one call, nor duplicate the SSRF/XXE
+    hardening (_is_nse_host pre- and post-redirect, resolve_entities=False)
+    that fetch already needs."""
+    session = _nse_session()
+    master_url = f"{_NSE_BASE}/api/corporate-share-holdings-master?index=equities&symbol={symbol.upper()}"
+    master_resp = session.get(master_url, headers=_NSE_HEADERS, timeout=15)
+    master_resp.raise_for_status()
+    records = master_resp.json()
+
+    if not records:
+        raise ValueError("No shareholding records found")
+
+    # Pick the most recent record (last by date)
+    latest = sorted(records, key=lambda r: r.get("date", ""), reverse=True)[0]
+    xbrl_url = latest.get("xbrl", "")
+    if not xbrl_url or not _is_nse_host(xbrl_url):
+        raise ValueError("No XBRL URL in shareholding record")
+
+    xbrl_resp = requests.get(xbrl_url, headers={"User-Agent": _NSE_HEADERS["User-Agent"]}, timeout=20)
+    xbrl_resp.raise_for_status()
+    # Re-check the post-redirect URL too, not just the one requested — a
+    # redirect encountered on this specific fetch could otherwise land off
+    # nseindia.com with no check at all.
+    if not _is_nse_host(xbrl_resp.url):
+        raise ValueError("XBRL URL redirected off nseindia.com")
+    root = _parse_xbrl_xml(xbrl_resp.content)
+    return root, latest.get("date", "")
+
+
 @tool("Get NSE Mutual Fund Holdings")
 def get_mf_holdings(symbol: str) -> str:
     """Fetch the top mutual funds holding an NSE-listed Indian stock from NSE's shareholding XBRL data.
     Returns fund names, number of shares, and percentage of total shares held.
     Input: NSE stock symbol, e.g. RELIANCE, TCS, INFY."""
     try:
-        session = _nse_session()
-        master_url = f"{_NSE_BASE}/api/corporate-share-holdings-master?index=equities&symbol={symbol.upper()}"
-        master_resp = session.get(master_url, headers=_NSE_HEADERS, timeout=15)
-        master_resp.raise_for_status()
-        records = master_resp.json()
-
-        if not records:
-            return json.dumps({"error": "No shareholding records found", "symbol": symbol})
-
-        # Pick the most recent record (last by date)
-        latest = sorted(records, key=lambda r: r.get("date", ""), reverse=True)[0]
-        xbrl_url = latest.get("xbrl", "")
-        if not xbrl_url or not _is_nse_host(xbrl_url):
-            return json.dumps({"error": "No XBRL URL in shareholding record", "symbol": symbol})
-
-        xbrl_resp = requests.get(xbrl_url, headers={"User-Agent": _NSE_HEADERS["User-Agent"]}, timeout=20)
-        xbrl_resp.raise_for_status()
-        # Re-check the post-redirect URL too, not just the one requested —
-        # a redirect encountered on this specific fetch could otherwise land
-        # off nseindia.com with no check at all.
-        if not _is_nse_host(xbrl_resp.url):
-            return json.dumps({"error": "XBRL URL redirected off nseindia.com", "symbol": symbol})
-        root = _parse_xbrl_xml(xbrl_resp.content)
+        root, as_of_date = _fetch_shareholding_xbrl(symbol)
 
         # Find MF context IDs: typedMember > scenario > context(id)
         ns_di = "http://xbrl.org/2006/xbrldi"
@@ -249,8 +267,154 @@ def get_mf_holdings(symbol: str) -> str:
 
         return json.dumps({
             "symbol": symbol.upper(),
-            "as_of_date": latest.get("date", ""),
+            "as_of_date": as_of_date,
             "mutual_funds": funds[:15],
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e), "symbol": symbol})
+
+
+def _humanize_category(raw: str) -> str:
+    """Turns an XBRL typedMember child's raw PascalCase localname (e.g.
+    "ForeignPortfolioInvestorsMember") into a readable label ("Foreign
+    Portfolio Investors") — this app has no fixed enum of NSE's
+    shareholding-category taxonomy to translate against (see
+    get_shareholding_detail's own disclosed limitation below), so the raw
+    XBRL tag name IS the category, just cleaned up for display: a trailing
+    "Member" is stripped (a generic XBRL dimensional-modeling convention —
+    explicit/typed dimension member concepts are conventionally suffixed
+    "Member" per the XBRL spec itself, not a guess specific to NSE's own
+    taxonomy) and the remainder is word-spaced rather than shown as
+    unbroken PascalCase."""
+    trimmed = raw[:-len("Member")] if raw.endswith("Member") and len(raw) > len("Member") else raw
+    spaced = re.sub(r"(?<!^)(?=[A-Z])", " ", trimmed)
+    return spaced.strip() or raw
+
+
+@tool("Get NSE Detailed Shareholding")
+def get_shareholding_detail(symbol: str) -> str:
+    """Fetch every individually-named shareholder disclosed in an NSE-listed
+    Indian stock's shareholding XBRL filing — promoters by name, plus every
+    other named-shareholder category the filing contains (mutual funds,
+    FPIs, insurance companies, etc., whatever NSE's own filing actually
+    tags). A more granular view than get_holdings' aggregate Promoters/
+    FIIs/DIIs/Public percentages or get_mf_holdings' mutual-fund-only list.
+    Input: NSE stock symbol, e.g. RELIANCE, TCS, INFY.
+
+    Reuses get_mf_holdings' own proven extraction mechanism
+    (NameOtTheShareholder + ShareholdingAsAPercentageOfTotalNumberOfShares
+    facts, keyed off the typedMember context an XBRL shareholder record
+    lives under), generalized to every category rather than filtered to
+    contexts whose typedMember child tag contains "MutualFunds" — this
+    means it doesn't need to guess NSE's exact category tag spellings for
+    "Insurance Companies"/"Alternate Investment Funds"/etc. up front: it
+    groups by whatever category label the filing actually uses, and the
+    only tag-name assumption this function adds on top of the already-
+    working MF extraction is that a promoter/promoter-group category's
+    XBRL tag contains the substring "Promoter" (case-insensitive) —
+    consistent with how the MF filter already matches on "MutualFunds"
+    appearing in the tag, not an exact tag string.
+
+    Disclosed limitation: like every other NSE/Screener/Trendlyne/RBI
+    scraper in this codebase, the exact XBRL category tag names NSE's real
+    shareholding filings use beyond "MutualFunds" (already proven by
+    get_mf_holdings) were not verified against a live filing in this
+    sandbox (no outbound internet). If a real filing's promoter category
+    tag doesn't contain "Promoter", those records fall through into
+    shareholder_categories under their own raw label instead of the
+    dedicated promoters field — a degraded-but-not-wrong result, never a
+    fabricated one, same "never invent" convention as everywhere else in
+    this file.
+    """
+    try:
+        root, as_of_date = _fetch_shareholding_xbrl(symbol)
+
+        ns_di = "http://xbrl.org/2006/xbrldi"
+        # Unlike get_mf_holdings (which only keeps typedMember contexts whose
+        # child tag contains "MutualFunds"), this walks every category the
+        # filing has — the whole point of this function is not being scoped
+        # to one category.
+        category_by_ctx: dict[str, str] = {}
+        for tm in root.findall(f".//{{{ns_di}}}typedMember"):
+            child = tm[0] if len(tm) else None
+            if child is None:
+                continue
+            category_raw = etree.QName(child.tag).localname
+            ctx_elem = tm
+            for _ in range(5):
+                ctx_elem = ctx_elem.getparent()
+                if ctx_elem is None:
+                    break
+                ctx_id = ctx_elem.get("id", "")
+                if ctx_id:
+                    category_by_ctx[ctx_id] = category_raw
+                    break
+
+        ctx_name: dict[str, str] = {}
+        ctx_category: dict[str, str] = {}
+        ctx_pct: dict[str, float] = {}
+
+        for elem in root.iter():
+            ctx_ref = elem.get("contextRef", "")
+            if not ctx_ref:
+                continue
+            local = etree.QName(elem.tag).localname
+
+            if ctx_ref in category_by_ctx and local == "NameOfTheShareholder" and elem.text:
+                base_id = ctx_ref.removeprefix("D_")
+                ctx_name[base_id] = elem.text.strip()
+                ctx_category[base_id] = category_by_ctx[ctx_ref]
+
+            if local == "ShareholdingAsAPercentageOfTotalNumberOfShares" and elem.text:
+                # One non-numeric fact anywhere in a document that can carry
+                # hundreds of shareholder records must not abort the whole
+                # result — skip just that fact, same as get_mf_holdings.
+                try:
+                    ctx_pct[ctx_ref] = float(elem.text)
+                except ValueError:
+                    continue
+
+        promoters = []
+        by_category: dict[str, list[dict]] = {}
+        for base_id, name in ctx_name.items():
+            pct = ctx_pct.get(base_id)
+            if pct is None:
+                continue
+            category_raw = ctx_category.get(base_id, "")
+            is_promoter = "promoter" in category_raw.lower()
+            # A promoter/promoter-group entity can plausibly hold up to (in
+            # principle) 100% of a closely-held company; any other single
+            # named institutional/individual holder above ~30% would be
+            # extraordinary — same "drop rather than trust a wrong format
+            # guess" reasoning _percent_from_ambiguous_value's own docstring
+            # describes, just with get_mf_holdings' existing 30% ceiling
+            # applied to every non-promoter category, not only mutual funds.
+            holding_pct = _percent_from_ambiguous_value(pct, plausible_max=100.0 if is_promoter else 30.0)
+            if holding_pct is None:
+                continue
+            entry = {"name": name, "holding_pct": holding_pct}
+            if is_promoter:
+                promoters.append(entry)
+            else:
+                label = _humanize_category(category_raw) if category_raw else "Other"
+                by_category.setdefault(label, []).append(entry)
+
+        promoters.sort(key=lambda x: x["holding_pct"], reverse=True)
+        shareholder_categories = [
+            {
+                "category": label,
+                "holders": sorted(holders, key=lambda x: x["holding_pct"], reverse=True)[:20],
+            }
+            for label, holders in sorted(
+                by_category.items(), key=lambda kv: sum(h["holding_pct"] for h in kv[1]), reverse=True,
+            )
+        ]
+
+        return json.dumps({
+            "symbol": symbol.upper(),
+            "as_of_date": as_of_date,
+            "promoters": promoters[:20],
+            "shareholder_categories": shareholder_categories,
         })
     except Exception as e:
         return json.dumps({"error": str(e), "symbol": symbol})

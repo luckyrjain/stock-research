@@ -296,6 +296,7 @@ through `frontend/app/api/`.
 | `GET /api/analyse/{symbol}` | Stock analysis — SSE stream of task progress + final report |
 | `GET /api/peers/{symbol}` | Peer comparison + absolute valuation-anchor percentile |
 | `GET /api/financials/{symbol}` | Multi-year income statement/balance sheet/cash flow + DCF + concalls |
+| `GET /api/shareholding-detail/{symbol}` | Named promoters + every other named-shareholder category from NSE's shareholding XBRL filing |
 | `GET /api/insider-activity/{symbol}` | Promoter/director PIT trades + bulk/block deals |
 | `GET /api/street-consensus/{symbol}` | Trendlyne-cited news + numeric analyst consensus |
 | `GET /api/verdict-history/{symbol}` | Stored verdict timeline + BUY/SELL win-rate scoring |
