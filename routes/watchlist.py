@@ -191,7 +191,16 @@ async def add_to_watchlist(request: Request, body: WatchlistAddRequest):
             count = conn.execute(_text(
                 f"SELECT COUNT(*) FROM watchlist_items WHERE {column} = :owner_value"
             ), {"owner_value": owner[1]}).scalar() or 0
-            if count >= _MAX_WATCHLIST_ITEMS_PER_CLIENT:
+            existing = conn.execute(_text(
+                f"SELECT 1 FROM watchlist_items WHERE {column} = :owner_value AND symbol = :symbol"
+            ), {"owner_value": owner[1], "symbol": symbol}).first()
+            # A re-add of a symbol the owner already has (double-click, retry
+            # after a flaky response, frontend re-sync) is a harmless
+            # ON CONFLICT ... DO NOTHING no-op below — it must not be
+            # rejected just because the owner happens to already be at cap,
+            # same exemption routes/positions.py::add_position already
+            # applies to its own identical cap check.
+            if count >= _MAX_WATCHLIST_ITEMS_PER_CLIENT and not existing:
                 raise ValueError(f"Watchlist is capped at {_MAX_WATCHLIST_ITEMS_PER_CLIENT} stocks.")
             conn.execute(_text(f"""
                 INSERT INTO watchlist_items ({column}, symbol, company, exchange)

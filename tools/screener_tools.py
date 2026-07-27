@@ -189,6 +189,17 @@ def _extract_quarterly_trend(soup: BeautifulSoup, max_periods: int = 8) -> dict:
                     values.append(float(raw))
                 except ValueError:
                     values.append(None)
+            # A row with a different cell count than the header's own period
+            # list can't be safely aligned by trimming each list to its own
+            # last-N elements — that only produces a correct pairing if the
+            # shorter list's gap happens to be at the very front, which is
+            # an assumption, not a guarantee. Bail out (never guess an
+            # alignment) rather than risk silently pairing a quarter label
+            # with the wrong revenue/EPS/OPM value — same equal-length
+            # requirement _extract_valuation_band/_extract_yearly_statement
+            # below already enforce for the same reason.
+            if len(values) != len(periods):
+                return None
             return values
         return None
 
@@ -197,7 +208,7 @@ def _extract_quarterly_trend(soup: BeautifulSoup, max_periods: int = 8) -> dict:
     if not periods or revenue is None or eps is None:
         return {}
 
-    n = min(len(periods), len(revenue), len(eps), max_periods)
+    n = min(len(periods), max_periods)
     periods_n, revenue_n, eps_n = periods[-n:], revenue[-n:], eps[-n:]
     if n < 2 or any(v is None for v in revenue_n) or any(v is None for v in eps_n):
         return {}
@@ -205,7 +216,7 @@ def _extract_quarterly_trend(soup: BeautifulSoup, max_periods: int = 8) -> dict:
     result = {"quarters": periods_n, "revenue": revenue_n, "eps": eps_n}
 
     opm = _row_values(("OPM %", "OPM"))
-    if opm is not None and len(opm) >= n:
+    if opm is not None:
         opm_n = opm[-n:]
         if not any(v is None for v in opm_n):
             result["operating_margin"] = opm_n

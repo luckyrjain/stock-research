@@ -891,6 +891,42 @@ class PricesEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.json()["prices"]), 50)
 
+    def test_missing_previous_close_yields_null_change_pct_not_zero(self) -> None:
+        # Regression test: a genuine flat day and "previous_close wasn't
+        # available" are different facts — the latter must not be
+        # fabricated as a confident 0.0% change.
+        fast_info = MagicMock()
+        fast_info.last_price = 100.0
+        fast_info.previous_close = None
+        fake_ticker = MagicMock()
+        fake_ticker.fast_info = fast_info
+
+        with patch("yfinance.Ticker", return_value=fake_ticker):
+            resp = client.get("/api/prices?symbols=TCS")
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["prices"]["TCS"]["price"], 100.0)
+        self.assertIsNone(body["prices"]["TCS"]["change_pct"])
+
+    def test_ns_suffix_exception_still_tries_bo_suffix(self) -> None:
+        # Regression test: a genuine BSE-only symbol (never listed on NSE,
+        # or delisted from it) can make the .NS attempt raise outright
+        # rather than just return empty data — that must not prevent the
+        # .BO attempt from running and finding a real price.
+        def _ticker(sym: str):
+            m = MagicMock()
+            if sym.endswith(".NS"):
+                raise ConnectionError("boom")
+            m.fast_info = MagicMock(last_price=50.0, previous_close=45.0)
+            return m
+
+        with patch("yfinance.Ticker", side_effect=_ticker):
+            resp = client.get("/api/prices?symbols=SMALLCAP")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["prices"]["SMALLCAP"]["price"], 50.0)
+
     def test_malformed_symbols_are_filtered_before_reaching_yfinance(self) -> None:
         fake_ticker = MagicMock()
         fake_ticker.fast_info = MagicMock(last_price=100.0, previous_close=90.0)
@@ -2305,13 +2341,15 @@ class WatchlistEndpointsTest(unittest.TestCase):
         lock_result = MagicMock()
         count_result = MagicMock()
         count_result.scalar.return_value = 0
+        existing_result = MagicMock()
+        existing_result.first.return_value = None
         insert_result = MagicMock()
         rows_result = MagicMock()
         rows_result.mappings.return_value.fetchall.return_value = [
             {"symbol": "TCS", "company": "", "exchange": "BSE", "addedAt": "2026-01-01T00:00:00"},
         ]
         fake_engine = MagicMock()
-        fake_engine.begin.return_value = _FakeConn([lock_result, count_result, insert_result])
+        fake_engine.begin.return_value = _FakeConn([lock_result, count_result, existing_result, insert_result])
         fake_engine.connect.return_value = _FakeConn([rows_result])
 
         with patch("api._get_db_engine", return_value=fake_engine):
@@ -2325,6 +2363,8 @@ class WatchlistEndpointsTest(unittest.TestCase):
         lock_result = MagicMock()
         count_result = MagicMock()
         count_result.scalar.return_value = 0
+        existing_result = MagicMock()
+        existing_result.first.return_value = None
         insert_result = MagicMock()
         rows_result = MagicMock()
         rows_result.mappings.return_value.fetchall.return_value = [
@@ -2332,7 +2372,7 @@ class WatchlistEndpointsTest(unittest.TestCase):
              "addedAt": "2026-01-01T00:00:00"},
         ]
         fake_engine = MagicMock()
-        fake_engine.begin.return_value = _FakeConn([lock_result, count_result, insert_result])
+        fake_engine.begin.return_value = _FakeConn([lock_result, count_result, existing_result, insert_result])
         fake_engine.connect.return_value = _FakeConn([rows_result])
 
         with patch("api._get_db_engine", return_value=fake_engine):
@@ -2348,11 +2388,38 @@ class WatchlistEndpointsTest(unittest.TestCase):
         lock_result = MagicMock()
         count_result = MagicMock()
         count_result.scalar.return_value = api._MAX_WATCHLIST_ITEMS_PER_CLIENT
+        existing_result = MagicMock()
+        existing_result.first.return_value = None
         fake_engine = MagicMock()
-        fake_engine.begin.return_value = _FakeConn([lock_result, count_result])
+        fake_engine.begin.return_value = _FakeConn([lock_result, count_result, existing_result])
         with patch("api._get_db_engine", return_value=fake_engine):
             resp = client.post("/api/watchlist", json={"client_id": "client-abc", "symbol": "TCS"})
         self.assertEqual(resp.status_code, 422)
+
+    def test_post_over_cap_but_symbol_already_starred_is_allowed(self) -> None:
+        # Regression test: a re-add of a symbol the owner already has
+        # (double-click, retry after a flaky response, frontend re-sync) is
+        # a harmless ON CONFLICT ... DO NOTHING no-op — it must not be
+        # rejected just because the owner happens to already be at cap,
+        # same exemption routes/positions.py's own identical cap check has.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        lock_result = MagicMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = api._MAX_WATCHLIST_ITEMS_PER_CLIENT
+        existing_result = MagicMock()
+        existing_result.first.return_value = (1,)
+        insert_result = MagicMock()
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = [
+            {"symbol": "TCS", "company": "Tata Consultancy Services", "exchange": "NSE",
+             "addedAt": "2026-01-01T00:00:00"},
+        ]
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = _FakeConn([lock_result, count_result, existing_result, insert_result])
+        fake_engine.connect.return_value = _FakeConn([rows_result])
+        with patch("api._get_db_engine", return_value=fake_engine):
+            resp = client.post("/api/watchlist", json={"client_id": "client-abc", "symbol": "TCS"})
+        self.assertEqual(resp.status_code, 200)
 
     def test_delete_invalid_symbol_returns_422(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
@@ -2586,12 +2653,14 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
         lock_result = MagicMock()
         count_result = MagicMock()
         count_result.scalar.return_value = 0
+        existing_result = MagicMock()
+        existing_result.first.return_value = None
         insert_result = MagicMock()
         rows_result = MagicMock()
         rows_result.mappings.return_value.fetchall.return_value = [
             {"symbol": "TCS", "company": "", "exchange": "NSE", "addedAt": "2026-01-01T00:00:00"},
         ]
-        begin_conn = _SqlRecordingConn([lock_result, count_result, insert_result])
+        begin_conn = _SqlRecordingConn([lock_result, count_result, existing_result, insert_result])
         connect_conn = _SqlRecordingConn([rows_result])
         fake_engine = MagicMock()
         fake_engine.begin.return_value = begin_conn
@@ -2606,7 +2675,7 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
             )
 
         self.assertEqual(resp.status_code, 200)
-        insert_query, insert_params = begin_conn.queries[2]
+        insert_query, insert_params = begin_conn.queries[3]
         self.assertIn("INSERT INTO watchlist_items (user_id", insert_query)
         self.assertIn("ON CONFLICT (user_id, symbol)", insert_query)
         self.assertEqual(insert_params["owner_value"], 42)
@@ -2623,7 +2692,9 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
         lock_result = MagicMock()
         count_result = MagicMock()
         count_result.scalar.return_value = api._MAX_WATCHLIST_ITEMS_PER_CLIENT
-        begin_conn = _SqlRecordingConn([lock_result, count_result])
+        existing_result = MagicMock()
+        existing_result.first.return_value = None
+        begin_conn = _SqlRecordingConn([lock_result, count_result, existing_result])
         fake_engine = MagicMock()
         fake_engine.begin.return_value = begin_conn
 

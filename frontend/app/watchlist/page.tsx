@@ -12,7 +12,9 @@ interface LivePrice {
   // yfinance had nothing for either the .NS or .BO suffix) — so `prices[sym]`
   // being truthy does NOT imply these fields are actually present.
   price?: number;
-  change_pct?: number;
+  // null when the price resolved but yfinance had no previous_close to
+  // diff against — a real "change unknown", not a fabricated flat 0%.
+  change_pct?: number | null;
 }
 
 function Skeleton({ className }: { className: string }) {

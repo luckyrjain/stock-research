@@ -156,6 +156,53 @@ class GetMfHoldingsTest(unittest.TestCase):
             result = json.loads(get_mf_holdings.run(symbol="TCS"))
         self.assertIn("error", result)
 
+    def test_picks_chronologically_latest_record_not_lexically_last(self) -> None:
+        # Regression test: NSE's real date format (dd-Mon-yyyy) does not
+        # sort lexically in calendar order — "01-Jan-2026" sorts BEFORE
+        # "15-Dec-2025" as plain strings ('0' < '1'), which would silently
+        # pick the older Dec-2025 filing as "latest". Two records here: an
+        # older one with a lexically-larger date string, and a genuinely
+        # newer one with a lexically-smaller date string.
+        ns_di = "http://xbrl.org/2006/xbrldi"
+        older_xbrl = f'''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance" xmlns:di="{ns_di}">
+          <xbrli:context id="D_MF1">
+            <xbrli:scenario><di:typedMember><MutualFundsMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <NameOfTheShareholder contextRef="D_MF1">Old Quarter Fund</NameOfTheShareholder>
+          <ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="MF1">0.01</ShareholdingAsAPercentageOfTotalNumberOfShares>
+        </xbrli:xbrl>'''
+        newer_xbrl = f'''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance" xmlns:di="{ns_di}">
+          <xbrli:context id="D_MF2">
+            <xbrli:scenario><di:typedMember><MutualFundsMember/></di:typedMember></xbrli:scenario>
+          </xbrli:context>
+          <NameOfTheShareholder contextRef="D_MF2">New Quarter Fund</NameOfTheShareholder>
+          <ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="MF2">0.02</ShareholdingAsAPercentageOfTotalNumberOfShares>
+        </xbrli:xbrl>'''
+
+        sess = MagicMock()
+        master_resp = MagicMock()
+        master_resp.json.return_value = [
+            {"date": "15-Dec-2025", "xbrl": "https://nsearchives.nseindia.com/older.xml"},
+            {"date": "01-Jan-2026", "xbrl": "https://nsearchives.nseindia.com/newer.xml"},
+        ]
+        sess.get.return_value = master_resp
+
+        def _fake_get(url, **kwargs):
+            resp = MagicMock()
+            if url == "https://nsearchives.nseindia.com/newer.xml":
+                resp.content = newer_xbrl.encode()
+            else:
+                resp.content = older_xbrl.encode()
+            resp.url = url
+            return resp
+
+        with patch("tools.nse_tools._nse_session", return_value=sess), \
+             patch("requests.get", side_effect=_fake_get):
+            result = json.loads(get_mf_holdings.run(symbol="TCS"))
+
+        self.assertEqual(result["as_of_date"], "01-Jan-2026")
+        self.assertEqual(result["mutual_funds"][0]["fund"], "New Quarter Fund")
+
     def test_parses_xbrl_mutual_fund_holdings(self) -> None:
         ns_di = "http://xbrl.org/2006/xbrldi"
         xbrl = f'''<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance" xmlns:di="{ns_di}">

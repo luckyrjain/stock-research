@@ -1,5 +1,7 @@
-// Small, pure formatting helpers shared across several ResultsDashboard cards.
-// Anything used by only one card lives with that card instead (see e.g.
+// Small, pure formatting helpers shared across several ResultsDashboard cards
+// (and, for safeExternalHref below, market-picks-dashboard.tsx too — the
+// same link-safety concern isn't specific to one dashboard). Anything used
+// by only one card lives with that card instead (see e.g.
 // insider-activity-card.tsx's fmtActivityDate, street-consensus-card.tsx's
 // fmtConsensusDate).
 
@@ -109,4 +111,22 @@ export function fmtRatio(raw: string): string {
   const n = parseFloat(s.replace(/,/g, ''));
   if (!isNaN(n) && isFinite(n)) return fmt(n, s.includes('.') ? 2 : 0);
   return s;
+}
+
+// Every card that renders a scraped/LLM-sourced link (news articles, filing
+// attachments, market-picks source headlines, Screener concall links, ...)
+// used to pass its URL straight into an <a href> with no validation, while
+// street-consensus-card.tsx's NumericConsensusRow alone checked its own
+// (Trendlyne-specific) URL against a host prefix before rendering it as a
+// link. None of these fields are user-typed, but they ARE scraped/LLM-
+// extracted third-party text this codebase never fully trusts elsewhere
+// (see e.g. the "never invent" convention) — a compromised/malicious source
+// article, or an LLM extraction bug, returning a `javascript:`/`data:` URI
+// would otherwise render as a clickable link a browser executes on click.
+// This is the shared, scheme-only equivalent of that same discipline: only
+// http(s) URLs are ever rendered as a real href, everything else renders as
+// plain (unclickable) text via the caller checking this function's result.
+export function safeExternalHref(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  return /^https?:\/\//i.test(url) ? url : undefined;
 }

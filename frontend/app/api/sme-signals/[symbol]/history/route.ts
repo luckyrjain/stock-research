@@ -10,7 +10,7 @@ export async function GET(
 
   let upstream: Response;
   try {
-    upstream = await fetch(`${API}/api/sme-signals/${symbol}/history`, { headers: clientIpHeaders(req), cache: 'no-store' });
+    upstream = await fetch(`${API}/api/sme-signals/${encodeURIComponent(symbol)}/history`, { headers: clientIpHeaders(req), cache: 'no-store' });
   } catch {
     return Response.json(
       { error: 'Backend unavailable. Make sure the analysis service is running.' },

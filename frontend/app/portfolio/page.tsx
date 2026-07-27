@@ -7,7 +7,7 @@ import SiteNav from '@/components/site-nav';
 
 interface LivePrice {
   price: number;
-  change_pct: number;
+  change_pct: number | null;
 }
 
 function fmtPrice(n: number | null): string {

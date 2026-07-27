@@ -115,17 +115,40 @@ class RunSignalEngineTest(unittest.TestCase):
 
     def test_weighted_score_is_computed_correctly(self) -> None:
         # weights: valuation 0.4, volume 0.2, growth 0.4, filings 0.2,
-        # technical 0.2, macro 0.15 — note these sum to 1.55, not 1.0, so
-        # final_score is not bounded to [-1, 1] even though each individual
-        # signal score is.
+        # technical 0.2, macro 0.15 — these sum to 1.55, not 1.0, so the raw
+        # weighted sum before clamping is not bounded to [-1, 1] even
+        # though each individual signal score is. The engine clamps the
+        # final result to the documented -1..1 contract (see the comment
+        # in signals/engine.py), so a weighted sum of 1.55 here reads back
+        # as exactly 1.0.
         result = self._run(
             volume=_sig(1.0), valuation=_sig(1.0), growth=_sig(1.0), filings=_sig(1.0),
             technical=_sig(1.0), macro=_sig(1.0),
         )
-        self.assertAlmostEqual(result.final_score, 1.55, places=2)
+        self.assertAlmostEqual(result.final_score, 1.0, places=2)
 
         result2 = self._run(volume=_sig(0.0), valuation=_sig(1.0), growth=_sig(0.0), filings=_sig(0.0))
         self.assertAlmostEqual(result2.final_score, 0.4, places=2)
+
+    def test_final_score_is_clamped_to_documented_range(self) -> None:
+        # Regression test for an adversarial-review finding: with real
+        # per-signal score ceilings/floors (not the +/-1.0 extremes the
+        # test above uses to prove the raw sum can exceed 1.55), the
+        # engine's own achievable max/min is asymmetric (~1.18 / ~-0.89 in
+        # the default weight configuration) — final_score must never
+        # silently exceed the -1..1 contract every consumer (frontend,
+        # GET /api/v1, docs/output-schema.md) treats as a hard bound.
+        result = self._run(
+            volume=_sig(1.0), valuation=_sig(0.6), growth=_sig(0.9), filings=_sig(0.95),
+            technical=_sig(0.6), macro=_sig(0.44),
+        )
+        self.assertLessEqual(result.final_score, 1.0)
+
+        result2 = self._run(
+            volume=_sig(-0.5), valuation=_sig(-1.0), growth=_sig(-0.5), filings=_sig(-0.15),
+            technical=_sig(-0.4), macro=_sig(-0.52),
+        )
+        self.assertGreaterEqual(result2.final_score, -1.0)
 
     def test_final_score_is_rounded_to_two_decimals(self) -> None:
         result = self._run(volume=_sig(0.333), valuation=_sig(0.111), growth=_sig(0.777), filings=_sig(0.222))

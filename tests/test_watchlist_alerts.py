@@ -214,7 +214,7 @@ class RunTest(unittest.TestCase):
         }
         change = {"kind": "recommendation_change", "symbol": "TCS", "old_recommendation": "HOLD", "new_recommendation": "BUY", "confidence": "HIGH"}
 
-        def fake_detect(symbol):
+        def fake_detect(symbol, changes=None):
             return change if symbol == "TCS" else None
 
         with patch("watchlist_alerts.get_engine", return_value=MagicMock()), \
@@ -295,6 +295,40 @@ class RunTest(unittest.TestCase):
         with patch("watchlist_alerts.get_engine", return_value=MagicMock()), \
              patch("watchlist_alerts._get_watched_symbols", return_value={}):
             self.assertTrue(watchlist_alerts.run())
+
+    def test_detect_recent_changes_is_called_once_per_symbol_not_twice(self) -> None:
+        # Regression test for an adversarial-review finding: run() used to
+        # call watchlist_alerts._detect_change(symbol) and
+        # _detect_price_move(symbol) with no shared state between them, and
+        # each independently called verdict_history.detect_recent_changes()
+        # -- which itself does one full DB read of the last two stored
+        # snapshots to compute BOTH the recommendation-change and
+        # price-move verdicts. That doubled the DB round-trips per watched
+        # symbol for no benefit, since one shared call already has
+        # everything both checks need. run() must now fetch it once per
+        # symbol and pass the result down to both checks.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        os.environ["ANTHROPIC_API_KEY"] = "fake"
+        by_symbol = {
+            "TCS": [{"user_id": 1, "email": "a@example.com"}],
+            "INFY": [{"user_id": 1, "email": "a@example.com"}],
+        }
+
+        with patch("watchlist_alerts.get_engine", return_value=MagicMock()), \
+             patch("watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
+             patch("watchlist_alerts._analyze_symbol", return_value={"recommendation": "HOLD"}), \
+             patch(
+                 "watchlist_alerts.verdict_history.detect_recent_changes",
+                 return_value={"recommendation_change": None, "price_move": None},
+             ) as mock_detect, \
+             patch("watchlist_alerts.send_watchlist_alert_email"):
+            self.assertTrue(watchlist_alerts.run())
+
+        # Exactly one call per watched symbol (2 symbols -> 2 calls), not
+        # one per symbol per alert-kind (which would be 4).
+        self.assertEqual(mock_detect.call_count, 2)
+        called_symbols = {call.args[0] for call in mock_detect.call_args_list}
+        self.assertEqual(called_symbols, {"TCS", "INFY"})
 
 
 if __name__ == "__main__":

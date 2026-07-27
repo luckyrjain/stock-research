@@ -125,19 +125,31 @@ def _analyze_symbol(symbol: str, run_id: str, force: bool = False) -> dict | Non
         return None
 
 
-def _detect_change(symbol: str) -> dict | None:
+def _detect_change(symbol: str, changes: dict | None = None) -> dict | None:
     """Compare today's freshly-saved verdict against the one immediately
     before it. None if there's no prior day to compare against yet, or the
     recommendation didn't change. Delegates the actual comparison to
     verdict_history.detect_recent_changes() — the same function
     GET /api/watchlist/calendar now calls for same-day in-app surfacing, so
     the email digest and the watchlist page can never disagree on what
-    counts as a change."""
-    change = verdict_history.detect_recent_changes(symbol, _PRICE_MOVE_THRESHOLD_PCT)["recommendation_change"]
+    counts as a change.
+
+    `changes` lets a caller that's already fetched
+    detect_recent_changes()'s combined result (see _detect_price_move
+    below and run()'s own call site) pass it straight through instead of
+    triggering a second, redundant DB round-trip for the same symbol —
+    detect_recent_changes() already computes both the recommendation-change
+    and price-move verdicts from one shared read of the last two stored
+    snapshots. Left optional (default None -> fetch it here) so this
+    function's own standalone tests, and any other caller that only cares
+    about this one check, don't need to fetch it themselves first."""
+    if changes is None:
+        changes = verdict_history.detect_recent_changes(symbol, _PRICE_MOVE_THRESHOLD_PCT)
+    change = changes["recommendation_change"]
     return {"kind": "recommendation_change", "symbol": symbol, **change} if change else None
 
 
-def _detect_price_move(symbol: str) -> dict | None:
+def _detect_price_move(symbol: str, changes: dict | None = None) -> dict | None:
     """Compare today's freshly-saved verdict snapshot's price against the
     one immediately before it — None if there's no prior snapshot yet,
     either price is missing, the prior price is zero (can't compute a
@@ -145,8 +157,11 @@ def _detect_price_move(symbol: str) -> dict | None:
     Independent of _detect_change: a stock can move 12% in a day and still
     close as a HOLD, which the recommendation-change check alone would
     never surface. Delegates to verdict_history.detect_recent_changes(),
-    same reasoning as _detect_change above."""
-    move = verdict_history.detect_recent_changes(symbol, _PRICE_MOVE_THRESHOLD_PCT)["price_move"]
+    same reasoning (and same optional `changes` short-circuit) as
+    _detect_change above."""
+    if changes is None:
+        changes = verdict_history.detect_recent_changes(symbol, _PRICE_MOVE_THRESHOLD_PCT)
+    move = changes["price_move"]
     return {"kind": "price_move", "symbol": symbol, **move} if move else None
 
 
@@ -190,7 +205,14 @@ def run(force: bool = False) -> bool:
             continue
         analyzed += 1
 
-        symbol_alerts = [a for a in (_detect_change(symbol), _detect_price_move(symbol)) if a]
+        # Fetched once and passed to both checks below -- detect_recent_changes()
+        # already does one shared DB read of the last two stored snapshots
+        # for both the recommendation-change and price-move verdicts, so
+        # calling it separately from each of _detect_change/_detect_price_move
+        # (their own default behavior when called standalone) would double
+        # the DB round-trips per symbol for no benefit here.
+        changes = verdict_history.detect_recent_changes(symbol, _PRICE_MOVE_THRESHOLD_PCT)
+        symbol_alerts = [a for a in (_detect_change(symbol, changes), _detect_price_move(symbol, changes)) if a]
         if not symbol_alerts:
             continue
         for watcher in by_symbol[symbol]:

@@ -9,8 +9,8 @@ export async function GET(
   const { symbol } = await params;
   const exchange = new URL(req.url).searchParams.get('exchange');
   const upstreamUrl = exchange
-    ? `${API}/api/validate/${symbol}?exchange=${encodeURIComponent(exchange)}`
-    : `${API}/api/validate/${symbol}`;
+    ? `${API}/api/validate/${encodeURIComponent(symbol)}?exchange=${encodeURIComponent(exchange)}`
+    : `${API}/api/validate/${encodeURIComponent(symbol)}`;
   try {
     const res = await fetch(upstreamUrl, { headers: clientIpHeaders(req), cache: 'no-store' });
     const data = await res.json();

@@ -16,6 +16,7 @@ import json
 import math
 import os
 import re
+import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -200,11 +201,25 @@ def _extraction_cache_get(key: str) -> list[dict] | None:
 
 
 def _extraction_cache_set(key: str, picks: list[dict]) -> None:
+    # Written atomically (tempfile + os.replace), same convention as
+    # cache.py::save() — _phase_extract runs one of these per source with up
+    # to 6 ThreadPoolExecutor workers, and while distinct sources normally
+    # write distinct keys, overlapping pipeline runs (e.g. a manual
+    # ?force=true firing while a scheduled run is still in flight) can have
+    # two writers race on the exact same (source, article-batch) cache key.
+    # A direct write_text's interleaved writes could otherwise leave a torn/
+    # partial JSON file on disk for the next reader.
     _EXTRACT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    serialized = json.dumps({"ts": time.time(), "picks": picks})
     try:
-        (_EXTRACT_CACHE_DIR / f"{key}.json").write_text(
-            json.dumps({"ts": time.time(), "picks": picks})
-        )
+        fd, tmp_path = tempfile.mkstemp(dir=_EXTRACT_CACHE_DIR, prefix=f".{key}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(serialized)
+            os.replace(tmp_path, _EXTRACT_CACHE_DIR / f"{key}.json")
+        except Exception:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
     except Exception:
         pass
 
@@ -528,6 +543,103 @@ def _load_nse_symbol_master() -> set[str]:
         except Exception:
             pass
         return set()  # empty = allow all (fail open)
+
+
+# A regex-parsed "target ₹X" match out of a source's free-text reason string
+# is unvalidated against the stock's own price — a false-positive match (e.g.
+# "target 2027 revenue growth" capturing "2027" as a target price) or a
+# genuine but stale/wrong figure can land arbitrarily far from the current
+# price, breaking the entry < target invariant _trade_levels' own formula
+# path guarantees (target is always 10-25% above price). Any analyst target
+# outside this multiple-of-price band is treated as unparseable (falls back
+# to the deterministic formula) rather than trusted at face value.
+_ANALYST_TARGET_MIN_PRICE_MULT = 0.5
+_ANALYST_TARGET_MAX_PRICE_MULT = 3.0
+
+
+def _select_target_price(
+    analyst_target: float | None,
+    formula_target: float | None,
+    price: float | None,
+) -> float | None:
+    """
+    Prefer a real, regex-parsed analyst target price over the deterministic
+    formula target — but only when it's within a plausible multiple of the
+    current price (_ANALYST_TARGET_MIN_PRICE_MULT.._ANALYST_TARGET_MAX_PRICE_MULT).
+    A target outside that band is more likely a false-positive regex match
+    (e.g. "target 2027 revenue growth" capturing "2027" as a price) or a
+    stale/wrong figure than a real one, and trusting it at face value would
+    violate the stop < entry < target invariant the formula path guarantees.
+    Falls back to `formula_target` (which may itself be None) in that case.
+    """
+    if (
+        analyst_target is not None
+        and analyst_target > 0
+        and price is not None
+        and price > 0
+        and _ANALYST_TARGET_MIN_PRICE_MULT * price <= analyst_target <= _ANALYST_TARGET_MAX_PRICE_MULT * price
+    ):
+        return analyst_target
+    return formula_target
+
+
+def _dedup_key(ticker: str, company: str) -> str:
+    """
+    Group key for consolidating raw LLM-extracted picks that refer to the
+    same stock, before any NSE/ticker validation has happened. Prefers a
+    real ticker when the LLM provided one; falls back to a normalized
+    company name (uppercased, alphanumeric-only) when it didn't.
+
+    Previously truncated the normalized-company-name fallback to 12
+    characters. Two different companies whose normalized names happen to
+    share the same first 12 characters (e.g. two subsidiaries of the same
+    group with a long shared name prefix) would silently collide onto the
+    same group and have their source mentions merged — with no length-
+    related reason for the cap in the first place (this key is only ever
+    used as a dict lookup, where key length doesn't matter). Uses the full
+    normalized name instead.
+    """
+    if ticker:
+        return ticker
+    return re.sub(r"[^A-Z0-9]", "", company.upper())
+
+
+def _resolve_symbol_via_fuzzy_match(norm: str, symbols: list[dict]) -> dict | None:
+    """
+    Resolve `norm` (a normalized company name) against NSE autocomplete's
+    `symbols` results via rapidfuzz fuzzy matching. Only called from
+    consolidation's Path B2 — when there's no exact ticker match among the
+    candidates and more than one candidate exists to disambiguate between.
+    Returns None (never guessed) when rapidfuzz isn't installed, there's
+    only one candidate, or nothing clears the score cutoff.
+    """
+    if len(symbols) <= 1:
+        return None
+    try:
+        from rapidfuzz import process as _rfprocess, fuzz as _rffuzz
+    except ImportError:
+        return None
+
+    sym_names = [
+        (s.get("symbol", ""), s.get("symbol_info") or s.get("company", ""))
+        for s in symbols
+    ]
+    best_match = _rfprocess.extractOne(
+        norm,
+        [n for _, n in sym_names],
+        scorer=_rffuzz.token_set_ratio,
+        score_cutoff=70,
+    )
+    if not best_match:
+        return None
+    # extractOne's own 3rd tuple element is the matched choice's index in
+    # the `choices` list passed to it -- using this directly (rather than
+    # re-deriving it via `[...].index(best_match[0])`, which silently finds
+    # the FIRST list entry with that matched display-name string) avoids
+    # resolving to the WRONG symbol whenever two different entries share the
+    # same display name (e.g. two differently-suffixed listings of a
+    # similarly named company).
+    return symbols[best_match[2]]
 
 
 def _parse_targets_from_sources(sources: list[dict]) -> float | None:
@@ -1052,7 +1164,7 @@ Return ONLY this JSON (no markdown, no extra text):
         for pick in raw_picks:
             ticker  = (pick.get("ticker") or "").upper().strip()
             company = (pick.get("company") or "").strip()
-            key     = ticker or re.sub(r"[^A-Z0-9]", "", company.upper())[:12]
+            key     = _dedup_key(ticker, company)
             if not key:
                 continue
             if key not in groups:
@@ -1090,11 +1202,6 @@ Return ONLY this JSON (no markdown, no extra text):
         emit({"event": "consolidating", "total_raw": len(raw_picks), "unique": len(groups)})
 
         import yfinance as yf
-        try:
-            from rapidfuzz import process as _rfprocess, fuzz as _rffuzz
-            _RAPIDFUZZ_OK = True
-        except ImportError:
-            _RAPIDFUZZ_OK = False
 
         def _norm_company(name: str) -> str:
             """Strip common suffixes and noise words for cleaner ticker lookup."""
@@ -1143,20 +1250,8 @@ Return ONLY this JSON (no markdown, no extra text):
                         None,
                     )
                     # ── Path B2: rapidfuzz fuzzy match against autocomplete results ─
-                    if not exact and _RAPIDFUZZ_OK and len(symbols) > 1:
-                        sym_names = [
-                            (s.get("symbol", ""), s.get("symbol_info") or s.get("company", ""))
-                            for s in symbols
-                        ]
-                        best_match = _rfprocess.extractOne(
-                            norm,
-                            [n for _, n in sym_names],
-                            scorer=_rffuzz.token_set_ratio,
-                            score_cutoff=70,
-                        )
-                        if best_match:
-                            idx = [n for _, n in sym_names].index(best_match[0])
-                            exact = symbols[idx]
+                    if not exact:
+                        exact = _resolve_symbol_via_fuzzy_match(norm, symbols)
                     best = exact or symbols[0]
                     sym  = best.get("symbol", "").upper()
                     if not sym:
@@ -1465,9 +1560,14 @@ Return ONLY this JSON (no markdown):
             else:
                 rec = "HOLD"
 
-            # Quant veto: strongly negative signal engine demotes BUY → WATCHLIST
-            if signal_score < -0.3 and rec == "BUY":
-                rec = "WATCHLIST"
+            # NOTE: a "quant veto" block used to live here (demoting BUY to
+            # WATCHLIST when signal_score < -0.3), but it was dead code —
+            # the BUY branch above already requires signal_score >= -0.3, so
+            # `signal_score < -0.3 and rec == "BUY"` could never be true.
+            # Removed rather than left as misleading, unreachable code (an
+            # adversarial-review finding); the BUY branch's own
+            # `signal_score >= -0.3` guard is the real (and only) quant veto
+            # on this recommendation tier.
 
             # ── Action score: magnitude of conviction (0–1) ───────────────────
             action_score = round(min(1.0, max(0.0, abs(combined_dir))), 3)
@@ -1475,9 +1575,9 @@ Return ONLY this JSON (no markdown):
             # ── Trade levels: real analyst targets when parseable, else formula ─
             analyst_target          = _parse_targets_from_sources(sources)
             entry_f, target_f, stop = _trade_levels(si, signal_score)
-            target = analyst_target if (analyst_target and analyst_target > 0) else target_f
             entry  = entry_f
             price  = si.get("current_price")
+            target = _select_target_price(analyst_target, target_f, price)
             upside_pct: float | None = None
             if target is not None and price and price > 0:
                 upside_pct = round((target - price) / price * 100, 1)

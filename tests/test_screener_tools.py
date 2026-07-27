@@ -478,6 +478,28 @@ class ExtractQuarterlyTrendTest(unittest.TestCase):
         self.assertEqual(trend["revenue"], [100.0, 200.0, 300.0, 400.0])
         self.assertEqual(trend["eps"], [1.0, 2.0, 3.0, 4.0])
 
+    def test_sales_row_shorter_than_header_returns_empty_dict_not_misaligned(self) -> None:
+        # Regression test: an adversarial-review finding — independently
+        # trimming each row to its own last-N cells only produces a correct
+        # quarter-to-value pairing if a shorter row's missing cell happens
+        # to be at the very front. A Sales row with one fewer cell than the
+        # 4-quarter header (simulating a real-world layout quirk) must bail
+        # out entirely rather than risk silently pairing "Q1" with a Sales
+        # value that actually belongs to "Q2".
+        html = """
+        <section id="quarters">
+          <table>
+            <thead><tr><th></th><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th></tr></thead>
+            <tbody>
+              <tr><td>Sales</td><td>200</td><td>300</td><td>400</td></tr>
+              <tr><td>EPS in Rs</td><td>1</td><td>2</td><td>3</td><td>4</td></tr>
+            </tbody>
+          </table>
+        </section>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(_extract_quarterly_trend(soup), {})
+
     def test_operating_margin_capped_to_max_periods_window(self) -> None:
         html = """
         <section id="quarters">

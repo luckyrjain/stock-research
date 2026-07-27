@@ -6,6 +6,7 @@ import InfoTooltip from './info-tooltip';
 import WatchlistButton from './watchlist-button';
 import PositionButton from './position-button';
 import { usePositions } from '@/lib/positions';
+import { safeExternalHref } from './dashboard-format';
 
 type SortKey    = 'confidence_score' | 'change_pct' | 'pe_ratio' | 'valuation_percentile';
 type ConfFilter = 'all' | 'high' | 'medium' | 'low';
@@ -192,8 +193,8 @@ function SourcesPopover({ sources }: { sources: PickSource[] }) {
                   {s.headline && (
                     <p className="text-[10px] text-muted leading-snug line-clamp-2">{s.headline}</p>
                   )}
-                  {s.url && (
-                    <a href={s.url} target="_blank" rel="noopener noreferrer"
+                  {safeExternalHref(s.url) && (
+                    <a href={safeExternalHref(s.url)} target="_blank" rel="noopener noreferrer"
                        className="text-[10px] text-accent hover:underline mt-0.5 block">
                       View article →
                     </a>

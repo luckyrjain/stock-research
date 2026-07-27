@@ -1,11 +1,24 @@
-import json
+import multiprocessing
 import shutil
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import scraper_error_counters
+
+
+def _mp_record_error(counters_dir: str, scraper_name: str) -> None:
+    """Top-level (picklable) worker for MultiProcessConcurrencySafetyTest —
+    runs in a genuinely separate OS process, not a thread, to exercise the
+    actual cross-process guarantee fcntl.flock provides — same pattern as
+    tests/test_llm_cost.py's own _mp_record_call."""
+    import scraper_error_counters as _sec
+
+    _sec._COUNTERS_DIR = Path(counters_dir)
+    _sec.record_scraper_error(scraper_name)
 
 
 class RecordScraperErrorTest(unittest.TestCase):
@@ -66,6 +79,93 @@ class RecordScraperErrorTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("not json")
         self.assertEqual(scraper_error_counters.get_error_count("peers"), 0)
+
+
+class ConcurrencySafetyTest(unittest.TestCase):
+    """Regression coverage for an adversarial-review finding: an earlier
+    version of this module guarded its read-modify-write with only an
+    in-process threading.Lock, which does nothing to prevent two backend
+    *worker processes* (the exact multi-worker/REDIS_URL topology
+    docs/deployment.md's "Scaling" section documents as supported) from
+    both reading the same prior error_count and one write silently
+    clobbering the other — permanently undercounting with no warning
+    logged. Same fcntl.flock-based fix and same test shape as
+    tests/test_llm_cost.py's own ConcurrencySafetyTest."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-scraper-error-counters-lock-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._patch = patch.object(scraper_error_counters, "_COUNTERS_DIR", Path(self._tmpdir))
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+
+    def test_locked_excludes_concurrent_holders(self) -> None:
+        intervals = []
+        lock_guard = threading.Lock()
+
+        def hold(label: str) -> None:
+            with scraper_error_counters._locked("peers"):
+                start = time.monotonic()
+                time.sleep(0.05)
+                end = time.monotonic()
+            with lock_guard:
+                intervals.append((label, start, end))
+
+        threads = [threading.Thread(target=hold, args=(f"t{i}",)) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(intervals), 4)
+        intervals.sort(key=lambda x: x[1])
+        for (_, _, end_a), (_, start_b, _) in zip(intervals, intervals[1:]):
+            self.assertLessEqual(end_a, start_b)  # no overlap between consecutive holders
+
+    def test_concurrent_record_scraper_error_loses_no_calls(self) -> None:
+        threads = [
+            threading.Thread(target=scraper_error_counters.record_scraper_error, args=("peers",))
+            for _ in range(30)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(scraper_error_counters.get_error_count("peers"), 30)
+
+
+class MultiProcessConcurrencySafetyTest(unittest.TestCase):
+    """The gap ConcurrencySafetyTest's own comments disclose: its tests
+    only spawn threads within one process, proving the file-level lock
+    serializes correctly in-process — but the bug this module's _locked()
+    fix actually targets is two separate *processes* racing to update the
+    same scraper's counter file, which a plain threading.Lock cannot
+    prevent at all. This spawns real OS processes (multiprocessing, fork
+    start method) to exercise fcntl.flock's actual cross-process
+    guarantee — same pattern as tests/test_llm_cost.py's own
+    MultiProcessConcurrencySafetyTest."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-scraper-error-counters-mp-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+
+    def test_concurrent_processes_lose_no_calls(self) -> None:
+        ctx = multiprocessing.get_context("fork")
+        procs = [
+            ctx.Process(target=_mp_record_error, args=(self._tmpdir, "peers"))
+            for _ in range(12)
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=30)
+            self.assertEqual(p.exitcode, 0)
+
+        with patch.object(scraper_error_counters, "_COUNTERS_DIR", Path(self._tmpdir)):
+            count = scraper_error_counters.get_error_count("peers")
+
+        self.assertEqual(count, 12)
 
 
 if __name__ == "__main__":

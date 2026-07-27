@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import type { StreetConsensus } from '@/types';
 import InfoTooltip from './info-tooltip';
 import { Card } from './dashboard-primitives';
+import { safeExternalHref } from './dashboard-format';
 
 function fmtConsensusDate(publishedAt: string | null): string | null {
   if (!publishedAt) return null;
@@ -113,12 +114,13 @@ export function StreetConsensusCard({ consensus }: { consensus: StreetConsensus 
       <div className="space-y-2.5">
         {consensus.articles.slice(0, 6).map((a, i) => {
           const date = fmtConsensusDate(a.published_at);
+          const safeUrl = safeExternalHref(a.url);
           return (
             <a
               key={i}
-              href={a.url}
-              target="_blank"
-              rel="noopener noreferrer"
+              href={safeUrl}
+              target={safeUrl ? '_blank' : undefined}
+              rel={safeUrl ? 'noopener noreferrer' : undefined}
               className="block text-xs hover:bg-card-hi/60 rounded-lg px-2 py-1.5 -mx-2 transition-colors"
             >
               <p className="text-tx line-clamp-2">{a.title}</p>

@@ -27,7 +27,7 @@ export async function GET(
   let upstream: Response;
   try {
     upstream = await fetch(
-      `${API}/api/analyse/${symbol}?force=${force}`,
+      `${API}/api/analyse/${encodeURIComponent(symbol)}?force=${encodeURIComponent(force)}`,
       { headers: clientIpHeaders(req), cache: 'no-store' },
     );
   } catch {
