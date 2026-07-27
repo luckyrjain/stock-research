@@ -4,6 +4,17 @@ from pathlib import Path
 _analyst_cfg = json.loads((Path(__file__).parent / "analyst.json").read_text())
 
 ANALYST_SECTIONS: dict[str, str] = _analyst_cfg["sections"]
+# "instructions"/"valuation_guidance" were previously parsed here and never
+# referenced anywhere else in this module -- an operator editing either list
+# in analyst.json (e.g. to tune the filings-materiality guidance or the P/E
+# calibration bands) had zero effect on the actual LLM prompt below, since
+# build_analysis_prompt() only ever pulled ANALYST_SECTIONS out of this
+# config. Wired into the prompt itself (see the "ADDITIONAL ANALYST
+# INSTRUCTIONS"/"VALUATION GUIDANCE" sections below) so both actually reach
+# the model, matching crew.py's own comment (right above its
+# filings-handling code) that already assumed this was happening.
+_INSTRUCTIONS: list[str] = _analyst_cfg.get("instructions", [])
+_VALUATION_GUIDANCE: list[str] = _analyst_cfg.get("valuation_guidance", [])
 
 
 def build_analysis_prompt(symbol: str, all_data: dict[str, dict]) -> str:
@@ -11,6 +22,8 @@ def build_analysis_prompt(symbol: str, all_data: dict[str, dict]) -> str:
     for name, label in ANALYST_SECTIONS.items():
         clean = {k: v for k, v in (all_data.get(name, {}) or {}).items() if k != "_meta"}
         parts.append(f"### {label}\n{json.dumps(clean, indent=2)}")
+    instructions_block = "\n".join(f"- {line}" for line in _INSTRUCTIONS)
+    valuation_guidance_block = "\n".join(f"- {line}" for line in _VALUATION_GUIDANCE)
     return (
         f"""You are a professional equity research analyst.
             You are given structured data for the NSE-listed stock: {symbol}.
@@ -96,6 +109,16 @@ def build_analysis_prompt(symbol: str, all_data: dict[str, dict]) -> str:
             6. INSTITUTIONAL TREND
             - DO NOT infer trends (rising/falling) from a single snapshot
             - Only describe what is explicitly visible
+
+            =====================
+            ADDITIONAL ANALYST INSTRUCTIONS
+            =====================
+            {instructions_block}
+
+            =====================
+            VALUATION GUIDANCE (Indian equities)
+            =====================
+            {valuation_guidance_block}
 
             =====================
             REASONING APPROACH

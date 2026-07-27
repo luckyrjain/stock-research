@@ -106,6 +106,21 @@ class SendMagicLinkEmailTest(unittest.TestCase):
         fake_server.login.assert_called_once_with("apikey", "secret")
         fake_server.send_message.assert_called_once()
 
+    def test_malformed_smtp_port_returns_false_instead_of_raising(self) -> None:
+        # Regression test for an adversarial-review finding: SMTP_PORT used
+        # to be parsed with int() BEFORE the try/except block, so a
+        # malformed value (a plausible operator copy-paste typo) raised
+        # ValueError straight out of this "never raises" function.
+        # watchlist_alerts.py's run() has no try/except around its per-user
+        # send call at all, so this would have crashed the unattended daily
+        # cron job mid-batch.
+        os.environ["SMTP_HOST"] = "smtp.example.com"
+        os.environ["SMTP_PORT"] = "587,"
+
+        result = email_sender.send_magic_link_email("user@example.com", "https://x/y")
+
+        self.assertFalse(result)
+
 
 class SendWatchlistAlertEmailTest(unittest.TestCase):
     def setUp(self) -> None:

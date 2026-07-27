@@ -41,5 +41,26 @@ class FilingsInAnalystPromptTest(unittest.TestCase):
         self.assertIsInstance(prompt, str)
 
 
+class AnalystJsonInstructionsAndValuationGuidanceTest(unittest.TestCase):
+    """Regression tests for an adversarial-review finding: config/analyst.json's
+    "instructions" and "valuation_guidance" keys were parsed at import time but
+    never referenced anywhere in build_analysis_prompt() — an operator editing
+    either list (e.g. the filings-materiality classification instruction, or
+    the P/E/ROCE/ROE calibration bands) had zero effect on the actual LLM
+    prompt, silently contradicting crew.py's own comment claiming the filings
+    instruction reaches the model."""
+
+    def test_a_real_instruction_from_analyst_json_appears_in_the_built_prompt(self) -> None:
+        prompt = build_analysis_prompt("TCS", {})
+        self.assertIn(
+            "treat material ones (board decisions on fundraising/M&A, credit rating changes",
+            prompt,
+        )
+
+    def test_a_real_valuation_guidance_line_appears_in_the_built_prompt(self) -> None:
+        prompt = build_analysis_prompt("TCS", {})
+        self.assertIn("P/E: below 15 = potentially cheap", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

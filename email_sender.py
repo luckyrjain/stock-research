@@ -79,24 +79,37 @@ def _send_via_smtp(msg: EmailMessage, failure_event: str) -> bool:
         log_event(LOGGER, "smtp_not_configured", level="warning")
         return False
 
-    port = int(os.environ.get("SMTP_PORT", "587"))
     user = os.environ.get("SMTP_USER")
     password = os.environ.get("SMTP_PASSWORD")
     # Defaults on (587/STARTTLS is the common case for real providers). Only
     # meant to be turned off for a local/dev relay that doesn't speak TLS.
     use_tls = os.environ.get("SMTP_USE_TLS", "true").lower() not in ("false", "0", "no")
-    # Port 465 is the IANA-registered implicit-TLS SMTP port (many major
-    # providers, e.g. Gmail/Office365, document it as their alternative to
-    # 587) — a plaintext connect-then-STARTTLS handshake against a listener
-    # already expecting TLS from the first byte fails outright. Without this,
-    # an operator setting SMTP_PORT=465 (a very plausible config choice,
-    # without also separately setting SMTP_USE_TLS=false) would have every
-    # send silently fail — the broad except below swallows it into a log
-    # line, so sign-in links and watchlist alerts would simply never arrive
-    # with no obvious symptom pointing at the port/TLS-mode mismatch.
-    use_implicit_tls = port == 465
 
     try:
+        # SMTP_PORT is parsed inside this try block, not before it — a
+        # malformed value (e.g. "587," from an operator copy-paste typo)
+        # must degrade through the same "log and return False" path as
+        # every other SMTP failure below, not raise ValueError straight out
+        # of this function. That matters beyond this call site: watchlist_
+        # alerts.py's run() has no try/except around its per-user
+        # send_watchlist_alert_email() call at all (an unattended daily cron
+        # job would otherwise crash mid-batch), and api.py's
+        # /api/auth/request-link only catches this to return a 503 instead
+        # of the documented always-{"sent": true} response, which itself
+        # leaks that something is broken server-side — both consequences
+        # this function's own "never raises" docstring promise exists to
+        # prevent.
+        port = int(os.environ.get("SMTP_PORT", "587"))
+        # Port 465 is the IANA-registered implicit-TLS SMTP port (many major
+        # providers, e.g. Gmail/Office365, document it as their alternative to
+        # 587) — a plaintext connect-then-STARTTLS handshake against a listener
+        # already expecting TLS from the first byte fails outright. Without this,
+        # an operator setting SMTP_PORT=465 (a very plausible config choice,
+        # without also separately setting SMTP_USE_TLS=false) would have every
+        # send silently fail — the broad except below swallows it into a log
+        # line, so sign-in links and watchlist alerts would simply never arrive
+        # with no obvious symptom pointing at the port/TLS-mode mismatch.
+        use_implicit_tls = port == 465
         smtp_cls = smtplib.SMTP_SSL if use_implicit_tls else smtplib.SMTP
         with smtp_cls(host, port, timeout=10) as server:
             if use_tls and not use_implicit_tls:

@@ -241,14 +241,20 @@ _LIQUIDITY_WINDOW_DAYS = 20
 def _compute_liquidity(result: dict) -> dict | None:
     """Avg daily share volume / turnover (₹) over the last _LIQUIDITY_WINDOW_DAYS
     trading days, from the same OHLCV fetch already done for EMA signals — no
-    extra network calls. None if the stock errored out or has no trading days
-    at all (never invents a liquidity figure from partial/missing data).
+    extra network calls. None if the stock errored out, has no trading days
+    at all, or has fewer than _LIQUIDITY_WINDOW_DAYS of history (never invents
+    a liquidity figure from partial/missing data) — a newly-listed NSE
+    Emerge/BSE SME stock (this pipeline's own target universe) routinely has
+    well under 20 days of history, and averaging over whatever's there would
+    silently mislabel a 3-day average (often dominated by an atypical
+    listing-day volume print) as a "20d" figure. Same min-periods convention
+    _compute_volume_spike() already applies to its own rolling window.
     """
     if "error" in result:
         return None
     symbol = result["symbol"]
     df = result["df"]
-    if df.empty or "Volume" not in df.columns:
+    if df.empty or "Volume" not in df.columns or len(df) < _LIQUIDITY_WINDOW_DAYS:
         return None
 
     window = df.tail(_LIQUIDITY_WINDOW_DAYS)
