@@ -668,7 +668,14 @@ async def analyse(symbol: str, request: Request, force: bool = False):
                     try:
                         raw = await loop.run_in_executor(None, _fetch_task, name, sym, run_id)
                         normed = schema_normalize(name, raw)
-                        cache.save(sym, name, normed)
+                        meta = cache.save(sym, name, normed)
+                        # cache.save() deliberately doesn't mutate `normed`
+                        # itself (see its own docstring) -- stamped here so
+                        # main._build_report()'s data_freshness finds a real
+                        # timestamp for a task fetched fresh THIS run, same
+                        # fix as main.py's own CLI loop.
+                        if meta:
+                            normed["_meta"] = meta
                         await q.put({"event": "task_done", "task": name, "ok": True})
                         return name, normed
                     except Exception as exc:

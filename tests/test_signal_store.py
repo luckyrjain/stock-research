@@ -47,6 +47,17 @@ class SaveSignalTest(unittest.TestCase):
         self.assertIn(str(recent_date), remaining)
         self.assertIn(str(date.today()), remaining)
 
+    def test_write_failure_never_raises(self) -> None:
+        # Regression test for an adversarial-review finding: save_signal()
+        # had no exception handling of its own, unlike every sibling
+        # best-effort persistence module -- both main.py and api.py's SSE
+        # handler call this unguarded, right before the expensive LLM
+        # analyst call, so a filesystem hiccup here (disk full, a
+        # read-only mount) aborted the entire analysis over a write-only
+        # audit-trail file nothing else in the codebase reads back.
+        with patch("builtins.open", side_effect=OSError("disk full")):
+            store.save_signal(self._result())  # must not raise
+
     def test_unexpected_filename_is_skipped_not_fatal(self) -> None:
         symbol_dir = store.BASE / "TCS"
         symbol_dir.mkdir(parents=True)

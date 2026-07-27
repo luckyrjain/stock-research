@@ -1,3 +1,5 @@
+import re
+
 from signals.filings_classifier import classify_rating_action
 from signals.models import Signal
 
@@ -5,6 +7,16 @@ KEYWORDS = [
     "order", "contract", "agreement", "deal",
     "partnership", "award", "client"
 ]
+
+# "order" alone is ambiguous -- NSE filing boilerplate overwhelmingly uses it
+# as filler ("in order to comply with...") rather than a genuine business
+# order (a purchase/export/work order). Same class of substring false
+# positive already fixed once for "care" in
+# filings_classifier.py::_find_rating_agency() -- strip just this specific
+# filler phrase before checking for "order" specifically, rather than
+# dropping the keyword entirely, so a real "received an order worth ₹50 Cr"
+# filing still counts.
+_ORDER_FILLER_RE = re.compile(r"\bin order to\b")
 
 # A credit-rating change is a small confirmation nudge on top of the
 # keyword-hit score below, not a primary driver — mirrors the
@@ -25,8 +37,10 @@ def filings_signal(features: dict) -> Signal:
         # case f.get(key, "") returns None, not the default — guard with
         # `or ""` so this never raises on a malformed/None text field.
         text = ((f.get("title") or "") + " " + (f.get("desc") or "")).lower()
+        order_check_text = _ORDER_FILLER_RE.sub("", text)
         for k in KEYWORDS:
-            if k in text:
+            haystack = order_check_text if k == "order" else text
+            if k in haystack:
                 hits.append(k)
 
     if len(hits) >= 2:

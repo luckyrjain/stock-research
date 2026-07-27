@@ -35,6 +35,24 @@ class ComputeValuationAnchorTest(unittest.TestCase):
         band = {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [20.0, 22.0, 26.0]}
         self.assertIsNone(compute_valuation_anchor(None, band))
 
+    def test_negative_current_pe_returns_none_not_a_fabricated_cheap_percentile(self) -> None:
+        # Regression test for an adversarial-review finding: a negative P/E
+        # (a currently loss-making company) used to rank as arithmetically
+        # "cheapest" against a positive historical P/E band -- percentile
+        # near 0, rendered as bullish "cheap vs. its own history" and
+        # feeding a confidence-score nudge in market_picks_pipeline.py.
+        # Same anti-pattern signals/valuation.py::valuation_signal() already
+        # guards against for the identical reason: a negative P/E says
+        # nothing about over/undervaluation.
+        self_row = {"values": {"P/E": "-42.3"}}
+        band = {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [18.0, 22.0, 26.0]}
+        self.assertIsNone(compute_valuation_anchor(self_row, band))
+
+    def test_zero_current_pe_returns_none(self) -> None:
+        self_row = {"values": {"P/E": "0"}}
+        band = {"years": ["Mar 2022", "Mar 2023", "Mar 2024"], "pe": [18.0, 22.0, 26.0]}
+        self.assertIsNone(compute_valuation_anchor(self_row, band))
+
 
 class BuildPeerResultTest(unittest.TestCase):
     """build_peer_result() is the single source of truth for the shape

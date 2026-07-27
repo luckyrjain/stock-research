@@ -16,7 +16,7 @@ import requests
 from dotenv import load_dotenv
 
 import cache
-from crew import ALL_DATA_TASKS, parse_json_object, run_analysis_with_fallback
+from crew import ALL_DATA_TASKS, _configured_providers, parse_json_object, run_analysis_with_fallback
 from error_tracking import init_error_tracking
 from mf_holdings_history import compute_stake_deltas as compute_mf_holdings_deltas
 from mf_holdings_history import save_snapshot as save_mf_holdings_snapshot
@@ -42,19 +42,31 @@ LOGGER = get_logger("main")
 # ── Tool dispatch ─────────────────────────────────────────────────────────────
 
 def _save_raw_tool_output(symbol: str, task_name: str, raw_payload: object) -> None:
-    """Persist raw tool output for selected tasks to aid debugging and auditability."""
+    """Persist raw tool output for selected tasks to aid debugging and
+    auditability. Best-effort, never raises -- this runs inside
+    _fetch_task()'s own try block right after a tool call has already
+    succeeded, so a failure here (disk full, a read-only output/ mount, a
+    permission error) must not be indistinguishable from the fetch itself
+    failing. Without this guard, an exception here burned a retry attempt
+    on an already-successful fetch, and could exhaust every attempt and
+    discard real, successfully-scraped data as {"error": ...} — the same
+    "auxiliary/debug persistence must not break the primary operation"
+    convention schema_drift.py::log_drift_if_any() already follows."""
     if task_name not in {"research", "shareholding", "filings"}:
         return
 
-    symbol_dir = Path("output") / symbol.upper()
-    symbol_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = symbol_dir / f"{task_name}_raw.json"
+    try:
+        symbol_dir = Path("output") / symbol.upper()
+        symbol_dir.mkdir(parents=True, exist_ok=True)
+        raw_path = symbol_dir / f"{task_name}_raw.json"
 
-    payload = {
-        "_meta": {"fetched_at": datetime.now(timezone.utc).isoformat(), "task": task_name},
-        "raw_output": raw_payload if isinstance(raw_payload, dict) else str(raw_payload),
-    }
-    raw_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        payload = {
+            "_meta": {"fetched_at": datetime.now(timezone.utc).isoformat(), "task": task_name},
+            "raw_output": raw_payload if isinstance(raw_payload, dict) else str(raw_payload),
+        }
+        raw_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        log_event(LOGGER, "save_raw_tool_output_failed", level="warning", symbol=symbol, task=task_name, error=str(exc))
 
 def _fetch_task(task_name: str, symbol: str, run_id: str, max_attempts: int = 3) -> dict:
     """Call the appropriate data tool directly (no LLM involved)."""
@@ -246,14 +258,18 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     parser.add_argument("--force", action="store_true", help="Ignore cache and re-fetch all data")
     args = parser.parse_args()
 
-    has_key = any(
-        os.getenv(k)
-        for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY", "GOOGLE_API_KEY")
-    )
+    # Delegates to crew.py's own provider-key registry rather than a
+    # hand-duplicated list of env var names -- a hardcoded tuple here had
+    # drifted out of sync with _API_KEY_ENV (missing OPENROUTER_API_KEY, a
+    # fully-supported 5th provider api.py's own equivalent startup check
+    # already accounts for via this same function), so a deployment
+    # configured with only an OpenRouter key worked fine through the API
+    # server but the CLI refused to even attempt the pipeline.
+    has_key = bool(_configured_providers())
     is_ollama = os.getenv("LLM_PROVIDER", "").lower() == "ollama"
     if not has_key and not is_ollama:
         print("Error: No API key or local provider found.")
-        print("Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, GOOGLE_API_KEY")
+        print("Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, GOOGLE_API_KEY, OPENROUTER_API_KEY")
         print("or set LLM_PROVIDER=ollama in your .env file.")
         raise SystemExit(1)
 
@@ -304,7 +320,13 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         _validate_stock_data(symbol, stock_info)
 
         for name, data in freshly_fetched.items():
-            cache.save(symbol, name, data)
+            meta = cache.save(symbol, name, data)
+            # cache.save() deliberately doesn't mutate `data` itself (see its
+            # own docstring) -- stamped here instead so _fetched_at() below
+            # finds a real timestamp for a task fetched fresh THIS run, not
+            # just on a later run once cache.load() reads _meta back off disk.
+            if meta:
+                data["_meta"] = meta
 
     all_data = {**cached_data, **freshly_fetched}
 

@@ -38,6 +38,29 @@ class CacheFailureHandlingTest(unittest.TestCase):
             self.assertEqual(loaded["symbol"], "TCS")
             self.assertTrue(cache.is_fresh("TCS", "news"))
 
+    def test_save_returns_the_meta_stamp_without_mutating_the_callers_dict(self) -> None:
+        # Regression test for an adversarial-review finding (and its own
+        # follow-up fix): save() must return the `_meta` dict it wrote so a
+        # caller that wants it reflected onto its own object (main.py's CLI,
+        # api.py's SSE handler -- both build `data_freshness` from `_meta`
+        # on the SAME dict this run, not a separate cache.load() call) can
+        # stamp it explicitly. It must NOT mutate `data` itself in place --
+        # several other call sites (GET /api/peers, /financials,
+        # /insider-activity, /street-consensus, /shareholding-detail) call
+        # save(symbol, task, result) and then return that same `result`
+        # object straight to an HTTP client; an in-place mutation here would
+        # leak the internal-only `_meta` field into those JSON responses.
+        with patch.object(cache, "CACHE_DIR", self.cache_dir):
+            data = {"symbol": "TCS", "articles": []}
+            meta = cache.save("TCS", "news", data)
+            self.assertNotIn("_meta", data)
+            self.assertIsNotNone(meta)
+            self.assertIsNotNone(meta.get("fetched_at"))
+
+    def test_failed_payload_returns_none(self) -> None:
+        with patch.object(cache, "CACHE_DIR", self.cache_dir):
+            self.assertIsNone(cache.save("TCS", "news", {"error": "boom", "symbol": "TCS"}))
+
     def test_failed_payload_is_not_saved(self) -> None:
         with patch.object(cache, "CACHE_DIR", self.cache_dir):
             cache.save("TCS", "news", {"error": "temporary upstream failure", "symbol": "TCS"})

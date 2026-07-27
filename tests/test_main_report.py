@@ -1,6 +1,12 @@
+import os
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import cache
+import main
 from main import _build_report, _fetch_task, _strip_meta
 
 
@@ -94,6 +100,26 @@ class BuildReportTest(unittest.TestCase):
         self.assertEqual(report["data_freshness"]["stock_info"], "2026-07-27T09:00:00+00:00")
         self.assertEqual(report["data_freshness"]["shareholding"], "2026-07-21T09:00:00+00:00")
 
+    def test_data_freshness_reflects_a_task_fetched_fresh_this_run(self) -> None:
+        # Regression test for an adversarial-review finding: unlike the test
+        # above (which hand-builds all_data with _meta already present),
+        # this exercises the REAL sequence main.py's CLI loop runs --
+        # cache.save() on a freshly-fetched dict, then stamping its
+        # returned _meta back onto that same dict -- the exact pattern that
+        # was broken (data_freshness came back null for every task fetched
+        # fresh this run, only ever showing a real timestamp on a LATER run
+        # once cache.load() read the persisted _meta back off disk).
+        tmpdir = tempfile.mkdtemp(prefix="stock-research-report-freshness-test-")
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        with patch.object(cache, "CACHE_DIR", Path(tmpdir)):
+            data = {"price": 100}
+            meta = cache.save("TCS", "stock_info", data)
+            if meta:
+                data["_meta"] = meta
+            all_data = {"stock_info": data}
+            report = _build_report("TCS", all_data, {}, {})
+        self.assertIsNotNone(report["data_freshness"]["stock_info"])
+
     def test_data_freshness_is_none_for_a_task_with_no_meta(self) -> None:
         # An error payload or a task that never ran has no _meta at all —
         # None (never guessed), not a fabricated "just fetched" timestamp.
@@ -165,6 +191,66 @@ class FetchTaskMfHoldingsSnapshotTest(unittest.TestCase):
             _fetch_task("mf_holdings", "TCS", "run-1")
 
         mock_save.assert_called_once()
+
+
+class FetchTaskRawOutputAuditFailureTest(unittest.TestCase):
+    """Regression tests for an adversarial-review finding: _save_raw_tool_output()
+    (a debug/audit side write, for research/shareholding/filings only) ran
+    inside _fetch_task()'s own try block with no exception handling of its
+    own, right after a tool call had already succeeded. A failure there
+    (disk full, a read-only output/ mount, a permission error) used to be
+    indistinguishable from the fetch itself failing -- burning a retry, and
+    if it recurred for every attempt, discarding an already-successfully-
+    fetched payload as {"error": ...}."""
+
+    def test_raw_output_write_failure_does_not_discard_a_successful_fetch(self) -> None:
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = {"symbol": "TCS", "ratios": {"PE": "22.5"}}
+        with patch("main.get_fundamentals", fake_tool), \
+             patch("main.Path", side_effect=OSError("disk full")):
+            result = _fetch_task("research", "TCS", "run-1")
+
+        self.assertNotIn("error", result)
+        self.assertEqual(result["ratios"], {"PE": "22.5"})
+        # Only one attempt should have been needed -- the fetch itself never
+        # failed, so this must not have burned a retry.
+        self.assertEqual(fake_tool.run.call_count, 1)
+
+    def test_raw_output_write_failure_is_logged_not_silently_swallowed(self) -> None:
+        fake_tool = MagicMock()
+        fake_tool.run.return_value = {"symbol": "TCS", "ratios": {}}
+        with patch("main.get_fundamentals", fake_tool), \
+             patch("main.Path", side_effect=OSError("disk full")), \
+             patch("main.log_event") as mock_log:
+            result = _fetch_task("research", "TCS", "run-1")
+
+        self.assertNotIn("error", result)
+        events = [c.args[1] for c in mock_log.call_args_list]
+        self.assertIn("save_raw_tool_output_failed", events)
+
+
+class CliPreflightProviderCheckTest(unittest.TestCase):
+    """Regression test for an adversarial-review finding: main()'s CLI
+    preflight check used to hand-duplicate a list of provider env var names
+    that had drifted out of sync with crew.py's _API_KEY_ENV (missing
+    OPENROUTER_API_KEY, a fully-supported 5th provider api.py's own
+    equivalent startup check already accounts for). A deployment configured
+    with only OPENROUTER_API_KEY immediately hit SystemExit(1) here, even
+    though the pipeline itself would have run successfully with it."""
+
+    def test_openrouter_only_key_passes_the_preflight_check(self) -> None:
+        sentinel = RuntimeError("reached past the preflight check")
+        env = {
+            "OPENROUTER_API_KEY": "sk-or-fake",
+            "ANTHROPIC_API_KEY": "", "OPENAI_API_KEY": "", "GROQ_API_KEY": "", "GOOGLE_API_KEY": "",
+            "LLM_PROVIDER": "",
+        }
+        with patch.dict(os.environ, env), \
+             patch("sys.argv", ["main.py", "TCS"]), \
+             patch("main._print_status", side_effect=sentinel):
+            with self.assertRaises(RuntimeError) as ctx:
+                main.main()
+        self.assertIs(ctx.exception, sentinel)
 
 
 if __name__ == "__main__":
