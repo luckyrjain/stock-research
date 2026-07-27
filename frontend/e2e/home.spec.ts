@@ -22,6 +22,31 @@ test.describe('Home page', () => {
     await expect(page.getByRole('link', { name: 'Sign in' })).toBeVisible();
   });
 
+  test('nav collapses into a hamburger menu on a phone-width viewport', async ({ page }) => {
+    // Regression test for the deep gap analysis finding: SiteNav's 8
+    // pipe-separated links previously just wrapped onto 2-3 lines of small
+    // text above every page's content on a narrow viewport — real friction
+    // for this India-focused, mobile-heavy product. Below the md
+    // breakpoint they now collapse behind a toggle instead.
+    await page.setViewportSize({ width: 375, height: 800 });
+    await page.goto('/');
+
+    const toggle = page.getByRole('button', { name: 'Toggle navigation menu' });
+    await expect(toggle).toBeVisible();
+    // The desktop link list is present in the DOM (display:contents at
+    // md+) but not visible at this width.
+    await expect(page.getByRole('menu')).toHaveCount(0);
+
+    await toggle.click();
+    const menu = page.getByRole('menu');
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Screener' })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Watchlist' })).toBeVisible();
+
+    await menu.getByRole('menuitem', { name: 'Watchlist' }).click();
+    await expect(page).toHaveURL('/watchlist');
+  });
+
   test('idle hero offers a one-click sample report for skeptical first-time visitors', async ({ page }) => {
     const symbol = 'TCS';
     await page.route(`**/api/analyse/${symbol}**`, route =>

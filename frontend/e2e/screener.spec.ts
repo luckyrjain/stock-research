@@ -75,4 +75,41 @@ test.describe('Screener page', () => {
     // Exactly one request fires once typing settles past the debounce delay.
     await expect.poll(() => requestCount, { timeout: 2000 }).toBe(afterInitialLoad + 1);
   });
+
+  test('"Load more" fetches the next page and appends it, without dropping the already-loaded rows', async ({ page }) => {
+    // Regression test: GET /api/screener always supported offset/limit and
+    // returned a real `total`, but this page previously hardcoded limit=200
+    // and never read `total` or offered a way past it — a broad sort over
+    // the full NIFTY 500 universe silently showed only a 200-row slice.
+    const requestedOffsets: string[] = [];
+    await page.route('**/api/screener?*', route => {
+      const url = new URL(route.request().url());
+      const offset = url.searchParams.get('offset') ?? '0';
+      // The page also fires a separate, filter-independent limit=500 fetch
+      // to populate the sector heatmap (see page.tsx's own comment on why)
+      // — only the main table's limit=200 requests are relevant here.
+      if (url.searchParams.get('limit') === '200') requestedOffsets.push(offset);
+      const stocks = offset === '0' ? [FIXTURE_STOCKS[0]] : [FIXTURE_STOCKS[1]];
+      return route.fulfill({
+        json: {
+          stocks, total: 2, total_monitored: 500,
+          industries: [], last_run: new Date().toISOString(), refreshing: false,
+        },
+      });
+    });
+
+    await page.goto('/screener');
+    await expect(page.getByRole('link', { name: 'TCS' })).toBeVisible();
+    await expect(page.getByText('Showing 1 of 2 matching stocks')).toBeVisible();
+
+    await page.getByRole('button', { name: /Load 1 more/ }).click();
+
+    await expect(page.getByRole('link', { name: 'RELIANCE' })).toBeVisible();
+    // The first page's row is still there — this appends, it doesn't replace.
+    await expect(page.getByRole('link', { name: 'TCS' })).toBeVisible();
+    await expect(page.getByText('Showing 2 of 2 matching stocks')).toBeVisible();
+    // No more rows to load once every matching stock is shown.
+    await expect(page.getByRole('button', { name: /Load.*more/ })).toHaveCount(0);
+    expect(requestedOffsets).toEqual(['0', '200']);
+  });
 });
