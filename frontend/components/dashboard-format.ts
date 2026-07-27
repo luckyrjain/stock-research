@@ -46,7 +46,14 @@ export function formatAge(dateStr: string): string {
   const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
   if (dateStr === today)     return 'Updated today';
   if (dateStr === yesterday) return 'Updated yesterday';
-  return `Updated ${new Date(dateStr).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`;
+  // dateStr (report.generated_at, main.py's date.today().isoformat()) is a
+  // bare 'YYYY-MM-DD' string, which Date parses as UTC midnight -- without
+  // an explicit timeZone, toLocaleDateString() would render in the
+  // browser's LOCAL timezone and silently shift the displayed date back by
+  // one day for any visitor west of UTC (the same "today"/"yesterday"
+  // comparison above is itself UTC-based, via toISOString(), so the render
+  // must stay UTC-anchored too for consistency).
+  return `Updated ${new Date(dateStr).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' })}`;
 }
 
 // Human-friendly "how long ago" for a real fetch timestamp (data_freshness),
