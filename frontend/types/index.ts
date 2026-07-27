@@ -140,9 +140,25 @@ export interface QuarterlyTrend {
   operating_margin?: number[];         // % — aligned with quarters, when present
 }
 
+// Per-task fetch timestamp (ISO, or null if that task never ran / errored),
+// captured before main._strip_meta() discards each task's own _meta —
+// distinct from Report.generated_at, which is stamped fresh on every
+// report-assembly call regardless of whether any underlying data was
+// actually refetched. A 7-day-stale shareholding table (168h TTL) would
+// otherwise still read as "Updated today" with generated_at alone.
+export interface DataFreshness {
+  stock_info: string | null;
+  research: string | null;
+  news: string | null;
+  shareholding: string | null;
+  mf_holdings: string | null;
+  filings: string | null;
+}
+
 export interface Report {
   symbol: string;
   generated_at: string;
+  data_freshness: DataFreshness;
   analysis: Partial<Analysis>;
   signals?: Partial<SignalSummary>;
   stock_info: Partial<StockInfo>;
@@ -666,6 +682,14 @@ export interface InsiderActivity {
   symbol:            string;
   insider_trades:    InsiderTrade[];
   bulk_block_deals:  BulkBlockDeal[];
+  // True when the corresponding source's fetch genuinely failed (an NSE
+  // outage, a scraper break) — distinct from an empty array, which just
+  // means no activity today (the expected common case). A card renders
+  // "temporarily unavailable" for the former and nothing at all for the
+  // latter, since a blank card and a broken scraper previously looked
+  // identical to the user.
+  insider_trades_unavailable:    boolean;
+  bulk_block_deals_unavailable:  boolean;
 }
 
 // Trendlyne-cited analyst commentary for one stock — real article
@@ -699,4 +723,8 @@ export interface StreetConsensus {
   symbol:              string;
   articles:            StreetConsensusArticle[];
   numeric_consensus:   TrendlyneNumericConsensus | null;
+  // Same "real failure vs. legitimately empty" distinction as
+  // InsiderActivity's own *_unavailable flags above.
+  articles_unavailable:            boolean;
+  numeric_consensus_unavailable:   boolean;
 }

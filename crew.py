@@ -237,6 +237,13 @@ def _validate_analysis_payload(  # pylint: disable=too-many-return-statements
     if signal_context:
         if signal_context["final_score"] > 0.5 and data["recommendation"] == "SELL":
             return False, "Recommendation contradicts strong positive signals"
+        # Symmetric check — the SELL-vs-strong-positive-signals guard above
+        # had no negative-side counterpart, so a BUY against a quant score
+        # deep in the engine's own SELL tier (final_score < -0.6, the same
+        # threshold signals/engine.py::run_signal_engine uses for "SELL")
+        # previously passed validation untouched.
+        if signal_context["final_score"] < -0.6 and data["recommendation"] == "BUY":
+            return False, "Recommendation contradicts strong negative signals"
     support_issues = _analysis_support_issues(data, all_data)
     if support_issues:
         return False, f"Unsupported claims found: {'; '.join(support_issues)}."

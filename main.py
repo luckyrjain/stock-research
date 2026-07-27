@@ -165,6 +165,13 @@ def _strip_meta(data: dict) -> dict:
     return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
+def _fetched_at(data: dict) -> str | None:
+    """Pulls a task's own _meta.fetched_at before _strip_meta discards it —
+    used to build `data_freshness` below. None (never guessed) when a task
+    has no _meta at all (an error payload, or a task that was never run)."""
+    return data.get("_meta", {}).get("fetched_at") if isinstance(data, dict) else None
+
+
 def _nse_autocomplete(query: str) -> list[dict]:
     """Return raw NSE autocomplete results for a query."""
     try:
@@ -342,6 +349,22 @@ def _build_report(
     signals: dict | None = None,
     mf_holdings_trend: list[dict] | None = None,
 ) -> dict:
+    # Captured before _strip_meta discards each task's own _meta — the main
+    # report page previously only showed report.generated_at ("Updated
+    # today"), which is stamped fresh on every _build_report() call
+    # regardless of whether any underlying data was actually refetched, so
+    # e.g. a 6-day-stale shareholding table (168h TTL) still read as
+    # "Updated today". data_freshness surfaces each task's own real fetch
+    # timestamp so the UI can show the true oldest-data age instead.
+    data_freshness = {
+        "stock_info":   _fetched_at(all_data.get("stock_info", {})),
+        "research":     _fetched_at(all_data.get("research", {})),
+        "news":         _fetched_at(all_data.get("news", {})),
+        "shareholding": _fetched_at(all_data.get("shareholding", {})),
+        "mf_holdings":  _fetched_at(all_data.get("mf_holdings", {})),
+        "filings":      _fetched_at(all_data.get("filings", {})),
+    }
+
     stock       = _strip_meta(all_data.get("stock_info", {}))
     research    = _strip_meta(all_data.get("research", {}))
     news_raw    = _strip_meta(all_data.get("news", {}))
@@ -355,6 +378,7 @@ def _build_report(
     return {
         "symbol": symbol,
         "generated_at": date.today().isoformat(),
+        "data_freshness": data_freshness,
         "analysis": _strip_meta(analysis),
         # Promoted out of `analysis` (where it's `_degraded`, underscore-
         # prefixed and stripped above) into its own sibling field — a

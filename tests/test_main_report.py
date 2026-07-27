@@ -79,6 +79,31 @@ class BuildReportTest(unittest.TestCase):
             {"corporate_actions": [], "rating_action": None, "next_results_date": None},
         )
 
+    def test_data_freshness_captures_each_tasks_own_fetched_at(self) -> None:
+        # report.generated_at is stamped fresh on every _build_report() call
+        # regardless of whether any underlying data was actually refetched
+        # — data_freshness is the real per-task fetch timestamp, captured
+        # before _strip_meta() discards _meta. See the deep gap analysis
+        # finding this closes: a 6-day-stale shareholding table (168h TTL)
+        # previously still read as "Updated today" in the hero.
+        all_data = {
+            "stock_info":   {"price": 100, "_meta": {"fetched_at": "2026-07-27T09:00:00+00:00"}},
+            "shareholding": {"promoters_pct": 50, "_meta": {"fetched_at": "2026-07-21T09:00:00+00:00"}},
+        }
+        report = _build_report("TCS", all_data, {}, {})
+        self.assertEqual(report["data_freshness"]["stock_info"], "2026-07-27T09:00:00+00:00")
+        self.assertEqual(report["data_freshness"]["shareholding"], "2026-07-21T09:00:00+00:00")
+
+    def test_data_freshness_is_none_for_a_task_with_no_meta(self) -> None:
+        # An error payload or a task that never ran has no _meta at all —
+        # None (never guessed), not a fabricated "just fetched" timestamp.
+        report = _build_report("TCS", {}, {}, {})
+        self.assertEqual(
+            report["data_freshness"],
+            {"stock_info": None, "research": None, "news": None,
+             "shareholding": None, "mf_holdings": None, "filings": None},
+        )
+
     def test_mf_holdings_trend_defaults_to_empty_list(self) -> None:
         report = _build_report("TCS", {}, {}, {})
         self.assertEqual(report["mf_holdings_trend"], [])

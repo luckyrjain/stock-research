@@ -275,6 +275,25 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(message, "Recommendation contradicts strong positive signals")
 
+    def test_validate_analysis_payload_rejects_buy_against_strong_negative_signals(self) -> None:
+        payload = dict(self._VALID_PAYLOAD, recommendation="BUY")
+
+        ok, message = crew._validate_analysis_payload(
+            payload, self.all_data, signal_context={"final_score": -0.8}
+        )
+        self.assertFalse(ok)
+        self.assertEqual(message, "Recommendation contradicts strong negative signals")
+
+    def test_validate_analysis_payload_allows_hold_against_strong_negative_signals(self) -> None:
+        # The guard is specifically BUY-vs-negative and SELL-vs-positive —
+        # HOLD is never rejected by either direction of this check.
+        payload = dict(self._VALID_PAYLOAD, recommendation="HOLD")
+
+        ok, _ = crew._validate_analysis_payload(
+            payload, self.all_data, signal_context={"final_score": -0.8}
+        )
+        self.assertTrue(ok)
+
     def test_run_analysis_passes_signal_context_to_guardrail(self) -> None:
         sell_payload = dict(self._VALID_PAYLOAD, recommendation="SELL")
         responses = [

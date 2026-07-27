@@ -1280,6 +1280,11 @@ class InsiderActivityEndpointTest(unittest.TestCase):
         body = resp.json()
         self.assertEqual(body["insider_trades"], [])
         self.assertEqual(body["bulk_block_deals"], [])
+        # A legitimately-empty day is NOT "unavailable" — see the
+        # unavailable-vs-empty regression test below for the failure case
+        # this distinction exists to fix.
+        self.assertFalse(body["insider_trades_unavailable"])
+        self.assertFalse(body["bulk_block_deals_unavailable"])
 
     def test_one_source_failing_does_not_take_down_the_other(self) -> None:
         # Both underlying tool functions are documented to never raise, but
@@ -1295,6 +1300,26 @@ class InsiderActivityEndpointTest(unittest.TestCase):
         body = resp.json()
         self.assertEqual(body["insider_trades"], [])
         self.assertEqual(body["bulk_block_deals"], fake_bulk["deals"])
+
+    def test_unavailable_flag_distinguishes_a_real_failure_from_a_quiet_day(self) -> None:
+        # Regression test for the deep gap analysis finding: a genuine NSE
+        # failure and "no insider trades today" previously both collapsed
+        # to the same empty [] with nothing in the response telling them
+        # apart. insider_trades_unavailable must be True on a real failure.
+        with patch("tools.nse_insider_trades.fetch_insider_trades_for_symbol",
+                   return_value={"symbol": "TCS", "error": "NSE request failed"}), \
+             patch("tools.nse_bulk_block_deals.fetch_bulk_block_deals_for_symbol",
+                   return_value={"symbol": "TCS", "deals": []}):
+            resp = client.get("/api/insider-activity/TCS")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["insider_trades"], [])
+        self.assertTrue(body["insider_trades_unavailable"])
+        self.assertFalse(body["bulk_block_deals_unavailable"])
+
+        # A genuine failure must not be cached as a confident "no activity"
+        # answer for the full 24h TTL — retried on the next request instead.
+        self.assertIsNone(cache.load("TCS", "insider_activity"))
 
 
 class StreetConsensusEndpointTest(unittest.TestCase):
@@ -1405,10 +1430,13 @@ class StreetConsensusEndpointTest(unittest.TestCase):
         body = resp.json()
         self.assertNotIn("error", body["numeric_consensus"])
         self.assertNotIn("internal-host-detail", resp.text)
+        self.assertTrue(body["numeric_consensus_unavailable"])
 
-        # And the sanitized (error-free) result is what gets cached.
-        cached = cache.load("TCS", "street_consensus")
-        self.assertNotIn("error", cached["numeric_consensus"])
+        # A genuine scrape failure must not be cached as if it were a real
+        # "no consensus data" answer — see the "only cache on full success"
+        # comment in get_street_consensus. Retried on the next request
+        # instead of locking a failure in for the full 24h TTL.
+        self.assertIsNone(cache.load("TCS", "street_consensus"))
 
 
 class PeerPercentileHelperTest(unittest.TestCase):
@@ -1682,11 +1710,20 @@ class SmeSignalHistoryEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
         api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
         api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
+
+    def test_rate_limited_returns_429(self) -> None:
+        # Previously unrate-limited despite being a fully anonymous,
+        # unbounded DB query — see the deep gap analysis this fix closes.
+        rate_limiter._memory_calls["sme_signal_history:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/sme-signals/ABC/history")
+        self.assertEqual(resp.status_code, 429)
 
     def _fake_history_engine(self, series_rows, stock_row):
         series_result = MagicMock()
@@ -3374,6 +3411,14 @@ class ApiKeyManagementEndpointTest(unittest.TestCase):
         resp = client.get("/api/api-keys")
         self.assertEqual(resp.status_code, 401)
 
+    def test_list_rate_limited_returns_429(self) -> None:
+        # Previously unrate-limited despite requiring only a session, unlike
+        # its own sibling POST /api/api-keys (20/hr) — see the deep gap
+        # analysis this fix closes.
+        rate_limiter._memory_calls["api_keys_list:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/api-keys", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 429)
+
     def test_list_returns_keys_for_current_user(self) -> None:
         keys = [{
             "id": 1, "key_prefix": "apk_ab", "label": None,
@@ -3418,6 +3463,11 @@ class ApiKeyManagementEndpointTest(unittest.TestCase):
     def test_revoke_requires_session(self) -> None:
         resp = client.delete("/api/api-keys/1")
         self.assertEqual(resp.status_code, 401)
+
+    def test_revoke_rate_limited_returns_429(self) -> None:
+        rate_limiter._memory_calls["api_keys_revoke:testclient"] = [api.time.monotonic()] * 60
+        resp = client.delete("/api/api-keys/1", headers={"Authorization": "Bearer sometoken"})
+        self.assertEqual(resp.status_code, 429)
 
     def test_revoke_success(self) -> None:
         with patch("auth.get_user_for_session", return_value={"id": 7, "email": "a@b.com"}), \

@@ -5,7 +5,7 @@ import type { MfHoldingsStakeDelta, Report, StockInfo } from '@/types';
 import InfoTooltip from './info-tooltip';
 import WatchlistButton from './watchlist-button';
 import { Card, MetricRow, ExchangeTable, RangeBar } from './dashboard-primitives';
-import { fmt, fmtCr, fmtVolume, fmtRatio, formatAge, humanizeMetaKey, formatMetaValue, normalizeRatioKey } from './dashboard-format';
+import { fmt, fmtCr, fmtVolume, fmtRatio, formatAge, formatDataAge, oldestDataFreshness, DATA_FRESHNESS_LABELS, humanizeMetaKey, formatMetaValue, normalizeRatioKey } from './dashboard-format';
 import { usePeerComparison, PeerTable, SimilarStocksRail } from './peer-comparison-card';
 import { useFinancials, FinancialStatementsCard, ConcallsCard } from './financial-statements-card';
 import { InsiderActivityCard } from './insider-activity-card';
@@ -93,6 +93,14 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
     return map;
   }, [peers]);
 
+  // The true bottleneck on "how fresh is everything on this page" — see
+  // dashboard-format.ts::oldestDataFreshness. report.generated_at alone
+  // (rendered below as formatAge) is stamped fresh on every report
+  // assembly regardless of whether anything was actually refetched, so a
+  // long-TTL task (shareholding/mf_holdings, 168h) could otherwise read as
+  // "Updated today" while being up to a week stale.
+  const oldestFreshness = useMemo(() => oldestDataFreshness(report.data_freshness), [report.data_freshness]);
+
   const mfDeltaByFund = useMemo(() => {
     const map: Record<string, MfHoldingsStakeDelta> = {};
     for (const d of mfTrend ?? []) {
@@ -156,6 +164,22 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
               )}
               {report.generated_at && (
                 <span className="text-xs text-muted/60">· {formatAge(report.generated_at)}</span>
+              )}
+              {oldestFreshness && (
+                <span className="text-xs text-muted/60 flex items-center gap-0.5">
+                  · Data as of {formatDataAge(oldestFreshness.iso)}
+                  <InfoTooltip title="Data freshness" align="left">
+                    <p>Each section refreshes on its own schedule — some (price, news) update hourly, others (shareholding, MF holdings) only every 7 days since they change far less often.</p>
+                    <div className="mt-2 space-y-1">
+                      {Object.entries(report.data_freshness ?? {}).map(([task, iso]) => (
+                        <div key={task} className="flex justify-between gap-3 font-mono text-[11px]">
+                          <span>{DATA_FRESHNESS_LABELS[task] ?? task}</span>
+                          <span>{formatDataAge(iso)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </InfoTooltip>
+                </span>
               )}
             </div>
           </div>

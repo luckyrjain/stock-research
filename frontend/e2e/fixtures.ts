@@ -17,6 +17,14 @@ export function sseAnalysisBody(symbol: string, opts: { degraded?: boolean } = {
       report: {
         symbol,
         generated_at: new Date().toISOString(),
+        data_freshness: {
+          stock_info: new Date().toISOString(),
+          research: new Date().toISOString(),
+          news: new Date().toISOString(),
+          shareholding: new Date().toISOString(),
+          mf_holdings: new Date().toISOString(),
+          filings: new Date().toISOString(),
+        },
         analysis: {
           bull_factors: ['Strong earnings growth', 'Market leadership'],
           bear_factors: ['Valuation is stretched'],
