@@ -124,20 +124,36 @@ def _compute_ema_signals(result: dict) -> list[dict]:
     df["rsi14"] = _compute_rsi(df["Close"])
     df["volume_spike"] = _compute_volume_spike(df)
 
-    if has_enough_history:
-        above = df["ema20"] > df["ema50"]
-        prev_above = above.shift(1)
-        golden = above & (prev_above == False)   # noqa: E712 — elementwise; NaN first row never flags
-        death  = (~above) & (prev_above == True)  # noqa: E712
-        df["cross"] = np.where(golden, "golden", np.where(death, "death", None))
-    else:
-        # EMA50 isn't converged yet — still store price/EMA for the current-regime
-        # view, but never claim a golden/death cross event on unreliable data.
+    above = df["ema20"] > df["ema50"]
+    prev_above = above.shift(1)
+    golden = above & (prev_above == False)   # noqa: E712 — elementwise; NaN first row never flags
+    death  = (~above) & (prev_above == True)  # noqa: E712
+    # Per-bar convergence guard: a cross is only trusted at a bar that
+    # itself has _MIN_HISTORY_DAYS of preceding closes behind it — checking
+    # only the TOTAL series length (has_enough_history, below) isn't
+    # enough, since a stock whose total history just clears that threshold
+    # (e.g. 80 days) can still have an early cross fire well before that
+    # (e.g. day 28, with only 28 bars of EMA50 warm-up — exactly the
+    # "recency-weighted average, not a converged EMA" case _MIN_HISTORY_DAYS
+    # exists to exclude), and that early cross can still land inside the
+    # stored/served window once only the last _STORE_DAYS rows are kept
+    # below (a stock between _MIN_HISTORY_DAYS and _MIN_HISTORY_DAYS +
+    # _STORE_DAYS days old has its whole history — including that early,
+    # unconverged cross — inside the stored tail).
+    converged = np.arange(len(df)) >= (_MIN_HISTORY_DAYS - 1)
+    golden = golden & converged
+    death  = death & converged
+    df["cross"] = np.where(golden, "golden", np.where(death, "death", None))
+
+    if not has_enough_history:
+        # EMA50 isn't converged anywhere in this series yet — still store
+        # price/EMA for the current-regime view (the converged mask above
+        # already guarantees no cross is claimed), just log it for
+        # visibility into how often this happens across the SME universe.
         log_event(
             LOGGER, "sme_insufficient_history", level="debug",
             symbol=symbol, trading_days=len(df), min_required=_MIN_HISTORY_DAYS,
         )
-        df["cross"] = None
 
     df = df.iloc[-_STORE_DAYS:]
 
@@ -258,7 +274,9 @@ def _upsert_stocks(engine, stocks: list[dict]) -> None:
                     VALUES (:symbol, :name, :exchange, :isin, :series, NOW())
                     ON CONFLICT (symbol) DO UPDATE SET
                         name       = EXCLUDED.name,
+                        exchange   = EXCLUDED.exchange,
                         isin       = EXCLUDED.isin,
+                        series     = EXCLUDED.series,
                         fetched_at = NOW()
                 """),
                 {

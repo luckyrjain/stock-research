@@ -150,17 +150,32 @@ def fetch_nse_emerge_stocks(force: bool = False) -> list[dict]:
         r.raise_for_status()
         data = r.json()
         rows = data.get("data", [])
-        stocks = [
-            {
-                "symbol":   row["symbol"].strip().upper(),
-                "name":     None,   # not provided by this endpoint
-                "isin":     None,
-                "series":   row.get("series", "SM").strip().upper(),
-                "exchange": "NSE",
-            }
-            for row in rows
-            if row.get("symbol", "").strip()
-        ]
+        stocks = []
+        skipped = 0
+        for row in rows:
+            # A single malformed row (a "series" key present but null,
+            # rather than merely absent — `.get("series", "SM")` only falls
+            # back to the default when the key is MISSING, not when it's
+            # explicitly None) must not abort the rest of this fetch — same
+            # per-row isolation fetch_bse_sme_stocks() already applies for
+            # the identical failure mode, so one bad row can't silently
+            # discard the entire ~500-stock NSE Emerge universe via the
+            # outer except below.
+            try:
+                symbol = row.get("symbol", "").strip()
+                if not symbol:
+                    continue
+                stocks.append({
+                    "symbol":   symbol.upper(),
+                    "name":     None,   # not provided by this endpoint
+                    "isin":     None,
+                    "series":   (row.get("series") or "SM").strip().upper(),
+                    "exchange": "NSE",
+                })
+            except Exception:
+                skipped += 1
+        if skipped:
+            logger.warning("NSE Emerge: skipped %d malformed row(s)", skipped)
         if len(stocks) >= _NSE_EMERGE_MIN_COUNT:
             logger.info("NSE Emerge: fetched %d stocks, enriching names…", len(stocks))
             stocks = _enrich_names(stocks)

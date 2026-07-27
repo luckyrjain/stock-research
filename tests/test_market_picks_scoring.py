@@ -579,6 +579,176 @@ class PhaseResearchValuationPercentileTest(unittest.TestCase):
         self.assertEqual(cached["absolute_anchor"]["percentile"], 33.3)
 
 
+class PhaseResearchIsRecentIpoTest(unittest.TestCase):
+    """Regression tests for an adversarial-review finding: is_recent_ipo's
+    NSE->BSE fallback logic used to be
+    `if len(hist) < 8: is_recent_ipo = True elif not is_recent_ipo: <check BSE>`.
+    Since the elif branch is only reachable when the if was false (meaning
+    is_recent_ipo is still False at that point), the BSE fallback ran
+    backwards -- only when NSE already proved sufficient history
+    (unnecessarily, and able to overwrite a correct False with a wrong
+    BSE-derived True), and never when NSE data was genuinely thin, which is
+    exactly the case a BSE fallback is supposed to help with."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-recent-ipo-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
+        self._cache_patch.start()
+        self.addCleanup(self._cache_patch.stop)
+
+    def _run(self, ns_history_len: int, bo_history_len: int, symbol: str = "TCS"):
+        fake_signal_result = MagicMock(final_score=0.5, verdict="BUY")
+        pipeline = MarketPicksPipeline()
+
+        def _fake_ticker(ticker_str):
+            fake = MagicMock()
+            length = ns_history_len if ticker_str.endswith(".NS") else bo_history_len
+            fake.history.return_value = [1] * length
+            return fake
+
+        with patch("main._fetch_task", return_value={}), \
+             patch("schemas.normalize", side_effect=lambda task, data: {}), \
+             patch("signals.engine.run_signal_engine", return_value=fake_signal_result), \
+             patch("signals.interpreter.interpret", return_value="insight"), \
+             patch("tools.screener_tools.get_peer_comparison") as mock_peers, \
+             patch("yfinance.Ticker", side_effect=_fake_ticker) as mock_ticker_cls:
+            mock_peers.run.return_value = json.dumps({"error": "boom"})
+            result = pipeline._phase_research([{"symbol": symbol}], emit=lambda p: None)
+            return result, mock_ticker_cls
+
+    def test_sufficient_nse_history_is_not_a_recent_ipo_and_bse_is_never_checked(self) -> None:
+        result, mock_ticker_cls = self._run(ns_history_len=12, bo_history_len=3)
+        self.assertFalse(result["TCS"]["is_recent_ipo"])
+        called_tickers = [c.args[0] for c in mock_ticker_cls.call_args_list]
+        self.assertTrue(any(t.endswith(".NS") for t in called_tickers))
+        self.assertFalse(any(t.endswith(".BO") for t in called_tickers))
+
+    def test_thin_nse_history_falls_back_to_bse_which_has_enough_history(self) -> None:
+        result, mock_ticker_cls = self._run(ns_history_len=3, bo_history_len=12)
+        self.assertFalse(result["TCS"]["is_recent_ipo"])
+        called_tickers = [c.args[0] for c in mock_ticker_cls.call_args_list]
+        self.assertTrue(any(t.endswith(".BO") for t in called_tickers))
+
+    def test_thin_history_on_both_exchanges_is_a_recent_ipo(self) -> None:
+        result, _ = self._run(ns_history_len=3, bo_history_len=3)
+        self.assertTrue(result["TCS"]["is_recent_ipo"])
+
+
+class PhaseConsolidateDedupMergeTest(unittest.TestCase):
+    """Regression tests for an adversarial-review finding: _phase_consolidate()
+    groups raw LLM picks by _dedup_key() (ticker if present, else normalized
+    company name) BEFORE NSE/yfinance resolution. Two different raw picks for
+    the same real stock can legitimately land in different pre-resolution
+    groups -- one source's extraction included a ticker, another's left it
+    blank and only had the company name. If both groups independently
+    resolve to the same final symbol, the ThreadPoolExecutor-driven
+    resolution used to let whichever group's future completed first win
+    outright and silently discard the other group's entire source list,
+    undercounting mention_count/confidence_score for exactly the stocks
+    with the broadest, most format-mixed source coverage."""
+
+    def _fake_session(self, symbols: list[dict]) -> MagicMock:
+        sess = MagicMock()
+        resp = MagicMock()
+        resp.json.return_value = {"symbols": symbols}
+        sess.get.return_value = resp
+        return sess
+
+    def test_ticker_keyed_and_company_keyed_groups_merge_sources_on_same_symbol(self) -> None:
+        raw_picks = [
+            {"ticker": "TCS", "company": "", "source": "Source A", "reason": "Buy call", "article_title": "TCS wins big deal"},
+            {"ticker": "", "company": "Tata Consultancy Services", "source": "Source B", "reason": "Upgrade", "article_title": "Tata Consultancy gets upgrade"},
+        ]
+        pipeline = MarketPicksPipeline()
+        fake_ticker = MagicMock()
+        fake_ticker.fast_info.last_price = 3500.0
+        fake_session = self._fake_session([{"symbol": "TCS", "symbol_info": "Tata Consultancy Services Ltd"}])
+
+        with patch("yfinance.Ticker", return_value=fake_ticker), \
+             patch("market_picks_pipeline._load_nse_symbol_master", return_value=set()), \
+             patch.object(pipeline, "_nse_session_get", return_value=fake_session):
+            result = pipeline._phase_consolidate(raw_picks, emit=lambda p: None)
+
+        # Both raw picks resolve to the same real stock -- must land as ONE
+        # consolidated entry, not two, and its sources must include BOTH
+        # groups' contributions rather than only whichever group's
+        # resolution future happened to complete first.
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["symbol"], "TCS")
+        self.assertEqual(len(result[0]["sources"]), 2)
+        source_names = {s["name"] for s in result[0]["sources"]}
+        self.assertEqual(source_names, {"Source A", "Source B"})
+
+
+class PhaseScoreMissingPriceTest(unittest.TestCase):
+    """Regression tests for an adversarial-review finding: a stock whose
+    research fetch failed entirely (main.py's _fetch_task() never raises --
+    it returns an error dict that schemas.normalize() passes through
+    unchanged, leaving stock_info with no current_price) used to still be
+    scored by _phase_score() and could be recommended BUY purely off source
+    consensus (signal_score degrades to a neutral ~0, not a veto) -- a pick
+    with entry/target/stop/current_price all null and no bull/bear factors,
+    which _phase_analyze() already silently skips building for the same
+    reason. _phase_score() must exclude such a stock from the final list
+    entirely rather than surface a non-actionable, misleading pick."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-phase-score-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        patch.object(market_picks_pipeline, "_HISTORY_DIR", Path(self._tmpdir)).start()
+        self.addCleanup(patch.stopall)
+
+    def test_stock_with_no_price_data_is_excluded_from_final_picks(self) -> None:
+        consolidated = [
+            {
+                "symbol": "GOODSTK", "company": "Good Stock", "exchange": "NSE",
+                "sources": [_source(reason="Strong buy call"), _source(name="Second Brokerage")],
+            },
+            {
+                "symbol": "NOPRICE", "company": "No Price Stock", "exchange": "NSE",
+                "sources": [_source(reason="Strong buy call"), _source(name="Second Brokerage")],
+            },
+        ]
+        research_data = {
+            "GOODSTK": {"stock_info": {"current_price": 1000.0}, "signal_score": 0.5, "signal_verdict": "BUY"},
+            # Simulates a fully-failed stock_info fetch: schema-normalized to
+            # an empty dict, no current_price anywhere.
+            "NOPRICE": {"stock_info": {}, "signal_score": 0.0, "signal_verdict": "HOLD"},
+        }
+        pipeline = MarketPicksPipeline()
+        picks = pipeline._phase_score(consolidated, research_data, analyses={}, emit=lambda p: None)
+
+        symbols = {p["symbol"] for p in picks}
+        self.assertIn("GOODSTK", symbols)
+        self.assertNotIn("NOPRICE", symbols)
+
+    def test_excluded_symbol_is_logged_not_silently_dropped(self) -> None:
+        consolidated = [
+            {"symbol": "NOPRICE", "company": "No Price Stock", "exchange": "NSE", "sources": [_source()]},
+        ]
+        research_data = {"NOPRICE": {"stock_info": {}, "signal_score": 0.0, "signal_verdict": "HOLD"}}
+        pipeline = MarketPicksPipeline()
+
+        with patch("market_picks_pipeline.log_event") as mock_log:
+            picks = pipeline._phase_score(consolidated, research_data, analyses={}, emit=lambda p: None)
+
+        self.assertEqual(picks, [])
+        events = [call.args[1] for call in mock_log.call_args_list if len(call.args) > 1]
+        self.assertIn("market_picks_skipped_no_price", events)
+
+    def test_stock_missing_from_research_data_entirely_is_also_excluded(self) -> None:
+        # research_data.get(sym, {}) defaults to {} when a symbol's research
+        # step is missing outright (not just error-shaped) -- must degrade
+        # the same way as an explicit empty stock_info.
+        consolidated = [
+            {"symbol": "MISSING", "company": "Missing Research", "exchange": "NSE", "sources": [_source()]},
+        ]
+        pipeline = MarketPicksPipeline()
+        picks = pipeline._phase_score(consolidated, research_data={}, analyses={}, emit=lambda p: None)
+        self.assertEqual(picks, [])
+
+
 class PhaseScrapeSourceHealthTest(unittest.TestCase):
     def test_records_health_for_every_source_ok_and_empty(self) -> None:
         fake_sources = [("Source A", "news", "fn_a"), ("Source B", "news", "fn_b")]
