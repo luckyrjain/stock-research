@@ -291,6 +291,15 @@ class ValidateSymbolEndpointTest(unittest.TestCase):
     All network-touching helpers are mocked at the api.* boundary.
     """
 
+    def test_overlong_symbol_returns_422(self) -> None:
+        # This endpoint deliberately accepts more input shapes than
+        # _TICKER_RE (ISINs, numeric BSE codes, hyphenated Screener slugs),
+        # so it can't apply that same regex — but it previously had no
+        # length bound at all before passing the value to yfinance/
+        # Screener/NSE lookups below.
+        resp = client.get(f"/api/validate/{'A' * 41}")
+        self.assertEqual(resp.status_code, 422)
+
     def test_isin_resolved_via_nse_master_falls_through_to_nse_lookup(self) -> None:
         with patch("api._load_isin_map", return_value={"INE009A01021": {"symbol": "TCS"}}), \
              patch("api._autocomplete_sync", return_value=[{"symbol": "TCS", "activeSeries": True}]), \

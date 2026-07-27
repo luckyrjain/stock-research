@@ -8,6 +8,7 @@ _TABLE_HTML = """
   <tr><th>Name</th><th>ROE</th><th>PE</th></tr>
   <tr><td><a href="/company/TCS/">TCS</a></td><td>45%</td><td>28</td></tr>
   <tr><td><a href="https://external.example/x">External Co</a></td><td>20%</td><td>15</td></tr>
+  <tr><td><a href="https://www.screener.in/company/WIPRO/">Wipro</a></td><td>18%</td><td>20</td></tr>
   <tr><td></td><td>-</td><td>-</td></tr>
 </table>
 """
@@ -16,18 +17,28 @@ _TABLE_HTML = """
 class ParseScreenHtmlTest(unittest.TestCase):
     def test_parses_rows_into_articles(self) -> None:
         articles = _parse_screen_html(_TABLE_HTML, "High ROE")
-        self.assertEqual(len(articles), 2)
+        self.assertEqual(len(articles), 3)
         self.assertIn("TCS", articles[0]["title"])
         self.assertEqual(articles[0]["url"], "https://www.screener.in/company/TCS/")
         self.assertIn("ROE: 45%", articles[0]["summary"])
 
-    def test_absolute_href_is_used_as_is(self) -> None:
+    def test_off_domain_absolute_href_falls_back_to_the_screener_homepage(self) -> None:
+        # A relative href is reconstructed against screener.in, but an
+        # absolute href pointing somewhere else must not be trusted as-is
+        # — same "don't trust an arbitrary scraped href" instinct as
+        # tools/trendlyne_scraper.py's own host check, even though this
+        # URL is only ever rendered as an article link, never fetched
+        # server-side by this module.
         articles = _parse_screen_html(_TABLE_HTML, "High ROE")
-        self.assertEqual(articles[1]["url"], "https://external.example/x")
+        self.assertEqual(articles[1]["url"], "https://www.screener.in")
+
+    def test_same_domain_absolute_href_is_used_as_is(self) -> None:
+        articles = _parse_screen_html(_TABLE_HTML, "High ROE")
+        self.assertEqual(articles[2]["url"], "https://www.screener.in/company/WIPRO/")
 
     def test_row_with_empty_company_name_is_skipped(self) -> None:
         articles = _parse_screen_html(_TABLE_HTML, "High ROE")
-        self.assertEqual(len(articles), 2)  # the blank third row is dropped
+        self.assertEqual(len(articles), 3)  # the blank fourth row is dropped
 
     def test_no_table_returns_empty_list(self) -> None:
         self.assertEqual(_parse_screen_html("<div>no table here</div>", "label"), [])

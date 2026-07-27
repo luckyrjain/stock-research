@@ -450,6 +450,15 @@ async def health():
 async def validate_symbol(symbol: str, request: Request, exchange: str = ""):
     _rate_limit(request, "validate", max_calls=30, window_seconds=60)
     sym = symbol.upper().strip()
+    # Deliberately not the strict _TICKER_RE every sibling endpoint applies
+    # — this one legitimately accepts more input shapes than a plain ticker
+    # (a 12-char ISIN, a numeric BSE scrip code, a hyphenated Screener slug
+    # like "TAPARIA-TOOLS"), so a character-class-restrictive regex here
+    # would reject real inputs. A generous length cap still closes the gap
+    # of having no bound at all before this value gets passed to
+    # yfinance/Screener/NSE lookups below.
+    if not sym or len(sym) > 40:
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
     loop = asyncio.get_running_loop()
 
     # ── ISIN PATH ─────────────────────────────────────────────
