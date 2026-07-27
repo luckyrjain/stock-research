@@ -57,6 +57,30 @@ class ExtractFeaturesTest(unittest.TestCase):
         features = extract_features(all_data)
         self.assertEqual(features["filings"], [])
 
+    def test_wrong_type_research_container_degrades_to_empty_dict_not_a_crash(self) -> None:
+        # Regression test for a gap in the two tests above, caught by an
+        # independent adversarial review: the isinstance guards only covered
+        # the *nested* ratios/filings fields, not the outer task containers
+        # (all_data["research"]/["filings"]/["stock_info"]) those .get()
+        # calls chain through. A malformed cache entry storing the whole
+        # "research" task as a list, not a dict, previously raised
+        # AttributeError on research.get("ratios", {}) before the nested
+        # isinstance check ever ran.
+        all_data = {"research": ["not", "a", "dict"]}
+        features = extract_features(all_data)
+        self.assertEqual(features["ratios"], {})
+
+    def test_wrong_type_filings_container_degrades_to_empty_list_not_a_crash(self) -> None:
+        all_data = {"filings": ["not", "a", "dict"]}
+        features = extract_features(all_data)
+        self.assertEqual(features["filings"], [])
+
+    def test_wrong_type_stock_info_container_degrades_gracefully_not_a_crash(self) -> None:
+        all_data = {"stock_info": ["not", "a", "dict"]}
+        features = extract_features(all_data)
+        self.assertIsNone(features["price"])
+        self.assertIsNone(features["volume"])
+
 
 class WeightsForSectorTest(unittest.TestCase):
     def test_unknown_or_missing_sector_uses_default_weights(self) -> None:
