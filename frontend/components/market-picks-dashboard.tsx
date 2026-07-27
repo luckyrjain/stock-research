@@ -357,7 +357,7 @@ function ExpandedRow({ pick }: { pick: MarketPick }) {
           </div>
 
           <div className="flex justify-end pt-1">
-            <a href={`/?symbol=${pick.symbol}`}
+            <a href={`/?symbol=${encodeURIComponent(pick.symbol)}`}
                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold
                           bg-accent/10 text-accent border border-accent/25 hover:bg-accent/20 transition-colors">
               Full deep-dive analysis →

@@ -118,6 +118,31 @@ class ResolveTrendlyneUrlTest(unittest.TestCase):
             url = _resolve_trendlyne_url("TCS")
         self.assertIsNone(url)
 
+    def test_search_page_redirected_to_non_trendlyne_host_is_rejected(self) -> None:
+        # Regression test for an SSRF-relevant bug: the search-page fallback
+        # (unlike the direct-URL path above) previously never re-checked its
+        # own response's host after following redirects (requests.get()
+        # defaults to allow_redirects=True) — it went straight to parsing
+        # the response body with BeautifulSoup regardless of where the
+        # request actually landed. Even though every extracted candidate
+        # anchor is still separately host-checked before being returned
+        # (see the two tests above), this meant the app's own server would
+        # still fetch AND parse arbitrary off-domain HTML if Trendlyne's
+        # search endpoint ever had (or was tricked into) an open redirect —
+        # a real SSRF gap, and an inconsistency with this function's own
+        # documented "every candidate URL is host-checked... pre- and
+        # post-redirect" design. A malicious host's HTML containing a
+        # trendlyne.com-shaped anchor must not resolve, since the fetch that
+        # produced it never should have landed there in the first place.
+        redirected_search = _resp(
+            200,
+            text='<a href="https://trendlyne.com/equity/5/REAL/real-co/">Real-looking anchor</a>',
+            url="http://evil.example.com/search-new/TCS/",
+        )
+        with patch("tools.trendlyne_scraper.requests.get", side_effect=[_resp(404), redirected_search]):
+            url = _resolve_trendlyne_url("TCS")
+        self.assertIsNone(url)
+
 
 class FetchTrendlyneNumericConsensusTest(unittest.TestCase):
     def test_full_success_path(self) -> None:

@@ -88,10 +88,13 @@ def _parse_pit_row(row: dict) -> dict | None:
     }
 
 
-def _trade_to_article(row: dict) -> dict | None:
-    parsed = _parse_pit_row(row)
-    if not parsed:
-        return None
+def _article_from_parsed(parsed: dict) -> dict:
+    """Formats an already-_parse_pit_row()-parsed disclosure as a
+    plain-language LLM-extraction article. Split out of _trade_to_article()
+    below so fetch_insider_trades() can parse+dedup once (on the real
+    underlying fields — see its own dedup comment) and only then build the
+    article, instead of building the article first and deduping on its own
+    (coarser) title string."""
     symbol, person, category, action, qty, value, date_str = (
         parsed["symbol"], parsed["person"], parsed["category"], parsed["action"],
         parsed["quantity"], parsed["value"], parsed["date"],
@@ -117,6 +120,13 @@ def _trade_to_article(row: dict) -> dict | None:
         "url":          "https://www.nseindia.com/companies-listing/corporate-filings-insider-trading",
         "published_at": pub_iso,
     }
+
+
+def _trade_to_article(row: dict) -> dict | None:
+    parsed = _parse_pit_row(row)
+    if not parsed:
+        return None
+    return _article_from_parsed(parsed)
 
 
 def _parse_pit_date(date_str: str) -> str | None:
@@ -155,17 +165,31 @@ def fetch_insider_trades() -> dict:
     raw = _fetch_pit_rows(sess, _LOOKBACK_DAYS)
 
     articles: list[dict] = []
-    seen: set[str] = set()
+    # Dedups on the same real-world-event fields fetch_insider_trades_for_symbol()
+    # already dedups on (person, action, quantity, value, date), not on the
+    # built article's own title string. The title format
+    # (f"{person} ({category}) {verb} {_fmt_value(value)} worth of {symbol}...")
+    # deliberately omits quantity and date for readability — it rounds value
+    # to one decimal place in Cr/L buckets — so two genuinely distinct same-
+    # symbol, same-person, same-day-category disclosures (e.g. two separate
+    # purchases of ₹1.05 Cr and ₹1.08 Cr, both formatting as "₹1.1 Cr") would
+    # otherwise collide on an identical title and the second would be
+    # silently dropped, losing a real "insider is buying more" signal this
+    # module exists to surface.
+    seen: set[tuple] = set()
     for row in raw:
         try:
-            art = _trade_to_article(row)
+            parsed = _parse_pit_row(row)
         except Exception as exc:
             logger.debug("Skipping malformed insider-trade row: %s", exc)
             continue
-        if not art or art["title"] in seen:
+        if not parsed:
             continue
-        seen.add(art["title"])
-        articles.append(art)
+        key = (parsed["symbol"], parsed["person"], parsed["action"], parsed["quantity"], parsed["value"], parsed["date"])
+        if key in seen:
+            continue
+        seen.add(key)
+        articles.append(_article_from_parsed(parsed))
 
     if raw and not articles:
         logger.debug(

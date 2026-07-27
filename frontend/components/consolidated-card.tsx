@@ -155,7 +155,7 @@ export default function ConsolidatedCard({ symbol, onClose }: Props) {
                   <p className="text-sm text-muted">Not yet analyzed, or the cached analysis has expired.</p>
                 )}
                 <Link
-                  href={`/?symbol=${symbol}`}
+                  href={`/?symbol=${encodeURIComponent(symbol)}`}
                   className="inline-block mt-2 text-xs font-semibold text-accent hover:underline"
                 >
                   {data.analysis ? 'View full analysis →' : 'Run analysis →'}

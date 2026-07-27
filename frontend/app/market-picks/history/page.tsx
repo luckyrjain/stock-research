@@ -270,7 +270,7 @@ export default function MarketPicksHistoryPage() {
                       daily.picks.map(p => (
                         <tr key={p.symbol} className="border-b border-border/60 hover:bg-surface/60 transition-colors">
                           <td className="px-4 py-4">
-                            <Link href={`/?symbol=${p.symbol}`} className="font-semibold text-tx hover:text-accent transition-colors text-sm">
+                            <Link href={`/?symbol=${encodeURIComponent(p.symbol)}`} className="font-semibold text-tx hover:text-accent transition-colors text-sm">
                               {p.symbol}
                             </Link>
                           </td>
@@ -347,7 +347,7 @@ export default function MarketPicksHistoryPage() {
                     symbols.map(s => (
                       <tr key={s.symbol} className="border-b border-border/60 hover:bg-surface/60 transition-colors">
                         <td className="px-4 py-4">
-                          <Link href={`/?symbol=${s.symbol}`} className="font-semibold text-tx hover:text-accent transition-colors text-sm">
+                          <Link href={`/?symbol=${encodeURIComponent(s.symbol)}`} className="font-semibold text-tx hover:text-accent transition-colors text-sm">
                             {s.symbol}
                           </Link>
                         </td>

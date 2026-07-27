@@ -146,6 +146,13 @@ export function useWatchlist() {
     const symbol = item.symbol.toUpperCase();
     const clientId = getClientId();
     const currentlyWatched = (cachedItems ?? []).some(i => i.symbol === symbol);
+    // Captured before the await, same generation-guard convention as
+    // fetchItems() above — without this, a toggle in flight when the
+    // caller's identity changes mid-request (e.g. signing out right after
+    // starring a stock) can resolve after refreshWatchlist()'s own fetch and
+    // silently overwrite the fresher (post-refresh) list with this stale,
+    // now-wrong-identity one.
+    const myGeneration = generation;
 
     try {
       if (currentlyWatched) {
@@ -154,6 +161,7 @@ export function useWatchlist() {
         });
         if (!res.ok) return;
         const data = await res.json() as { items: WatchlistItem[] };
+        if (myGeneration !== generation) return;
         cachedItems = data.items;
       } else {
         const res = await fetch('/api/watchlist', {
@@ -163,6 +171,7 @@ export function useWatchlist() {
         });
         if (!res.ok) return;
         const data = await res.json() as { items: WatchlistItem[] };
+        if (myGeneration !== generation) return;
         cachedItems = data.items;
       }
       notify();
@@ -174,12 +183,14 @@ export function useWatchlist() {
 
   const remove = useCallback(async (symbol: string) => {
     const clientId = getClientId();
+    const myGeneration = generation;
     try {
       const res = await fetch(`/api/watchlist/${encodeURIComponent(symbol.toUpperCase())}?client_id=${encodeURIComponent(clientId)}`, {
         method: 'DELETE',
       });
       if (!res.ok) return;
       const data = await res.json() as { items: WatchlistItem[] };
+      if (myGeneration !== generation) return;
       cachedItems = data.items;
       notify();
     } catch {

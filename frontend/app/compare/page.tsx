@@ -59,7 +59,7 @@ function CompareColumn({ symbol, onReport }: { symbol: string; onReport: (symbol
     <div className="w-full 2xl:flex-1 2xl:min-w-0 min-w-0">
       <div className="flex items-center gap-2 mb-4">
         <Link
-          href={`/?symbol=${symbol}`}
+          href={`/?symbol=${encodeURIComponent(symbol)}`}
           className="font-mono font-black text-lg text-tx hover:text-accent transition-colors"
         >
           {symbol}
