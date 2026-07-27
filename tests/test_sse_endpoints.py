@@ -4,6 +4,7 @@ These are the most intricate async code in the app (queue-bridged background
 tasks, heartbeats, the LLM-concurrency ceiling) and previously had no test
 driving a full success sequence — only the 429/error edge cases were covered.
 """
+import asyncio
 import json
 import shutil
 import tempfile
@@ -161,6 +162,102 @@ class AnalyseSuccessPathTest(unittest.TestCase):
         for event in task_done_errors:
             self.assertEqual(event["error"], api._SANITIZED_ERROR)
             self.assertNotIn("hunter2", event["error"])
+
+
+class AnalysisPersistedDespiteDisconnectTest(unittest.IsolatedAsyncioTestCase):
+    """Regression test for an adversarial-review finding: cache.save() and
+    save_verdict_snapshot() used to run only AFTER the SSE consumer's own
+    `await asyncio.wait_for(done_q.get(), timeout=15)` returned. A real
+    client disconnect while the generator is suspended there (a realistic
+    window — LLM calls routinely take 10s+, spanning many 15s heartbeat
+    cycles) tears down the generator at that await point, but the
+    background `_run_and_signal()` task — created via asyncio.create_task,
+    not a child of the generator — keeps running independently, computes a
+    real (already-billed) LLM result, and then has nobody left to persist
+    it. The fix moved persistence into `_run_and_signal()` itself so it
+    happens unconditionally, before `done_q.put()`, regardless of whether
+    the consumer is still around to read the queue.
+
+    Simulated here by driving the real `stream()` async generator by hand
+    (via `analyse()`'s returned StreamingResponse.body_iterator) up through
+    the "analysing" event — the point where `asyncio.create_task(
+    _run_and_signal())` fires — then abandoning the generator's next
+    `__anext__()` call via a short outer timeout, which injects a
+    CancelledError at the exact `await asyncio.wait_for(done_q.get(), ...)`
+    suspension point a real disconnect would interrupt. The independently
+    created background task is untouched by that cancellation and keeps
+    running, exactly matching the real bug scenario."""
+
+    async def asyncSetUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-analyse-disconnect-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        patch.object(cache, "CACHE_DIR", Path(self._tmpdir)).start()
+        self.addCleanup(patch.stopall)
+        rate_limiter._memory_calls.clear()
+        rate_limiter._memory_slots.clear()
+        self.addCleanup(rate_limiter._memory_calls.clear)
+        self.addCleanup(rate_limiter._memory_slots.clear)
+
+    async def test_llm_result_is_cached_even_if_consumer_abandons_the_stream(self) -> None:
+        import time as _time
+        from starlette.requests import Request
+
+        def _fake_fetch_task(task_name, symbol, run_id, max_attempts=3):
+            return {"symbol": symbol, "task": task_name}
+
+        def _slow_analysis(*_args, **_kwargs):
+            # Runs inside run_in_executor's own worker thread (not the event
+            # loop), so a real sleep here is safe and gives us a wide,
+            # reliable window to abandon the generator's __anext__() call
+            # before this "LLM call" finishes -- a real analyst call
+            # routinely takes 10s+, this just simulates that on a much
+            # shorter, test-friendly timescale.
+            _time.sleep(0.2)
+            return _fake_analysis("TCS")
+
+        patch("main._fetch_task", side_effect=_fake_fetch_task).start()
+        patch("schemas.normalize", side_effect=lambda name, data: data).start()
+        patch("schemas.validate", return_value=(True, "")).start()
+        patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")).start()
+        patch("signals.store.save_signal").start()
+        patch("crew.run_analysis_with_fallback", side_effect=_slow_analysis).start()
+        patch("verdict_history.save_snapshot").start()
+
+        scope = {"type": "http", "method": "GET", "headers": [], "client": ("testclient", 12345)}
+        request = Request(scope)
+
+        response = await api.analyse("TCS", request, force=False)
+        gen = response.body_iterator
+
+        # Drive the generator through "start", 6x "task_done", and
+        # "analysing" -- the events emitted BEFORE asyncio.create_task(
+        # _run_and_signal()) is called.
+        for _ in range(8):
+            await gen.__anext__()
+
+        # This next __anext__() call resumes the generator past the
+        # "analysing" yield, which creates the background task and then
+        # suspends the generator on `await asyncio.wait_for(done_q.get(),
+        # timeout=15)`. Wrapping it in a short outer timeout (well inside
+        # the 0.2s the mocked "LLM call" takes) and abandoning it there
+        # injects a CancelledError at that exact suspension point --
+        # simulating the client disconnecting at that moment -- while
+        # leaving the already-created background task to keep running
+        # independently on the event loop, exactly as a real disconnect
+        # would.
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(gen.__anext__(), timeout=0.05)
+
+        # Give the background task (already scheduled before the
+        # cancellation above) time to actually finish.
+        for _ in range(20):
+            await asyncio.sleep(0.05)
+            if cache.load("TCS", "analysis"):
+                break
+
+        cached = cache.load("TCS", "analysis")
+        self.assertIsNotNone(cached, "analysis result was not persisted despite the background task completing")
+        self.assertEqual(cached.get("recommendation"), "BUY")
 
 
 class MarketPicksSuccessPathTest(unittest.TestCase):

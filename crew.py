@@ -40,11 +40,23 @@ def _unwrap_json(raw: str) -> str:
     """Extract the first balanced JSON object from raw text, handling markdown fences."""
 
     def _extract_balanced_object(text: str) -> str | None:
+        # Collects EVERY top-level balanced {...} object in the text and
+        # returns the LAST one, not the first. A verbose/reasoning-style
+        # completion can legitimately contain an earlier, small JSON-like
+        # fragment before its real structured answer (e.g. "I'll use
+        # {\"P/E\": 20} as context. Final answer: {...full payload...}") --
+        # returning the first-found object there would silently discard the
+        # actual response and hand the guardrail a fragment missing every
+        # required field, burning the one guardrail retry for nothing even
+        # though the model's real answer was fully valid. The common case
+        # (exactly one JSON object in the text) is unaffected either way.
+        candidates: list[str] = []
         start = text.find("{")
         while start != -1:
             depth = 0
             in_string = False
             escape = False
+            end = None
 
             for idx in range(start, len(text)):
                 char = text[idx]
@@ -65,11 +77,16 @@ def _unwrap_json(raw: str) -> str:
                 elif char == "}":
                     depth -= 1
                     if depth == 0:
-                        return text[start:idx + 1]
+                        end = idx
+                        break
 
-            start = text.find("{", start + 1)
+            if end is not None:
+                candidates.append(text[start:end + 1])
+                start = text.find("{", end + 1)
+            else:
+                start = text.find("{", start + 1)
 
-        return None
+        return candidates[-1] if candidates else None
 
     # Try markdown fence first so we prefer the intended payload when present.
     fence = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
@@ -254,19 +271,36 @@ def _validate_analysis_payload(  # pylint: disable=too-many-return-statements
         return False, "Field 'recommendation' must be exactly 'BUY', 'SELL', or 'HOLD'."
     if data.get("confidence") not in {"HIGH", "MEDIUM", "LOW"}:
         return False, "Field 'confidence' must be exactly 'HIGH', 'MEDIUM', or 'LOW'."
-    for field in ("summary", "business_quality", "bull_factors", "bear_factors",
-                  "key_risks", "news_highlights", "institutional_trend"):
+    # symbol/valuation/news_sentiment are all required by config/analyst.json's
+    # own output_schema (and frontend/types/index.ts's Analysis interface has
+    # all three as non-optional) but were previously never checked here at
+    # all -- a payload missing any of them still passed guardrails and was
+    # cached/returned as a "valid" analysis, silently violating the documented
+    # contract every other consumer of this schema relies on.
+    for field in ("symbol", "summary", "business_quality", "bull_factors", "bear_factors",
+                  "key_risks", "news_highlights", "institutional_trend", "news_sentiment"):
         if not data.get(field):
             return False, f"Field '{field}' is required and cannot be empty."
+    if data.get("news_sentiment") not in {"Positive", "Neutral", "Negative"}:
+        return False, "Field 'news_sentiment' must be exactly 'Positive', 'Neutral', or 'Negative'."
+    if not isinstance(data.get("valuation"), dict) or not data["valuation"].get("verdict") or not data["valuation"].get("comment"):
+        return False, "Field 'valuation' must be an object with non-empty 'verdict' and 'comment'."
 
-    if len(data.get("bull_factors", [])) < 3:
-        return False, "Field 'bull_factors' must contain at least 3 items."
+    # A field can be present and truthy (passing the loop above) while still
+    # being the WRONG TYPE -- an LLM occasionally returns comma-joined prose
+    # instead of a JSON array for a list field. len() doesn't distinguish a
+    # 3-item list from a 40-character string, so a truthiness + len() check
+    # alone lets a string/dict through unnoticed. frontend/components/
+    # results-dashboard.tsx calls .map() directly on these fields, which
+    # throws on anything that isn't a real array.
+    if not isinstance(data.get("bull_factors"), list) or len(data["bull_factors"]) < 3:
+        return False, "Field 'bull_factors' must be a list with at least 3 items."
 
-    if len(data.get("bear_factors", [])) < 2:
-        return False, "Field 'bear_factors' must contain at least 2 items."
+    if not isinstance(data.get("bear_factors"), list) or len(data["bear_factors"]) < 2:
+        return False, "Field 'bear_factors' must be a list with at least 2 items."
 
-    if len(data.get("key_risks", [])) < 3:
-        return False, "Field 'key_risks' must contain at least 3 items."
+    if not isinstance(data.get("key_risks"), list) or len(data["key_risks"]) < 3:
+        return False, "Field 'key_risks' must be a list with at least 3 items."
     # .get(), not signal_context["final_score"] — this function is called
     # from more than one independent pipeline (main.py, watchlist_alerts.py,
     # api.py), and a signal_context dict missing the key (a future caller

@@ -416,6 +416,45 @@ class PhaseExtractGuardrailTest(unittest.TestCase):
         self.assertEqual(picks, [])
 
 
+class PhaseExtractCrossSourceUrlDedupTest(unittest.TestCase):
+    """Regression test for an adversarial-review finding: seen_urls used to be
+    declared OUTSIDE the per-source loop in _phase_extract, so URL dedup was
+    global across all 20 sources despite the code's own comment claiming
+    dedup happens "within each source". Two different sources' GNews keyword
+    searches can realistically surface the same article URL -- when that
+    happened, the second source's copy was silently dropped before it ever
+    reached an LLM extraction call, so that source never got attributed a
+    pick for it and the cross-source Jaccard syndication mechanism (which
+    exists specifically to down-weight this same-article-across-sources
+    case) never ran on it at all."""
+
+    def _raw_sources(self) -> dict:
+        # Two distinct sources, each with an article at the SAME url.
+        return {
+            "ET Markets": {"articles": [{
+                "title": "Reliance gets a Buy call", "summary": "s1",
+                "url": "https://example.com/shared-article", "published_at": None,
+            }]},
+            "GNews — Moneycontrol": {"articles": [{
+                "title": "Reliance gets a Buy call", "summary": "s2",
+                "url": "https://example.com/shared-article", "published_at": None,
+            }]},
+        }
+
+    def test_both_sources_get_their_own_extraction_call_for_the_same_url(self) -> None:
+        pipeline = MarketPicksPipeline()
+        with patch("market_picks_pipeline._llm_call", return_value=json.dumps({"picks": []})) as llm_call, \
+             patch("market_picks_pipeline._extraction_cache_get", return_value=None), \
+             patch("market_picks_pipeline._extraction_cache_set"):
+            pipeline._phase_extract(self._raw_sources(), emit=lambda p: None)
+
+        # Both sources have an article to extract from, so both must trigger
+        # their own LLM extraction call -- if the second source's article was
+        # silently dropped by a global (not per-source) URL dedup, only one
+        # call would have been made here.
+        self.assertEqual(llm_call.call_count, 2)
+
+
 class PhaseExtractTickerAttributionTest(unittest.TestCase):
     """A pick's url/article_title/article_date/syndicated are attributed to
     whichever article in the batch actually contains its ticker — never
@@ -747,6 +786,33 @@ class PhaseScoreMissingPriceTest(unittest.TestCase):
         pipeline = MarketPicksPipeline()
         picks = pipeline._phase_score(consolidated, research_data={}, analyses={}, emit=lambda p: None)
         self.assertEqual(picks, [])
+
+
+class PhaseAnalyzeEmptyBatchesTest(unittest.TestCase):
+    """Regression test for an adversarial-review finding: when EVERY stock in
+    `consolidated` lacks current_price (a plausible NSE/yfinance rate-limit
+    day hitting every stock_info fetch in Phase 4), `payloads` ends up empty,
+    so `batches` is `[]` and `ThreadPoolExecutor(max_workers=min(len(batches), 4))`
+    evaluates to `max_workers=0`, which raises ValueError immediately and
+    crashes the entire pipeline run() call uncaught -- even though Phase 6
+    (_phase_score) is explicitly designed to gracefully skip no-price stocks
+    one at a time rather than fail the whole run."""
+
+    def test_no_stock_with_price_data_does_not_crash(self) -> None:
+        consolidated = [
+            {"symbol": "NOPRICE1", "company": "No Price One", "exchange": "NSE", "sources": [_source()]},
+            {"symbol": "NOPRICE2", "company": "No Price Two", "exchange": "NSE", "sources": [_source()]},
+        ]
+        research_data = {
+            "NOPRICE1": {"stock_info": {}, "research": {}},
+            "NOPRICE2": {"stock_info": {}, "research": {}},
+        }
+        pipeline = MarketPicksPipeline()
+        with patch("market_picks_pipeline._llm_call") as llm_call:
+            result = pipeline._phase_analyze(consolidated, research_data, emit=lambda p: None)
+
+        self.assertEqual(result, {})
+        llm_call.assert_not_called()
 
 
 class PhaseScrapeSourceHealthTest(unittest.TestCase):
