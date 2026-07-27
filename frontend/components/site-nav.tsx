@@ -4,6 +4,17 @@ import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import HeaderSearch from './header-search';
 import AuthWidget from './auth-widget';
+import { useWatchlistAlertsBadge } from '@/lib/watchlist-alerts-badge';
+
+function WatchlistAlertDot() {
+  return (
+    <span
+      aria-label="A watched stock has a same-day recommendation change or price move"
+      title="A watched stock has a same-day recommendation change or price move"
+      className="w-1.5 h-1.5 rounded-full bg-accent shrink-0"
+    />
+  );
+}
 
 export type NavKey =
   | 'market-picks'
@@ -58,6 +69,10 @@ export default function SiteNav({ active, extraLabel, right, wrap = false }: Pro
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
+  // A same-day recommendation change or notable price move on any watched
+  // symbol — previously only visible to a user who happened to be on
+  // /watchlist itself. See lib/watchlist-alerts-badge.ts for the full story.
+  const hasWatchlistAlerts = useWatchlistAlertsBadge();
 
   useEffect(() => {
     function onClickOutside(e: MouseEvent) {
@@ -92,10 +107,14 @@ export default function SiteNav({ active, extraLabel, right, wrap = false }: Pro
           <span key={link.key} className="contents">
             <span className="text-border-hi">|</span>
             {active === link.key ? (
-              <span className="text-sm font-semibold text-accent whitespace-nowrap">{link.label}</span>
-            ) : (
-              <Link href={link.href} className="text-sm text-muted hover:text-tx transition-colors whitespace-nowrap">
+              <span className="text-sm font-semibold text-accent whitespace-nowrap inline-flex items-center gap-1">
                 {link.label}
+                {link.key === 'watchlist' && hasWatchlistAlerts && <WatchlistAlertDot />}
+              </span>
+            ) : (
+              <Link href={link.href} className="text-sm text-muted hover:text-tx transition-colors whitespace-nowrap inline-flex items-center gap-1">
+                {link.label}
+                {link.key === 'watchlist' && hasWatchlistAlerts && <WatchlistAlertDot />}
               </Link>
             )}
           </span>
@@ -139,8 +158,9 @@ export default function SiteNav({ active, extraLabel, right, wrap = false }: Pro
         >
           {LINKS.map(link => (
             active === link.key ? (
-              <span key={link.key} role="menuitem" className="block px-3 py-2 text-sm font-semibold text-accent">
+              <span key={link.key} role="menuitem" className="px-3 py-2 text-sm font-semibold text-accent flex items-center gap-1.5">
                 {link.label}
+                {link.key === 'watchlist' && hasWatchlistAlerts && <WatchlistAlertDot />}
               </span>
             ) : (
               <Link
@@ -148,9 +168,10 @@ export default function SiteNav({ active, extraLabel, right, wrap = false }: Pro
                 href={link.href}
                 role="menuitem"
                 onClick={() => setMenuOpen(false)}
-                className="block px-3 py-2 text-sm text-muted hover:text-tx hover:bg-surface/60 transition-colors"
+                className="px-3 py-2 text-sm text-muted hover:text-tx hover:bg-surface/60 transition-colors flex items-center gap-1.5"
               >
                 {link.label}
+                {link.key === 'watchlist' && hasWatchlistAlerts && <WatchlistAlertDot />}
               </Link>
             )
           ))}
