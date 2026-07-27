@@ -109,6 +109,40 @@ class FetchDealsTest(unittest.TestCase):
         result = _fetch_deals(sess, "bulk-deals", min_qty=50_000, deal_type="Bulk Deal")
         self.assertEqual(len(result), 1)
 
+    def test_distinct_deals_on_different_dates_are_not_collapsed(self) -> None:
+        # Regression test for an adversarial-review finding: the market-wide
+        # dedup used to key on the built article's own title string, which
+        # deliberately omits the deal date entirely (see _article_from_parsed_deal's
+        # title format). Two genuinely distinct real-world deals -- same
+        # client/symbol/qty/price/action, different day -- used to produce
+        # an identical title and the second was silently dropped. Deduping
+        # on the underlying parsed fields (including date) must keep both.
+        deal_day1 = {"symbol": "A", "clientName": "X", "bdQty": 60000, "bdPrice": 10, "buySell": "BUY", "date": "01-JAN-2026"}
+        deal_day2 = {**deal_day1, "date": "02-JAN-2026"}
+        sess = self._session({"data": [deal_day1, deal_day2]})
+        result = _fetch_deals(sess, "bulk-deals", min_qty=50_000, deal_type="Bulk Deal")
+        self.assertEqual(len(result), 2)
+        # Confirms the premise: both really do produce the same title text.
+        titles = {r["title"] for r in result}
+        self.assertEqual(len(titles), 1)
+
+    def test_zero_articles_from_nonempty_raw_logs_at_debug_not_warning(self) -> None:
+        # Regression test: a routine day where every returned deal falls
+        # below min_qty (small deals are common) previously logged at
+        # `warning` level, mischaracterizing expected filtering as a likely
+        # scraper break -- inconsistent with nse_insider_trades.py's own
+        # equivalent check, which already uses `debug` for the identical
+        # scenario. Asserting on the debug logger (not warning) fails loudly
+        # if this regresses back to warning.
+        sess = self._session({"data": [
+            {"symbol": "A", "clientName": "X", "bdQty": 1000, "bdPrice": 10, "buySell": "BUY", "date": "01-JAN-2026"},
+        ]})
+        with self.assertLogs("tools.nse_bulk_block_deals", level="DEBUG") as cm:
+            result = _fetch_deals(sess, "bulk-deals", min_qty=50_000, deal_type="Bulk Deal")
+        self.assertEqual(result, [])
+        self.assertTrue(any(r.levelname == "DEBUG" and "0 parsed as articles" in r.message for r in cm.records))
+        self.assertFalse(any(r.levelname == "WARNING" for r in cm.records))
+
     def test_malformed_row_is_skipped_not_fatal(self) -> None:
         sess = self._session({"data": [
             {"symbol": "A", "clientName": "X", "bdQty": "garbage", "bdPrice": 10, "buySell": "BUY", "date": "x"},

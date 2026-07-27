@@ -1454,7 +1454,15 @@ async def get_financials(request: Request, symbol: str):
 
         cached = cache.load(sym, "financials")
         if cached is not None:
-            return {k: v for k, v in cached.items() if k != "_meta"}
+            # A response cached before a field existed (e.g. `dcf`/`concalls`
+            # were added after this endpoint shipped, and any future field
+            # would hit the same gap) won't have that key at all, vs. a
+            # fresh response's explicit null/[] — backfill defaults so every
+            # response has a consistent, self-describing shape, same
+            # convention as GET /api/peers/{symbol}'s own cached-hit path
+            # (which backfills `absolute_anchor: None` for the same reason).
+            defaults = {"profit_loss": None, "balance_sheet": None, "cash_flow": None, "dcf": None, "concalls": []}
+            return {**defaults, **{k: v for k, v in cached.items() if k != "_meta"}}
 
         from tools.screener_tools import get_financial_statements
 

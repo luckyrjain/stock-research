@@ -76,6 +76,36 @@ class SendMagicLinkEmailTest(unittest.TestCase):
 
         self.assertFalse(result)
 
+    def test_port_465_uses_implicit_tls_not_starttls(self) -> None:
+        # Regression test: port 465 is the implicit-TLS SMTP port many major
+        # providers (Gmail, Office365) document as their alternative to 587
+        # — a plaintext connect-then-STARTTLS handshake against a listener
+        # already expecting TLS from the first byte fails outright. An
+        # operator setting SMTP_PORT=465 without also separately setting
+        # SMTP_USE_TLS=false used to have every send silently fail via
+        # smtplib.SMTP + starttls(); this asserts smtplib.SMTP_SSL is used
+        # instead, and that plain smtplib.SMTP (which would attempt
+        # STARTTLS) is never even constructed.
+        os.environ["SMTP_HOST"] = "smtp.example.com"
+        os.environ["SMTP_PORT"] = "465"
+        os.environ["SMTP_USER"] = "apikey"
+        os.environ["SMTP_PASSWORD"] = "secret"
+
+        fake_server = MagicMock()
+        fake_smtp_ssl_cls = MagicMock()
+        fake_smtp_ssl_cls.return_value.__enter__.return_value = fake_server
+
+        with patch("smtplib.SMTP_SSL", fake_smtp_ssl_cls), \
+             patch("smtplib.SMTP") as fake_smtp_cls:
+            result = email_sender.send_magic_link_email("user@example.com", "https://x/y")
+
+        self.assertTrue(result)
+        fake_smtp_ssl_cls.assert_called_once_with("smtp.example.com", 465, timeout=10)
+        fake_smtp_cls.assert_not_called()
+        fake_server.starttls.assert_not_called()
+        fake_server.login.assert_called_once_with("apikey", "secret")
+        fake_server.send_message.assert_called_once()
+
 
 class SendWatchlistAlertEmailTest(unittest.TestCase):
     def setUp(self) -> None:

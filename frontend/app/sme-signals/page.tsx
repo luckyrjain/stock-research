@@ -583,7 +583,7 @@ export default function SmeSignalsPage() {
                             />
                             {s.exchange === 'NSE' ? (
                               <Link
-                                href={`/?symbol=${s.symbol}`}
+                                href={`/?symbol=${encodeURIComponent(s.symbol)}`}
                                 onClick={e => e.stopPropagation()}
                                 className="font-semibold text-tx hover:text-accent transition-colors text-sm"
                               >

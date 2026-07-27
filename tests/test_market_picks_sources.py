@@ -10,7 +10,7 @@ from tools.market_picks_tools import (
     _parse_rss,
     fetch_gnews_ms_jpm,
 )
-from tools.nse_insider_trades import _trade_to_article, fetch_insider_trades_for_symbol
+from tools.nse_insider_trades import _trade_to_article, fetch_insider_trades, fetch_insider_trades_for_symbol
 
 
 def _pit_row(**overrides) -> dict:
@@ -117,6 +117,50 @@ class InsiderTradeArticleTest(unittest.TestCase):
 
     def test_malformed_row_returns_none(self) -> None:
         self.assertIsNone(_trade_to_article({"symbol": "X", "secAcq": "abc"}))
+
+
+class FetchInsiderTradesMarketWideTest(unittest.TestCase):
+    def _session(self, rows: list[dict]) -> MagicMock:
+        sess = MagicMock()
+        resp = MagicMock()
+        resp.json.return_value = {"data": rows}
+        sess.get.return_value = resp
+        return sess
+
+    def test_exact_duplicate_row_is_deduped(self) -> None:
+        rows = [_pit_row(), dict(_pit_row())]
+        with patch("tools.nse_insider_trades._nse_session", return_value=self._session(rows)):
+            result = fetch_insider_trades()
+        self.assertEqual(len(result["articles"]), 1)
+
+    def test_distinct_disclosures_with_the_same_rounded_title_are_not_collapsed(self) -> None:
+        # Regression test for an adversarial-review finding: the market-wide
+        # dedup used to key on the built article's own title string, which
+        # deliberately omits quantity/date and rounds value to 1 decimal
+        # place in Cr/L buckets (_fmt_value) for readability. Two genuinely
+        # distinct real-world disclosures -- same person/category/symbol,
+        # different day, slightly different value that rounds the same way
+        # (₹1.05 Cr and ₹1.08 Cr both format as "₹1.1 Cr") -- used to
+        # collide on an identical title and the second was silently dropped,
+        # losing a real "insider bought again" signal. Deduping on the
+        # underlying parsed fields (including date and exact value) instead
+        # must keep both.
+        rows = [
+            _pit_row(intimDt="01-Jul-2026", secVal="10500000"),  # ₹1.05 Cr
+            _pit_row(intimDt="02-Jul-2026", secVal="10800000"),  # ₹1.08 Cr -- same rounded title
+        ]
+        with patch("tools.nse_insider_trades._nse_session", return_value=self._session(rows)):
+            result = fetch_insider_trades()
+        self.assertEqual(len(result["articles"]), 2)
+        # Confirms the premise: both really do round to the same title text.
+        titles = {a["title"] for a in result["articles"]}
+        self.assertEqual(len(titles), 1)
+
+    def test_below_value_threshold_rows_produce_no_articles(self) -> None:
+        rows = [_pit_row(secVal="100000")]
+        with patch("tools.nse_insider_trades._nse_session", return_value=self._session(rows)):
+            result = fetch_insider_trades()
+        self.assertEqual(result["articles"], [])
 
 
 class FetchInsiderTradesForSymbolTest(unittest.TestCase):

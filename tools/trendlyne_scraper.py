@@ -128,6 +128,18 @@ def _resolve_trendlyne_url(symbol: str) -> str | None:
         )
         if search_resp.status_code != 200:
             return None
+        # Post-redirect host check, matching the direct-URL path above (see
+        # _is_trendlyne_host's own docstring: "both the direct-URL path...
+        # and the search-page fallback... must never hand a cross-domain URL
+        # to the follow-up fetch"). requests.get() with allow_redirects=True
+        # (the default) can land search_resp.url somewhere other than
+        # trendlyne.com if this endpoint ever redirects off-domain — without
+        # this check, that response's HTML would be BeautifulSoup-parsed
+        # before any host validation runs at all, an SSRF gap even though
+        # every candidate anchor extracted below is still separately
+        # host-checked before being returned.
+        if not _is_trendlyne_host(search_resp.url):
+            return None
         soup = BeautifulSoup(search_resp.text, "lxml")
         for a in soup.find_all("a", href=True):
             href = a["href"]

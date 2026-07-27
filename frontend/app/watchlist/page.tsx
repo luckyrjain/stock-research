@@ -89,7 +89,7 @@ function CalendarStrip({ entries }: { entries: WatchlistCalendarEntry[] }) {
       <div className="space-y-2">
         {entries.map(e => (
           <div key={e.symbol} className="flex items-center gap-2 flex-wrap text-xs">
-            <Link href={`/?symbol=${e.symbol}`} className="font-mono font-semibold text-tx hover:text-accent transition-colors shrink-0">
+            <Link href={`/?symbol=${encodeURIComponent(e.symbol)}`} className="font-mono font-semibold text-tx hover:text-accent transition-colors shrink-0">
               {e.symbol}
             </Link>
             <AlertBadges entry={e} />
@@ -233,7 +233,7 @@ export default function WatchlistPage() {
                     return (
                       <tr key={item.symbol} className="border-b border-border/60 hover:bg-surface/60 transition-colors">
                         <td className="px-4 py-4">
-                          <Link href={`/?symbol=${item.symbol}`} className="font-semibold text-tx hover:text-accent transition-colors text-sm">
+                          <Link href={`/?symbol=${encodeURIComponent(item.symbol)}`} className="font-semibold text-tx hover:text-accent transition-colors text-sm">
                             {item.symbol}
                           </Link>
                         </td>

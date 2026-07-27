@@ -1298,6 +1298,38 @@ class FinancialsEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         mock_record.assert_not_called()
 
+    def test_cache_entry_missing_newer_fields_is_backfilled_not_omitted(self) -> None:
+        # Regression test for an adversarial-review finding: unlike GET
+        # /api/peers/{symbol}'s own cached-hit path (which backfills
+        # `absolute_anchor: None` for a response cached before that field
+        # existed), this endpoint's cached-hit path used to just strip
+        # `_meta` and return the cached dict verbatim. A cache entry written
+        # before `dcf`/`concalls` existed (or before any future field is
+        # added) would then be served with those keys entirely ABSENT for
+        # up to the remaining 24h TTL, rather than the documented null/[]
+        # shape every fresh response guarantees.
+        cache.save("TCS", "financials", {
+            "symbol": "TCS",
+            "profit_loss": {"years": ["Mar 2024"], "rows": [{"label": "Sales", "values": [100.0]}]},
+            # Deliberately missing "balance_sheet", "cash_flow", "dcf", and
+            # "concalls" -- simulating a payload cached before those fields
+            # existed on this endpoint.
+        })
+        with patch("tools.screener_tools.get_financial_statements") as should_not_run:
+            resp = client.get("/api/financials/TCS")
+        should_not_run.run.assert_not_called()
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["profit_loss"]["rows"][0]["label"], "Sales")
+        self.assertIn("balance_sheet", body)
+        self.assertIsNone(body["balance_sheet"])
+        self.assertIn("cash_flow", body)
+        self.assertIsNone(body["cash_flow"])
+        self.assertIn("dcf", body)
+        self.assertIsNone(body["dcf"])
+        self.assertIn("concalls", body)
+        self.assertEqual(body["concalls"], [])
+
     def test_tool_error_is_not_cached_so_next_request_retries(self) -> None:
         # Same convention as GET /api/peers/{symbol}: a transient scrape
         # failure must not get locked in as "no financials" for the full

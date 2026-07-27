@@ -119,6 +119,14 @@ export function usePositions() {
   const addPosition = useCallback(async (pos: Omit<Position, 'bought_at' | 'shares'>) => {
     const symbol = pos.symbol.toUpperCase();
     const clientId = getClientId();
+    // Captured before the await, same generation-guard convention as
+    // fetchPositions() above and lib/watchlist.ts's own toggle()/remove() —
+    // without this, a mutation in flight when the caller's identity changes
+    // mid-request (e.g. signing out right after marking a position) can
+    // resolve after refreshPositions()'s own fetch and silently overwrite
+    // the fresher (post-refresh) list with this stale, now-wrong-identity
+    // one.
+    const myGeneration = generation;
     try {
       const res = await fetch('/api/positions', {
         method: 'POST',
@@ -127,6 +135,7 @@ export function usePositions() {
       });
       if (!res.ok) return;
       const data = await res.json() as { items: Position[] };
+      if (myGeneration !== generation) return;
       cachedPositions = data.items;
       notify();
     } catch {
@@ -137,12 +146,14 @@ export function usePositions() {
 
   const removePosition = useCallback(async (symbol: string) => {
     const clientId = getClientId();
+    const myGeneration = generation;
     try {
       const res = await fetch(`/api/positions/${encodeURIComponent(symbol.toUpperCase())}?client_id=${encodeURIComponent(clientId)}`, {
         method: 'DELETE',
       });
       if (!res.ok) return;
       const data = await res.json() as { items: Position[] };
+      if (myGeneration !== generation) return;
       cachedPositions = data.items;
       notify();
     } catch {
@@ -155,6 +166,7 @@ export function usePositions() {
   // meant to be a one-click action while browsing Market Picks.
   const updateShares = useCallback(async (symbol: string, shares: number | null) => {
     const clientId = getClientId();
+    const myGeneration = generation;
     try {
       const res = await fetch(`/api/positions/${encodeURIComponent(symbol.toUpperCase())}`, {
         method: 'PATCH',
@@ -163,6 +175,7 @@ export function usePositions() {
       });
       if (!res.ok) return;
       const data = await res.json() as { items: Position[] };
+      if (myGeneration !== generation) return;
       cachedPositions = data.items;
       notify();
     } catch {

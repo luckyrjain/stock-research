@@ -108,10 +108,13 @@ def _parse_deal_row(deal: dict, deal_type: str) -> dict | None:
     }
 
 
-def _deal_to_article(deal: dict, deal_type: str) -> dict | None:
-    parsed = _parse_deal_row(deal, deal_type)
-    if not parsed:
-        return None
+def _article_from_parsed_deal(parsed: dict, deal_type: str) -> dict:
+    """Formats an already-_parse_deal_row()-parsed deal as a plain-language
+    LLM-extraction article. Split out of _deal_to_article() below so
+    _fetch_deals() can parse+dedup once (on the real underlying fields — see
+    its own dedup comment) and only then build the article, instead of
+    building the article first and deduping on its own (coarser) title
+    string."""
     symbol, client, action, qty, price, date_str = (
         parsed["symbol"], parsed["client"], parsed["action"],
         parsed["quantity"], parsed["price"], parsed["date"],
@@ -137,6 +140,13 @@ def _deal_to_article(deal: dict, deal_type: str) -> dict | None:
     }
 
 
+def _deal_to_article(deal: dict, deal_type: str) -> dict | None:
+    parsed = _parse_deal_row(deal, deal_type)
+    if not parsed:
+        return None
+    return _article_from_parsed_deal(parsed, deal_type)
+
+
 def _fetch_deal_rows(sess: requests.Session, endpoint: str) -> list[dict]:
     try:
         r = sess.get(f"https://www.nseindia.com/api/{endpoint}", timeout=10)
@@ -150,28 +160,45 @@ def _fetch_deals(sess: requests.Session, endpoint: str, min_qty: int, deal_type:
     raw = _fetch_deal_rows(sess, endpoint)
 
     articles: list[dict] = []
-    seen: set[str] = set()
+    # Dedups on the same real-world-event fields fetch_bulk_block_deals_for_symbol()
+    # already dedups on (client, action, quantity, price, deal_type, date),
+    # not on the built article's own title string — the title omits date
+    # entirely and rounds quantity via _fmt_qty() for large values, so two
+    # genuinely distinct same-client/same-symbol deals on different dates (or
+    # with a similar-but-not-identical quantity that rounds the same) could
+    # otherwise collide on an identical title and the second would be
+    # silently dropped.
+    seen: set[tuple] = set()
     for deal in raw:
         try:
             qty = _to_int(_first(deal, _QTY_KEYS))
             if qty < min_qty:
                 continue
-            art = _deal_to_article(deal, deal_type)
+            parsed = _parse_deal_row(deal, deal_type)
         except Exception as exc:
             logger.debug("Skipping malformed %s row: %s", deal_type, exc)
             continue
-        if not art:
+        if not parsed:
             continue
-        key = art["title"]
+        key = (
+            parsed["symbol"], parsed["client"], parsed["action"],
+            parsed["quantity"], parsed["price"], parsed["deal_type"], parsed["date"],
+        )
         if key in seen:
             continue
         seen.add(key)
-        articles.append(art)
+        articles.append(_article_from_parsed_deal(parsed, deal_type))
 
     if raw and not articles:
-        logger.warning(
-            "%s: NSE returned %d raw rows but 0 parsed as articles — "
-            "field names may have drifted from the expected schema",
+        # debug, not warning — a routine day where every returned deal fell
+        # below min_qty (small deals are common) looks identical to a real
+        # schema drift from this check's own perspective; nse_insider_trades.py's
+        # equivalent check already uses debug for the same reason (see its
+        # own comment) — matches that established "don't manufacture noise
+        # from the expected common case" convention.
+        logger.debug(
+            "%s: NSE returned %d raw rows but 0 parsed as articles "
+            "(likely filtered out by the min_qty threshold)",
             deal_type, len(raw),
         )
 

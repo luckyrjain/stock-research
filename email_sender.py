@@ -85,10 +85,21 @@ def _send_via_smtp(msg: EmailMessage, failure_event: str) -> bool:
     # Defaults on (587/STARTTLS is the common case for real providers). Only
     # meant to be turned off for a local/dev relay that doesn't speak TLS.
     use_tls = os.environ.get("SMTP_USE_TLS", "true").lower() not in ("false", "0", "no")
+    # Port 465 is the IANA-registered implicit-TLS SMTP port (many major
+    # providers, e.g. Gmail/Office365, document it as their alternative to
+    # 587) — a plaintext connect-then-STARTTLS handshake against a listener
+    # already expecting TLS from the first byte fails outright. Without this,
+    # an operator setting SMTP_PORT=465 (a very plausible config choice,
+    # without also separately setting SMTP_USE_TLS=false) would have every
+    # send silently fail — the broad except below swallows it into a log
+    # line, so sign-in links and watchlist alerts would simply never arrive
+    # with no obvious symptom pointing at the port/TLS-mode mismatch.
+    use_implicit_tls = port == 465
 
     try:
-        with smtplib.SMTP(host, port, timeout=10) as server:
-            if use_tls:
+        smtp_cls = smtplib.SMTP_SSL if use_implicit_tls else smtplib.SMTP
+        with smtp_cls(host, port, timeout=10) as server:
+            if use_tls and not use_implicit_tls:
                 server.starttls()
             if user and password:
                 server.login(user, password)
