@@ -17,6 +17,7 @@ import math
 import os
 import re
 import tempfile
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -810,6 +811,15 @@ class MarketPicksPipeline:
     def __init__(self):
         self._run_id = uuid.uuid4().hex[:8]
         self._nse_session: requests.Session | None = None
+        # _nse_session_get() is called from up to 8 concurrent
+        # ThreadPoolExecutor workers during _phase_consolidate's Path B
+        # resolution — without a lock, an unsynchronized check-then-act on
+        # self._nse_session lets multiple threads race past the "not yet
+        # created" check simultaneously and each build+prime their own
+        # redundant Session (extra network round-trips to nseindia.com),
+        # with only the last assignment winning as the shared session going
+        # forward.
+        self._nse_session_lock = threading.Lock()
         # Set during run(): False when the scrape phase or final pick count looks
         # substantially broken rather than just a quiet day — see run_pipeline()
         # in api.py, which uses this to decide whether the result is safe to cache.
@@ -1222,6 +1232,26 @@ Return ONLY this JSON (no markdown, no extra text):
                             # For NSE path: reject symbols absent from equity master
                             if suffix == ".NS" and nse_master and ticker_hint.upper() not in nse_master:
                                 continue
+                            # Disclosed limitation: the .BO (BSE) branch has
+                            # no equivalent hard gate — _load_nse_symbol_master()
+                            # is genuinely NSE-only (NSE's own EQUITY_L.csv),
+                            # and this codebase has no BSE equity-master
+                            # fetcher to validate against (BSE listings are
+                            # also frequently keyed by numeric scrip codes
+                            # rather than the alpha ticker this branch is
+                            # working with — see the SME BSE deep-link
+                            # resolution notes elsewhere in this codebase —
+                            # so the NSE master would be the wrong list to
+                            # check even if it were reused here). A
+                            # ticker_hint that yfinance's .BO variant returns
+                            # a spurious positive last_price for (a stale/
+                            # wrong Yahoo symbol mapping) would be accepted
+                            # with no independent cross-check. Not fixed here
+                            # — building a real BSE master-list fetcher is a
+                            # feature addition, not a bug fix, and a partial
+                            # validation without solid backing data would
+                            # risk rejecting genuinely valid BSE-only stocks
+                            # instead of closing the gap safely.
                             return {
                                 "symbol":   ticker_hint.upper(),
                                 "company":  company_hint or ticker_hint.upper(),
@@ -1284,18 +1314,35 @@ Return ONLY this JSON (no markdown, no extra text):
         nse_master = _load_nse_symbol_master()
 
         consolidated: list[dict] = []
-        seen_symbols: set[str]   = set()
+        # Maps a resolved symbol to its consolidated dict (not just a
+        # membership set) so a second pre-resolution group that resolves to
+        # the same symbol can have its sources merged in, rather than
+        # discarded outright. Two different raw picks for the same real
+        # stock legitimately land in different dedup groups pre-resolution
+        # (e.g. one source's extraction included a ticker, another's left it
+        # blank and only had the company name — _dedup_key() groups on
+        # whichever the LLM provided) — without merging, whichever group's
+        # _validate() future happened to complete first (order is
+        # nondeterministic under ThreadPoolExecutor) would silently win and
+        # the other group's entire source list would be lost, undercounting
+        # mention_count/confidence_score for exactly the stocks with the
+        # broadest, most format-mixed coverage.
+        seen_symbols: dict[str, dict] = {}
 
         # 8 workers: yfinance is the fast path and has no rate limit
         with ThreadPoolExecutor(max_workers=8) as ex:
             futures = {ex.submit(_validate, k, v): k for k, v in groups.items()}
             for fut in as_completed(futures):
                 result = fut.result()
-                ok     = result is not None and result["symbol"] not in seen_symbols
                 sym    = result["symbol"] if result else (futures[fut] or "?")
+                ok     = result is not None
                 if ok:
-                    seen_symbols.add(result["symbol"])
-                    consolidated.append(result)
+                    existing = seen_symbols.get(result["symbol"])
+                    if existing is not None:
+                        existing["sources"].extend(result["sources"])
+                    else:
+                        seen_symbols[result["symbol"]] = result
+                        consolidated.append(result)
                 emit({"event": "validate_progress", "symbol": sym, "ok": ok})
 
         consolidated.sort(key=lambda x: len(x["sources"]), reverse=True)
@@ -1383,16 +1430,22 @@ Return ONLY this JSON (no markdown, no extra text):
                 signal_result  = run_signal_engine(symbol, all_data)
                 signal_insight = interpret(signal_result)
 
-                # Detect recent IPO: < 8 months of monthly history on yfinance
+                # Detect recent IPO: < 8 months of monthly history on yfinance.
+                # NSE history >= 8 months is itself positive proof the stock
+                # isn't a recent IPO -- no need to check BSE too. Only when
+                # NSE's own history is too thin to tell (a stock that's
+                # primarily listed/liquid on BSE can have sparse NSE data on
+                # Yahoo even when it's genuinely well-established) does the
+                # BSE series get a chance to override the flag back to False.
                 is_recent_ipo = False
                 try:
                     import yfinance as yf
                     hist = yf.Ticker(symbol + ".NS").history(period="1y", interval="1mo")
-                    if len(hist) < 8:
-                        is_recent_ipo = True
-                    elif not is_recent_ipo:
-                        hist = yf.Ticker(symbol + ".BO").history(period="1y", interval="1mo")
-                        is_recent_ipo = len(hist) < 8
+                    if len(hist) >= 8:
+                        is_recent_ipo = False
+                    else:
+                        hist_bo = yf.Ticker(symbol + ".BO").history(period="1y", interval="1mo")
+                        is_recent_ipo = len(hist_bo) < 8
                 except Exception:
                     pass
 
@@ -1532,11 +1585,28 @@ Return ONLY this JSON (no markdown):
             default=1.0,
         )
         picks: list[dict] = []
+        skipped_no_price: list[str] = []
 
         for item in consolidated:
             sym           = item["symbol"]
             rd            = research_data.get(sym, {})
             si            = rd.get("stock_info", {})
+            # `_fetch_task()` (main.py) never raises -- a fully-failed stock_info
+            # fetch (rate-limited, network error exhausted its retries, etc.)
+            # comes back as an error dict, which schemas.normalize() passes
+            # through unchanged, leaving `si` with no current_price. Without
+            # this guard the stock would still be scored and could be
+            # recommended BUY purely off source consensus (signal_score
+            # degrades to a neutral ~0, not a veto), producing a pick with
+            # entry/target/stop/current_price all null and no bull/bear
+            # factors (_phase_analyze already skips building an LLM payload
+            # for it, for the same reason) — a non-actionable, misleading
+            # recommendation that violates this codebase's "never show
+            # without substantiation" convention. _apply_sector_balance and
+            # the rank/sort below never see it.
+            if not si.get("current_price"):
+                skipped_no_price.append(sym)
+                continue
             analysis      = analyses.get(sym, {})
             signal_score  = rd.get("signal_score", 0.0)
             quant_verdict = rd.get("signal_verdict", "HOLD")
@@ -1629,6 +1699,12 @@ Return ONLY this JSON (no markdown):
                 "valuation_percentile": valuation_pct,
             })
 
+        if skipped_no_price:
+            log_event(
+                LOGGER, "market_picks_skipped_no_price", level="warning",
+                run_id=self._run_id, symbols=skipped_no_price, count=len(skipped_no_price),
+            )
+
         # Sort: BUYs first, then WATCHLIST, HOLD, SELL; within tier by action_score DESC
         _rec_order = {"BUY": 0, "WATCHLIST": 1, "HOLD": 2, "SELL": 3}
         picks.sort(key=lambda x: (
@@ -1656,14 +1732,15 @@ Return ONLY this JSON (no markdown):
     # ── Shared NSE session ────────────────────────────────────────────────────
 
     def _nse_session_get(self) -> requests.Session:
-        if not self._nse_session:
-            self._nse_session = requests.Session()
-            self._nse_session.headers.update(_NSE_HEADERS)
-            try:
-                self._nse_session.get("https://www.nseindia.com", timeout=8)
-            except Exception:
-                pass
-        return self._nse_session
+        with self._nse_session_lock:
+            if not self._nse_session:
+                self._nse_session = requests.Session()
+                self._nse_session.headers.update(_NSE_HEADERS)
+                try:
+                    self._nse_session.get("https://www.nseindia.com", timeout=8)
+                except Exception:
+                    pass
+            return self._nse_session
 
 
 # ── CLI entrypoint ────────────────────────────────────────────────────────────

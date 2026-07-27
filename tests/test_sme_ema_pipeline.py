@@ -120,6 +120,26 @@ class ComputeEmaSignalsTest(unittest.TestCase):
     def test_error_result_returns_empty_list(self) -> None:
         self.assertEqual(_compute_ema_signals({"error": "no data", "symbol": "X"}), [])
 
+    def test_early_cross_before_convergence_margin_is_suppressed_even_when_total_history_clears_the_threshold(self) -> None:
+        # Regression test for an adversarial-review finding: has_enough_history
+        # only checked the TOTAL fetched series length (>= _MIN_HISTORY_DAYS),
+        # not whether the specific bar where a cross actually fires has that
+        # much real history behind IT. A stock whose total history just
+        # clears the 75-day threshold can still have an early cross (EMA50
+        # warmed up on far fewer bars than the stock's eventual total) land
+        # inside the stored window -- exactly the "recency-weighted average,
+        # not a converged EMA" scenario _MIN_HISTORY_DAYS exists to exclude.
+        # 20 days falling, then a steep 60-day rise (80 days total, clears
+        # the 75-day has_enough_history threshold) -- the actual EMA20/EMA50
+        # crossover fires well before day 74 (position _MIN_HISTORY_DAYS - 1)
+        # since the reversal is sharp. No cross should be reported anywhere.
+        closes = [200.0 - i for i in range(20)] + [181.0 + 5.0 * i for i in range(60)]
+        self.assertEqual(len(closes), 80)  # sanity: total clears _MIN_HISTORY_DAYS (75)
+
+        rows = _compute_ema_signals(_make_result(closes))
+        crosses = [r for r in rows if r["cross"] is not None]
+        self.assertEqual(crosses, [])
+
     def test_rsi14_and_volume_spike_flow_through_to_stored_rows(self) -> None:
         # Exercises the real row-assembly path (df["rsi14"]/df["volume_spike"]
         # -> _safe_float / pd.notna -> the returned dict), not just the pure
@@ -255,6 +275,26 @@ class ExtractMarketCapTest(unittest.TestCase):
 
 def _stock(symbol: str) -> dict:
     return {"symbol": symbol, "name": symbol, "isin": None, "series": "SM", "exchange": "NSE"}
+
+
+class UpsertStocksTest(unittest.TestCase):
+    def test_conflict_update_refreshes_exchange_and_series(self) -> None:
+        # Regression test for an adversarial-review finding: the ON CONFLICT
+        # clause only refreshed name/isin/fetched_at, silently leaving a
+        # stale exchange/series value in place forever even though every
+        # pipeline run re-fetches and passes fresh values for both --
+        # inconsistent with screener_pipeline.py's own sibling
+        # _upsert_stocks(), which refreshes every column on conflict.
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.begin.return_value.__enter__.return_value = conn
+
+        sme_ema_pipeline._upsert_stocks(engine, [_stock("ABC")])
+
+        sql_text = str(conn.execute.call_args[0][0])
+        conflict_clause = sql_text.split("ON CONFLICT", 1)[1]
+        self.assertIn("exchange", conflict_clause)
+        self.assertIn("series", conflict_clause)
 
 
 class RunHealthSignalTest(unittest.TestCase):

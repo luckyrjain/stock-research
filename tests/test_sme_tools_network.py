@@ -94,6 +94,37 @@ class FetchNseEmergeStocksTest(SmeToolsNetworkTestBase):
             result = sme_tools.fetch_nse_emerge_stocks(force=True)
         self.assertEqual(result, stale)
 
+    def test_row_with_null_series_is_skipped_not_fatal_to_the_whole_fetch(self) -> None:
+        # Regression test for an adversarial-review finding: `.get("series",
+        # "SM")` only falls back to the default when the key is MISSING —
+        # if NSE ever returns a row with "series": null (key present, value
+        # None), `None.strip()` raised AttributeError, which used to
+        # propagate out of the whole list-comprehension building `stocks`
+        # and get caught by the outer except, discarding every remaining
+        # row (potentially the whole ~500-stock universe) over one bad row.
+        # fetch_bse_sme_stocks() was already hardened per-row against this
+        # exact failure mode; this closes the same gap on the NSE side.
+        api_response = _FakeResponse(json_data={"data": [
+            {"symbol": "good1", "series": "SM"},
+            {"symbol": "bad", "series": None},
+            {"symbol": "good2", "series": "SM"},
+        ]})
+
+        def _session_get(self_, url, **kwargs):
+            if "live-analysis-emerge" in url:
+                return api_response
+            return _FakeResponse(json_data={})
+
+        with patch("requests.Session.get", _session_get), \
+             patch.object(sme_tools, "_NSE_EMERGE_MIN_COUNT", 1), \
+             patch.object(sme_tools, "_enrich_names", side_effect=lambda stocks: stocks):
+            result = sme_tools.fetch_nse_emerge_stocks(force=True)
+
+        symbols = {s["symbol"] for s in result}
+        self.assertEqual(symbols, {"GOOD1", "BAD", "GOOD2"})
+        bad = next(s for s in result if s["symbol"] == "BAD")
+        self.assertEqual(bad["series"], "SM")  # None falls back to the default, doesn't crash
+
 
 class FetchBseSmeStocksTest(SmeToolsNetworkTestBase):
     def _group_response(self, rows):
