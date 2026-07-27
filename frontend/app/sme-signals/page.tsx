@@ -6,6 +6,7 @@ import type { SmeSignal, SmeCrossEvent, SmeSignalHistoryResponse, SmeSignalsResp
 import EmaChart from '@/components/ema-chart';
 import SiteNav from '@/components/site-nav';
 import WatchlistButton from '@/components/watchlist-button';
+import InfoTooltip from '@/components/info-tooltip';
 import { Skeleton, FilterChip, SortableTh, fmtMarketCap } from '@/components/data-table-ui';
 
 // ── Filter types ──────────────────────────────────────────────────────────────
@@ -336,8 +337,13 @@ export default function SmeSignalsPage() {
                           bg-accent/10 border border-accent/20 text-accent text-xs font-semibold mb-4">
             NSE Emerge · BSE SME · Golden Cross Screener
           </div>
-          <h1 className="text-4xl font-black tracking-tight mb-2">
+          <h1 className="text-4xl font-black tracking-tight mb-2 flex items-center gap-2">
             SME Golden <span className="text-accent">Cross</span> Signals
+            <InfoTooltip title="Golden cross / death cross" align="left">
+              <p>A <span className="text-buy font-semibold">golden cross</span> is when a stock&apos;s 20-day exponential moving average (EMA20) crosses <em>above</em> its 50-day average (EMA50) — a classic bullish momentum signal.</p>
+              <p>A <span className="text-sell font-semibold">death cross</span> is the opposite: EMA20 crossing <em>below</em> EMA50, a bearish signal.</p>
+              <p>&quot;Regime&quot; is just which side of that crossover a stock is on right now, whether or not it crossed recently.</p>
+            </InfoTooltip>
           </h1>
           <p className="text-muted text-sm max-w-xl leading-relaxed">
             SME-listed stocks (NSE Emerge + BSE SME) whose EMA 20 crossed their EMA 50 (golden/death cross) in the selected window.
@@ -367,7 +373,15 @@ export default function SmeSignalsPage() {
           ].map(({ label, value, color, sub }) => (
             <div key={label} className="rounded-xl border border-border bg-card px-4 py-3">
               <div className={`text-2xl font-black font-mono tabular-nums ${color}`}>{value}</div>
-              <div className="text-[11px] font-semibold text-tx mt-0.5">{label}</div>
+              <div className="text-[11px] font-semibold text-tx mt-0.5 flex items-center gap-1">
+                {label}
+                {label === 'Golden Follow-Through' && (
+                  <InfoTooltip title="Golden Follow-Through" align="left">
+                    <p>Of every golden cross in the last 90 days, what % were still trading above their cross-day price 20 trading days later.</p>
+                    <p>A rough trust signal for this screener&apos;s own track record — not a guarantee any specific cross will follow through.</p>
+                  </InfoTooltip>
+                )}
+              </div>
               <div className="text-[10px] text-muted mt-0.5">{sub}</div>
             </div>
           ))}
@@ -445,7 +459,14 @@ export default function SmeSignalsPage() {
 
           {/* RSI(14) — momentum-screener confirmation, filtered client-side */}
           <div className="flex items-center gap-2">
-            <span className="text-[10px] font-bold text-muted uppercase tracking-wider">RSI</span>
+            <span className="text-[10px] font-bold text-muted uppercase tracking-wider flex items-center gap-1">
+              RSI
+              <InfoTooltip title="RSI(14)" align="left">
+                <p>The 14-day Relative Strength Index measures how fast and how far a stock&apos;s price has moved recently, on a 0-100 scale.</p>
+                <p><span className="text-buy font-semibold">Oversold (≤{_RSI_OVERSOLD})</span> — may be due for a bounce. <span className="text-sell font-semibold">Overbought (≥{_RSI_OVERBOUGHT})</span> — may be due for a pullback.</p>
+                <p>A momentum confirmation signal, not a standalone buy/sell call.</p>
+              </InfoTooltip>
+            </span>
             <div className="flex gap-1.5">
               {(
                 [
