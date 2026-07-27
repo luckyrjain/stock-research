@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import shutil
 import tempfile
 import threading
@@ -8,6 +9,18 @@ from pathlib import Path
 from unittest.mock import patch
 
 import source_health
+
+
+def _mp_record_and_check(health_dir: str, source_name: str, date: str, ok: bool) -> None:
+    """Top-level (picklable) worker for MultiProcessConcurrencySafetyTest —
+    see llm_cost's own equivalent worker for why a real OS process, not a
+    thread, is what actually exercises fcntl.flock's cross-process
+    guarantee. Reassigns _HEALTH_DIR directly rather than via
+    unittest.mock.patch for the same reason."""
+    import source_health as _source_health
+
+    _source_health._HEALTH_DIR = Path(health_dir)
+    _source_health.record_and_check(source_name, ok, date=date)
 
 
 class RecordAndCheckTest(unittest.TestCase):
@@ -230,6 +243,39 @@ class ConcurrencySafetyTest(unittest.TestCase):
             t.join()
 
         path = source_health._path("Backfilled Source")
+        recorded_dates = {d["date"] for d in json.loads(path.read_text())["days"]}
+        self.assertEqual(recorded_dates, set(dates))
+
+
+class MultiProcessConcurrencySafetyTest(unittest.TestCase):
+    """The gap ConcurrencySafetyTest's own tests don't cover: they only
+    spawn threads within one process, proving the file-level lock
+    serializes correctly in-process — but the bug _locked() actually
+    targets is two separate *processes* (several market_picks_pipeline.py
+    worker processes, or several backend API workers) racing to update the
+    same source's file, which a plain threading.Lock cannot prevent at
+    all. This spawns real OS processes (multiprocessing, fork start
+    method) to exercise fcntl.flock's actual cross-process guarantee."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-source-health-mp-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+
+    def test_concurrent_processes_on_distinct_days_lose_no_updates(self) -> None:
+        ctx = multiprocessing.get_context("fork")
+        dates = [f"2026-05-{i:02d}" for i in range(1, 9)]
+        procs = [
+            ctx.Process(target=_mp_record_and_check, args=(self._tmpdir, "MP Source", d, True))
+            for d in dates
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=30)
+            self.assertEqual(p.exitcode, 0)
+
+        with patch.object(source_health, "_HEALTH_DIR", Path(self._tmpdir)):
+            path = source_health._path("MP Source")
         recorded_dates = {d["date"] for d in json.loads(path.read_text())["days"]}
         self.assertEqual(recorded_dates, set(dates))
 

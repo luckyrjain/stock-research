@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import shutil
 import tempfile
 import threading
@@ -8,6 +9,23 @@ from pathlib import Path
 from unittest.mock import patch
 
 import llm_cost
+
+
+def _mp_record_call(cost_dir: str, date: str) -> None:
+    """Top-level (picklable) worker for MultiProcessConcurrencySafetyTest —
+    runs in a genuinely separate OS process, not a thread, to exercise the
+    actual guarantee fcntl.flock provides (keyed on the open file
+    description across processes) rather than only the in-process
+    serialization threads already prove. Reassigns _COST_DIR directly
+    (not via unittest.mock.patch, which doesn't need to cross a process
+    boundary here since the fork start method copies this module's already-
+    imported state, but setting it explicitly keeps this independent of
+    that assumption)."""
+    import llm_cost as _llm_cost
+
+    _llm_cost._COST_DIR = Path(cost_dir)
+    with patch.object(_llm_cost, "_today", return_value=date):
+        _llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)
 
 
 class LlmCostTest(unittest.TestCase):
@@ -164,6 +182,40 @@ class ConcurrencySafetyTest(unittest.TestCase):
         path = llm_cost._COST_DIR / f"{llm_cost._today()}.json"
         data = json.loads(path.read_text())  # raises if corrupted
         self.assertEqual(data["call_count"], 20)
+
+
+class MultiProcessConcurrencySafetyTest(unittest.TestCase):
+    """The gap ConcurrencySafetyTest's own comments disclose: its tests
+    only spawn threads within one process, proving the file-level lock
+    serializes correctly in-process — but the bug this module's _locked()
+    fix actually targets (docs/deployment.md's supported multi-worker
+    topology) is two separate *processes* racing to update the same day's
+    counter file, which a plain threading.Lock cannot prevent at all. This
+    spawns real OS processes (multiprocessing, fork start method) to
+    exercise fcntl.flock's actual cross-process guarantee."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-llm-cost-mp-test-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+
+    def test_concurrent_processes_lose_no_calls(self) -> None:
+        ctx = multiprocessing.get_context("fork")
+        date = "2026-04-01"
+        procs = [
+            ctx.Process(target=_mp_record_call, args=(self._tmpdir, date))
+            for _ in range(12)
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=30)
+            self.assertEqual(p.exitcode, 0)
+
+        with patch.object(llm_cost, "_COST_DIR", Path(self._tmpdir)):
+            totals = llm_cost.get_daily_totals(date)
+
+        self.assertEqual(totals["call_count"], 12)
+        self.assertAlmostEqual(totals["total_cost_usd"], 0.12, places=6)
 
 
 if __name__ == "__main__":
