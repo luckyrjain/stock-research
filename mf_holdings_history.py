@@ -37,7 +37,16 @@ def save_snapshot(symbol: str, mf_holdings: dict) -> None:
     symbol/as_of_date. No-ops (never invented) if DATABASE_URL isn't set,
     `mf_holdings` is an error payload, `as_of_date` is missing, or there
     are no funds to record — a symbol with no mutual fund holders is a
-    legitimate scrape result, not a reason to write an empty snapshot."""
+    legitimate scrape result, not a reason to write an empty snapshot.
+
+    Same last-write-wins shape as verdict_history.save_snapshot's own
+    disclosed limitation (no session correlation on a concurrent write),
+    but materially lower-risk here: `as_of_date` is Screener/NSE's own
+    quarterly disclosure date, not derived per-request, so two concurrent
+    fetches racing for the same symbol/quarter are writing the same
+    underlying scraped figures, not two independently-generated answers
+    that could disagree — a race here means a redundant write, not a
+    silently-discarded different verdict."""
     if not os.environ.get("DATABASE_URL"):
         return
     if not isinstance(mf_holdings, dict) or mf_holdings.get("error"):
