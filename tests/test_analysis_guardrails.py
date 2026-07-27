@@ -125,7 +125,50 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
 
         ok, message = crew._validate_analysis_payload(payload, self.all_data)
         self.assertFalse(ok)
-        self.assertEqual(message, "Field 'bull_factors' must contain at least 3 items.")
+        self.assertEqual(message, "Field 'bull_factors' must be a list with at least 3 items.")
+
+    def test_validate_analysis_payload_rejects_non_list_bull_factors(self) -> None:
+        # Regression test for an adversarial-review finding: bull_factors/
+        # bear_factors/key_risks were only checked via truthiness + len(),
+        # never isinstance(list). An LLM occasionally returns comma-joined
+        # prose instead of a JSON array for a list field -- a non-empty
+        # string of sufficient length passed both the truthiness check and
+        # the len() >= N check unnoticed, reaching results-dashboard.tsx's
+        # .map() call on this field and crashing the render with a
+        # TypeError, since a string isn't an array.
+        payload = dict(
+            self._VALID_PAYLOAD,
+            bull_factors="Strong ROCE of 20%, improving margins, and robust FCF drive the bull case",
+        )
+        ok, message = crew._validate_analysis_payload(payload, self.all_data)
+        self.assertFalse(ok)
+        self.assertIn("bull_factors", message)
+        self.assertIn("list", message)
+
+    def test_validate_analysis_payload_rejects_missing_symbol_valuation_news_sentiment(self) -> None:
+        # Regression test: config/analyst.json's own output_schema (and
+        # frontend/types/index.ts's Analysis interface) require symbol,
+        # valuation, and news_sentiment -- none of which were previously
+        # enforced by this guardrail at all, so a payload missing any of
+        # them still passed as "valid".
+        for field in ("symbol", "valuation", "news_sentiment"):
+            payload = dict(self._VALID_PAYLOAD)
+            del payload[field]
+            ok, message = crew._validate_analysis_payload(payload, self.all_data)
+            self.assertFalse(ok, f"payload missing '{field}' should be rejected")
+            self.assertIn(field, message)
+
+    def test_validate_analysis_payload_rejects_invalid_news_sentiment_enum(self) -> None:
+        payload = dict(self._VALID_PAYLOAD, news_sentiment="Bullish")
+        ok, message = crew._validate_analysis_payload(payload, self.all_data)
+        self.assertFalse(ok)
+        self.assertIn("news_sentiment", message)
+
+    def test_validate_analysis_payload_rejects_malformed_valuation_shape(self) -> None:
+        payload = dict(self._VALID_PAYLOAD, valuation={"verdict": "Fairly Valued"})  # missing 'comment'
+        ok, message = crew._validate_analysis_payload(payload, self.all_data)
+        self.assertFalse(ok)
+        self.assertIn("valuation", message)
 
     def test_validate_analysis_payload_rejects_directional_shareholding_claim_without_trend_data(self) -> None:
         payload = {
@@ -265,6 +308,23 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
         parsed = crew.parse_json_object(raw)
         self.assertEqual(parsed["symbol"], "TCS")
         self.assertEqual(parsed["details"]["pe"], 20)
+
+    def test_parse_json_object_prefers_last_balanced_object_over_an_earlier_fragment(self) -> None:
+        # Regression test for an adversarial-review finding: a verbose/
+        # reasoning-style LLM completion can legitimately contain an
+        # earlier, small JSON-like fragment before its real structured
+        # answer -- e.g. explaining its approach with a small example
+        # object, then giving the actual full payload. The parser
+        # previously returned the FIRST balanced {...} object found, which
+        # silently discarded the real answer and handed the guardrail a
+        # fragment missing every required field.
+        raw = (
+            'Here is my reasoning: I will use {"P/E": 20} as context.\n\n'
+            'Final answer:\n'
+            '{"symbol": "TCS", "recommendation": "BUY", "confidence": "HIGH"}'
+        )
+        parsed = crew.parse_json_object(raw)
+        self.assertEqual(parsed, {"symbol": "TCS", "recommendation": "BUY", "confidence": "HIGH"})
 
     def test_parse_json_object_handles_braces_inside_strings(self) -> None:
         raw = """

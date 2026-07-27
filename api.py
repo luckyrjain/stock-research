@@ -789,6 +789,21 @@ async def analyse(symbol: str, request: Request, force: bool = False):
                         }
                     finally:
                         _release_llm_slot()
+                    # Persist regardless of whether the SSE consumer below is
+                    # still listening. A client disconnect while this task is
+                    # still running (a realistic window: LLM calls routinely
+                    # take 10s+, spanning many 15s heartbeat cycles below) cancels
+                    # the consumer generator at its next await point — but this
+                    # background task, created via asyncio.create_task rather than
+                    # as a child of the generator, keeps running independently.
+                    # Persisting only after the consumer's own `done_q.get()`
+                    # (the previous behavior) meant a completed, already-billed
+                    # LLM call's result was computed here and then silently
+                    # discarded, since nobody was left to read it off the queue.
+                    cache.save(sym, "analysis", result)
+                    loop.run_in_executor(
+                        None, save_verdict_snapshot, sym, result, signal_context, all_data.get("stock_info") or {}
+                    )
                     await done_q.put(result)
 
                 asyncio.create_task(_run_and_signal())
@@ -804,24 +819,23 @@ async def analyse(symbol: str, request: Request, force: bool = False):
                         break
                     except asyncio.TimeoutError:
                         yield _heartbeat()
-
-                cache.save(sym, "analysis", analysis)
             else:
                 analysis = cache.load(sym, "analysis") or {}
+                # No background task involved in this branch (cache hit, no LLM
+                # call) — the whole sequence up to here is synchronous with no
+                # intervening await/suspension point, so there's no disconnect
+                # window for this fire-and-forget dispatch to race against; safe
+                # to keep it here rather than duplicating it into _run_and_signal().
+                loop.run_in_executor(
+                    None, save_verdict_snapshot, sym, analysis, signal_context, all_data.get("stock_info") or {}
+                )
 
-            # Unlike verdict_history below, the frontend actually needs this in
+            # Unlike verdict_history above, the frontend actually needs this in
             # the response — awaited, but still off the event loop (a DB query,
             # same "never block the event loop" rule as everywhere else in this
             # SSE path) via run_in_executor rather than called inline.
             mf_holdings_trend = await loop.run_in_executor(None, compute_mf_holdings_deltas, sym)
             report = _build_report(sym, all_data, analysis, signal_context, mf_holdings_trend)
-            # Fire-and-forget: verdict_history is a best-effort side effect (it
-            # already logs and swallows its own failures) that the client isn't
-            # waiting on, so it must not add a DB round-trip to the response's
-            # critical path — not awaited here.
-            loop.run_in_executor(
-                None, save_verdict_snapshot, sym, analysis, signal_context, all_data.get("stock_info") or {}
-            )
             log_event(LOGGER, "api_analysis_completed", run_id=run_id, symbol=sym)
             yield _sse({"event": "done", "report": report})
 
@@ -1088,7 +1102,24 @@ def _fetch_nifty_closes(start_date: str, end_date: str) -> dict[str, float]:
         return {}
 
     if closes:
-        cache.save("NSEI", "index_history", {"start": fetch_start, "end": fetch_end, "closes": closes})
+        # Re-read the cache immediately before writing and merge, rather than
+        # trusting the `cached` value read at the top of this function.
+        # Without this, two concurrent callers requesting different-sized
+        # windows (the picks-history alpha stat's ever-growing full-archive
+        # range vs. a per-stock ?benchmark=true ~180-day window) can each
+        # independently compute their own fetch_start/fetch_end from their
+        # own now-stale read and unconditionally overwrite the whole cached
+        # range with just their own — last write wins, and if the
+        # narrower-range caller's write lands last, the effective cached
+        # coverage can shrink, violating this function's own "coverage only
+        # ever grows" invariant documented above. Merging against a fresh
+        # read here means the final stored range/closes is always at least
+        # as broad as either individual write would have produced alone.
+        latest_cached = cache.load("NSEI", "index_history") or {}
+        merged_start = min(fetch_start, latest_cached.get("start", fetch_start))
+        merged_end = max(fetch_end, latest_cached.get("end", fetch_end))
+        merged_closes = {**latest_cached.get("closes", {}), **closes}
+        cache.save("NSEI", "index_history", {"start": merged_start, "end": merged_end, "closes": merged_closes})
     return closes
 
 
@@ -2080,6 +2111,13 @@ async def get_sme_signal_history(request: Request, symbol: str):
     # anonymous, unbounded DB query, unlike every other DB-backed GET here.
     _rate_limit(request, "sme_signal_history", max_calls=60, window_seconds=60)
     sym = symbol.upper().strip()
+    # Every sibling ticker-taking endpoint in this file validates against
+    # _TICKER_RE before use — this one didn't, an inconsistency an
+    # adversarial review flagged. Not SQL-injectable (sym is always a bind
+    # parameter below), so a garbage value would only ever have yielded a
+    # 404, but there's no reason for this endpoint to be the one exception.
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
     if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the SME pipeline first.")
 

@@ -617,6 +617,53 @@ class FetchNiftyClosesCacheSharingTest(unittest.TestCase):
             result = api._fetch_nifty_closes("2026-01-01", "2026-01-10")
         self.assertEqual(result, {})
 
+    def test_concurrent_narrower_write_does_not_shrink_a_wider_callers_cached_range(self) -> None:
+        # Regression test for an adversarial-review finding: two callers with
+        # different range shapes reading the cache around the same time
+        # (e.g. the picks-history alpha stat's ever-growing archive range vs.
+        # a per-stock ?benchmark=true narrower window) previously each
+        # computed their own fetch_start/fetch_end from their OWN cache read
+        # and unconditionally overwrote the whole stored range with just
+        # their own -- last write wins, and if the narrower caller's write
+        # landed after the wider caller's, the cached coverage would shrink,
+        # violating this module's own "coverage only ever grows" invariant.
+        import cache as cache_module
+
+        # Caller A: a wide range, populates the cache from empty.
+        wide = {f"2026-01-{d:02d}": 20000.0 + d for d in range(1, 29)}
+        with patch("yfinance.Ticker", return_value=self._fake_ticker(wide)):
+            api._fetch_nifty_closes("2026-01-01", "2026-01-28")
+
+        real_cache_state = cache_module.load("NSEI", "index_history")
+        self.assertEqual(real_cache_state["start"], "2026-01-01")
+        self.assertEqual(real_cache_state["end"], "2026-01-28")
+
+        # Caller B: a narrower range, but its OWN initial cache.load() (at
+        # the top of _fetch_nifty_closes) simulates having read a STALE,
+        # empty cache -- as if it ran concurrently with caller A, before A's
+        # write landed. The fix's re-read-immediately-before-writing must
+        # still pick up A's already-written wide range at write time.
+        narrow = {"2026-01-10": 20005.0}
+        call_count = {"n": 0}
+        real_load = cache_module.load
+
+        def _stale_first_read(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return None  # simulates B's own stale initial read
+            return real_load(*args, **kwargs)  # the fix's re-read-before-write
+
+        with patch("yfinance.Ticker", return_value=self._fake_ticker(narrow)), \
+             patch("cache.load", side_effect=_stale_first_read):
+            api._fetch_nifty_closes("2026-01-10", "2026-01-10")
+
+        final = cache_module.load("NSEI", "index_history")
+        # Caller A's wide coverage must still be intact -- not shrunk down to
+        # caller B's narrower request.
+        self.assertEqual(final["start"], "2026-01-01")
+        self.assertEqual(final["end"], "2026-01-28")
+        self.assertEqual(final["closes"]["2026-01-01"], wide["2026-01-01"])
+
     def test_old_shape_cache_entry_without_start_end_keys_does_not_crash(self) -> None:
         # A cache file written before the coverage-based scheme existed (the
         # old {"range": "...", "closes": {...}} shape) must not KeyError on
@@ -2053,6 +2100,14 @@ class SmeSignalHistoryEndpointTest(unittest.TestCase):
             resp = client.get("/api/sme-signals/ABC/history")
         self.assertEqual(resp.status_code, 503)
         self.assertNotIn("password", resp.text)
+
+    def test_invalid_symbol_returns_422(self) -> None:
+        # Regression test for an adversarial-review finding: every sibling
+        # ticker-taking endpoint in this file validates against _TICKER_RE
+        # before use -- this one previously skipped it entirely.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        resp = client.get(f"/api/sme-signals/{'X' * 25}/history")
+        self.assertEqual(resp.status_code, 422)
 
 
 def _row(date_str: str, close: float, cross: str | None = None) -> dict:

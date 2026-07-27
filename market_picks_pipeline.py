@@ -945,10 +945,25 @@ class MarketPicksPipeline:
         _source_type: dict[str, str] = {s[0]: s[1] for s in _SOURCES}
 
         # ── Build per-source article lists (URL-deduped within each source) ──────
+        # seen_urls is scoped PER SOURCE (reset on every loop iteration) --
+        # not shared across sources. Two different sources' GNews keyword
+        # searches can realistically surface the same underlying article URL
+        # (GNews searches by keyword, not domain-restricted), and each source
+        # should still get its own extraction call for it: dropping the
+        # second source's copy entirely means that source never gets an LLM
+        # extraction call for the article, is never attributed a pick, and
+        # the cross-source Jaccard syndication detection below (which exists
+        # specifically to down-weight this exact same-article-across-sources
+        # case) never runs on it, since the article isn't in that source's
+        # list at all. Sharing one seen_urls set across all sources here
+        # would silently undercount mention_count/consensus for well-covered
+        # stocks and contradict this phase's own "same stock in ET Markets
+        # AND GNews gets sources=2" invariant (see the module docstring
+        # above).
         source_articles: dict[str, list[dict]] = {}
-        seen_urls: set[str] = set()
         for src_name, src_data in raw_sources.items():
             arts: list[dict] = []
+            seen_urls: set[str] = set()
             for art in src_data.get("articles", [])[:_MAX_ARTICLES_PER_SRC]:
                 url = art.get("url", "")
                 if url and url in seen_urls:
@@ -1540,6 +1555,19 @@ Return ONLY this JSON (no markdown):
         syms   = list(payloads.keys())
         batches = [syms[i:i+_BATCH] for i in range(0, len(syms), _BATCH)]
         all_results: dict = {}
+
+        # Every candidate stock can plausibly lack current_price on a single
+        # run (an NSE/yfinance rate-limit day hitting every stock_info fetch
+        # in Phase 4), leaving `batches` empty. ThreadPoolExecutor(max_workers=0)
+        # -- what min(len(batches), 4) evaluates to below in that case -- raises
+        # ValueError immediately, crashing the entire pipeline run() call
+        # uncaught, even though Phase 6 (_phase_score) is explicitly designed
+        # to gracefully skip no-price stocks one at a time rather than fail
+        # the whole run. A "quiet/degraded data day" the rest of this
+        # pipeline tolerates must not become a hard crash here.
+        if not batches:
+            return all_results
+
         lock = __import__("threading").Lock()
 
         def _analyze_batch(batch: list[str]) -> dict:
