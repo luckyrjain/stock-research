@@ -11,6 +11,15 @@ export interface WatchlistItem {
 
 const CLIENT_ID_KEY = 'alphapulse_client_id';
 
+// Fallback when localStorage.setItem fails (quota exceeded, private
+// browsing, or blocked by browser/extension policy) -- without this, every
+// call to getClientId() would mint a brand-new UUID (since
+// localStorage.getItem keeps returning null), so a write made under one
+// generated id would never be found again by the very next read. Keeping it
+// in memory for the rest of this page session means every call at least
+// agrees with itself, even though it still won't survive a reload.
+let inMemoryClientId: string | null = null;
+
 /** Opaque per-browser identifier — NOT an account. There is no login; this is
  * just how the backend groups one browser's watchlist rows in Postgres. See
  * db/models.py's watchlist_items table for the server side of this. */
@@ -18,8 +27,12 @@ export function getClientId(): string {
   if (typeof window === 'undefined') return '';
   let id = window.localStorage.getItem(CLIENT_ID_KEY);
   if (!id) {
-    id = crypto.randomUUID();
-    try { window.localStorage.setItem(CLIENT_ID_KEY, id); } catch { /* private browsing, etc. */ }
+    id = inMemoryClientId ?? crypto.randomUUID();
+    try {
+      window.localStorage.setItem(CLIENT_ID_KEY, id);
+    } catch {
+      inMemoryClientId = id;
+    }
   }
   return id;
 }

@@ -59,7 +59,17 @@ def save_snapshot(symbol: str, analysis: dict, signal_context: dict | None, stoc
     masking or fabricating an apparent recommendation/price change that
     neither run actually produced on its own. This is an existing
     consequence of the race documented above, not a new/separate bug — it
-    isn't fixed here for the same infrastructure-cost reason."""
+    isn't fixed here for the same infrastructure-cost reason.
+
+    `signal_score` is `COALESCE`d against the existing stored value rather
+    than blindly overwritten, unlike the other three columns — main.py's
+    cache-hit early return and watchlist_alerts.py's own "nothing to
+    re-analyze today" branch both intentionally call this with
+    `signal_context=None` (no signal engine run for a cache hit), so a
+    same-day no-op re-save must not silently NULL out a real signal_score a
+    genuine earlier run already wrote that same day. This is deterministic
+    (fires on a single caller re-running twice, no concurrency needed) and
+    distinct from the last-write-wins race documented above."""
     if not os.environ.get("DATABASE_URL"):
         return
     recommendation = analysis.get("recommendation")
@@ -86,7 +96,7 @@ def save_snapshot(symbol: str, analysis: dict, signal_context: dict | None, stoc
                     recommendation = EXCLUDED.recommendation,
                     confidence     = EXCLUDED.confidence,
                     current_price  = EXCLUDED.current_price,
-                    signal_score   = EXCLUDED.signal_score
+                    signal_score   = COALESCE(EXCLUDED.signal_score, verdict_history.signal_score)
             """), {
                 "symbol":         symbol.upper().strip(),
                 "verdict_date":   verdict_date,

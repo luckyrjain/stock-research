@@ -72,6 +72,31 @@ class SaveSnapshotTest(unittest.TestCase):
             "signal_score": 7.5,
         })
 
+    def test_signal_score_upsert_preserves_existing_value_on_a_null_write(self) -> None:
+        # Regression test for an adversarial-review finding, confirmed against
+        # a real Postgres instance: main.py's cache-hit early return and
+        # watchlist_alerts.py's "nothing to re-analyze today" branch both
+        # intentionally call save_snapshot with signal_context=None (no
+        # signal engine run for a cache hit). The upsert previously
+        # unconditionally overwrote signal_score with EXCLUDED.signal_score,
+        # so a same-day no-op re-save silently NULLed out a real
+        # signal_score a genuine earlier run that same day had written.
+        # A mocked connection can't exercise real ON CONFLICT semantics, so
+        # this locks in the SQL-level fix (COALESCE against the existing
+        # stored value) directly.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        conn = _FakeConn([MagicMock()])
+        fake_engine = MagicMock()
+        fake_engine.begin.return_value = conn
+
+        with patch("verdict_history._get_engine", return_value=fake_engine):
+            verdict_history.save_snapshot("TCS", {"recommendation": "BUY"}, None, {"current_price": 100.0})
+
+        args, _kwargs = conn.calls[0]
+        stmt, params = args
+        self.assertIn("COALESCE(EXCLUDED.signal_score, verdict_history.signal_score)", str(stmt))
+        self.assertIsNone(params["signal_score"])
+
     def test_swallows_db_errors(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         with patch("verdict_history._get_engine", side_effect=RuntimeError("connection refused: password exposed")):

@@ -2810,6 +2810,7 @@ class WatchlistClaimEndpointTest(unittest.TestCase):
     def test_happy_path_claims_rows_and_returns_counts(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         lock_result = MagicMock()
+        client_lock_result = MagicMock()
         delete_conflicts_result = MagicMock()
         count_existing_result = MagicMock()
         count_existing_result.scalar.return_value = 1
@@ -2818,8 +2819,8 @@ class WatchlistClaimEndpointTest(unittest.TestCase):
         count_skipped_result = MagicMock()
         count_skipped_result.scalar.return_value = 0
         begin_conn = _SqlRecordingConn([
-            lock_result, delete_conflicts_result, count_existing_result,
-            update_result, count_skipped_result,
+            lock_result, client_lock_result, delete_conflicts_result,
+            count_existing_result, update_result, count_skipped_result,
         ])
         rows_result = MagicMock()
         rows_result.mappings.return_value.fetchall.return_value = [
@@ -2854,12 +2855,23 @@ class WatchlistClaimEndpointTest(unittest.TestCase):
         lock_query, lock_params = begin_conn.queries[0]
         self.assertIn("pg_advisory_xact_lock", lock_query)
         self.assertEqual(lock_params["lock_key"], "watchlist:user:42")
+        # A second advisory lock, scoped to the source client_id (not the
+        # target account), must also be taken -- regression test for an
+        # adversarial-review finding: without this second lock, two
+        # different accounts racing to claim the identical client_id take
+        # two different user-scoped locks and never serialize against each
+        # other, so both can report a false "claimed" success for the same
+        # row. See routes/_shared.py's own docstring for the confirmed
+        # concurrent-transaction repro.
+        client_lock_query, client_lock_params = begin_conn.queries[1]
+        self.assertIn("pg_advisory_xact_lock", client_lock_query)
+        self.assertEqual(client_lock_params["lock_key"], "watchlist:client:client-abc")
         # The row cap check runs against the account's own existing rows,
         # not the anonymous client_id's.
-        count_query, count_params = begin_conn.queries[2]
+        count_query, count_params = begin_conn.queries[3]
         self.assertIn("user_id = :user_id", count_query)
         self.assertEqual(count_params["user_id"], 42)
-        update_query, update_params = begin_conn.queries[3]
+        update_query, update_params = begin_conn.queries[4]
         self.assertIn("SET client_id = NULL, user_id = :user_id", update_query)
         self.assertEqual(update_params["client_id"], "client-abc")
 
@@ -3209,6 +3221,7 @@ class PositionsClaimEndpointTest(unittest.TestCase):
     def test_happy_path_claims_rows_and_returns_counts(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         lock_result = MagicMock()
+        client_lock_result = MagicMock()
         delete_conflicts_result = MagicMock()
         count_existing_result = MagicMock()
         count_existing_result.scalar.return_value = 0
@@ -3217,8 +3230,8 @@ class PositionsClaimEndpointTest(unittest.TestCase):
         count_skipped_result = MagicMock()
         count_skipped_result.scalar.return_value = 1
         begin_conn = _SqlRecordingConn([
-            lock_result, delete_conflicts_result, count_existing_result,
-            update_result, count_skipped_result,
+            lock_result, client_lock_result, delete_conflicts_result,
+            count_existing_result, update_result, count_skipped_result,
         ])
         rows_result = MagicMock()
         rows_result.mappings.return_value.fetchall.return_value = [
@@ -3250,7 +3263,12 @@ class PositionsClaimEndpointTest(unittest.TestCase):
         lock_query, lock_params = begin_conn.queries[0]
         self.assertIn("pg_advisory_xact_lock", lock_query)
         self.assertEqual(lock_params["lock_key"], "positions:user:42")
-        update_query, update_params = begin_conn.queries[3]
+        # Second advisory lock scoped to the source client_id — see
+        # WatchlistClaimEndpointTest's matching test for the full history.
+        client_lock_query, client_lock_params = begin_conn.queries[1]
+        self.assertIn("pg_advisory_xact_lock", client_lock_query)
+        self.assertEqual(client_lock_params["lock_key"], "positions:client:client-abc")
+        update_query, update_params = begin_conn.queries[4]
         self.assertIn("SET client_id = NULL, user_id = :user_id", update_query)
         self.assertEqual(update_params["client_id"], "client-abc")
         self.assertEqual(update_params["user_id"], 42)

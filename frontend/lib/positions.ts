@@ -33,6 +33,14 @@ let inFlight: Promise<Position[] | null> | null = null;
 // lib/watchlist.ts's fetchItems()/refreshWatchlist().
 let generation = 0;
 const listeners = new Set<() => void>();
+// Per-symbol send-order sequence for updateShares() -- the Portfolio page's
+// Shares input fires a PATCH on every keystroke with no debounce, so several
+// requests for the same symbol can be in flight at once. Network responses
+// can resolve out of the order they were sent in; without tracking send
+// order, whichever response happens to arrive LAST wins, which can silently
+// revert cachedPositions (and the displayed share count) to an intermediate
+// value the user already typed past.
+const shareUpdateSeq = new Map<string, number>();
 
 function notify(): void {
   listeners.forEach(fn => fn());
@@ -167,8 +175,11 @@ export function usePositions() {
   const updateShares = useCallback(async (symbol: string, shares: number | null) => {
     const clientId = getClientId();
     const myGeneration = generation;
+    const upperSymbol = symbol.toUpperCase();
+    const mySeq = (shareUpdateSeq.get(upperSymbol) ?? 0) + 1;
+    shareUpdateSeq.set(upperSymbol, mySeq);
     try {
-      const res = await fetch(`/api/positions/${encodeURIComponent(symbol.toUpperCase())}`, {
+      const res = await fetch(`/api/positions/${encodeURIComponent(upperSymbol)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ client_id: clientId, shares }),
@@ -176,6 +187,10 @@ export function usePositions() {
       if (!res.ok) return;
       const data = await res.json() as { items: Position[] };
       if (myGeneration !== generation) return;
+      // A later keystroke may already have sent its own PATCH for the same
+      // symbol — only the most recently SENT request's response is ever
+      // applied, regardless of which one's network response resolves first.
+      if (shareUpdateSeq.get(upperSymbol) !== mySeq) return;
       cachedPositions = data.items;
       notify();
     } catch {
