@@ -140,20 +140,37 @@ def record_and_check(source_name: str, ok: bool, *, date: str | None = None, **c
         with _locked(source_name):
             path = _path(source_name)
             prior_days: list[dict] = []
+            prior_ever_healthy = False
             if path.exists():
                 try:
-                    prior_days = json.loads(path.read_text()).get("days", [])[-_MAX_HISTORY:]
+                    stored = json.loads(path.read_text())
+                    prior_days = stored.get("days", [])[-_MAX_HISTORY:]
+                    # Missing key (a file written before this field
+                    # existed) falls back to deriving it from whatever
+                    # days are currently stored -- the same signal
+                    # `was_healthy_baseline` used before this fix, just
+                    # persisted from here on instead of re-derived from a
+                    # window that keeps shrinking as old days age out.
+                    prior_ever_healthy = stored.get(
+                        "ever_healthy", any(d.get("ok") for d in prior_days)
+                    )
                 except Exception:
                     prior_days = []
+                    prior_ever_healthy = False
 
             # A source only has an established "should usually have data"
-            # baseline once it has enough distinct-day history AND at
-            # least one of those prior days actually succeeded — a source
-            # that's simply always been empty (e.g. genuinely no
-            # coverage) shouldn't alert either.
+            # baseline once it has enough distinct-day history AND has
+            # succeeded at least once, ever — a source that's simply
+            # always been empty (e.g. genuinely no coverage) shouldn't
+            # alert either. `ever_healthy` is a persistent flag, not
+            # derived from `any(d.get("ok") for d in prior_days)` alone:
+            # the rolling `days` window is capped at _MAX_HISTORY entries,
+            # so a source failing continuously for longer than that would
+            # otherwise age its own last healthy day out of the window and
+            # silently stop alerting about an outage it's still observing
+            # -- precisely when the outage is most severe.
             was_healthy_baseline = (
-                len(prior_days) >= _MIN_HISTORY_FOR_BASELINE
-                and any(d.get("ok") for d in prior_days)
+                len(prior_days) >= _MIN_HISTORY_FOR_BASELINE and prior_ever_healthy
             )
 
             today = date or _today()
@@ -163,7 +180,9 @@ def record_and_check(source_name: str, ok: bool, *, date: str | None = None, **c
                 days = prior_days + [{"date": today, "ok": ok}]
             days = days[-_MAX_HISTORY:]
 
-            _atomic_write(path, {"days": days})
+            ever_healthy = prior_ever_healthy or ok
+
+            _atomic_write(path, {"days": days, "ever_healthy": ever_healthy})
 
             recent = days[-_CONSECUTIVE_FAILURES_TO_ALERT:]
             should_alert = (

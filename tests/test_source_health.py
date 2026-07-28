@@ -135,6 +135,47 @@ class RecordAndCheckTest(unittest.TestCase):
         )
         self.assertEqual(len(self._history("Long Running Source")), source_health._MAX_HISTORY)
 
+    def test_outage_longer_than_max_history_keeps_alerting(self) -> None:
+        # Regression test for an adversarial-review finding: was_healthy_baseline
+        # used to be derived from `any(d.get("ok") for d in prior_days)` --
+        # the rolling window, capped at _MAX_HISTORY entries. A source
+        # failing continuously for longer than that eventually ages its own
+        # last healthy day out of the window, was_healthy_baseline flips
+        # False, and the module silently stops alerting about an outage
+        # it's still observing -- precisely when the outage is most severe.
+        healthy_days = source_health._MIN_HISTORY_FOR_BASELINE
+        total_days = source_health._MAX_HISTORY + 20
+        dates = [f"day{i:03d}" for i in range(total_days)]
+
+        fired_on = []
+        for i, d in enumerate(dates):
+            ok = i < healthy_days
+            with patch("source_health.log_event") as mock_log:
+                source_health.record_and_check("Outage Source", ok, date=d)
+            if mock_log.called:
+                fired_on.append(i)
+
+        # An alert must still fire for a failing day well past the point
+        # where the rolling window has aged every healthy day out of it
+        # (index >= healthy_days + _MAX_HISTORY) -- the exact case the old
+        # code went silent on.
+        past_window_alerts = [i for i in fired_on if i >= healthy_days + source_health._MAX_HISTORY]
+        self.assertTrue(past_window_alerts, f"no alert fired past the rolling window; fired_on={fired_on}")
+
+    def test_ever_healthy_flag_persists_across_reads_of_an_old_format_file(self) -> None:
+        # A file written before the `ever_healthy` field existed must still
+        # correctly derive it (from whatever days are currently stored) on
+        # the first read after this fix ships, rather than treating a
+        # genuinely-healthy-before source as if it never had a baseline.
+        path = source_health._path("Legacy Source")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"days": [
+            {"date": f"2026-01-0{i}", "ok": True} for i in range(1, 6)
+        ]}))  # no "ever_healthy" key at all
+        with patch("source_health.log_event") as mock_log:
+            self._record_on_days("Legacy Source", [(f"2026-01-0{i}", False) for i in range(6, 9)])
+        mock_log.assert_called_once()  # still correctly alerts on 3 consecutive failures
+
     def test_different_sources_do_not_share_history(self) -> None:
         source_health.record_and_check("Source A", True)
         source_health.record_and_check("Source B", False)

@@ -99,13 +99,13 @@ def record_call_cost(
     break the analysis request it's observing, the same "tools must not
     raise" instinct this codebase applies to every other piece of
     non-critical observability infrastructure."""
-    log_event(
-        LOGGER, "llm_call_cost", symbol=symbol, model=model, provider=provider,
-        cost_usd=cost_usd, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-        run_id=run_id,
-    )
     date = _today()
     try:
+        log_event(
+            LOGGER, "llm_call_cost", symbol=symbol, model=model, provider=provider,
+            cost_usd=cost_usd, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            run_id=run_id,
+        )
         _COST_DIR.mkdir(parents=True, exist_ok=True)
         path = _COST_DIR / f"{date}.json"
         with _locked(date):

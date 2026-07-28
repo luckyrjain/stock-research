@@ -318,6 +318,30 @@ class LockRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         with patch("rate_limiter._get_redis_client", return_value=fake_client):
             self.assertTrue(rate_limiter.is_locked("job"))
 
+    def test_is_locked_uses_memory_state_during_a_sustained_redis_outage(self) -> None:
+        # Regression test for an adversarial-review finding: unlike the
+        # test above (where a lock genuinely acquired via Redis left
+        # _memory_locks untouched, so failing closed was correct),
+        # is_locked() used to fail closed (return True) unconditionally on
+        # ANY Redis read failure -- even when Redis has been unreachable
+        # since before the very first acquire/release call on this lock,
+        # so every prior operation already fell back to _memory_locks and
+        # has been correctly tracking real state there the whole time.
+        # api.py's "refreshing" status field (GET /api/sme-signals,
+        # GET /api/screener) reads is_locked() -- during a sustained Redis
+        # outage this used to report "refreshing": true forever, even
+        # immediately after a refresh genuinely completed.
+        os.environ["REDIS_URL"] = "redis://localhost:6379/0"
+        fake_client = MagicMock()
+        fake_client.set.side_effect = ConnectionError("boom")
+        fake_client.delete.side_effect = ConnectionError("boom")
+        fake_client.exists.side_effect = ConnectionError("boom")
+        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+            self.assertTrue(rate_limiter.try_acquire_lock("job", ttl_seconds=60))
+            self.assertTrue(rate_limiter.is_locked("job"))  # genuinely held (in memory)
+            rate_limiter.release_lock("job")
+            self.assertFalse(rate_limiter.is_locked("job"))  # genuinely released -- must not still report locked
+
 
 if __name__ == "__main__":
     unittest.main()

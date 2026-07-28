@@ -200,6 +200,17 @@ def run_signal_engine(symbol: str, all_data: dict) -> SignalResult:
     # underlying skew.
     score = max(-1.0, min(1.0, score))
 
+    # Rounded once, here, before the verdict decision -- not after. Summing
+    # six weighted floats routinely lands a hair above/below a tier boundary
+    # (e.g. 0.10000000000000003), so deciding the verdict off the raw score
+    # and only rounding a SEPARATE copy for final_score could report
+    # final_score=0.1 alongside verdict="WATCHLIST" even though this
+    # engine's own rule (score > 0.1) says 0.1 itself is not a WATCHLIST
+    # score -- a self-contradictory readout shown to the user and fed
+    # verbatim into the LLM analyst prompt. Deciding and reporting off the
+    # same rounded value makes the two always agree.
+    score = round(score, 2)
+
     if score > 0.5:
         verdict = "BUY"
     elif score > 0.1:
@@ -214,6 +225,6 @@ def run_signal_engine(symbol: str, all_data: dict) -> SignalResult:
     return SignalResult(
         symbol=symbol,
         signals=signals,
-        final_score=round(score, 2),
+        final_score=score,
         verdict=verdict
     )
