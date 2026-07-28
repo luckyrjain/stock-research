@@ -80,6 +80,21 @@ class LlmCostTest(unittest.TestCase):
         self.assertEqual(mock_log.call_args.kwargs["cost_usd"], 0.01)
         self.assertEqual(mock_log.call_args.kwargs["run_id"], "run-1")
 
+    def test_a_broken_first_log_event_call_never_raises(self) -> None:
+        # Regression test for an adversarial-review finding: the initial
+        # log_event(..., "llm_call_cost", ...) call used to execute BEFORE
+        # the try: block guarding the rest of the function, contradicting
+        # this function's own "never raises" docstring contract -- a
+        # failure there (or in whatever log_event forwards to, e.g. the
+        # optional Sentry hook) would have propagated straight out of
+        # record_call_cost() and broken the analysis request it's
+        # observing. The second side_effect entry lets the failure-warning
+        # log_event call inside the except block still succeed, so this
+        # test isolates the FIRST call's own coverage rather than the
+        # already-covered write-failure path.
+        with patch("llm_cost.log_event", side_effect=[Exception("boom"), None]):
+            llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)  # must not raise
+
     def test_a_broken_cost_dir_never_raises(self) -> None:
         blocked = Path(self._tmpdir) / "blocked"
         blocked.write_text("not a directory")

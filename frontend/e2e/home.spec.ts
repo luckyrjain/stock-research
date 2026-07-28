@@ -181,6 +181,36 @@ test.describe('Home page', () => {
     await expect(page.getByText('₹100.0L')).toHaveCount(0);
   });
 
+  test('shows the specific backend-unavailable message, not a generic "connection lost" fallback', async ({ page }) => {
+    // Regression test for an adversarial-review finding: app/api/analyse/
+    // [symbol]/route.ts's crafted SSE error message ("Backend unavailable.
+    // Please make sure the analysis service is running.") used to be
+    // returned with a non-200 HTTP status. EventSource only ever reads a
+    // response body when the status is exactly 200 with a text/event-stream
+    // Content-Type -- any other status makes the browser "fail the
+    // connection" and fire a generic error event WITHOUT parsing the body,
+    // so this specific message was unreachable; useStockAnalysis.ts's
+    // onerror handler always fell back to a hardcoded generic string
+    // instead. Deliberately does NOT mock /api/analyse/** -- the E2E
+    // harness runs no real backend process, so the real Next.js proxy
+    // route's own fetch() call genuinely fails, exercising its actual
+    // error-response code rather than a browser-level mock standing in
+    // for it.
+    const symbol = 'TCS';
+    await page.route(`**/api/validate/${symbol}`, route =>
+      route.fulfill({ json: validationResult(symbol) }));
+
+    await page.goto('/');
+    const input = page.getByLabel('NSE or BSE stock ticker');
+    await input.fill(symbol);
+    await expect(page.getByText(validationResult(symbol).company)).toBeVisible({ timeout: 5000 });
+    await page.getByRole('button', { name: 'Analyse Stock' }).click();
+
+    await expect(page.getByText('Backend unavailable. Please make sure the analysis service is running.'))
+      .toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('Connection to server lost. Please try again.')).toHaveCount(0);
+  });
+
   test('shows a degraded-analysis banner when every LLM provider failed', async ({ page }) => {
     // A full provider outage previously converged to a generic HOLD with no
     // visible signal that this wasn't a real analyst call — see crew.py's

@@ -244,6 +244,26 @@ class RunSignalEngineTest(unittest.TestCase):
                 self.assertAlmostEqual(result.final_score, target_score, places=2)
                 self.assertEqual(result.verdict, expected_verdict)
 
+    def test_verdict_never_disagrees_with_the_rounded_final_score_at_a_boundary(self) -> None:
+        # Regression test for an adversarial-review finding: verdict used to
+        # be decided from the raw, unrounded weighted sum, while final_score
+        # was a SEPARATELY rounded copy of that same value. Floating-point
+        # summation across six weighted signals routinely lands a hair
+        # above/below a tier boundary (e.g. 0.10000000000000003), so the
+        # verdict and the reported final_score could disagree right at the
+        # boundary the engine's own rule defines -- e.g. final_score=0.1
+        # alongside verdict="WATCHLIST", even though the rule is
+        # "score > 0.1 -> WATCHLIST" and 0.1 itself is not > 0.1. Both
+        # fields are shown to the user and fed verbatim into the LLM
+        # analyst prompt, so a self-contradictory readout must never reach
+        # either.
+        result = self._run(
+            volume=_sig(0.0), valuation=_sig(0.0), growth=_sig(0.0),
+            filings=_sig(0.8), technical=_sig(-0.3), macro=_sig(0.0),
+        )
+        self.assertEqual(result.final_score, 0.1)
+        self.assertEqual(result.verdict, "HOLD")
+
     def test_missing_signal_is_skipped_not_fatal(self) -> None:
         result = self._run(volume=None, valuation=_sig(1.0), growth=_sig(1.0), filings=None, technical=None)
         # only valuation (0.4) + growth (0.4) contribute

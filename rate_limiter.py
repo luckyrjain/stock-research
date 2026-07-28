@@ -298,15 +298,30 @@ def is_locked(name: str) -> bool:
         _warn_redis_failure("redis_lock_check_failed", exc)
         # Unlike try_acquire_lock()/release_lock(), which fall back to
         # _memory_locks on their OWN failure (keeping that dict internally
-        # consistent), this is a read-only peek: when Redis is configured,
-        # it's the one actually tracking this lock's real state, so
-        # _memory_locks was very likely never populated by whatever call
-        # genuinely acquired/released it. Falling back to that stale dict
-        # here would silently report "not locked" while a run is genuinely
-        # in progress via Redis. Fail closed (assume locked) instead --
-        # worst case a caller sees a spurious "already running" for the one
-        # request that lands during a transient Redis blip, self-correcting
-        # on the next successful read. That's safer than the reverse
-        # (reporting "not running" while one actually is, which could
-        # prompt a duplicate/overlapping run).
+        # consistent), this is a read-only peek -- when Redis is configured
+        # AND reachable, it's the one actually tracking this lock's real
+        # state, so a lock genuinely acquired via Redis and only now
+        # blipping on this peek would have left _memory_locks untouched for
+        # this name. Falling back to `_memory_locks.get(name, False)`
+        # unconditionally would silently report "not locked" in that case,
+        # while a run is genuinely in progress via Redis.
+        #
+        # But a SUSTAINED Redis outage (unreachable since before the very
+        # first try_acquire_lock()/release_lock() call on this name) is a
+        # different, equally real scenario: every prior acquire/release
+        # already fell back to _memory_locks and has been correctly
+        # tracking true state there the whole time -- unconditionally
+        # failing closed here would misreport "locked" forever, even
+        # immediately after a refresh genuinely completed and released its
+        # (memory-tracked) lock. `name in _memory_locks` disambiguates the
+        # two: it's only ever populated by that fallback path, so its
+        # presence means at least one prior operation on THIS lock already
+        # went through memory, making it the actual source of truth here
+        # too. Only fail closed (assume locked) when memory has never been
+        # touched for this name -- worst case a caller sees a spurious
+        # "already running" for the one request that lands during a
+        # transient Redis blip, self-correcting on the next successful
+        # read, which is safer than the reverse.
+        if name in _memory_locks:
+            return _memory_locks[name]
         return True
