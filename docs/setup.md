@@ -236,10 +236,12 @@ python sme_ema_pipeline.py --force      # bypass the 24 h stock-list cache
 python sme_ema_pipeline.py --lookback 10  # report window for the CLI summary
 ```
 
-**`--reset-db` drops and recreates every table in the shared `MetaData()`, not just this
-pipeline's own** — see backend/CLAUDE.md's "SME golden cross flow" section for the disclosed blast-radius
-caveat. Don't run it against a database with real Watchlist/Positions/account data unless you
-mean to lose it.
+**`--reset-db` is scoped to this pipeline's own two tables** (`ema_signals`, `sme_stocks`) — it
+does not touch the shared `MetaData()` as a whole. This used to be a real footgun (an early
+version called `metadata.drop_all()` and wiped every table, including Watchlist/Positions/account
+data); see backend/CLAUDE.md's "SME golden cross flow" section for the fix and the scoping
+convention it established for every pipeline after it (`screener_pipeline.py`,
+`eod_prices_pipeline.py`, `corporate_actions_pipeline.py`).
 
 The screener page's **Refresh Data** button triggers the same pipeline via `POST /api/sme-signals/refresh`.
 The CLI exits non-zero (and the API logs an `sme_refresh_unhealthy` warning) when a run was

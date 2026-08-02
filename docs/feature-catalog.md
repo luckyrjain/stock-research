@@ -204,11 +204,11 @@ in the nav so the two aren't confused.
 |---|---|
 | HTTP endpoints | 57 — 29 in `api.py`, 5 watchlist, 6 positions, 17 portfolio-aggregator (`routes/`) |
 | Frontend page routes | 13 — 11 top-level (`/`, market-picks, sme-signals, screener, watchlist, portfolio, portfolio-aggregator, compare, api-keys, pricing, login) + `/market-picks/history` and `/auth/verify` |
-| PostgreSQL tables | 21 (`backend/db/models.py`) |
+| PostgreSQL tables | 22 (`backend/db/models.py`) |
 | Market Picks source scrapers | 20 (5 RSS + 12 GNews + 3 structured), capped at 35 researched stocks/run |
-| Backend automated tests | 1,502 passing, 0 failed, 0 skipped (`cd backend && python -m pytest tests/`) |
+| Backend automated tests | 1,509 passing, 0 failed, 0 skipped (`cd backend && python -m pytest tests/`) |
 | E2E (Playwright) specs | 44 passing (`cd frontend && npm run test:e2e`) |
-| Alembic migration revisions | 3 (baseline schema, EOD price store + corporate actions, portfolio-aggregator foundation) |
+| Alembic migration revisions | 4 (baseline schema, EOD price store + corporate actions, portfolio-aggregator foundation, `app_state` durable JSON state) |
 | LLM providers supported | 6 — Anthropic, OpenAI, Groq, Google, OpenRouter, Ollama |
 
 ---
