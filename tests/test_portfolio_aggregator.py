@@ -189,6 +189,19 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         resp = client.patch(f"/api/portfolio/assets/{aid}", json={"units": 5})
         self.assertEqual(resp.status_code, 422)
 
+    def test_avg_cost_without_units_on_create_422(self) -> None:
+        # Regression test: create_asset previously silently dropped avg_cost
+        # (returning 201 as if it succeeded) whenever it was supplied without
+        # units, since the holdings insert only fires when units is not
+        # None. patch_asset already 422s this same case; create now matches.
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        resp = client.post("/api/portfolio/assets", json={
+            "account_id": acc, "type": "stock", "name": "TCS", "symbol": "TCS",
+            "value": 1000.0, "avg_cost": 150.0,
+        })
+        self.assertEqual(resp.status_code, 422)
+
     def test_create_asset_creates_holding_row(self) -> None:
         pid = self._mk_profile()
         acc = self._mk_account(pid)

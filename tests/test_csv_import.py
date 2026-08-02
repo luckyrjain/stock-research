@@ -109,6 +109,27 @@ class NormalizeRowsTest(unittest.TestCase):
         self.assertIn("unrecognized side", warnings[1])
         self.assertIn("bad quantity", warnings[2])
 
+    def test_skips_row_with_neither_price_nor_amount_instead_of_fabricating_zero(self) -> None:
+        # Regression test: a row with no parseable price AND no amount
+        # column mapped previously fell through to
+        # `amount = units * (price or 0.0)`, silently importing a real-
+        # quantity, fabricated-₹0-cost-basis transaction instead of being
+        # skipped like every other unparseable field here.
+        rows = [["2024-01-01", "TCS", "buy", "10", ""]]
+        txns, skipped, warnings = _normalize_rows(rows, self._HEADERS, self._MAPPING)
+        self.assertEqual(txns, [])
+        self.assertEqual(skipped, 1)
+        self.assertIn("missing price/amount", warnings[0])
+
+    def test_zero_price_is_not_treated_as_missing(self) -> None:
+        # A genuine price of 0 (e.g. a bonus-share credit some brokers log
+        # as a buy at price 0) must not be skipped by the missing-price
+        # check above — 0.0 is a real, parseable value, not None.
+        rows = [["2024-01-01", "TCS", "buy", "10", "0"]]
+        txns, skipped, _ = _normalize_rows(rows, self._HEADERS, self._MAPPING)
+        self.assertEqual(skipped, 0)
+        self.assertEqual(txns[0]["amount"], 0.0)
+
 
 class ParseBrokerFileTest(unittest.TestCase):
     def test_parses_csv_with_comma_delimiter(self) -> None:
