@@ -12,11 +12,23 @@ const config: Config = {
         border:     '#1d2e4e',
         'border-hi':'#243860',
         tx:         '#e2e8f4',
-        muted:      '#6b7fa8',
+        // Was #6b7fa8, which measured 3.99:1 on `card` — below the 4.5:1 WCAG AA
+        // body-text bar, and this is MetricRow's label, the most-repeated text
+        // pairing in the app. #8093bd measures 5.22:1 on `card` and 6.12:1 on
+        // `bg`. Do not darken without re-measuring both.
+        muted:      '#8093bd',
         buy:        '#10d98e',  // Vibrant green — gains
         sell:       '#e05568',  // Muted red — losses (brief: "muted reds")
         hold:       '#f5a623',
         accent:     '#4d7fff',  // True blue — matches Midnight Blue theme
+      },
+      boxShadow: {
+        // Accent glow for the primary CTA. Tokenised because a Tailwind
+        // arbitrary value can't read `theme.colors.accent` — the one previous
+        // inline use hardcoded #6c71f0, a retired accent, and silently rotted
+        // when the palette moved to #4d7fff.
+        accent:      '0 4px 24px #4d7fff40',
+        'accent-lg': '0 6px 28px #4d7fff60',
       },
       fontFamily: {
         sans: ['var(--font-sans)', 'system-ui', 'sans-serif'],

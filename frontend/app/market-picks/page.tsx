@@ -134,7 +134,7 @@ function PipelineStepper({ phase }: { phase: MarketPicksPhase }) {
           <div key={step.id} className="flex items-center flex-1 min-w-0">
             <div className="flex flex-col items-center flex-1 min-w-0">
               <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold border-2 transition-all
-                ${isDone   ? 'bg-buy border-buy text-white' :
+                ${isDone   ? 'bg-buy border-buy text-bg' :
                   isActive ? 'bg-accent border-accent text-white' :
                   'bg-surface border-border text-muted'}`}>
                 {isDone ? '✓' : <span className={isActive ? 'text-white' : ''}>{i + 1}</span>}
