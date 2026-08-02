@@ -261,10 +261,11 @@ something concrete rather than restating them.
 - **EOD price store is ingestion-only** outside the aggregator: no BSE bhavcopy, no intraday, no
   total-return (dividend-adjusted) series, and the SME pipeline still fetches its own OHLCV from
   yfinance rather than reading from it.
-- **Operational hazard:** `sme_ema_pipeline.py --reset-db` drops and recreates *every* table via
-  the shared SQLAlchemy `MetaData()`, not just its own two. Later pipelines (`screener_pipeline`,
-  `eod_prices_pipeline`, `corporate_actions_pipeline`) scope their `--reset-db` to their own
-  tables; this one predates that convention.
+- **`--reset-db` scoping is a convention, not an enforced rule.** Every pipeline now scopes its
+  reset to the tables it owns (`sme_ema_pipeline` was the last holdout and has been brought in
+  line), but nothing stops a new pipeline from reaching for `metadata.drop_all()` — the shared
+  SQLAlchemy `MetaData()` carries all 21 tables, including six holding non-regenerable personal
+  financial data. See `docs/database.md` for the table-ownership map.
 - **`client_id` is a grouping key, not a security boundary** — anyone holding one can read/write
   that browser's anonymous watchlist and positions. The claim endpoints (which reassign rows
   exclusively and permanently) are rate-limited to 5/hour and audit-logged, which bounds

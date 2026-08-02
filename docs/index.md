@@ -47,6 +47,7 @@ access to a public `/api/v1/*` surface.
 
 | Doc | What it covers |
 |-----|----------------|
+| [Backlog](backlog.md) | **The single "what's left" list** — every open issue, gap, and roadmap item, indexed across all docs |
 | [PRD](PRD.md) | Product vision, goals, principles, target users, priority, roadmap, business context |
 | [Feature Catalog](feature-catalog.md) | Detailed inventory of every shipped feature area (the former PRD §3) |
 | [Setup & Configuration](setup.md) | Backend/frontend install, environment variables, local development |

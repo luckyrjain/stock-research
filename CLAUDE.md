@@ -152,6 +152,7 @@ whichever one is relevant to the directory you're working in):
 | [`backend/CLAUDE.md`](backend/CLAUDE.md) | Exhaustive backend engineering reference — every feature's exact behavior, agent architecture, all data flows, env config, code style, and the load-bearing "Important Rules for Claude" for Python code |
 | [`frontend/CLAUDE.md`](frontend/CLAUDE.md) | Frontend conventions, testing gate (`npx tsc --noEmit`), env config, code style |
 | [`docs/design.md`](docs/design.md) | AlphaPulse Design System — colors, typography, spacing, component patterns. All UI work must follow it |
+| [`docs/backlog.md`](docs/backlog.md) | **The single "what's left" list** — open issues, gaps, roadmap, and the architectural stance. Check here before planning work |
 | [`docs/PRD.md`](docs/PRD.md) | Product strategy — vision, goals, principles, personas, priority, roadmap, business context |
 | [`docs/feature-catalog.md`](docs/feature-catalog.md) | Detailed "what's already built" feature inventory |
 | [`docs/setup.md`](docs/setup.md) | Full environment variable reference, local dev setup, troubleshooting |

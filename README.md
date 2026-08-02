@@ -433,5 +433,6 @@ Claude" section.
 - [docs/tools.md](docs/tools.md)
 - [docs/output-schema.md](docs/output-schema.md)
 - [docs/design.md](docs/design.md) — AlphaPulse Design System
+- [docs/backlog.md](docs/backlog.md) — the single "what's left" list (open issues, gaps, roadmap)
 - [docs/PRD.md](docs/PRD.md) — product strategy (vision, goals, priority, roadmap)
 - [docs/feature-catalog.md](docs/feature-catalog.md) — detailed feature inventory
