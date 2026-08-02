@@ -118,13 +118,17 @@ def items(namespace: str, limit: int | None = None, newest_first: bool = False) 
         return []
 
 
-def save(namespace: str, key: str, payload: dict) -> None:
+def save(namespace: str, key: str, payload: dict) -> bool:
     """Upsert one record. Last write wins — used only where a single writer
     owns the key (one snapshot per date, one telemetry file per run id, one
     report per symbol-and-date). Anything with concurrent writers must use
-    `mutate()` instead, which serializes them."""
+    `mutate()` instead, which serializes them.
+
+    Returns whether the write actually happened — best-effort callers that
+    report success to a user (e.g. a CLI's "Report saved") must check this
+    rather than assuming a call that never raises also always persisted."""
     if not _enabled():
-        return
+        return False
     try:
         from db.models import app_state
 
@@ -138,9 +142,11 @@ def save(namespace: str, key: str, payload: dict) -> None:
         )
         with engine.begin() as conn:
             conn.execute(stmt)
+        return True
     except Exception as exc:  # pylint: disable=broad-exception-caught
         log_event(LOGGER, "state_save_failed", level="warning",
                   namespace=namespace, key=key, error=str(exc))
+        return False
 
 
 def mutate(namespace: str, key: str, fn, default: dict) -> dict | None:

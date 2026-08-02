@@ -361,8 +361,10 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     report = _build_report(symbol, all_data, analysis, signal_context, mf_holdings_trend)
     save_verdict_snapshot(symbol, analysis, signal_context, all_data.get("stock_info") or {})
     report_key = f"{symbol.upper()}:{date.today()}"
-    state_store.save(REPORT_NAMESPACE, report_key, report)
-    print(f"\nReport saved as {REPORT_NAMESPACE}/{report_key}")
+    if state_store.save(REPORT_NAMESPACE, report_key, report):
+        print(f"\nReport saved as {REPORT_NAMESPACE}/{report_key}")
+    else:
+        print("\nReport NOT saved — DATABASE_URL is unset (nothing persists it).")
     log_event(LOGGER, "pipeline_completed", run_id=run_id, symbol=symbol, report_key=report_key)
 
 

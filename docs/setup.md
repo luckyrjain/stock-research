@@ -174,8 +174,9 @@ alembic upgrade head
 
 This runs all revisions in order — `0001_baseline_schema.py` (the original 11 tables),
 `684c8a31e7e0_add_eod_price_store_and_corporate_.py` (EOD price store + corporate actions, 4
-tables), and `8613aafc2d9d_add_portfolio_aggregator_foundation_.py` (Portfolio Aggregator, 6
-tables) — creating all 22 tables, indexes, and constraints from scratch.
+tables), `8613aafc2d9d_add_portfolio_aggregator_foundation_.py` (Portfolio Aggregator, 6
+tables), and `a7f2c1d09b34_add_app_state_durable_json_state.py` (`app_state`, 1 table) — creating
+all 22 tables, indexes, and constraints from scratch.
 
 **Existing deployment with only the original 11 tables** (created by hand via `db/schema.sql`, or
 via one of the pipelines' `--setup-db` flags before Alembic existed — i.e. predates the EOD price
