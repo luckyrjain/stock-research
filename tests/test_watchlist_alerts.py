@@ -182,7 +182,19 @@ class AnalyzeSymbolTest(unittest.TestCase):
 
 class RunTest(unittest.TestCase):
     def setUp(self) -> None:
-        self._env = {k: os.environ.pop(k, None) for k in ("DATABASE_URL", "ANTHROPIC_API_KEY", "LLM_PROVIDER")}
+        # Must pop every var watchlist_alerts.run()'s has_key check reads
+        # (ANTHROPIC/OPENAI/GROQ/GOOGLE), not just ANTHROPIC_API_KEY — a
+        # real developer .env with e.g. GROQ_API_KEY set (loaded into
+        # os.environ by an earlier test module's import, since nothing in
+        # this file itself calls load_dotenv) otherwise leaks through and
+        # makes "no LLM key configured" untestable in that environment.
+        self._env = {
+            k: os.environ.pop(k, None)
+            for k in (
+                "DATABASE_URL", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                "GROQ_API_KEY", "GOOGLE_API_KEY", "LLM_PROVIDER",
+            )
+        }
 
     def tearDown(self) -> None:
         for k, v in self._env.items():

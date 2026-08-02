@@ -129,6 +129,124 @@ def _build_quote_payload(sym: str, exchange: str, info: dict) -> dict:
     }
 
 
+def _num(val) -> float | None:
+    try:
+        return float(val) if val not in (None, "") else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _stockanalysis_extra_fields(sym: str) -> dict:
+    """Supplemental fields from stockanalysis.com's NSE quote page — server-rendered
+    HTML has a real 52-week range, reported EPS, and volume that Screener's
+    top-ratios widget doesn't expose (it only has price/PE/book-value/div-yield).
+    Never raises; returns {} on any failure so the Screener fallback still works
+    without these fields if this source is unreachable."""
+    try:
+        from bs4 import BeautifulSoup
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        }
+        resp = requests.get(f"https://stockanalysis.com/quote/nse/{sym}/", headers=headers, timeout=10)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        stats: dict[str, str] = {}
+        for tr in soup.select("table tr"):
+            tds = tr.find_all("td")
+            if len(tds) == 2:
+                stats[tds[0].get_text(strip=True)] = tds[1].get_text(" ", strip=True)
+
+        out: dict = {}
+        eps_val = _num((stats.get("EPS", "") or "").split(" ")[0])
+        if eps_val is not None:
+            out["eps"] = eps_val
+        range_raw = stats.get("52-Week Range", "")
+        if " - " in range_raw:
+            low, high = range_raw.split(" - ", 1)
+            out["52w_low"] = _num(low)
+            out["52w_high"] = _num(high)
+        vol_raw = stats.get("Volume", "").replace(",", "").split(" ")[0]
+        if vol_raw.isdigit():
+            out["volume"] = int(vol_raw)
+        return {k: v for k, v in out.items() if v is not None}
+    except Exception:
+        return {}
+
+
+def _screener_fallback_quote(sym: str) -> dict | None:
+    """Best-effort price via Screener.in's top-ratios when yfinance has no quote
+    on either exchange (common for thinly-traded/illiquid stocks yfinance doesn't
+    track). Supplemented with stockanalysis.com's 52-week range/EPS/volume where
+    available.
+
+    Disclosed limitation: Screener's top-ratios widget has no intraday
+    change%, so `change_pct` is set to 0.0 here rather than the more
+    correct `None` — matching this same file's pre-existing
+    `_build_quote_payload()`, which has the identical "no previous close ->
+    0.0" fallback for the primary yfinance path (line ~93). Making this
+    field genuinely nullable would mean widening `change_pct` to
+    `number | null` in frontend/types/index.ts and updating several
+    consumer sites (dashboard-primitives.tsx, market-picks-dashboard.tsx,
+    watchlist/page.tsx) that currently treat it as always-a-number — a
+    real fix, but a wider one than this fallback path alone justifies.
+    Tracked here rather than silently left as a "never invent" violation:
+    a stock priced only through this fallback will show as "flat today"
+    even though that's genuinely unknown, not observed."""
+    try:
+        from tools.screener_tools import _clean, _fetch_soup
+        soup = _fetch_soup(sym)
+        ratios: dict[str, str] = {}
+        for li in soup.select("#top-ratios li"):
+            name_el = li.select_one(".name")
+            val_el = li.select_one(".number")
+            if name_el and val_el:
+                ratios[name_el.get_text(strip=True)] = _clean(val_el.get_text(" ", strip=True))
+
+        price = _num(ratios.get("Current Price"))
+        if price is None:
+            return None
+
+        pe_ratio = _num(ratios.get("Stock P/E"))
+        book_value = _num(ratios.get("Book Value"))
+        # EPS and P/B aren't in Screener's top-ratios widget, but both are
+        # directly derivable from ratios it does expose (P/E = price/EPS,
+        # P/B = price/book_value) — compute rather than leave null.
+        eps = round(price / pe_ratio, 2) if pe_ratio else None
+        price_to_book = round(price / book_value, 2) if book_value else None
+
+        h1 = soup.select_one("h1")
+        result = {
+            "symbol": sym,
+            "exchange": "NSE",
+            "company_name": h1.get_text(strip=True) if h1 else "",
+            "current_price": price,
+            "previous_close": None,
+            "change_pct": 0.0,
+            "volume": None,
+            "avg_volume_10d": None,
+            "market_cap_cr": _num(ratios.get("Market Cap")),
+            "pe_ratio": pe_ratio,
+            "eps": eps,
+            "book_value": book_value,
+            "price_to_book": price_to_book,
+            "52w_high": None,
+            "52w_low": None,
+            "dividend_yield_pct": _num(ratios.get("Dividend Yield")),
+            "beta": None,
+            "sector": None,
+            "industry": None,
+            "about": "",
+        }
+        # stockanalysis.com's real EPS/52-week-range/volume beat Screener's
+        # derived-EPS approximation and empty range/volume, where available.
+        result.update(_stockanalysis_extra_fields(sym))
+        return result
+    except Exception:
+        return None
+
+
 @tool("Get NSE Stock Quote")
 def get_stock_quote(symbol: str) -> str:
     """Get current market data for an Indian stock listed on NSE or BSE.
@@ -155,6 +273,14 @@ def get_stock_quote(symbol: str) -> str:
             **primary_quote,
             "primary_exchange": primary_exchange,
             "prices_by_exchange": quotes_by_exchange,
+        })
+
+    fallback = _screener_fallback_quote(sym)
+    if fallback:
+        return json.dumps({
+            **fallback,
+            "primary_exchange": "NSE",
+            "prices_by_exchange": {"NSE": fallback},
         })
 
     return json.dumps({"error": last_err or f"No market data found for {sym}", "symbol": sym})

@@ -761,3 +761,80 @@ export interface StreetConsensus {
   articles_unavailable:            boolean;
   numeric_consensus_unavailable:   boolean;
 }
+
+// ── Portfolio Aggregator ─────────────────────────────────────────────────────
+// A separate personal net-worth tracker (GET/POST /api/portfolio/profiles,
+// /accounts, /assets, /networth) — unrelated to Position/the /portfolio
+// page above, which aggregates P&L over market-picks positions. No auth;
+// see routes/portfolio_aggregator.py's own docstring for why.
+
+export interface PortfolioProfile {
+  id:    number;
+  name:  string;
+}
+
+export type PortfolioAccountType = 'bank' | 'broker' | 'amc' | 'epfo' | 'other';
+
+export interface PortfolioAccount {
+  id:            number;
+  profile_id:    number;
+  name:          string;
+  institution:   string | null;
+  type:          PortfolioAccountType;
+}
+
+export type PortfolioAssetType = 'mf' | 'stock' | 'fd' | 'epf' | 'ppf' | 'cash' | 'manual' | 'loan';
+
+export interface PortfolioAsset {
+  id:          number;
+  account_id:  number;
+  type:        PortfolioAssetType;
+  name:        string;
+  symbol:      string | null;
+  meta:        Record<string, unknown>;
+  archived:    boolean;
+  // Only present for type mf/stock.
+  units:       number | null;
+  avg_cost:    number | null;
+  // Latest stored valuation, if any (an asset with no valuation yet — not
+  // possible via the create-asset flow, but reachable after a
+  // not-yet-built import path — shows both as null rather than 0).
+  value:       number | null;
+  valued_on:   string | null;
+}
+
+export interface PortfolioNetWorth {
+  total:        number;
+  by_type:      Record<string, number>;
+  by_account:   Array<{ account_id: number; account_name: string; value: number }>;
+}
+
+// CAS PDF import (POST /api/portfolio/import-cas) — CAMS/KFintech detailed
+// statement only. Reconciles by AMFI scheme code, then ISIN.
+export interface CasImportResult {
+  schemes:         number;
+  assets_created:  number;
+  assets_matched:  number;
+  transactions:    number;
+  skipped_rows:    number;
+  warnings:        string[];
+}
+
+// Broker CSV/XLSX import — preview suggests a column mapping (Zerodha's
+// tradebook is auto-detected), the user confirms it, then import runs.
+export interface CsvPreviewResult {
+  headers:            string[];
+  sample_rows:         string[][];
+  suggested_mapping:  Record<string, string | null>;
+  detected:           'zerodha' | null;
+}
+
+export interface CsvImportResult {
+  rows:            number;
+  imported:        number;
+  duplicates:      number;
+  skipped:         number;
+  assets_created:  number;
+  assets_matched:  number;
+  warnings:        string[];
+}

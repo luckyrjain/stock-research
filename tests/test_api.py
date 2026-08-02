@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 import api
 import cache
 import rate_limiter
+import routes.positions as routes_positions
 
 client = TestClient(api.app)
 
@@ -3344,6 +3345,124 @@ class PositionsClaimEndpointTest(unittest.TestCase):
         self.assertIn("SET client_id = NULL, user_id = :user_id", update_query)
         self.assertEqual(update_params["client_id"], "client-abc")
         self.assertEqual(update_params["user_id"], 42)
+
+
+class ComputeSectorConcentrationTest(unittest.TestCase):
+    """Pure aggregation function backing GET /api/portfolio/concentration —
+    capital-weighted (shares * live price), only over positions with a
+    known share count, live price, and sector; never guessed."""
+
+    def test_no_positions_returns_empty(self) -> None:
+        result = routes_positions.compute_sector_concentration([], {}, {})
+        self.assertEqual(result, {"by_sector": {}, "concentrated_sectors": []})
+
+    def test_position_without_shares_excluded(self) -> None:
+        positions = [{"symbol": "TCS", "shares": None}]
+        result = routes_positions.compute_sector_concentration(
+            positions, {"TCS": 3500.0}, {"TCS": "IT"},
+        )
+        self.assertEqual(result, {"by_sector": {}, "concentrated_sectors": []})
+
+    def test_position_without_live_price_or_sector_excluded(self) -> None:
+        positions = [{"symbol": "TCS", "shares": 10}, {"symbol": "INFY", "shares": 5}]
+        result = routes_positions.compute_sector_concentration(
+            positions, {"TCS": 3500.0}, {"INFY": "IT"},  # TCS has no sector, INFY has no price
+        )
+        self.assertEqual(result, {"by_sector": {}, "concentrated_sectors": []})
+
+    def test_single_sector_above_threshold_is_concentrated(self) -> None:
+        positions = [{"symbol": "TCS", "shares": 10}, {"symbol": "INFY", "shares": 10}]
+        result = routes_positions.compute_sector_concentration(
+            positions, {"TCS": 3500.0, "INFY": 1500.0}, {"TCS": "IT", "INFY": "IT"},
+        )
+        self.assertEqual(result["by_sector"], {"IT": 100.0})
+        self.assertEqual(result["concentrated_sectors"], ["IT"])
+
+    def test_sector_below_threshold_not_flagged(self) -> None:
+        positions = [{"symbol": "TCS", "shares": 1}, {"symbol": "HDFCBANK", "shares": 100}]
+        result = routes_positions.compute_sector_concentration(
+            positions, {"TCS": 100.0, "HDFCBANK": 1000.0}, {"TCS": "IT", "HDFCBANK": "Banking"},
+        )
+        # TCS: 100 value / 100100 total = 0.1% -- well under the 25% threshold
+        self.assertNotIn("IT", result["concentrated_sectors"])
+        self.assertIn("Banking", result["concentrated_sectors"])
+
+    def test_multiple_sectors_only_ones_at_or_above_threshold_flagged(self) -> None:
+        positions = [
+            {"symbol": "A", "shares": 1}, {"symbol": "B", "shares": 1}, {"symbol": "C", "shares": 1},
+        ]
+        result = routes_positions.compute_sector_concentration(
+            positions,
+            {"A": 300.0, "B": 300.0, "C": 400.0},
+            {"A": "IT", "B": "IT", "C": "Banking"},
+            threshold_pct=25.0,
+        )
+        self.assertEqual(result["by_sector"], {"IT": 60.0, "Banking": 40.0})
+        self.assertEqual(result["concentrated_sectors"], ["Banking", "IT"])
+
+    def test_zero_or_negative_shares_excluded(self) -> None:
+        positions = [{"symbol": "TCS", "shares": 0}, {"symbol": "INFY", "shares": -5}]
+        result = routes_positions.compute_sector_concentration(
+            positions, {"TCS": 3500.0, "INFY": 1500.0}, {"TCS": "IT", "INFY": "IT"},
+        )
+        self.assertEqual(result, {"by_sector": {}, "concentrated_sectors": []})
+
+
+class PortfolioConcentrationEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._db_url = os.environ.pop("DATABASE_URL", None)
+        api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
+
+    def tearDown(self) -> None:
+        if self._db_url is not None:
+            os.environ["DATABASE_URL"] = self._db_url
+        api._DB_ENGINE = None
+        rate_limiter._memory_calls.clear()
+
+    def test_missing_database_url_returns_503(self) -> None:
+        resp = client.get("/api/portfolio/concentration?client_id=client-abc")
+        self.assertEqual(resp.status_code, 503)
+
+    def test_computes_concentration_from_positions_prices_and_cached_sector(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = [
+            {"symbol": "TCS", "company": "TCS", "exchange": "NSE",
+             "entry_price": 3000.0, "target_price": None, "stop_loss": None, "shares": 10,
+             "bought_at": "2026-01-01T00:00:00"},
+        ]
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value = _FakeConn([rows_result])
+
+        with patch("api._get_db_engine", return_value=fake_engine), \
+             patch("api._fetch_live_price_sync", return_value={"price": 3500.0, "change_pct": 1.0}), \
+             patch("cache.load", return_value={"sector": "IT"}):
+            resp = client.get("/api/portfolio/concentration?client_id=client-abc")
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["by_sector"], {"IT": 100.0})
+        self.assertEqual(body["concentrated_sectors"], ["IT"])
+
+    def test_stale_sector_cache_excludes_symbol_rather_than_guessing(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rows_result = MagicMock()
+        rows_result.mappings.return_value.fetchall.return_value = [
+            {"symbol": "TCS", "company": "TCS", "exchange": "NSE",
+             "entry_price": 3000.0, "target_price": None, "stop_loss": None, "shares": 10,
+             "bought_at": "2026-01-01T00:00:00"},
+        ]
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value = _FakeConn([rows_result])
+
+        with patch("api._get_db_engine", return_value=fake_engine), \
+             patch("api._fetch_live_price_sync", return_value={"price": 3500.0, "change_pct": 1.0}), \
+             patch("cache.load", return_value=None):
+            resp = client.get("/api/portfolio/concentration?client_id=client-abc")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"by_sector": {}, "concentrated_sectors": []})
 
 
 class VerdictHistoryEndpointTest(unittest.TestCase):

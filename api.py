@@ -2400,6 +2400,16 @@ from routes.positions import _MAX_POSITIONS_PER_CLIENT
 app.include_router(_watchlist_router)
 app.include_router(_positions_router)
 
+# ── Portfolio Aggregator ──────────────────────────────────────────────────────
+# A separate personal net-worth tracker (profiles/accounts/assets/holdings/
+# valuations) — unrelated to the positions-based /portfolio page above; see
+# routes/portfolio_aggregator.py's own docstring and CLAUDE.md's "Portfolio
+# aggregator" section for the distinction. Mounted at the same /api/portfolio
+# prefix as the concentration endpoint above — distinct sub-paths, no collision.
+from routes.portfolio_aggregator import router as _portfolio_aggregator_router
+
+app.include_router(_portfolio_aggregator_router)
+
 # ── Consolidated view ──────────────────────────────────────────────────────────
 # "What does AlphaPulse think about X" spans three independently-run pipelines
 # today, so answering it means visiting three pages. This endpoint answers it

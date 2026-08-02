@@ -9,6 +9,9 @@ from tools.nse_tools import (
     _humanize_category,
     _is_nse_host,
     _is_valid_quote,
+    _num,
+    _screener_fallback_quote,
+    _stockanalysis_extra_fields,
     get_mf_holdings,
     get_nse_basic_ratios,
     get_shareholding_detail,
@@ -104,7 +107,8 @@ class GetStockQuoteTest(unittest.TestCase):
     def test_both_exchanges_fail_returns_error_payload(self) -> None:
         fake_ticker = MagicMock()
         fake_ticker.info = {}
-        with patch("yfinance.Ticker", return_value=fake_ticker):
+        with patch("yfinance.Ticker", return_value=fake_ticker), \
+             patch("tools.nse_tools._screener_fallback_quote", return_value=None):
             result = json.loads(get_stock_quote.run(symbol="nosuch"))
         self.assertIn("error", result)
         self.assertEqual(result["symbol"], "NOSUCH")
@@ -119,6 +123,91 @@ class GetStockQuoteTest(unittest.TestCase):
         with patch("yfinance.Ticker", side_effect=_ticker):
             result = json.loads(get_stock_quote.run(symbol="tcs"))
         self.assertEqual(result["primary_exchange"], "BSE")
+
+    def test_both_exchanges_fail_falls_back_to_screener_quote(self) -> None:
+        # Thinly-traded stocks yfinance has no quote for on either exchange,
+        # but Screener.in still has a price for — must not hard-fail.
+        fake_ticker = MagicMock()
+        fake_ticker.info = {}
+        fallback = {
+            "symbol": "CHANDAN", "exchange": "NSE", "company_name": "Chandan Steel",
+            "current_price": 45.0, "previous_close": None, "change_pct": 0.0,
+            "volume": None, "avg_volume_10d": None, "market_cap_cr": 120.0,
+            "pe_ratio": 12.0, "eps": 3.75, "book_value": 30.0, "price_to_book": 1.5,
+            "52w_high": None, "52w_low": None, "dividend_yield_pct": 1.2,
+            "beta": None, "sector": None, "industry": None, "about": "",
+        }
+        with patch("yfinance.Ticker", return_value=fake_ticker), \
+             patch("tools.nse_tools._screener_fallback_quote", return_value=fallback):
+            result = json.loads(get_stock_quote.run(symbol="chandan"))
+        self.assertEqual(result["primary_exchange"], "NSE")
+        self.assertEqual(result["current_price"], 45.0)
+        self.assertEqual(result["prices_by_exchange"]["NSE"]["pe_ratio"], 12.0)
+
+
+class ScreenerFallbackQuoteTest(unittest.TestCase):
+    def _soup_with_ratios(self, ratios: dict, company_name: str = "Chandan Steel"):
+        from bs4 import BeautifulSoup
+        lis = "".join(
+            f'<li><span class="name">{k}</span><span class="number">{v}</span></li>'
+            for k, v in ratios.items()
+        )
+        html = f"<html><body><h1>{company_name}</h1><ul id='top-ratios'>{lis}</ul></body></html>"
+        return BeautifulSoup(html, "lxml")
+
+    def test_returns_none_when_no_current_price(self) -> None:
+        with patch("tools.screener_tools._fetch_soup", return_value=self._soup_with_ratios({})), \
+             patch("tools.nse_tools._stockanalysis_extra_fields", return_value={}):
+            self.assertIsNone(_screener_fallback_quote("NOSUCH"))
+
+    def test_derives_eps_and_price_to_book_from_price_and_ratios(self) -> None:
+        soup = self._soup_with_ratios({
+            "Current Price": "120", "Stock P/E": "10", "Book Value": "60", "Market Cap": "500",
+        })
+        with patch("tools.screener_tools._fetch_soup", return_value=soup), \
+             patch("tools.nse_tools._stockanalysis_extra_fields", return_value={}):
+            result = _screener_fallback_quote("CHANDAN")
+        self.assertEqual(result["current_price"], 120.0)
+        self.assertEqual(result["eps"], 12.0)
+        self.assertEqual(result["price_to_book"], 2.0)
+        self.assertEqual(result["company_name"], "Chandan Steel")
+
+    def test_stockanalysis_fields_override_derived_values(self) -> None:
+        soup = self._soup_with_ratios({"Current Price": "120", "Stock P/E": "10"})
+        with patch("tools.screener_tools._fetch_soup", return_value=soup), \
+             patch("tools.nse_tools._stockanalysis_extra_fields",
+                   return_value={"eps": 13.5, "52w_high": 200.0, "52w_low": 90.0, "volume": 12345}):
+            result = _screener_fallback_quote("CHANDAN")
+        self.assertEqual(result["eps"], 13.5)
+        self.assertEqual(result["52w_high"], 200.0)
+        self.assertEqual(result["volume"], 12345)
+
+    def test_returns_none_on_fetch_exception(self) -> None:
+        with patch("tools.screener_tools._fetch_soup", side_effect=ConnectionError("boom")):
+            self.assertIsNone(_screener_fallback_quote("NOSUCH"))
+
+
+class StockanalysisExtraFieldsTest(unittest.TestCase):
+    def test_parses_eps_range_and_volume(self) -> None:
+        fake_resp = MagicMock()
+        fake_resp.text = (
+            "<html><body><table>"
+            "<tr><td>EPS</td><td>12.5</td></tr>"
+            "<tr><td>52-Week Range</td><td>80.00 - 150.00</td></tr>"
+            "<tr><td>Volume</td><td>1,234,567</td></tr>"
+            "</table></body></html>"
+        )
+        fake_resp.raise_for_status = MagicMock()
+        with patch("requests.get", return_value=fake_resp):
+            result = _stockanalysis_extra_fields("TCS")
+        self.assertEqual(result["eps"], 12.5)
+        self.assertEqual(result["52w_low"], 80.0)
+        self.assertEqual(result["52w_high"], 150.0)
+        self.assertEqual(result["volume"], 1234567)
+
+    def test_returns_empty_dict_on_request_failure(self) -> None:
+        with patch("requests.get", side_effect=ConnectionError("boom")):
+            self.assertEqual(_stockanalysis_extra_fields("TCS"), {})
 
 
 class IsNseHostTest(unittest.TestCase):
