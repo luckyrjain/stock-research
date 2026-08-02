@@ -250,6 +250,238 @@ def _analysis_support_issues(data: dict | None, all_data: dict[str, dict] | None
     return issues
 
 
+def _parse_ratio_number(value: Any) -> float | None:
+    """Parses a scraped ratio string (e.g. '18.5 %', '1,234.5', '-') into a float."""
+    if value is None:
+        return None
+    text = str(value).strip().replace(",", "").replace("%", "").strip()
+    if not text or text == "-":
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _first_cited_number(text: str, field_pattern: str) -> float | None:
+    match = re.search(field_pattern, text)
+    if not match:
+        return None
+    window = text[match.end(): match.end() + 20].replace(",", "")
+    number_match = re.search(r"-?\d+\.?\d*", window)
+    if not number_match:
+        return None
+    try:
+        return float(number_match.group(0))
+    except ValueError:
+        return None
+
+
+def _ratio(ad: dict, key: str) -> float | None:
+    return _parse_ratio_number(((ad.get("research", {}) or {}).get("ratios") or {}).get(key))
+
+
+def _in_tolerance(cited: float, source: float) -> bool:
+    """Sign-agnostic 2x-tolerance check. min/max instead of source/2..source*2
+    directly — for negative source (e.g. -10% growth), source/2=-5 is the
+    upper bound and source*2=-20 is the lower bound, the reverse of the
+    positive case, so a plain range would reject even an exact citation."""
+    lo, hi = min(source / 2, source * 2), max(source / 2, source * 2)
+    return lo <= cited <= hi
+
+
+_CR_PER_LAKH_CRORE = 100_000.0
+_INR_PER_USD = 83.0  # fixed approximate rate — 2x tolerance absorbs real-world FX drift
+
+_MARKET_CAP_PATTERN = r"market\s*cap(?:italization)?"
+_MARKET_CAP_UNITS_INR = [
+    (re.compile(r"lakh\s*crore"), _CR_PER_LAKH_CRORE),
+    (re.compile(r"lac\s*crore"), _CR_PER_LAKH_CRORE),
+    (re.compile(r"\bcrore\b"), 1.0),
+    (re.compile(r"\bcr\b"), 1.0),
+]
+_MARKET_CAP_UNITS_USD = [
+    (re.compile(r"\btrillion\b"), 100_000.0 * _INR_PER_USD),
+    (re.compile(r"\bbillion\b"), 100.0 * _INR_PER_USD),
+]
+_USD_MARKER = re.compile(r"\$|\busd\b|\bdollar")
+
+
+def _parse_cited_market_cap(text: str, field_pattern: str) -> float | None:
+    """Finds a market-cap citation and normalizes it to crores. INR units
+    (crore/lakh crore) convert directly. USD units (billion/trillion) only
+    convert if a $/usd/dollar marker also appears in the window — a bare
+    '50 billion' with no currency marker is ambiguous, so it's skipped
+    rather than guessed, same as the other checks' skip-on-unparseable rule."""
+    match = re.search(field_pattern, text)
+    if not match:
+        return None
+    window = text[match.end(): match.end() + 60]
+    number_match = re.search(r"-?\d+\.?\d*", window.replace(",", ""))
+    if not number_match:
+        return None
+    try:
+        value = float(number_match.group(0))
+    except ValueError:
+        return None
+
+    for pattern, multiplier in _MARKET_CAP_UNITS_INR:
+        if pattern.search(window):
+            return value * multiplier
+    for pattern, multiplier in _MARKET_CAP_UNITS_USD:
+        if pattern.search(window) and _USD_MARKER.search(window):
+            return value * multiplier
+    return None
+
+
+_NUMERIC_FIELD_CHECKS = [
+    ("dividend yield", r"dividend\s*yield",
+     lambda ad: (ad.get("stock_info", {}) or {}).get("dividend_yield_pct"), None),
+    ("P/E ratio", r"\bp/?e\b(?:\s*ratio)?|price[- ]to[- ]earnings",
+     lambda ad: (ad.get("stock_info", {}) or {}).get("pe_ratio"), None),
+    ("ROE", r"\broe\b|return on equity",
+     lambda ad: _ratio(ad, "ROE"), None),
+    ("ROCE", r"\broce\b|return on capital employed",
+     lambda ad: _ratio(ad, "ROCE"), None),
+    ("book value", r"book value",
+     lambda ad: (ad.get("stock_info", {}) or {}).get("book_value"), None),
+    # Sales/profit growth: the analyst text rarely states which trailing
+    # window (3Y vs 5Y) it means, so accept either — flag only if the cited
+    # number is off by 2x from BOTH known windows, not just one.
+    ("sales growth", r"sales\s*growth|revenue\s*growth",
+     lambda ad: [_ratio(ad, "Sales growth 3Y"), _ratio(ad, "Sales growth 5Y")], None),
+    ("profit growth", r"profit\s*growth|earnings\s*growth",
+     lambda ad: [_ratio(ad, "Profit growth 3Y"), _ratio(ad, "Profit growth 5Y")], None),
+    ("EBITDA margin", r"ebitda\s*margin|operating\s*margin",
+     lambda ad: _ratio(ad, "EBITDA margin"), None),
+    ("market cap", _MARKET_CAP_PATTERN,
+     lambda ad: _ratio(ad, "Market Cap"), _parse_cited_market_cap),
+]
+
+
+def _analysis_numeric_issues(data: dict | None, all_data: dict[str, dict] | None) -> list[str]:
+    """Compares numbers the analyst LLM cites in prose against the actual
+    source data, catching transcription errors like a 0.46 dividend yield
+    being written as "47%". A 2x-tolerance mismatch is flagged; anything
+    closer is assumed to be legitimate rounding/rephrasing."""
+    if data is None or not all_data:
+        return []
+
+    issues: list[str] = []
+    analysis_text = " ".join(
+        [
+            str(data.get("summary", "")),
+            str(data.get("business_quality", "")),
+            str(data.get("news_highlights", "")),
+            str(data.get("institutional_trend", "")),
+            " ".join(str(item) for item in data.get("bull_factors", []) or []),
+            " ".join(str(item) for item in data.get("bear_factors", []) or []),
+            " ".join(str(item) for item in data.get("key_risks", []) or []),
+        ]
+    ).lower()
+
+    for label, field_pattern, source_getter, cite_parser in _NUMERIC_FIELD_CHECKS:
+        parser = cite_parser or _first_cited_number
+        cited = parser(analysis_text, field_pattern)
+        if cited is None:
+            continue
+        source = source_getter(all_data)
+        candidates = source if isinstance(source, list) else [source]
+        candidates = [c for c in candidates if c is not None and c != 0]
+        if not candidates:
+            continue
+        if not any(_in_tolerance(cited, c) for c in candidates):
+            issues.append(
+                f"{label} cited as {cited} but source data shows {candidates} — off by more than 2x from all known values"
+            )
+
+    issues.extend(_sector_range_issues(analysis_text, all_data))
+    return issues
+
+
+_SECTOR_RANGES: dict[str, dict[str, tuple[float, float]]] = {
+    "IT / Software":                       {"pe": (15, 40), "roe": (15, 35)},
+    "Banking (Private)":                   {"pe": (8, 25),  "roe": (10, 20)},
+    "Banking (PSU) / NBFC":                {"pe": (5, 18),  "roe": (8, 18)},
+    "Pharma / Healthcare":                 {"pe": (15, 45), "roe": (10, 25)},
+    "FMCG / Consumer":                     {"pe": (25, 70), "roe": (15, 40)},
+    "Auto / Auto Ancillary":               {"pe": (10, 35), "roe": (8, 25)},
+    "Metals & Mining":                     {"pe": (4, 20),  "roe": (5, 25)},
+    "Oil & Gas / Energy":                  {"pe": (5, 20),  "roe": (8, 20)},
+    "Power / Utilities":                   {"pe": (6, 25),  "roe": (8, 18)},
+    "Cement":                              {"pe": (10, 35), "roe": (6, 18)},
+    "Capital Goods / Infra / Engineering": {"pe": (15, 45), "roe": (8, 20)},
+    "Chemicals":                           {"pe": (10, 40), "roe": (8, 25)},
+    "Realty":                              {"pe": (10, 50), "roe": (5, 20)},
+    "Telecom":                             {"pe": (15, 60), "roe": (-5, 15)},
+    "Media & Entertainment":               {"pe": (10, 40), "roe": (5, 20)},
+    "Textiles":                            {"pe": (8, 30),  "roe": (5, 18)},
+}
+_SECTOR_RANGE_PAD = 0.25
+
+_SECTOR_COMPARISON_PATTERN = re.compile(
+    r"(sector|industry|peer[s]?)\s+average.{0,40}(\bp/?e\b|\broe\b)"
+    r"|(\bp/?e\b|\broe\b).{0,40}(sector|industry|peer[s]?)\s+average"
+)
+
+
+def _resolve_sector_bucket(sector: str | None) -> str | None:
+    """Fuzzy-matches a free-text sector string (e.g. Screener.in's "IT -
+    Software") against _SECTOR_RANGES's bucket names. Returns None on no
+    confident match rather than guessing — a stock in an unmapped sector
+    simply doesn't get this check."""
+    if not sector:
+        return None
+    from rapidfuzz import fuzz, process
+    from rapidfuzz import utils as rf_utils
+    match = process.extractOne(
+        sector, list(_SECTOR_RANGES.keys()),
+        scorer=fuzz.token_set_ratio, processor=rf_utils.default_process, score_cutoff=85,
+    )
+    return match[0] if match else None
+
+
+def _padded_range(lo: float, hi: float) -> tuple[float, float]:
+    width = hi - lo
+    pad = _SECTOR_RANGE_PAD * width
+    return lo - pad, hi + pad
+
+
+def _sector_range_issues(analysis_text: str, all_data: dict[str, dict]) -> list[str]:
+    """Flags an analyst-cited 'sector/peer average P/E or ROE' figure that
+    falls outside a static plausible range for the stock's own sector —
+    this codebase fetches no real peer-benchmark data for the single-stock
+    flow, so any such citation is either a fabrication or a genuine outlier
+    worth a human's attention; either way it isn't grounded in fetched data."""
+    sector = (all_data.get("stock_info", {}) or {}).get("sector")
+    bucket = _resolve_sector_bucket(sector)
+    if bucket is None:
+        return []
+
+    ranges = _SECTOR_RANGES[bucket]
+    issues: list[str] = []
+    for match in _SECTOR_COMPARISON_PATTERN.finditer(analysis_text):
+        metric = (match.group(2) or match.group(3) or "")
+        field = "pe" if metric.startswith("p") else "roe"
+        window = analysis_text[match.end(): match.end() + 30].replace(",", "")
+        number_match = re.search(r"-?\d+\.?\d*", window)
+        if not number_match:
+            continue
+        try:
+            cited = float(number_match.group(0))
+        except ValueError:
+            continue
+        lo, hi = _padded_range(*ranges[field])
+        if not (lo <= cited <= hi):
+            label = "P/E" if field == "pe" else "ROE"
+            issues.append(
+                f"cited sector-average {label} of {cited} falls outside plausible "
+                f"range for {bucket} sector ({lo:.2f}-{hi:.2f} with padding) — "
+                "check for a fabricated comparison"
+            )
+    return issues
+
+
 # Well inside signals/engine.py's own HOLD band (-0.3 to 0.1) — a score
 # with this small a magnitude means the quant engine found almost nothing
 # directional, so a HIGH-confidence call against it is a real inconsistency,
@@ -337,7 +569,7 @@ def _validate_analysis_payload(  # pylint: disable=too-many-return-statements
                 "Confidence 'HIGH' is not supported by a near-neutral quant signal score "
                 f"({final_score}); use MEDIUM or LOW instead."
             )
-    support_issues = _analysis_support_issues(data, all_data)
+    support_issues = _analysis_support_issues(data, all_data) + _analysis_numeric_issues(data, all_data)
     if support_issues:
         return False, f"Unsupported claims found: {'; '.join(support_issues)}."
     return True, data

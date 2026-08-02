@@ -23,6 +23,8 @@ python-dotenv>=1.0.0,<2.0.0
 rapidfuzz>=3.0.0,<4.0.0
 redis>=5.0.0,<6.0.0
 sentry-sdk>=2.0.0,<3.0.0
+casparser>=0.7.0,<1.0.0  # CAS PDF parsing (portfolio aggregator import) — pulls pdfminer.six
+openpyxl>=3.1.0,<4.0.0  # .xlsx broker export parsing (pandas.read_excel engine)
 
 # Optional providers (install only what you need)
 groq>=0.8.0,<2.0.0

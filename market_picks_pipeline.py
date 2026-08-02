@@ -28,6 +28,7 @@ import requests
 from dotenv import load_dotenv
 
 import source_health
+import source_quality
 from error_tracking import init_error_tracking
 from observability import get_logger, log_event
 
@@ -778,6 +779,41 @@ def _compute_confidence(
     return round(min(100.0, max(0.0, signal_comp + mention_comp + recency_comp + valuation_nudge)), 1)
 
 
+def _aggregate_source_stats(
+    raw_sources: dict,
+    raw_picks: list[dict],
+    consolidated: list[dict],
+) -> dict[str, dict]:
+    """Tallies per-source telemetry for source_quality.record_run(): articles
+    fetched (phase 1), picks the LLM extracted (phase 2), and picks that
+    survived NSE-symbol validation (phase 3 — every item in `consolidated`
+    passed validation by definition, so a source's validated count is how
+    many of its picks fed a surviving consolidated group)."""
+    from tools.market_picks_tools import SOURCES
+
+    stats: dict[str, dict] = {
+        name: {"articles_fetched": 0, "picks_extracted": 0, "picks_validated": 0}
+        for name, _type, _fn in SOURCES
+    }
+
+    for name, data in raw_sources.items():
+        if name in stats:
+            stats[name]["articles_fetched"] = len(data.get("articles", []))
+
+    for pick in raw_picks:
+        name = pick.get("source")
+        if name in stats:
+            stats[name]["picks_extracted"] += 1
+
+    for item in consolidated:
+        for src in item.get("sources", []):
+            name = src.get("name")
+            if name in stats:
+                stats[name]["picks_validated"] += 1
+
+    return stats
+
+
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 _MAX_ACCEPTABLE_EMPTY_SOURCE_RATE = 0.7  # mirrors sme_ema_pipeline's health-check
@@ -888,6 +924,9 @@ class MarketPicksPipeline:
         research_data = _timed_phase("research", self._phase_research, consolidated, emit)
         analyses      = _timed_phase("analyze", self._phase_analyze, consolidated, research_data, emit)
         picks         = _timed_phase("score", self._phase_score, consolidated, research_data, analyses, emit)
+
+        source_stats = _aggregate_source_stats(raw_sources, raw_picks, consolidated)
+        source_quality.record_run(self._run_id, source_stats)
 
         log_event(
             LOGGER, "market_picks_pipeline_completed", run_id=self._run_id,

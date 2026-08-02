@@ -1,0 +1,39 @@
+name: EOD Price Store Pipeline
+
+on:
+  schedule:
+    # 19:45 IST (UTC+5:30) on weekdays = 14:15 UTC. The bhavcopy with delivery
+    # data is published around 19:00 IST, and this runs after the SME job
+    # (13:00 UTC) with no overlap. Keep in sync with the schedule documented
+    # in CLAUDE.md.
+    - cron: '15 14 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    name: Run EOD price store + corporate actions pipeline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check DATABASE_URL is configured
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL secret is not set. Add a network-reachable Postgres connection string in repo Settings > Secrets and variables > Actions > New repository secret (name: DATABASE_URL) before this workflow can run."
+            exit 1
+          fi
+
+      - name: Run EOD price store pipeline (bhavcopy + AMFI NAV + corporate actions)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python eod_prices_pipeline.py

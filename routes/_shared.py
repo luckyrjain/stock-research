@@ -34,6 +34,16 @@ async def run_owned_db_call(
     loop = api.asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(None, sync_fn)
+    except HTTPException:
+        # sync_fn raised a status code it already knows is correct (e.g. a
+        # 404 for a missing id) — re-raise as-is rather than falling through
+        # to the generic-503 branch below, which would otherwise silently
+        # swallow a deliberate, specific status/detail into an opaque
+        # "Database error" response. No existing caller raises HTTPException
+        # from inside sync_fn today (they route "not found" around this
+        # wrapper entirely), so this is a pure addition, not a behavior
+        # change for them.
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except PermissionError as exc:

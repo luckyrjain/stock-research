@@ -23,6 +23,7 @@ export type NavKey =
   | 'track-record'
   | 'watchlist'
   | 'portfolio'
+  | 'portfolio-aggregator'
   | 'compare'
   | 'api-keys';
 
@@ -33,6 +34,11 @@ const LINKS: { key: NavKey; href: string; label: string }[] = [
   { key: 'track-record', href: '/market-picks/history',  label: 'Track Record' },
   { key: 'watchlist',    href: '/watchlist',              label: 'Watchlist' },
   { key: 'portfolio',    href: '/portfolio',              label: 'Portfolio' },
+  // A separate personal net-worth tracker (profiles/accounts/assets across
+  // banks/brokers/FDs/loans/etc.) — unrelated to the "Portfolio" link above,
+  // which aggregates P&L over market-picks positions. Distinct label so the
+  // two aren't confused for the same feature.
+  { key: 'portfolio-aggregator', href: '/portfolio-aggregator', label: 'Net Worth' },
   { key: 'compare',      href: '/compare',                label: 'Compare' },
   // A signed-out visitor previously had no navigational path to discover the
   // API exists at all — it was reachable only through the account dropdown

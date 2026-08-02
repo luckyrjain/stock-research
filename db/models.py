@@ -1,8 +1,8 @@
 import os
 
 from sqlalchemy import (
-    Boolean, CheckConstraint, Column, Date, DateTime, ForeignKey, Index, Integer,
-    MetaData, Numeric, String, Table, UniqueConstraint, text,
+    JSON, BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, ForeignKey, Index,
+    Integer, MetaData, Numeric, String, Table, UniqueConstraint, text,
 )
 from sqlalchemy import create_engine as _create_engine
 
@@ -282,6 +282,174 @@ positions = Table(
     UniqueConstraint("user_id", "symbol", name="uq_positions_user_symbol"),
     Index("idx_positions_client", "client_id"),
     Index("idx_positions_user", "user_id"),
+)
+
+# ── EOD price store (securities/prices_daily/mf_nav_daily) + corporate
+# actions (corporate_actions, prices_daily.adj_close). See CLAUDE.md's "EOD
+# price store + corporate actions flow" section.
+
+securities = Table(
+    "securities",
+    metadata,
+    Column("symbol",       String(20), primary_key=True),
+    Column("isin",         String(12)),
+    Column("company_name", String(200)),
+    Column("series",       String(10)),
+    Column("listing_date", Date),
+    Column("face_value",   Numeric(10, 2)),
+    # Last date this symbol appeared in a bhavcopy — a stale last_seen
+    # detects a delisting/suspension without a separate status field.
+    Column("last_seen",    Date),
+)
+
+prices_daily = Table(
+    "prices_daily",
+    metadata,
+    Column("symbol",        String(20), primary_key=True),
+    Column("trade_date",    Date,       primary_key=True),
+    Column("open",          Numeric(12, 2)),
+    Column("high",          Numeric(12, 2)),
+    Column("low",           Numeric(12, 2)),
+    Column("close",         Numeric(12, 2)),
+    Column("prev_close",    Numeric(12, 2)),
+    Column("avg_price",     Numeric(12, 2)),
+    Column("volume",        BigInteger),
+    Column("turnover_lacs", Numeric(18, 2)),  # bhavcopy TURNOVER_LACS is already in lakhs
+    Column("trades",        Integer),
+    Column("delivery_qty",  BigInteger),
+    Column("delivery_pct",  Numeric(6, 2)),
+    # Split/bonus-adjusted close. Seeded to `close` on insert; the corporate
+    # actions recompute job (corporate_actions_pipeline.py) is the only
+    # writer after that — a re-ingested day's ON CONFLICT UPDATE must never
+    # touch this column, or a replay would clobber an already-adjusted value
+    # back to raw.
+    Column("adj_close",     Numeric(12, 4)),
+    Index("idx_prices_daily_date", "trade_date"),
+)
+
+mf_nav_daily = Table(
+    "mf_nav_daily",
+    metadata,
+    Column("scheme_code", String(12), primary_key=True),
+    Column("nav_date",    Date,       primary_key=True),
+    Column("nav",         Numeric(14, 4), nullable=False),
+    Column("scheme_name", String(250)),
+)
+
+corporate_actions = Table(
+    "corporate_actions",
+    metadata,
+    Column("id",           Integer, primary_key=True, autoincrement=True),
+    Column("symbol",       String(20), nullable=False),
+    Column("ex_date",      Date, nullable=False),
+    # split | bonus | dividend | rights | buyback | other — see
+    # tools/corporate_actions.py::parse_purpose for the classifier.
+    Column("type",         String(10), nullable=False),
+    Column("purpose_raw",  String(300), nullable=False),
+    # Multiplier applied to prices strictly before ex_date; NULL for
+    # non-adjusting types (dividend/rights/buyback/other) — never guessed.
+    Column("price_factor", Numeric(12, 6)),
+    # Dividend Rs/share; NULL for every other type.
+    Column("amount",       Numeric(12, 4)),
+    Column("record_date",  Date),
+    # One symbol can have a dividend and a split on the same ex-date, but
+    # NSE occasionally revises the same action's purpose text, which would
+    # otherwise insert a near-duplicate row under this same key.
+    UniqueConstraint("symbol", "ex_date", "purpose_raw", name="uq_corp_actions_sym_ex_purpose"),
+    Index("idx_corp_actions_symbol", "symbol"),
+)
+
+# ── Portfolio Aggregator (personal net-worth tracker, unrelated to the
+# `positions` table above — see CLAUDE.md's "Portfolio aggregator" section
+# for the distinction between this and the existing /portfolio page) ────────
+# No auth/ownership column by design (localhost/Tailscale-only personal
+# tool, tens of users at most) — `profiles` is a bare picker, not an
+# account system; keeps the door open for real auth later without forcing
+# it now.
+
+profiles = Table(
+    "profiles",
+    metadata,
+    Column("id",         Integer, primary_key=True, autoincrement=True),
+    Column("name",       String(60), nullable=False, unique=True),
+    Column("created_at", DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")),
+)
+
+accounts = Table(
+    "accounts",
+    metadata,
+    Column("id",          Integer, primary_key=True, autoincrement=True),
+    Column("profile_id",  Integer, ForeignKey("profiles.id"), nullable=False),
+    Column("name",        String(120), nullable=False),
+    Column("institution", String(120)),
+    # bank | broker | amc | epfo | other
+    Column("type",        String(10), nullable=False),
+    Column("created_at",  DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")),
+    Index("idx_accounts_profile", "profile_id"),
+)
+
+assets = Table(
+    "assets",
+    metadata,
+    Column("id",         Integer, primary_key=True, autoincrement=True),
+    Column("account_id", Integer, ForeignKey("accounts.id"), nullable=False),
+    # mf | stock | fd | epf | ppf | cash | manual | loan
+    Column("type",       String(10), nullable=False),
+    Column("name",       String(200), nullable=False),
+    # Only meaningful for mf/stock — the tradeable symbol, e.g. for a future
+    # link to this app's own analysis page or the EOD price store.
+    Column("symbol",     String(20)),
+    # Per-type free-form data (e.g. an FD's rate/maturity date) — JSON, not
+    # JSONB: this codebase's tests run these tables against SQLite
+    # (`create_engine("sqlite://")`, house rule — no live DB in tests), and
+    # JSONB has no SQLite equivalent, whereas SQLAlchemy's generic JSON type
+    # works identically on both backends. No JSONB-specific operators (containment,
+    # path queries) are used anywhere against this column, so nothing is lost.
+    Column("meta",       JSON, nullable=False, server_default="{}"),
+    Column("archived",   Boolean, nullable=False, server_default=text("false")),
+    Column("created_at", DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")),
+    Index("idx_assets_account", "account_id"),
+)
+
+holdings = Table(
+    "holdings",
+    metadata,
+    Column("id",       Integer, primary_key=True, autoincrement=True),
+    # One-to-one with assets, but modeled as its own table (not columns on
+    # assets) since it's only ever populated for mf/stock assets — every
+    # other asset type has neither field, and this avoids a NULL-heavy
+    # assets row for the common case (fd/cash/manual/loan).
+    Column("asset_id",  Integer, ForeignKey("assets.id"), nullable=False, unique=True),
+    Column("units",     Numeric(18, 4), nullable=False),
+    Column("avg_cost",  Numeric(14, 4)),
+)
+
+valuations = Table(
+    "valuations",
+    metadata,
+    Column("id",       Integer, primary_key=True, autoincrement=True),
+    Column("asset_id", Integer, ForeignKey("assets.id"), nullable=False),
+    Column("as_of",    Date, nullable=False),
+    Column("value",    Numeric(16, 2), nullable=False),
+    # History from day one — one row per (asset, date); same-day re-entry
+    # upserts rather than accumulating duplicate rows for the same date.
+    UniqueConstraint("asset_id", "as_of", name="uq_valuations_asset_date"),
+    Index("idx_valuations_asset", "asset_id"),
+)
+
+# Reserved for the (not-yet-built) valuation-engine/CAS-import sub-projects —
+# no API or UI reads/writes this table yet in the Foundation increment.
+transactions = Table(
+    "transactions",
+    metadata,
+    Column("id",       Integer, primary_key=True, autoincrement=True),
+    Column("asset_id", Integer, ForeignKey("assets.id"), nullable=False),
+    Column("date",     Date, nullable=False),
+    Column("type",     String(10), nullable=False),
+    Column("amount",   Numeric(16, 2), nullable=False),
+    Column("units",    Numeric(18, 4)),
+    Column("meta",     JSON, nullable=False, server_default="{}"),
+    Index("idx_transactions_asset", "asset_id"),
 )
 
 

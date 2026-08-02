@@ -501,6 +501,344 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
         self.assertEqual(mock_record.call_args.kwargs["symbol"], "SAILIFE")
         self.assertEqual(mock_record.call_args.kwargs["cost_usd"], 0.0123)
 
+    def test_parse_ratio_number_handles_percent_comma_and_dash(self) -> None:
+        self.assertEqual(crew._parse_ratio_number("18.5 %"), 18.5)
+        self.assertEqual(crew._parse_ratio_number("1,234.5"), 1234.5)
+        self.assertIsNone(crew._parse_ratio_number("-"))
+        self.assertIsNone(crew._parse_ratio_number(""))
+        self.assertIsNone(crew._parse_ratio_number(None))
+
+    def test_analysis_numeric_issues_flags_dividend_yield_misread(self) -> None:
+        # Reproduces the live QA bug: source dividend_yield_pct=0.46, analyst
+        # prose cites "47%" (a ~100x misread).
+        data = {
+            "summary": "Solid company.",
+            "business_quality": "Stable.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["The stock has a high dividend yield of 47%."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"stock_info": {"dividend_yield_pct": 0.46}}
+        issues = crew._analysis_numeric_issues(data, all_data)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("dividend yield", issues[0])
+
+    def test_analysis_numeric_issues_allows_within_tolerance_pe(self) -> None:
+        data = {
+            "summary": "",
+            "business_quality": "Trading at a P/E of 25, close to fair value.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Reasonable valuation."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"stock_info": {"pe_ratio": 24.8}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_skips_missing_source(self) -> None:
+        data = {
+            "summary": "",
+            "business_quality": "ROE is 18%, well above peers.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Strong returns."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"stock_info": {}, "research": {"ratios": {}}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_handles_ratios_none_without_raising(self) -> None:
+        # Regression test: schemas._norm_research can produce "ratios": None
+        # (not just a missing key), which previously crashed with AttributeError.
+        data = {
+            "summary": "",
+            "business_quality": "ROE is 18%, well above peers.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Strong returns."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"stock_info": {}, "research": {"ratios": None}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_skips_uncited_field(self) -> None:
+        data = {
+            "summary": "No commentary on returns.",
+            "business_quality": "",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Good management."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"research": {"ratios": {"ROE": "18.5 %"}}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_skips_zero_source(self) -> None:
+        data = {
+            "summary": "",
+            "business_quality": "",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["The dividend yield is 1.5%."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"stock_info": {"dividend_yield_pct": 0}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_handles_comma_formatted_book_value(self) -> None:
+        data = {
+            "summary": "",
+            "business_quality": "The book value is roughly ₹1,234 per share.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Solid asset base."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"stock_info": {"book_value": 1234}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_flags_negative_growth_misread(self) -> None:
+        # Regression: the old `cited < source/2 or cited > source*2` tolerance
+        # inverted for negative source values (a -10% source made the "valid"
+        # window [-5, -20], excluding -10 itself). A 5x misread must still be
+        # caught, and a dead-on citation must NOT be flagged.
+        data = {
+            "summary": "",
+            "business_quality": "Sales growth has been -50% over the period, a real slowdown.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Turnaround expected."],
+            "bear_factors": ["Declining sales."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"research": {"ratios": {"Sales growth 3Y": "-10 %", "Sales growth 5Y": "-8 %"}}}
+        issues = crew._analysis_numeric_issues(data, all_data)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("sales growth", issues[0])
+
+    def test_analysis_numeric_issues_allows_correct_negative_citation(self) -> None:
+        data = {
+            "summary": "",
+            "business_quality": "Sales growth has been -10% over the period.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Turnaround expected."],
+            "bear_factors": ["Declining sales."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"research": {"ratios": {"Sales growth 3Y": "-10 %", "Sales growth 5Y": "-8 %"}}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_sales_growth_accepts_either_window(self) -> None:
+        # Analyst prose rarely states 3Y vs 5Y explicitly — a citation close
+        # to EITHER known window must pass, not just the first one checked.
+        data = {
+            "summary": "",
+            "business_quality": "Sales growth of 22% shows strong momentum.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Strong growth."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"research": {"ratios": {"Sales growth 3Y": "9 %", "Sales growth 5Y": "20 %"}}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_flags_profit_growth_off_both_windows(self) -> None:
+        data = {
+            "summary": "",
+            "business_quality": "Profit growth of 90% is exceptional.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Strong profit growth."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"research": {"ratios": {"Profit growth 3Y": "9 %", "Profit growth 5Y": "12 %"}}}
+        issues = crew._analysis_numeric_issues(data, all_data)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("profit growth", issues[0])
+
+    def test_analysis_numeric_issues_flags_ebitda_margin_misread(self) -> None:
+        data = {
+            "summary": "",
+            "business_quality": "EBITDA margin of 60% is best-in-class.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["High margins."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"research": {"ratios": {"EBITDA margin": "15 %"}}}
+        issues = crew._analysis_numeric_issues(data, all_data)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("EBITDA margin", issues[0])
+
+    def test_analysis_numeric_issues_flags_lakh_crore_market_cap_misread(self) -> None:
+        data = {
+            "summary": "",
+            "business_quality": "The company's market cap stands at ₹1.5 lakh crore, among the largest in its sector.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Large-cap stability."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"research": {"ratios": {"Market Cap": "13220"}}}
+        issues = crew._analysis_numeric_issues(data, all_data)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("market cap", issues[0])
+
+    def test_analysis_numeric_issues_allows_within_tolerance_market_cap_in_crore(self) -> None:
+        data = {
+            "summary": "",
+            "business_quality": "Market cap of ₹13,500 crore reflects steady growth.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Fairly valued."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"research": {"ratios": {"Market Cap": "13220"}}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_allows_within_tolerance_market_cap_in_usd_billion(self) -> None:
+        data = {
+            "summary": "",
+            "business_quality": "Market cap of $1.6 billion makes it a mid-cap play.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Reasonably sized."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"research": {"ratios": {"Market Cap": "13220"}}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_skips_market_cap_without_unit_word(self) -> None:
+        # Also a regression guard: "increase" contains the substring "cr" —
+        # word-boundary matching must not treat that as a "crore" unit.
+        data = {
+            "summary": "",
+            "business_quality": "Market cap continues to increase steadily this quarter.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Growing steadily."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"research": {"ratios": {"Market Cap": "13220"}}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_market_cap_ignores_cr_substring_in_words(self) -> None:
+        # Regression: "increased" contains the substring "cr" — a naive
+        # (non-word-boundary) unit match would treat that as the "crore"
+        # abbreviation "cr" and parse the citation. With a real number
+        # present in the window but no real unit word, the citation must
+        # stay unparseable (None) and be skipped, not compared to source
+        # (which is a very different number and would falsely flag).
+        data = {
+            "summary": "",
+            "business_quality": "Market cap of 500 has increased steadily as revenue grew this quarter.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Growing steadily."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"research": {"ratios": {"Market Cap": "13220"}}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_flags_fabricated_sector_average_pe(self) -> None:
+        data = {
+            "summary": "Sector average P/E is 60x, versus this stock's much lower multiple.",
+            "business_quality": "",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Trades at a discount to sector."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"stock_info": {"sector": "IT - Software"}}
+        issues = crew._analysis_numeric_issues(data, all_data)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("sector-average", issues[0])
+
+    def test_analysis_numeric_issues_sector_pattern_ignores_pe_substring_in_words(self) -> None:
+        # Regression: "expensive" contains the substring "pe" — unbounded
+        # matching in _SECTOR_COMPARISON_PATTERN previously misread this as
+        # a P/E citation. Real number present, no real "P/E"/"ROE" token.
+        data = {
+            "summary": "The stock looks expensive versus the sector average of 3.",
+            "business_quality": "",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Strong fundamentals."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"stock_info": {"sector": "IT - Software"}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_allows_plausible_sector_average_pe(self) -> None:
+        data = {
+            "summary": "",
+            "business_quality": "The stock trades at a P/E of 22, above sector average of 18.",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Premium to peers, justified by growth."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"stock_info": {"sector": "IT - Software", "pe_ratio": 22}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_allows_negative_sector_average_roe_within_padding(self) -> None:
+        data = {
+            "summary": "ROE below sector average of -8%, reflecting a tough year for the segment.",
+            "business_quality": "",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Turnaround expected."],
+            "bear_factors": ["Weak segment-wide returns."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"stock_info": {"sector": "Telecom"}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_analysis_numeric_issues_skips_unmapped_sector(self) -> None:
+        data = {
+            "summary": "Sector average P/E is 3x, a huge discount.",
+            "business_quality": "",
+            "news_highlights": "",
+            "institutional_trend": "",
+            "bull_factors": ["Cheap relative to peers."],
+            "bear_factors": ["Some risk."],
+            "key_risks": ["Some risk."],
+        }
+        all_data = {"stock_info": {"sector": "Miscellaneous Trading Co"}}
+        self.assertEqual(crew._analysis_numeric_issues(data, all_data), [])
+
+    def test_validate_analysis_payload_rejects_dividend_yield_misread(self) -> None:
+        payload = dict(
+            self._VALID_PAYLOAD,
+            bull_factors=self._VALID_PAYLOAD["bull_factors"] + ["High dividend yield of 47%."],
+        )
+        all_data = dict(self.all_data)
+        all_data["stock_info"] = dict(all_data.get("stock_info", {}), dividend_yield_pct=0.46)
+
+        ok, message = crew._validate_analysis_payload(payload, all_data)
+        self.assertFalse(ok)
+        self.assertIn("dividend yield", message)
+
 
 class CrossProviderFailoverTest(unittest.TestCase):
     """A full provider outage (not a formatting hiccup on an otherwise
@@ -517,6 +855,25 @@ class CrossProviderFailoverTest(unittest.TestCase):
         self._cost_dir_patch.start()
         self.addCleanup(self._cost_dir_patch.stop)
 
+        # clear=False alone isn't enough for isolation: a real developer
+        # .env can set LLM_PROVIDER (explicit pin disables failover per
+        # crew._resolve_provider) or GROQ_API_KEY/GOOGLE_API_KEY/
+        # OPENROUTER_API_KEY (widens _configured_providers() beyond the two
+        # keys this test cares about) — either leaks through clear=False and
+        # makes this test's outcome depend on whatever's in the real
+        # environment. `crew._attempt_provider()` imports `litellm` lazily
+        # (not at module load time), and litellm's own import triggers a
+        # fresh `dotenv.load_dotenv()` call — so even after popping these
+        # vars here, the *first* `run_analysis_with_fallback()` call in this
+        # test (which is also, alphabetically, often the first anywhere in
+        # the whole suite to reach that lazy import) can silently reload
+        # them straight from the real .env file mid-test. Patching
+        # `dotenv.load_dotenv` to a no-op closes that reload path outright,
+        # on top of popping the already-loaded values below.
+        self._dotenv_patch = patch("dotenv.load_dotenv")
+        self._dotenv_patch.start()
+        self.addCleanup(self._dotenv_patch.stop)
+
         self._env_patch = patch.dict(
             "os.environ",
             {"ANTHROPIC_API_KEY": "fake-anthropic-key", "OPENAI_API_KEY": "fake-openai-key"},
@@ -524,6 +881,10 @@ class CrossProviderFailoverTest(unittest.TestCase):
         )
         self._env_patch.start()
         self.addCleanup(self._env_patch.stop)
+        for var in ("LLM_PROVIDER", "GROQ_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY"):
+            if var in os.environ:
+                self.addCleanup(os.environ.__setitem__, var, os.environ[var])
+                del os.environ[var]
 
         self.all_data = {name: {} for name in crew.ALL_DATA_TASKS}
 

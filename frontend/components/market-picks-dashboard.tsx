@@ -6,6 +6,7 @@ import InfoTooltip from './info-tooltip';
 import WatchlistButton from './watchlist-button';
 import PositionButton from './position-button';
 import { usePositions } from '@/lib/positions';
+import { getClientId } from '@/lib/watchlist';
 import { safeExternalHref } from './dashboard-format';
 
 type SortKey    = 'confidence_score' | 'change_pct' | 'pe_ratio' | 'valuation_percentile';
@@ -110,6 +111,20 @@ function TrendBadge({ trend, delta }: { trend: MarketPick['trend']; delta: numbe
       ${rising ? 'bg-buy/10 text-buy border border-buy/20' : 'bg-sell/10 text-sell border border-sell/20'}`}
           title={delta != null ? `${rising ? '+' : ''}${delta} vs recent avg` : undefined}>
       {rising ? '↑' : '↓'} {trend}
+    </span>
+  );
+}
+
+function ConcentrationBadge({ sector, concentratedSectors }: { sector: string; concentratedSectors: string[] }) {
+  if (!concentratedSectors.includes(sector)) return null;
+  // No dedicated "warning" design token exists in this codebase (same gap
+  // sme-signals' own illiquid badge already works around) — accent is reused
+  // here rather than inventing a new Tailwind color for one badge.
+  return (
+    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold
+                     bg-accent/15 text-accent border border-accent/30"
+          title={`You already hold ${sector} stocks above your concentration threshold in your tracked positions`}>
+      Concentrated
     </span>
   );
 }
@@ -417,7 +432,8 @@ function SortableHeader({ label, sortK, currentKey, currentDir, onSort, tooltip 
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function MarketPicksDashboard({ picks, generatedAt, fromCache, onRescan, pricesLastUpdated }: Props) {
-  const { isPositioned } = usePositions();
+  const { isPositioned, positions } = usePositions();
+  const [concentratedSectors, setConcentratedSectors] = useState<string[]>([]);
   const [expanded,   setExpanded]   = useState<Set<string>>(new Set());
   const [sortKey,    setSortKey]    = useState<SortKey | null>(null);
   const [sortDir,    setSortDir]    = useState<'desc' | 'asc'>('desc');
@@ -431,6 +447,25 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
     () => Array.from(new Set(picks.map(p => p.sector).filter(Boolean))).sort(),
     [picks],
   );
+
+  // Fetched once per completed scan (not polled — unlike live prices, a
+  // user's tracked-positions sector mix rarely changes mid-session) so a
+  // new pick can be badged against sectors the user is already
+  // concentrated in. Read-only overlay; never affects picks scoring/cache.
+  useEffect(() => {
+    if (positions.length === 0) { setConcentratedSectors([]); return; }
+    let cancelled = false;
+    fetch(`/api/portfolio/concentration?client_id=${encodeURIComponent(getClientId())}`)
+      .then(res => res.ok ? res.json() : null)
+      .then((data: { concentrated_sectors?: string[] } | null) => {
+        if (!cancelled && data) setConcentratedSectors(data.concentrated_sectors ?? []);
+      })
+      .catch(() => {
+        // Backend unreachable — badge just doesn't render this session,
+        // same fail-quiet convention as PositionsStrip's own price poll.
+      });
+    return () => { cancelled = true; };
+  }, [positions.length, generatedAt]);
 
   function toggleSort(k: SortKey) {
     if (sortKey === k) setSortDir(d => d === 'desc' ? 'asc' : 'desc');
@@ -793,6 +828,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <SignalBadge verdict={pick.recommendation} />
                           <HorizonBadge horizon={pick.horizon} />
+                          <ConcentrationBadge sector={pick.sector} concentratedSectors={concentratedSectors} />
                         </div>
                       </td>
 
