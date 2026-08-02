@@ -18,8 +18,9 @@ This starts four services (`docker-compose.yml`):
 - **postgres** — Postgres 16, with a named volume so data survives `docker compose down` (not `down -v`)
 - **redis** — `redis:7-alpine`, persisted via a named volume; wired into the `backend` service's
   `REDIS_URL` automatically (see "Scaling" below)
-- **backend** — `Dockerfile` at the repo root, single `uvicorn` worker (see "Scaling" below), reads `.env`
-  for provider keys and gets `DATABASE_URL`/`REDIS_URL`/`ALLOWED_ORIGINS` set automatically by compose
+- **backend** — `backend/Dockerfile` (build context `./backend` in `docker-compose.yml`), single
+  `uvicorn` worker (see "Scaling" below), reads `.env` (repo root) for provider keys and gets
+  `DATABASE_URL`/`REDIS_URL`/`ALLOWED_ORIGINS` set automatically by compose
 - **frontend** — `frontend/Dockerfile`, a multi-stage build using Next.js's `output: 'standalone'`
   (`next.config.ts`), gets `API_URL` pointed at the `backend` service automatically
 
@@ -33,7 +34,7 @@ for the full fresh-DB-vs-existing-DB story. `alembic upgrade head` above is for 
 database (which is what a fresh `docker compose up` gives you). If you're pointing this compose
 setup at a database that already has the original 11 tables from before Alembic was introduced
 (and predates the EOD price store / Portfolio Aggregator tables), run
-`docker compose exec backend alembic stamp 0001_baseline_schema` followed by
+`docker compose exec backend alembic stamp 0001` followed by
 `docker compose exec backend alembic upgrade head` instead — plain `upgrade head` will fail trying
 to re-create the 11 tables that already exist, and a bare `stamp head` would skip creating the 10
 newer tables for real. If the database is already fully caught up, neither is needed.
@@ -45,11 +46,36 @@ which you don't want under real traffic). For production:
 
 ```bash
 source .venv/bin/activate
+cd backend
 uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
 If you need process supervision (auto-restart on crash, log rotation), run it under `systemd`, `supervisor`,
 or similar rather than backgrounding it directly. See "Scaling" below before adding `--workers`.
+
+> **The working directory must be `<repo>/backend`, not the repo root.** This is the one thing the
+> backend-directory move can break silently. About seventeen paths — `cache.py`'s
+> `CACHE_DIR = Path("output")`, the LLM cost counters, source-health and scraper-error counters,
+> the NSE/SME/NIFTY-500 master caches, `signals/store.py`'s `signals_data/` — are resolved relative
+> to the current working directory, not to `__file__`.
+>
+> Start the process from the repo root and it comes up cleanly, serves cleanly, and quietly writes
+> to a brand-new empty `<repo>/output/` that `.gitignore` hides from `git status`. Nothing crashes
+> and nothing is logged. What you get is a permanent total cache miss: every scraper re-fetches
+> against the rate-limit-sensitive NSE and Screener.in endpoints this codebase is otherwise careful
+> with, `/api/market-picks` re-runs the full paid LLM pipeline on every request because
+> `output/_market_picks/picks.json` always reads empty, and the NSE symbol master re-downloads.
+>
+> For a `systemd` unit that means:
+>
+> ```ini
+> [Service]
+> WorkingDirectory=/path/to/stock-research/backend
+> ExecStart=/path/to/stock-research/.venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000
+> ```
+>
+> Docker and CI are both immune — the image sets `WORKDIR /app` and the workflows set
+> `working-directory: backend`. This applies only to a manual/self-hosted deploy.
 
 **Frontend** — build once, then run the production server (not `next dev`):
 
@@ -62,18 +88,19 @@ npm run start   # or: node .next/standalone/server.js if you built with output: 
 Put both behind a reverse proxy (nginx, Caddy, a cloud load balancer) for TLS termination — neither
 `uvicorn` nor `next start` handles HTTPS itself in this setup.
 
-**Database schema**: run `alembic upgrade head` once against a fresh database, or `alembic stamp
-0001_baseline_schema` followed by `alembic upgrade head` against a database that already has the
-original 11 tables from before this app used Alembic — see
-[Setup & Configuration](setup.md#database-schema-setup-alembic) for the full distinction. From
-here on, schema changes ship as new Alembic revisions (`alembic revision --autogenerate`, then
-`alembic upgrade head` on deploy) rather than hand-edited `db/schema.sql` guards or ad-hoc
-`metadata.create_all()` calls. This replaces the old workflow documented in earlier versions of
-this file; `sme_ema_pipeline.py --setup-db`/`--reset-db` and `screener_pipeline.py --setup-db`/
-`--reset-db` also now stamp Alembic head automatically after their own `create_all()`/`drop_all()`
-calls, so a deployment that provisions its schema through one of those CLI flags instead of
-Alembic directly still ends up in a state `alembic upgrade head` can build on later without
-conflict.
+**Database schema** (all Alembic commands run from `backend/`): `alembic upgrade head` once
+against a fresh database, or `alembic stamp 0001` followed by `alembic upgrade head` against a
+database that already has the original 11 tables from before this app used Alembic — see
+[Setup & Configuration](setup.md#database-schema-setup-alembic) for the full distinction. The
+revision identifier is `0001`, not the filename stem `0001_baseline_schema`; Alembic resolves by
+revision id and fails on the longer form.
+
+From here on, schema changes ship as new Alembic revisions (`alembic revision --autogenerate`,
+then `alembic upgrade head` on deploy) rather than hand-edited `db/schema.sql` guards or ad-hoc
+`metadata.create_all()` calls. `sme_ema_pipeline.py` and `screener_pipeline.py`'s
+`--setup-db`/`--reset-db` flags also stamp Alembic head automatically after their own
+`create_all()`/`drop_all()`, so a deployment provisioned through one of those flags still ends up
+in a state `alembic upgrade head` can build on later without conflict.
 
 **Error tracking / APM (optional)**: set `SENTRY_DSN` (and optionally `SENTRY_ENVIRONMENT`,
 default `production`) to forward every error-level `observability.log_event()` call to a
@@ -84,7 +111,7 @@ that doesn't already have another way to get paged on a backend error; there's n
 signal on the frontend.
 
 **Real client IPs for per-IP rate limiting**: the Next.js frontend talks to the FastAPI backend
-server-to-server (see "Proxy routes" in CLAUDE.md) — without anything further, every one of
+server-to-server (see "Proxy routes" in backend/CLAUDE.md) — without anything further, every one of
 `api.py`'s per-IP rate limiters sees only the Next.js server's own IP for every request, collapsing
 them into one shared bucket for the whole site. Once a reverse proxy sits in front of the frontend,
 two things need to line up:
@@ -120,7 +147,7 @@ the same in-memory-per-process behavior this app had before Redis support existe
 | State | What it does | Without `REDIS_URL` (>1 worker/replica) |
 |---|---|---|
 | Rate limiter | Per-IP sliding window (20 req/5min on `/api/analyse`, etc.) | Each worker gets its own counter — the documented limits become *per-worker*, silently multiplying the effective limit |
-| LLM concurrency ceiling | Caps concurrent analyst/market-picks LLM pipelines across all callers | Each worker gets its own ceiling — `N` workers × the configured limit can run concurrently instead of the limit as a whole |
+| LLM concurrency ceiling | Caps concurrent analyst/market-picks LLM pipelines across all callers (`LLM_CONCURRENCY_LIMIT`, default 4) | Each worker gets its own ceiling — `N` workers × the configured limit can run concurrently instead of the limit as a whole |
 | Refresh locks (SME, Screener, Market Picks) | One `/api/sme-signals/refresh`, `/api/screener/refresh`, or force-refresh `/api/market-picks` run at a time, each independently | Two workers can both accept the same POST and run the pipeline concurrently — wasteful (duplicate NSE/yfinance/scraper calls), not corrupting (every underlying upsert is idempotent) |
 | Cached DB engine (`_DB_ENGINE`) | Reused SQLAlchemy engine | Harmless either way — each worker just gets its own connection pool, not a bug, just not shared |
 | `cache.py`'s six-task cache (`stock_info`, `research`, `news`, ...) | The persistent shared state behind every analysis/market-picks/peers/etc. cache TTL | **Only a problem across separate *hosts*/replicas without a shared disk volume** (same-host workers already share one local disk) — each host forks its own copy of every cache entry, multiplying scraper load on Screener.in/NSE/Trendlyne/RBI by however many hosts are running, since none of them see each other's writes |
@@ -188,6 +215,11 @@ Beyond an LLM provider key (see [Setup](setup.md)), production deployments shoul
 - `TRUSTED_PROXY_SECRET` — set on both backend and frontend once a reverse proxy/CDN sits in front
   of the frontend (see "Real client IPs for per-IP rate limiting" above); safe to leave unset otherwise
 - `LOG_LEVEL=INFO` (default) — bump to `DEBUG` temporarily when diagnosing an issue, not left on in steady state
+- `LLM_CONCURRENCY_LIMIT` (default `4`) / `EXECUTOR_MAX_WORKERS` (default `16`) — throughput knobs,
+  fine to leave at their defaults. Raise the first only if your LLM provider's own concurrency
+  allowance is higher than 4 and analyses are queueing; keep it below `EXECUTOR_MAX_WORKERS` so
+  quick requests (validate, prices) aren't starved by in-flight analyses. Both are per-worker
+  unless `REDIS_URL` is set (see "Scaling" above)
 
 Also run `alembic upgrade head` (fresh DB) or the stamp-then-upgrade pair (existing pre-Alembic DB)
 as part of your deploy process once `DATABASE_URL` is set — see "Database schema" above.

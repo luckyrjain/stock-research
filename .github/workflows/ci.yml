@@ -14,6 +14,9 @@ jobs:
   backend:
     name: Backend (pytest)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
     services:
       # Only used by the dedicated Alembic step below — the main `pytest
       # tests/` step runs exactly as before, with DATABASE_URL unset, same

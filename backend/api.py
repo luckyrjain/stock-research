@@ -954,8 +954,9 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
                     # A pipeline run that completes without raising but yields zero picks, or
                     # that pipeline.healthy flags as substantially degraded (e.g. most scrape
                     # sources failed simultaneously), must not be cached — caching it would
-                    # serve that broken result as "fresh" for 6h and mask the outage from
-                    # every subsequent visitor.
+                    # serve that broken result as "fresh" for the full 192h
+                    # (_PICKS_CACHE_TTL_HOURS — 7 days, matching the weekly cron
+                    # cadence) and mask the outage from every subsequent visitor.
                     if picks and pipeline.healthy:
                         _save_picks_cache(picks, generated_at)
                     else:
@@ -1583,8 +1584,11 @@ async def get_shareholding_breakdown(request: Request, symbol: str):
         raw = json.loads(_fetch.run(symbol=sym))
         if raw.get("error"):
             # Not cached — same "retry on next request, don't lock a
-            # transient failure in for the full 24h TTL" convention as
+            # transient failure in for the full TTL" convention as
             # GET /api/peers/{symbol} and GET /api/financials/{symbol}.
+            # Note this task's TTL is 168h (7 days — same quarterly NSE XBRL
+            # filing as mf_holdings), not the 24h those two use, so locking a
+            # failure in here would be correspondingly worse.
             import scraper_error_counters
             scraper_error_counters.record_scraper_error("shareholding_detail", symbol=sym)
             return {"symbol": sym, "as_of_date": None, "promoters": [], "shareholder_categories": [], "unavailable": True}

@@ -180,13 +180,13 @@ function ComparePageInner() {
             spellCheck={false}
             aria-label="Tickers to compare, comma-separated"
             className="flex-1 bg-card border border-border rounded-lg px-3 py-2 text-sm font-mono
-                       uppercase tracking-wide text-tx placeholder:text-muted placeholder:normal-case
+                       uppercase tracking-wide text-tx placeholder:text-muted/50 placeholder:normal-case
                        placeholder:font-sans placeholder:tracking-normal outline-none
                        focus:border-accent transition-colors"
           />
           <button
             type="submit"
-            className="px-4 py-2 rounded-lg text-sm font-semibold bg-accent text-white
+            className="px-4 py-2 rounded-lg text-sm font-semibold bg-accent text-bg
                        hover:opacity-90 transition-opacity"
           >
             Compare

@@ -11,7 +11,7 @@ The Python data layer is split into six groups:
 
 Every scraper in this codebase follows the same "never raise" convention: on failure, a tool
 returns `{"error": "...", ...}` (or, for the newer non-`@tool` helpers, an all-`None`/empty-list
-shape) rather than throwing — see "Important Rules for Claude" in `CLAUDE.md`.
+shape) rather than throwing — see "Important Rules for Claude" in `backend/CLAUDE.md`.
 
 ---
 
@@ -46,7 +46,7 @@ Returns quote and company metadata:
 | `52w_low` | number | 52-week low |
 | `dividend_yield_pct` | number | Dividend yield % |
 | `beta` | number | Beta vs index |
-| `sector` | string | Sector classification (yfinance's own taxonomy — see the "Sector-aware signal weights" disclosed limitation in `CLAUDE.md`) |
+| `sector` | string | Sector classification (yfinance's own taxonomy — see the "Sector-aware signal weights" disclosed limitation in `backend/CLAUDE.md`) |
 | `industry` | string | Industry classification |
 | `about` | string | Company description |
 | `prices_by_exchange` | object | Per-exchange price map (NSE, BSE) |
@@ -262,7 +262,7 @@ These feed the standalone, on-demand endpoints (`/api/peers`, `/api/financials`,
 
 ### `dcf_valuation.py::compute_dcf_estimate`
 
-- File: **`dcf_valuation.py`** (repo root, *not* under `tools/`) — a pure computation module, not a scraper
+- File: **`backend/dcf_valuation.py`** (backend root, *not* under `tools/`) — a pure computation module, not a scraper
 - Input: the `cash_flow` dict from `get_financial_statements`, plus `current_price` and `market_cap_cr`
 
 A deterministic two-stage DCF off the cash-flow table's Operating Activity row — never
@@ -282,7 +282,7 @@ Otherwise returns:
 | `terminal_growth` | number | % — fixed at 5% |
 | `latest_ocf_cr` | number | ₹ Cr — the OCF the projection started from |
 
-**Disclosed simplifications** (from the module's own docstring — see CLAUDE.md's "Multi-year
+**Disclosed simplifications** (from the module's own docstring — see backend/CLAUDE.md's "Multi-year
 financial statements + DCF valuation flow" section for the full rationale):
 1. Operating Cash Flow is used as the Free-Cash-Flow proxy — Screener's cash-flow table has no
    cleanly-labelled, sector-independent Capex row to net against it.
@@ -505,6 +505,16 @@ Fixed normalization reference for the consensus scoring component: `_CONSENSUS_R
 prevents the higher-weight sources (NSE Bulk 0.85, Trendlyne 0.75, Screener 0.70) from inflating
 `max_effective_signal` and compressing every other stock's consensus score.
 
+### `tools/screener_scanner.py`
+
+The one market-picks source that isn't an RSS/GNews/NSE-API scrape — it queries Screener.in's
+public `/screen/raw/` endpoint with two hardcoded quality criteria sets (high ROE + low debt +
+strong profit/sales growth ≥ ₹1000 Cr cap; high ROCE + PE under 35 + positive earnings growth
+≥ ₹500 Cr cap) and formats each qualifying stock as a plain-language article so the extraction
+LLM can assign a BUY direction from the fundamental rationale in the summary. Falls back to a
+GNews query when the screen URL is unavailable or requires login — the one source whose `type`
+can therefore change from `brokerage` to `news` at runtime.
+
 ### Adding a new source
 
 1. Define scraper functions in a new module (e.g. `tools/my_brokerage.py`)
@@ -516,7 +526,7 @@ prevents the higher-weight sources (NSE Bulk 0.85, Trendlyne 0.75, Screener 0.70
 
 ## SME stock-list fetchers
 
-Used only by `sme_ema_pipeline.py`. Live in `tools/sme_tools.py`; lists are cached under `output/` for 24 h.
+Used only by `sme_ema_pipeline.py`. Live in `tools/sme_tools.py`; lists are cached under `backend/output/` for 24 h.
 
 | Function | Source | Returns |
 |---|---|---|
@@ -544,7 +554,7 @@ reasonable at, unlike the full ~2000-symbol NSE equity master.
 |---|---|---|
 | `tools/nifty500_tools.py::get_nifty500_constituents(force=False)` | NSE archive CSV (`ind_nifty500list.csv`) | `[{"symbol", "company_name", "industry", "isin"}, ...]` |
 
-Cached 24h under `output/_nifty500_master.json`. A truncated-but-nonempty response (a partial
+Cached 24h under `backend/output/_nifty500_master.json`. A truncated-but-nonempty response (a partial
 download, a paginated/rate-limited NSE reply) is treated as a failed fetch, not cached, if it
 returns fewer than `_MIN_PLAUSIBLE_COUNT` (400) rows — a screener silently built on a truncated
 universe would look correct while quietly missing most of the market. Falls back to a stale cache
@@ -557,14 +567,14 @@ verified against a live response in this sandbox.
 ## EOD price store + Portfolio Aggregator support tools
 
 Feeds `eod_prices_pipeline.py`, `corporate_actions_pipeline.py`, and (via `resolve_symbol`)
-`csv_import.py`'s broker-CSV import — see CLAUDE.md's "EOD price store + corporate actions flow",
+`csv_import.py`'s broker-CSV import — see backend/CLAUDE.md's "EOD price store + corporate actions flow",
 "Securities master + symbol resolver", and "Portfolio Aggregator" sections for full design detail.
 
 ### `tools/eod_sources.py`
 
 | Function | Source | Returns |
 |---|---|---|
-| `download_bhavcopy(trade_date, session)` | NSE `sec_bhavdata_full_DDMMYYYY.csv` archive | Raw CSV text, archived to `output/_bhavcopy/` before parsing (replay without re-hitting NSE) |
+| `download_bhavcopy(trade_date, session)` | NSE `sec_bhavdata_full_DDMMYYYY.csv` archive | Raw CSV text, archived to `backend/output/_bhavcopy/` before parsing (replay without re-hitting NSE) |
 | `parse_bhavcopy(csv_text)` | — | List of per-symbol OHLC/volume/turnover/delivery-% dicts, filtered to `EQ`/`BE`/`BZ` series only |
 | AMFI NAV fetch/parse | AMFI `NAVAll.txt` | Filtered to scheme codes actually held in the Portfolio Aggregator's `assets` table — ~40k total schemes is too many to store wholesale |
 
@@ -619,6 +629,24 @@ success.
 
 ---
 
+## Shared GNews timeout guard
+
+`tools/_gnews_timeout.py` has no functions — importing it *is* the side effect. `gnews`'s
+`GNews.get_news()` delegates to `feedparser.parse()`, which uses `urllib` with no per-call
+timeout of its own, so a slow Google News response can hang the calling thread indefinitely.
+Since `market_picks_pipeline.py`'s `_phase_scrape` runs each source scraper in a
+`ThreadPoolExecutor` whose `with` block waits for every submitted thread, one hung GNews call
+would hang the entire weekly pipeline run — not just that one source.
+
+The module sets `socket.setdefaulttimeout(20)` at import time. That only supplies the *default*
+for sockets opened without an explicit timeout; every `requests`-based call elsewhere in this
+codebase already passes its own `timeout=`, which always takes priority, so this only ever
+affects call paths (like GNews's) that currently have none. Every module that calls GNews does
+`import tools._gnews_timeout  # noqa: F401` first; Python caches the module, so importing it
+from several call sites is idempotent.
+
+---
+
 ## Normalization
 
 Raw tool output from the six `ALL_DATA_TASKS` tools is always normalized through
@@ -634,5 +662,5 @@ discards error payloads; guardrails detect them and trigger retries.
 
 `schema_drift.py` additionally checks that the *type* (not just presence) of container-shaped
 raw fields (e.g. `research.ratios` should stay a `dict`) hasn't silently changed shape — see
-`schemas.CONTRACTS`'s `"types"` entries and CLAUDE.md's "Schema-drift detection" section. This is
+`schemas.CONTRACTS`'s `"types"` entries and backend/CLAUDE.md's "Schema-drift detection" section. This is
 scoped to the six data slices only, not the standalone tools in this doc.

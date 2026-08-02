@@ -67,7 +67,7 @@ function SamplePickCard() {
             </div>
             <div className="text-[10px] text-muted mt-0.5">IT Services · NSE · 7 sources this week</div>
           </div>
-          <div className="w-6 h-6 rounded-full bg-accent flex items-center justify-center text-[10px] font-black text-white shrink-0 shadow-sm shadow-accent/30">
+          <div className="w-6 h-6 rounded-full bg-accent flex items-center justify-center text-[10px] font-black text-bg shrink-0 shadow-sm shadow-accent/30">
             1
           </div>
         </div>
@@ -134,10 +134,10 @@ function PipelineStepper({ phase }: { phase: MarketPicksPhase }) {
           <div key={step.id} className="flex items-center flex-1 min-w-0">
             <div className="flex flex-col items-center flex-1 min-w-0">
               <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold border-2 transition-all
-                ${isDone   ? 'bg-buy border-buy text-white' :
-                  isActive ? 'bg-accent border-accent text-white' :
+                ${isDone   ? 'bg-buy border-buy text-bg' :
+                  isActive ? 'bg-accent border-accent text-bg' :
                   'bg-surface border-border text-muted'}`}>
-                {isDone ? '✓' : <span className={isActive ? 'text-white' : ''}>{i + 1}</span>}
+                {isDone ? '✓' : <span>{i + 1}</span>}
               </div>
               <div className="mt-1.5 text-center px-1">
                 <div className={`text-[11px] font-semibold leading-none
@@ -411,7 +411,7 @@ export default function MarketPicksPage() {
                 <div className="flex items-center gap-4 flex-wrap mb-3">
                   <button
                     onClick={() => startScan()}
-                    className="px-7 py-3 rounded-xl bg-accent text-white font-bold text-sm
+                    className="px-7 py-3 rounded-xl bg-accent text-bg font-bold text-sm
                                hover:bg-accent/90 active:scale-95 transition-all shadow-lg shadow-accent/20"
                   >
                     See This Week&apos;s Picks →

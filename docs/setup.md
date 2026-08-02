@@ -18,10 +18,12 @@
 From the repo root:
 
 ```bash
-/opt/homebrew/bin/python3.13 -m venv .venv
+/opt/homebrew/bin/python3.13 -m venv .venv   # venv lives at the repo root, shared by the whole backend
 source .venv/bin/activate
+cd backend
 pip install -r requirements.txt
-cp .env.example .env
+cd ..
+cp .env.example .env   # .env stays at the repo root — shared by both stacks
 ```
 
 Then edit `.env` and set the provider you want to use.
@@ -35,10 +37,12 @@ Then edit `.env` and set the provider you want to use.
 | `GROQ_API_KEY` | One key required | Groq API key |
 | `GOOGLE_API_KEY` | One key required | Google Gemini API key |
 | `OPENROUTER_API_KEY` | One key required | OpenRouter API key (access to 300+ models) |
-| `LLM_PROVIDER` | No | `anthropic` / `openai` / `groq` / `google` / `openrouter` / `ollama` — auto-detected if unset. If set explicitly, it also **disables cross-provider failover** even when a second provider's key is present (see CLAUDE.md's "LLM cost instrumentation + cross-provider failover") — an explicit pin is treated as deliberate, not incidental |
+| `LLM_PROVIDER` | No | `anthropic` / `openai` / `groq` / `google` / `openrouter` / `ollama` — auto-detected if unset. If set explicitly, it also **disables cross-provider failover** even when a second provider's key is present (see `backend/CLAUDE.md`'s "LLM cost instrumentation + cross-provider failover") — an explicit pin is treated as deliberate, not incidental |
 | `ANALYST_MODEL` | No | Model for the analyst step (stock analysis) and market picks' extraction/analysis LLM calls — the only model-selection env var that does anything (data fetching never calls an LLM) |
-| `OLLAMA_BASE_URL` | Ollama only | Default: `http://localhost:11434` |
+| `OLLAMA_BASE_URL` | No — **currently a no-op** | Present in `.env.example`, but **no backend code reads it**. litellm's Ollama provider reads `OLLAMA_API_BASE`, not this name, so setting it has no effect today; a non-default Ollama host needs `OLLAMA_API_BASE` instead. Flagged rather than silently removed — verify against your litellm version before relying on either |
 | `LOG_LEVEL` | No | `DEBUG` / `INFO` / `WARNING` — default: `INFO` |
+| `LLM_CONCURRENCY_LIMIT` | No | Max concurrent analyst/market-picks LLM pipelines across all callers — default `4` (`api.py`). Shared across workers only when `REDIS_URL` is set; per-worker otherwise |
+| `EXECUTOR_MAX_WORKERS` | No | Size of the shared `ThreadPoolExecutor` backing every blocking call in the async request path — default `16` (`api.py`). Deliberately larger than `LLM_CONCURRENCY_LIMIT` so quick requests (validate, prices) aren't starved by in-flight analyses |
 | `DATABASE_URL` | SME signals, Screener, Watchlist, Positions, auth, API keys, Alembic | PostgreSQL DSN, e.g. `postgresql://user:pass@localhost:5432/sme_research` |
 | `REDIS_URL` | No (only past 1 backend worker/replica) | e.g. `redis://localhost:6379/0` — shares rate-limit/concurrency guards, and `cache.py`'s scraped-data cache, across workers/hosts; see [Deployment](deployment.md#scaling-read-this-before-adding-workers-or-replicas) |
 | `FRONTEND_URL` | Account/magic-link auth | Canonical frontend origin embedded in the magic-link sign-in email (`{FRONTEND_URL}/auth/verify?token=...`) — that page has to run in the browser on the frontend's own origin to receive the session cookie. Defaults to `http://localhost:3000` |
@@ -90,25 +94,29 @@ exposed to the browser) and, like the backend's copy, is optional — see the ta
 
 ```bash
 source .venv/bin/activate
+cd backend
 uvicorn api:app --reload --port 8000
 ```
 
-The backend now exposes 35+ routes across `api.py` and `routes/` — the table below groups them
-by feature area rather than listing every one; see CLAUDE.md's "Agent Orchestration" section for
-the full narrative on each flow.
+The backend exposes **57 routes** — 29 declared in `api.py`, 28 across the three routers in
+`routes/` (17 Portfolio Aggregator, 6 Positions, 5 Watchlist). The table below groups them by
+feature area rather than listing every one; see `backend/CLAUDE.md`'s "Agent Orchestration"
+section for the full narrative on each flow.
 
 | Area | Endpoint(s) | Notes |
 |---|---|---|
 | Core analysis | `GET /api/validate/{symbol}`, `GET /api/analyse/{symbol}` | Symbol validation; the main SSE analysis stream |
 | Prices | `GET /api/prices`, `GET /api/prices/history/{symbol}` | Live quotes; sparkline history (`?benchmark=true` for vs.-Nifty alpha) |
 | Peers & valuation | `GET /api/peers/{symbol}`, `GET /api/financials/{symbol}` | Peer comparison + absolute P/E-history anchor; multi-year statements, concalls, and DCF estimate |
+| Shareholding | `GET /api/shareholding-detail/{symbol}` | Named promoters + every other named-shareholder category from NSE's shareholding XBRL filing |
 | Activity & consensus | `GET /api/insider-activity/{symbol}`, `GET /api/street-consensus/{symbol}` | Promoter/director trades + bulk/block deals; Trendlyne-cited articles + numeric consensus |
 | Verdict history | `GET /api/verdict-history/{symbol}` | Daily verdict/price snapshots + win-rate scoring |
 | Market picks | `GET /api/market-picks`, `GET /api/market-picks/status`, `GET /api/market-picks/history` | Weekly picks SSE stream (`?force=true`); cache metadata; per-symbol/per-day track record |
 | SME signals | `GET /api/sme-signals`, `GET /api/sme-signals/{symbol}/history`, `POST /api/sme-signals/refresh` | Golden/death cross screener (PostgreSQL-backed) |
 | Screener | `GET /api/screener`, `POST /api/screener/refresh` | NIFTY 500 custom screener (PostgreSQL-backed) |
 | Watchlist | `GET/POST /api/watchlist`, `DELETE /api/watchlist/{symbol}`, `GET /api/watchlist/calendar`, `POST /api/watchlist/claim` | Cross-mode watchlist; corporate-action calendar roll-up; claim-anonymous-rows-onto-account |
-| Positions | `GET/POST /api/positions`, `PATCH/DELETE /api/positions/{symbol}`, `POST /api/positions/claim` | "I bought this" tracking, same ownership shape as Watchlist |
+| Positions | `GET/POST /api/positions`, `PATCH/DELETE /api/positions/{symbol}`, `POST /api/positions/claim`, `GET /api/portfolio/concentration` | "I bought this" tracking, same ownership shape as Watchlist; the concentration check lives in `routes/positions.py` despite its `/api/portfolio` prefix |
+| Portfolio Aggregator | `GET/POST /api/portfolio/profiles`, `GET/POST/PATCH/DELETE /api/portfolio/accounts[/{id}]`, `.../assets[/{id}]`, `POST .../assets/{id}/valuations`, `GET .../networth`, `POST .../refresh-valuations`, `GET .../xirr`, `POST .../import-cas`, `POST .../import-csv[/preview]` | 17 routes in `routes/portfolio_aggregator.py` — the separate net-worth tracker, no auth. See "Portfolio Aggregator" below |
 | Consolidated | `GET /api/consolidated/{symbol}` | Pure aggregation of the three modes' caches — no new fetching |
 | Auth | `POST /api/auth/request-link`, `GET /api/auth/verify`, `GET /api/auth/me`, `POST /api/auth/logout` | Magic-link account system |
 | API keys | `GET/POST /api/api-keys`, `DELETE /api/api-keys/{id}`, `GET /api/v1/consolidated/{symbol}` | Key management + usage dashboard; the one `/api/v1/*` externally-callable route |
@@ -124,6 +132,7 @@ npm run dev
 - Stock analysis: [http://localhost:3000](http://localhost:3000)
 - Compare two stocks: [http://localhost:3000/compare?symbols=TCS,INFY](http://localhost:3000/compare?symbols=TCS,INFY)
 - Market picks: [http://localhost:3000/market-picks](http://localhost:3000/market-picks)
+- Market picks track record: [http://localhost:3000/market-picks/history](http://localhost:3000/market-picks/history)
 - Portfolio (aggregate "I bought this" view): [http://localhost:3000/portfolio](http://localhost:3000/portfolio)
 - Portfolio Aggregator (separate net-worth tracker — profiles/accounts/assets, CAS/CSV import,
   XIRR): [http://localhost:3000/portfolio-aggregator](http://localhost:3000/portfolio-aggregator)
@@ -138,6 +147,7 @@ npm run dev
 
 ```bash
 source .venv/bin/activate
+cd backend
 python main.py TCS
 python main.py RELIANCE --force   # bypass cache
 ```
@@ -148,7 +158,7 @@ Every PostgreSQL-backed feature (SME Signals, Screener, Watchlist, Positions, au
 EOD price store, corporate actions, and the Portfolio Aggregator — 21 tables total) shares one
 SQLAlchemy Core `MetaData()` object (`db/models.py`). Schema changes
 are now managed through **Alembic** rather than ad-hoc `create_all()` calls or hand-edited
-`ALTER TABLE` statements in `db/schema.sql` (see CLAUDE.md's "Schema migrations" section for the
+`ALTER TABLE` statements in `db/schema.sql` (see backend/CLAUDE.md's "Schema migrations" section for the
 full story — `db/schema.sql` is kept only as a frozen pre-Alembic reference).
 
 There are two paths, depending on whether the database already has these tables:
@@ -157,6 +167,7 @@ There are two paths, depending on whether the database already has these tables:
 
 ```bash
 source .venv/bin/activate
+cd backend
 createdb sme_research   # or whatever DATABASE_URL points at
 alembic upgrade head
 ```
@@ -171,17 +182,20 @@ via one of the pipelines' `--setup-db` flags before Alembic existed — i.e. pre
 store / corporate actions / Portfolio Aggregator tables):
 
 ```bash
-alembic stamp 0001_baseline_schema
+cd backend
+alembic stamp 0001
 alembic upgrade head
 ```
 
+The revision identifier is `0001`, not the filename stem `0001_baseline_schema` — Alembic
+resolves by revision id and will fail with "Can't locate revision" on the longer form.
+
 Stamp `0001` specifically here, **not** `alembic stamp head` — stamping straight to `head` would
 mark the database as already having the EOD/portfolio tables too, when it doesn't, and Alembic
-would then never actually create them. Stamping `0001` records "this database is already at the
-baseline revision" without executing any DDL for those 11 tables (`alembic upgrade head` against
-them would fail — the `CREATE TABLE` statements in `0001` collide with tables that already exist),
-then the subsequent `upgrade head` applies the two later revisions normally, creating the 10 new
-tables for real.
+would then never create them. Stamping `0001` records "already at the baseline revision" without
+executing DDL for those 11 tables (a plain `upgrade head` would fail — `0001`'s `CREATE TABLE`
+statements collide with tables that already exist), then the subsequent `upgrade head` applies the
+two later revisions normally, creating the 10 new tables for real.
 
 **Existing deployment already fully caught up** (already ran the two commands above, or was
 created after this session's work landed): nothing to do — already at `head`.
@@ -189,25 +203,22 @@ created after this session's work landed): nothing to do — already at `head`.
 **From here on**, schema changes should be authored as new Alembic revisions:
 
 ```bash
+cd backend
 # after editing db/models.py
 alembic revision --autogenerate -m "add some_column to some_table"
 alembic upgrade head
 ```
 
-**The `--setup-db`/`--reset-db` CLI flags on `sme_ema_pipeline.py` and `screener_pipeline.py`
-now call `db.models.stamp_alembic_head()` automatically** right after their own
-`metadata.create_all(engine)` call — so a database that was set up via `python
-sme_ema_pipeline.py --setup-db` (bypassing Alembic entirely) still ends up with a correct
-`alembic_version` row, and a later `alembic upgrade head` on that same database won't fail
-trying to re-create tables that already exist. In other words: whichever path you use to first
-create the tables (`alembic upgrade head`, or a pipeline's `--setup-db`), the database ends up
-in the same Alembic-tracked state either way (though note: this auto-stamp calls `stamp_alembic_head()`,
-i.e. stamps to the current `head` including the EOD/portfolio revisions, so only use a bare
-`sme_ema_pipeline.py --setup-db`/`screener_pipeline.py --setup-db` as your *only* setup step if you
-don't also need the EOD/portfolio tables created — otherwise still run `alembic upgrade head`
-yourself for those). The `alembic stamp 0001_baseline_schema` + `alembic upgrade head` pair above
-is what you need for a database that predates this auto-stamping (i.e. was set up before Alembic
-existed at all) and hasn't been touched by a pipeline's `--setup-db`/`--reset-db` since.
+**The `--setup-db`/`--reset-db` flags on `sme_ema_pipeline.py` and `screener_pipeline.py` call
+`db.models.stamp_alembic_head()` automatically** right after their own `metadata.create_all()`,
+so a database provisioned that way still gets a correct `alembic_version` row and a later
+`alembic upgrade head` won't fail trying to re-create existing tables.
+
+One caveat: that auto-stamp goes to the current `head`, including the EOD/portfolio revisions —
+so if you use a bare `--setup-db` as your only setup step, run `alembic upgrade head` yourself
+afterwards if you also need the EOD price store / Portfolio Aggregator tables. The
+`alembic stamp 0001` + `alembic upgrade head` pair above is only for a database that predates
+Alembic entirely and hasn't been touched by a pipeline's `--setup-db`/`--reset-db` since.
 
 ## SME signals pipeline
 
@@ -217,6 +228,7 @@ sme_research`), then either run `alembic upgrade head` (see above) or use the pi
 
 ```bash
 source .venv/bin/activate
+cd backend
 python sme_ema_pipeline.py --setup-db   # create tables (idempotent) + stamp alembic head
 python sme_ema_pipeline.py              # fetch SME stocks, compute EMA20/EMA50 crosses, store
 python sme_ema_pipeline.py --reset-db   # drop + recreate tables (after schema changes; data is regenerable)
@@ -225,7 +237,7 @@ python sme_ema_pipeline.py --lookback 10  # report window for the CLI summary
 ```
 
 **`--reset-db` drops and recreates every table in the shared `MetaData()`, not just this
-pipeline's own** — see CLAUDE.md's "SME golden cross flow" section for the disclosed blast-radius
+pipeline's own** — see backend/CLAUDE.md's "SME golden cross flow" section for the disclosed blast-radius
 caveat. Don't run it against a database with real Watchlist/Positions/account data unless you
 mean to lose it.
 
@@ -243,7 +255,7 @@ missing. Trigger a one-off run from the Actions tab ("Run workflow"). If you'd r
 this locally/self-hosted instead of on GitHub Actions, a crontab entry works too:
 
 ```cron
-30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
+30 18 * * 1-5 cd /path/to/stock-research/backend && ../.venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
 ```
 
 ## Market picks pipeline
@@ -253,10 +265,11 @@ run from the CLI, or via the **Fresh scan** / **See This Week's Picks** buttons 
 
 ```bash
 source .venv/bin/activate
+cd backend
 python market_picks_pipeline.py
 ```
 
-This saves straight to `output/_market_picks/picks.json`, bypassing `api.py`'s SSE endpoint —
+This saves straight to `backend/output/_market_picks/picks.json`, bypassing `api.py`'s SSE endpoint —
 only useful when run on the same host/disk as the backend (e.g. a self-hosted crontab, same
 caveat as the SME crontab alternative above).
 
@@ -272,10 +285,11 @@ exactly like a user clicking "Fresh scan." Add a `MARKET_PICKS_API_URL` reposito
 ## Custom screener pipeline (NIFTY 500)
 
 Same shape as the SME pipeline above, but over the NIFTY 500 universe instead of SME/Emerge
-stocks — see CLAUDE.md's "Custom screener flow" section. Requires `DATABASE_URL`:
+stocks — see backend/CLAUDE.md's "Custom screener flow" section. Requires `DATABASE_URL`:
 
 ```bash
 source .venv/bin/activate
+cd backend
 python screener_pipeline.py --setup-db   # create the screener_stocks table + stamp alembic head
 python screener_pipeline.py              # fetch NIFTY 500 constituents, quote + technical signal each, store
 python screener_pipeline.py --reset-db   # drop + recreate ONLY screener_stocks (scoped, unlike sme_ema_pipeline.py's --reset-db)
@@ -301,7 +315,7 @@ Each row is owned by either an anonymous per-browser `client_id` (a UUID generat
 and stored in `localStorage`) or, once a user signs in via the magic-link auth system below, the
 account's `user_id`. Signing in does **not** automatically migrate existing `client_id` rows onto
 the account — there's an explicit opt-in "claim my data" prompt on the `/auth/verify` page
-instead (`POST /api/watchlist/claim` / `POST /api/positions/claim`). See CLAUDE.md's "Watchlist
+instead (`POST /api/watchlist/claim` / `POST /api/positions/claim`). See backend/CLAUDE.md's "Watchlist
 flow" section for the full identity-resolution story.
 
 `GET /api/watchlist` / `GET /api/positions` return 503 if `DATABASE_URL` is unset or Postgres is
@@ -314,10 +328,11 @@ same `DATABASE_URL` requirement, no separate setup.
 Requires `DATABASE_URL`. Ingests NSE's daily bhavcopy (OHLCV + delivery %) and AMFI mutual-fund
 NAVs into `securities`/`prices_daily`/`mf_nav_daily`, then a second step ingests NSE corporate
 actions (splits/bonuses/dividends) into `corporate_actions` and recomputes `prices_daily.adj_close`.
-See CLAUDE.md's "EOD price store + corporate actions flow" section for the full design.
+See backend/CLAUDE.md's "EOD price store + corporate actions flow" section for the full design.
 
 ```bash
 source .venv/bin/activate
+cd backend
 python eod_prices_pipeline.py --setup-db     # create securities/prices_daily/mf_nav_daily
 python eod_prices_pipeline.py                # self-healing: ingests any missing day in the last 5
 python eod_prices_pipeline.py --date 2026-08-01
@@ -357,7 +372,7 @@ by the same Alembic step as everything else above).
 - **CAS import** (`POST /api/portfolio/import-cas`) — upload a CAMS/KFintech detailed CAS PDF +
   its password on `/portfolio-aggregator`. New dependency `casparser` (already in
   `requirements.txt`, pulls `pdfminer.six`). Parsed statements are archived (PII-scrubbed) to
-  `output/_cas/` for replay: `python cas_import.py --replay output/_cas/<file>.json --account-id N`.
+  `output/_cas/` for replay: from `backend/`, `python cas_import.py --replay output/_cas/<file>.json --account-id N`.
 - **Broker CSV import** (`POST /api/portfolio/import-csv/preview` then `.../import-csv`) — upload
   a broker trade export (Zerodha tradebook auto-detected; any other broker via a column-mapping
   UI). New dependency `openpyxl` (already in `requirements.txt`, for `.xlsx` files — `pandas`
@@ -415,35 +430,40 @@ or in a real deployment, set it by hand:
 UPDATE users SET tier = 'pro' WHERE email = 'you@example.com';
 ```
 
-This is a deliberate scope call, not an oversight — see CLAUDE.md's "Explicitly out of scope"
+This is a deliberate scope call, not an oversight — see backend/CLAUDE.md's "Explicitly out of scope"
 section (point 3) for why. Don't spend time looking for a checkout flow; there isn't one yet.
 
 ## Cache and output
 
-Per-symbol caches under `output/<SYMBOL>/` with these TTLs:
+Per-symbol caches under `backend/output/<SYMBOL>/` with these TTLs (`cache.TTL_HOURS`):
 
 | Task | TTL |
 |---|---|
 | `stock_info` | 1 hour |
 | `news` | 1 hour |
+| `filings` | 1 hour (not in `TTL_HOURS` — falls through to the 1 h default) |
 | `research` | 24 hours |
 | `analysis` | 24 hours |
 | `shareholding` | 7 days |
 | `mf_holdings` | 7 days |
+| `shareholding_detail` | 7 days (standalone — same quarterly NSE XBRL filing as `mf_holdings`) |
 | `peers`, `financials`, `insider_activity`, `street_consensus` | 24 hours (standalone, outside the six core tasks) |
 | `price_history` | 6 hours |
+
+`fii_dii_flow` and `macro_context` (24 h each) are cached under a fixed `"_MACRO"` pseudo-symbol
+and `index_history` (24 h) under `"NSEI"` — market-wide, not under any real ticker's folder.
 
 Market picks-specific caches:
 
 | Path | TTL | Description |
 |---|---|---|
-| `output/_market_picks/picks.json` | 7 days (192 h) | Full pipeline result |
-| `output/_extract_cache/` | 6 hours | Per-source LLM extraction |
-| `output/_nse_master.txt` | 24 hours | NSE equity symbol list |
-| `output/_history/` | Permanent | Daily snapshots for trend labels + `/market-picks/history` |
-| `output/_llm_cost/<date>.json` | Permanent (one file per day) | Running LLM cost/call counters — see `llm_cost.py` |
-| `output/_source_health/` | Permanent | Per-source freshness/volume tracking — see `source_health.py` |
-| `output/_scraper_error_counters/` | Permanent | Error counters for the 4 standalone per-symbol scrapers |
+| `backend/output/_market_picks/picks.json` | 7 days (192 h) | Full pipeline result |
+| `backend/output/_extract_cache/` | 6 hours | Per-source LLM extraction |
+| `backend/output/_nse_master.txt` | 24 hours | NSE equity symbol list |
+| `backend/output/_history/` | Permanent | Daily snapshots for trend labels + `/market-picks/history` |
+| `backend/output/_llm_cost/<date>.json` | Permanent (one file per day) | Running LLM cost/call counters — see `llm_cost.py` |
+| `backend/output/_source_health/` | Permanent | Per-source freshness/volume tracking — see `source_health.py` |
+| `backend/output/_scraper_error_counters/` | Permanent | Error counters for the standalone per-symbol scrapers |
 
 When `REDIS_URL` is set, `cache.py` writes through to Redis in addition to local disk — see
 [Deployment](deployment.md#scaling-read-this-before-adding-workers-or-replicas).
@@ -453,6 +473,7 @@ When `REDIS_URL` is set, `cache.py` writes through to Redis in addition to local
 ```bash
 # Backend
 source .venv/bin/activate
+cd backend
 python main.py INFY
 uvicorn api:app --reload --port 8000
 
@@ -475,18 +496,19 @@ python watchlist_alerts.py --force   # bypass cache freshness
 
 # Schema migrations
 alembic upgrade head                        # fresh database
-alembic stamp 0001_baseline_schema && alembic upgrade head   # existing DB with only the original 11 tables
+alembic stamp 0001 && alembic upgrade head  # existing DB with only the original 11 tables
 alembic revision --autogenerate -m "..."    # after editing db/models.py
 
-# Backend tests
+# Backend tests (1502 tests, no live network calls)
 python -m pytest tests/
 
 # Frontend
-cd frontend
+cd ../frontend
 npm run dev
 npm run build
 npm run start
-npx tsc --noEmit   # type-check (the only automated frontend check)
+npx tsc --noEmit    # type-check (no ESLint config exists)
+npm run test:e2e    # Playwright E2E — 44 tests across 8 spec files, every backend response mocked
 ```
 
 ## Troubleshooting
@@ -502,9 +524,9 @@ OPENAI_API_KEY=sk-...
 GROQ_API_KEY=gsk_...
 GOOGLE_API_KEY=AIza...
 
-# Or for Ollama
+# Or for Ollama (defaults to http://localhost:11434; see the OLLAMA_BASE_URL
+# note in the env-var table above before pointing at a non-default host)
 LLM_PROVIDER=ollama
-OLLAMA_BASE_URL=http://localhost:11434
 ```
 
 ### Frontend shows backend unavailable
@@ -526,7 +548,7 @@ The pipeline fetches from external RSS feeds and GNews. If all sources return em
 
 ### NSE equity master download fails
 
-The pipeline fails open when `output/_nse_master.txt` cannot be downloaded — all tickers are allowed through. If validation is too permissive, delete the stale cache file and ensure `nsearchives.nseindia.com` is reachable.
+The pipeline fails open when `backend/output/_nse_master.txt` cannot be downloaded — all tickers are allowed through. If validation is too permissive, delete the stale cache file and ensure `nsearchives.nseindia.com` is reachable.
 
 ### SME signals / Screener page returns 503
 
@@ -558,10 +580,27 @@ whether an email actually went out. If you don't receive anything:
 ### `alembic upgrade head` fails with "relation already exists"
 
 This means the database already has these tables (created by hand via `db/schema.sql`, or by a
-pipeline's `--setup-db` before it auto-stamped Alembic — see "Database schema setup" above). Use
-`alembic stamp head` instead — it records the revision without re-running the `CREATE TABLE`
-statements. If you genuinely want a clean slate, drop the tables first (see the `--reset-db`
-caveats above about scope) and re-run `alembic upgrade head`.
+pipeline's `--setup-db` before it auto-stamped Alembic — see "Database schema setup" above). Which
+stamp you need depends on **which** tables it already has:
+
+- **Only the original 11 tables** (i.e. it predates the EOD price store / Portfolio Aggregator):
+  ```bash
+  cd backend
+  alembic stamp 0001 && alembic upgrade head
+  ```
+  Stamp the baseline revision specifically, **not** `alembic stamp head`. There are three
+  revisions now, and a bare `stamp head` marks the two later ones as applied when they aren't —
+  Alembic then never creates the 10 tables they add (`securities`, `prices_daily`,
+  `mf_nav_daily`, `corporate_actions`, `profiles`, `accounts`, `assets`, `holdings`,
+  `valuations`, `transactions`), and the EOD price store and Portfolio Aggregator fail at
+  runtime with nothing having gone wrong at migration time.
+- **All 21 tables already present** (fully caught up — e.g. created by a recent pipeline
+  `--setup-db`, which auto-stamps): `alembic stamp head` is the correct command here, and the
+  only case where it is.
+
+Not sure which you have? `\dt` in `psql` and count them, or run `alembic current` to see whether
+the database is stamped at all. If you genuinely want a clean slate, drop the tables first (see
+the `--reset-db` caveats above about scope) and re-run `alembic upgrade head`.
 
 ### LLM provider outage or rate limit mid-analysis
 
@@ -570,7 +609,7 @@ The analyst step never hangs or crashes an analysis run — `run_analysis_with_f
 - **Rate limit** (429 or similar from the provider): retried once after a computed backoff. If it's still rate-limited on the retry, or if any other exception occurs (connection refused, provider 5xx, invalid/expired API key, timeout), the analyst step returns a labeled fallback immediately — no further retries.
 - **Guardrail validation failure** (the model returned malformed or ungrounded JSON): one corrective retry with the validation error appended to the prompt, then the same fallback if it still fails.
 
-The fallback report is a `HOLD` recommendation with `LOW` confidence and a summary explicitly stating structured analysis was unavailable — the underlying market data (price, fundamentals, news, etc.) is still fetched and shown normally, only the LLM-generated verdict is degraded. `Report.degraded` is `true` in this case, rendered as a visible banner in the UI (see CLAUDE.md's "LLM cost instrumentation + cross-provider failover" section, point 3), so this no longer requires grepping logs to notice from the frontend. To confirm which failure mode happened, check the server logs for an `analyst_llm_failed` event (set `LOG_LEVEL=DEBUG` for full detail) — its `failure_stage` field is `"exception"` (provider/network issue) or `"guardrail"` (formatting issue after a retry). Once the provider recovers, force a fresh analysis with `?force=true` on `/api/analyse/{symbol}` (subject to the 20-req/5-min rate limit) rather than waiting for the 24 h cache TTL.
+The fallback report is a `HOLD` recommendation with `LOW` confidence and a summary explicitly stating structured analysis was unavailable — the underlying market data (price, fundamentals, news, etc.) is still fetched and shown normally, only the LLM-generated verdict is degraded. `Report.degraded` is `true` in this case, rendered as a visible banner in the UI (see backend/CLAUDE.md's "LLM cost instrumentation + cross-provider failover" section, point 3), so this no longer requires grepping logs to notice from the frontend. To confirm which failure mode happened, check the server logs for an `analyst_llm_failed` event (set `LOG_LEVEL=DEBUG` for full detail) — its `failure_stage` field is `"exception"` (provider/network issue) or `"guardrail"` (formatting issue after a retry). Once the provider recovers, force a fresh analysis with `?force=true` on `/api/analyse/{symbol}` (subject to the 20-req/5-min rate limit) rather than waiting for the 24 h cache TTL.
 
 ### SME / Screener pipeline dies mid-run from a lost Postgres connection
 

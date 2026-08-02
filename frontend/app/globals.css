@@ -21,6 +21,31 @@ body {
   color: #e2e8f4;
 }
 
+/* Keyboard focus ring — global, so every button/link/input/chip/clickable row
+   gets one without each component opting in. Before this the app had zero
+   focus-visible rules anywhere and several inputs called `outline-none`,
+   leaving keyboard navigation completely invisible.
+
+   :focus-visible (not :focus) so a mouse click doesn't leave a ring behind
+   while still covering keyboard and programmatic focus. The offset keeps the
+   ring clear of the element's own border on the dark surfaces.
+
+   Components must NOT re-declare their own focus outline — override here.
+   An element that needs a different treatment (e.g. an inset ring inside a
+   scroll container) should say so explicitly with its own :focus-visible
+   rule, not by disabling this one.
+
+   Deliberately NO `border-radius` here: that styles the *element*, not the
+   outline, and this rule sits after `@tailwind utilities` — so at equal
+   (0,1,0) specificity it wins the source-order tiebreak against every
+   `rounded-*` class and squares off ~217 rounded elements the instant they
+   receive focus. Browsers already draw the outline following the element's
+   own radius, so it buys nothing even where it wouldn't hurt. */
+:focus-visible {
+  outline: 2px solid #4d7fff;
+  outline-offset: 2px;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: #0f1829; }
