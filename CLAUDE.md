@@ -102,7 +102,7 @@ stock-research/
 │       ├── _extract_cache/     LLM extraction cache (6 h TTL) — avoids re-calling LLM on re-runs
 │       ├── _history/           Daily pick snapshots (YYYY-MM-DD.json) — powers both the in-pipeline
 │       │                       trend/trend_delta fields and GET /api/market-picks/history (/market-picks/history page)
-│       ├── _market_picks/      Market picks result cache (6 h TTL) for the SSE endpoint
+│       ├── _market_picks/      Market picks result cache (192 h / 7-day TTL) for the SSE endpoint
 │       ├── _bhavcopy/          Raw NSE bhavcopy archive (EOD price store replay)
 │       ├── _cas/               Scrubbed CAS-import parse archive (PII stripped)
 │       └── _nse_master.txt     NSE equity symbol master, refreshed every 24 h

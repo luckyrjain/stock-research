@@ -2,13 +2,13 @@
 
 ## Per-symbol cache files
 
-Each symbol gets its own folder under `output/<SYMBOL>/` (or, when `REDIS_URL` is set, the same
-data lives in Redis and disk becomes a fast local mirror/fallback — see `cache.py` and CLAUDE.md's
+Each symbol gets its own folder under `backend/output/<SYMBOL>/` (or, when `REDIS_URL` is set, the same
+data lives in Redis and disk becomes a fast local mirror/fallback — see `cache.py` and backend/CLAUDE.md's
 "Redis-backed cache for multi-host deployments" section). One file per cache "task", each with its
 own TTL (`cache.TTL_HOURS`):
 
 ```text
-output/TCS/
+backend/output/TCS/
 ├── stock_info.json        # 1h
 ├── research.json          # 24h
 ├── news.json              # 1h
@@ -53,7 +53,7 @@ still read as "updated today."
 This is `main._build_report()`'s return value — produced by both the CLI (`main.py`) and
 `api.py`'s `/api/analyse/{symbol}` SSE endpoint's final `done` event (`frontend/types/index.ts`'s
 `Report` interface is the canonical TypeScript mirror; the two are kept in lockstep by
-convention, see CLAUDE.md's "Important Rules for Claude").
+convention, see backend/CLAUDE.md's "Important Rules for Claude").
 
 ```json
 {
@@ -81,7 +81,7 @@ convention, see CLAUDE.md's "Important Rules for Claude").
 | `generated_at` | string | Run date in `YYYY-MM-DD` format — stamped fresh on every assembly, not a per-task freshness signal (see `data_freshness`) |
 | `data_freshness` | object | `{stock_info, research, news, shareholding, mf_holdings, filings}` — each task's own real `_meta.fetched_at` ISO timestamp (or `null`), captured before `_meta` is stripped |
 | `analysis` | object | Final LLM analyst output (see below) |
-| `degraded` | boolean | `true` when every configured LLM provider failed (or failed guardrails past its retry) and `analysis` is `crew.py`'s generic safe-fallback HOLD, not a real analyst call. A sibling of `analysis` (not nested inside it) so it isn't subject to the four-file analyst-schema lockstep rule — the LLM never produces this field. See CLAUDE.md's "LLM cost instrumentation + cross-provider failover" point 3 |
+| `degraded` | boolean | `true` when every configured LLM provider failed (or failed guardrails past its retry) and `analysis` is `crew.py`'s generic safe-fallback HOLD, not a real analyst call. A sibling of `analysis` (not nested inside it) so it isn't subject to the four-file analyst-schema lockstep rule — the LLM never produces this field. See backend/CLAUDE.md's "LLM cost instrumentation + cross-provider failover" point 3 |
 | `signals` | object | Quantitative signal engine output (see below) |
 | `stock_info` | object | Quote and company information |
 | `research` | object | Fundamental ratios, about text, quarterly trend |
@@ -123,7 +123,7 @@ convention, see CLAUDE.md's "Important Rules for Claude").
 - `news_highlights` may be a string or array of strings
 - Adding/removing any field here requires updating `config/analyst.json`'s `output_schema`,
   `crew._validate_analysis_payload()`, `main._build_report()`, and `frontend/types/index.ts`'s
-  `Analysis` interface in lockstep — see CLAUDE.md's "Important Rules for Claude"
+  `Analysis` interface in lockstep — see backend/CLAUDE.md's "Important Rules for Claude"
 
 ---
 
@@ -160,7 +160,7 @@ convention, see CLAUDE.md's "Important Rules for Claude").
   (`Basic Materials`/`Energy`/`Industrials`/`Consumer Cyclical`: technical + volume up, valuation +
   growth down). Every override reallocates weight from other signals so each group's weights still
   sum to the baseline 1.55. Any other/missing sector uses the unchanged default weights. See
-  CLAUDE.md's "Sector-aware signal weights" section for the full disclosed-limitation writeup
+  backend/CLAUDE.md's "Sector-aware signal weights" section for the full disclosed-limitation writeup
   (whether yfinance's `sector` field is actually GICS-taxonomy-shaped for NSE/BSE symbols was never
   verified against a live response).
 
@@ -316,7 +316,7 @@ entrant absent from it.
 
 ## Market picks output
 
-The market picks result is cached at `output/_market_picks/picks.json`:
+The market picks result is cached at `backend/output/_market_picks/picks.json`:
 
 ```json
 {
@@ -560,7 +560,7 @@ sections, fetched concurrently:
 ```
 
 `analysis` comes from the same 24h `analysis` cache the stock-analysis flow writes to; `market_pick`
-from the current `output/_market_picks/picks.json` cache; `sme` from the latest stored
+from the current `backend/output/_market_picks/picks.json` cache; `sme` from the latest stored
 `ema_signals`/`sme_stocks` row. Each is `null` independently — "not yet analyzed" / "not on the
 picks list" / "no SME data" / a DB hiccup on the `sme` section alone — never an error for the
 whole response.
@@ -668,16 +668,16 @@ candidate name) rather than guessing.
 
 | Path | TTL | Key | Description |
 |---|---|---|---|
-| `output/_extract_cache/<hash>.json` | 6 h | SHA-256 of source name + article titles/URLs | LLM extraction result per source |
-| `output/_history/<YYYY-MM-DD>.json` | Permanent | Date | Daily pick snapshot (symbol, confidence, effective_signal, mention_count, current_price, recommendation) |
-| `output/_nse_master.txt` | 24 h | — | Newline-separated set of valid NSE equity symbols from EQUITY_L.csv |
-| `output/_nifty500_master.json` | 24 h | — | NIFTY 500 constituent list (`{symbol, company_name, industry, isin}[]`) — screener_pipeline.py's universe |
-| `output/_llm_cost/<date>.json` | Daily | Date | Running LLM cost/token counter (`call_count`, `total_cost_usd`, `calls_with_unknown_cost`) |
-| `output/_source_health/<source>.json` | — | Source name | Per-source daily ok/not-ok history for market-picks sources + macro overlay fetches |
-| `output/_scraper_error_counters/<name>.json` | — | Scraper name (`peers`, `financials`, `insider_trades`, `bulk_block_deals`, `trendlyne_articles`, `trendlyne_numeric_consensus`) | Error counter for the standalone per-symbol scrapers |
-| `output/_source_quality/<run_id>.json` | — | Market Picks run id | Per-run source telemetry (yield, syndication-dedup rate, extraction success) for the 20 Market Picks sources |
-| `output/_bhavcopy/<YYYY-MM-DD>.csv` | Permanent | Trade date | Raw NSE bhavcopy archive — EOD price store ingestion replay without re-hitting NSE |
-| `output/_cas/<YYYY-MM-DD-HHMM>.json` | Permanent | Timestamp | PII-scrubbed parsed CAS-statement JSON — replay via (from `backend/`) `python cas_import.py --replay <file> --account-id N` |
+| `backend/output/_extract_cache/<hash>.json` | 6 h | SHA-256 of source name + article titles/URLs | LLM extraction result per source |
+| `backend/output/_history/<YYYY-MM-DD>.json` | Permanent | Date | Daily pick snapshot (symbol, confidence, effective_signal, mention_count, current_price, recommendation) |
+| `backend/output/_nse_master.txt` | 24 h | — | Newline-separated set of valid NSE equity symbols from EQUITY_L.csv |
+| `backend/output/_nifty500_master.json` | 24 h | — | NIFTY 500 constituent list (`{symbol, company_name, industry, isin}[]`) — screener_pipeline.py's universe |
+| `backend/output/_llm_cost/<date>.json` | Daily | Date | Running LLM cost/token counter (`call_count`, `total_cost_usd`, `calls_with_unknown_cost`) |
+| `backend/output/_source_health/<source>.json` | — | Source name | Per-source daily ok/not-ok history for market-picks sources + macro overlay fetches |
+| `backend/output/_scraper_error_counters/<name>.json` | — | Scraper name (`peers`, `financials`, `insider_trades`, `bulk_block_deals`, `trendlyne_articles`, `trendlyne_numeric_consensus`) | Error counter for the standalone per-symbol scrapers |
+| `backend/output/_source_quality/<run_id>.json` | — | Market Picks run id | Per-run source telemetry (yield, syndication-dedup rate, extraction success) for the 20 Market Picks sources |
+| `backend/output/_bhavcopy/<YYYY-MM-DD>.csv` | Permanent | Trade date | Raw NSE bhavcopy archive — EOD price store ingestion replay without re-hitting NSE |
+| `backend/output/_cas/<YYYY-MM-DD-HHMM>.json` | Permanent | Timestamp | PII-scrubbed parsed CAS-statement JSON — replay via (from `backend/`) `python cas_import.py --replay <file> --account-id N` |
 
 ---
 

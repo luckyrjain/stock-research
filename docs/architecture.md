@@ -1,15 +1,17 @@
 # Architecture
 
-This is an architecture-level reference: how the pieces fit together, module boundaries, and
-request/data flow. For exhaustive per-feature detail (exact formulas, edge cases, disclosed
-limitations, historical "why" of a given design choice), see `CLAUDE.md` — this document
-deliberately summarizes and points there rather than duplicating it.
+System-level reference: how the pieces fit together, module boundaries, request/data flow. For
+per-feature depth (exact formulas, edge cases, disclosed limitations, the historical "why" behind a
+design choice) see **`backend/CLAUDE.md`** — the engineering ground truth this document summarizes
+and links into rather than duplicating. Frontend detail lives in `frontend/CLAUDE.md`.
 
 ## System overview
 
-A FastAPI backend (`api.py` + `routes/`) talks to yfinance, Screener.in, NSE, BSE, Trendlyne,
-RBI, and Google News, normalizes what it scrapes, runs a deterministic quant signal engine over
-it, and (for the flagship single-stock flow) calls an LLM for a structured recommendation. A
+A FastAPI backend (`backend/api.py` + `backend/routes/`) talks to yfinance, Screener.in, NSE, BSE,
+AMFI, Trendlyne, RBI, and Google News, normalizes what it scrapes, runs a deterministic quant
+signal engine over it, and (for the flagship single-stock flow) calls an LLM for a structured
+recommendation. It serves **57 HTTP routes** (29 in `api.py`, 5 + 6 + 17 across the three
+extracted `routes/` modules; 55 of them under `/api/*`, plus `/` and `/health`). A
 Next.js 15 frontend never talks to FastAPI directly — every call goes through a same-shaped proxy
 route under `frontend/app/api/*` first. PostgreSQL (via SQLAlchemy Core, migrated with Alembic)
 is the shared, persistent store for anything cross-session: accounts, watchlist, positions,
@@ -18,20 +20,21 @@ rate limiting and cache sharing once a deployment runs more than one backend wor
 Redis-backed module degrades to an in-memory/local-disk equivalent when `REDIS_URL` is unset, so
 a single-process deployment behaves identically with or without it.
 
-Four user-facing "modes" share this backend:
+Five user-facing modes share this backend:
 
-| Mode | Entry point | Backing store |
-|---|---|---|
-| Stock analysis | `GET /api/analyse/{symbol}` (SSE) | File cache (`output/<SYMBOL>/`) + Postgres (`verdict_history`, `mf_holdings_history`) |
-| Market Picks | `GET /api/market-picks` (SSE) | File cache (`output/_market_picks/`, `output/_history/`) |
-| SME Signals | `GET /api/sme-signals` | Postgres (`sme_stocks`, `ema_signals`) |
-| NIFTY 500 Screener | `GET /api/screener` | Postgres (`screener_stocks`) |
+| Mode | Entry point | Backing store | LLM? |
+|---|---|---|---|
+| Stock analysis | `GET /api/analyse/{symbol}` (SSE) | File cache (`output/<SYMBOL>/`) + Postgres (`verdict_history`, `mf_holdings_history`) | yes — 1 analyst call |
+| Market Picks | `GET /api/market-picks` (SSE) | File cache (`output/_market_picks/`, `output/_history/`) | yes — extraction + batched analysis |
+| SME Signals | `GET /api/sme-signals` | Postgres (`sme_stocks`, `ema_signals`) | no |
+| NIFTY 500 Screener | `GET /api/screener` | Postgres (`screener_stocks`) | no |
+| Portfolio Aggregator | `GET /api/portfolio/*` | Postgres (`profiles`…`transactions`, `prices_daily`, `mf_nav_daily`) | no |
 
-Two cross-cutting features tie all four together: a **Watchlist** (star any stock from any mode)
-and an **account system** (magic-link auth, optional — anonymous `client_id` usage still works
-everywhere). A shared **search box** (`GET /api/consolidated/{symbol}`) aggregates whatever the
-above modes have already cached for one symbol into a single "what does this app think about X"
-view, with zero new fetching.
+Cross-cutting: a **Watchlist** (star any stock from any of the first four modes), an **account
+system** (magic-link auth — optional; anonymous `client_id` usage works everywhere), and a shared
+**search box** (`GET /api/consolidated/{symbol}`) that aggregates whatever those modes have already
+cached for one symbol, with zero new fetching. Behind all of it, an **EOD price store** ingests
+NSE bhavcopy + AMFI NAV nightly — no endpoint of its own, it exists to feed the valuation engine.
 
 ---
 
@@ -58,25 +61,26 @@ FastAPI GET /api/analyse/{symbol}
   7. verdict_history.save_snapshot() (fire-and-forget) records today's call
 ```
 
-The six data slices fetched in step 2 (`stock_info`, `research`, `news`, `shareholding`,
-`mf_holdings`, `filings`) are unchanged from the original design — see CLAUDE.md's "Agent
-architecture" table for the tool/source mapping. What's grown since is everything layered on top
-of that base fetch, all standalone/on-demand (own cache entries, outside the six-task TTL
-lockstep, fetched by the frontend only after the main report has loaded):
+Step 2's six data slices are `main.ALL_DATA_TASKS`: `stock_info`, `research`, `news`,
+`shareholding`, `mf_holdings`, `filings` (see CLAUDE.md's "Agent architecture" table for the
+tool/source mapping). Everything else on the report page is a **standalone on-demand endpoint** —
+own cache entry, outside the six-task TTL lockstep, fetched by the frontend only after the main
+report has loaded, so none of them can delay or fail the SSE stream:
 
-| Endpoint | Adds |
-|---|---|
-| `GET /api/peers/{symbol}` | Peer percentile ranking + `absolute_anchor` (own P/E vs. own 3-5y history) — `peer_analytics.py` |
-| `GET /api/financials/{symbol}` | Multi-year Income Statement/Balance Sheet/Cash Flow + `dcf` (deterministic two-stage DCF, `dcf_valuation.py`) + `concalls` |
-| `GET /api/insider-activity/{symbol}` | Promoter/director PIT disclosures + bulk/block deals, scoped to one symbol (90-day window) |
-| `GET /api/street-consensus/{symbol}` | GNews articles citing Trendlyne + a real scraped numeric consensus (rating/analyst count/target price) from trendlyne.com directly |
-| `GET /api/verdict-history/{symbol}` | Timeline of stored daily verdicts, each BUY/SELL entry scored win/loss against today's live price |
-| `GET /api/prices/history/{symbol}?benchmark=true` | Daily-close sparkline series, optionally diffed against Nifty50 over the same window |
+| Endpoint | Adds | Cache TTL |
+|---|---|---|
+| `GET /api/peers/{symbol}` | Peer percentile ranking + `absolute_anchor` (own P/E vs. own 3-5y history) — `peer_analytics.py` | 24h |
+| `GET /api/financials/{symbol}` | Multi-year Income Statement/Balance Sheet/Cash Flow + `dcf` (deterministic two-stage DCF, `dcf_valuation.py`) + `concalls` | 24h |
+| `GET /api/shareholding-detail/{symbol}` | Individually-named shareholders (promoters + every other category) from NSE's quarterly shareholding XBRL — the granular counterpart to the aggregate `shareholding` slice | 168h |
+| `GET /api/insider-activity/{symbol}` | Promoter/director PIT disclosures + bulk/block deals, scoped to one symbol (90-day window) | 24h |
+| `GET /api/street-consensus/{symbol}` | GNews articles citing Trendlyne + a scraped numeric consensus (rating/analyst count/target price) from trendlyne.com directly | 24h |
+| `GET /api/verdict-history/{symbol}` | Timeline of stored daily verdicts, each BUY/SELL entry scored win/loss against today's live price | — (Postgres) |
+| `GET /api/prices/history/{symbol}?benchmark=true` | Daily-close sparkline series, optionally diffed against Nifty50 over the same window | 6h |
 
-Each is independently optional and degrades to `null`/`[]`/an empty section rather than failing
-the page — see CLAUDE.md's own section for each (Peer comparison flow, Insider & institutional
-activity flow, Street consensus flow, Multi-year financial statements + DCF valuation flow,
-Verdict history flow) for exact shapes and disclosed scraper-verification caveats.
+All degrade to `null`/`[]`/an empty section rather than failing the page. A genuine scrape
+*failure* is deliberately **not** cached (retried next request) and increments a
+`scraper_error_counters.py` counter; a legitimately empty result is cached normally. See
+CLAUDE.md's per-flow sections for exact shapes and the disclosed scraper-verification caveats.
 
 **Filings classification**: `signals/filings_classifier.py` runs pure text classification (no new
 scrape) over the same `filings` list — corporate actions (dividend/split/bonus/buyback), the most
@@ -112,14 +116,23 @@ Signals" below).
 
 ## Request flow: Market Picks
 
-Unchanged in shape from the original design — six sequential phases, all blocking work in a
-`ThreadPoolExecutor`, bridged to the SSE stream via `asyncio.Queue` + `loop.call_soon_threadsafe`.
-See CLAUDE.md's "Agent architecture" → Market picks pipeline table for the phase-by-phase
-breakdown (`_phase_scrape` → `_phase_extract` → `_phase_consolidate` → `_phase_research` →
-`_phase_analyze` → `_phase_score`) and "Peer/valuation-anchor wired into scoring" for how
-`_phase_research` now also pulls each candidate's absolute valuation anchor (via the same
-`peer_analytics.build_peer_result()` shared with `GET /api/peers/{symbol}`, sharing its cache
-entry) as a small confirmation nudge on `_compute_confidence()`.
+Six sequential phases inside one `MarketPicksPipeline.run()`, all blocking work in a
+`ThreadPoolExecutor`, bridged to the SSE stream via `asyncio.Queue` + `loop.call_soon_threadsafe`:
+
+| Phase | Does | Fan-out |
+|---|---|---|
+| `_phase_scrape` | Fetches **20 sources** — 5 direct RSS (ET Markets, LiveMint, NDTV Profit, Hindu BusinessLine, Zerodha Z-Connect), 12 GNews-mediated (Moneycontrol/BS/FE, 3 global-brokerage groups, 3 India-brokerage groups, 2 HDFC Securities, Trendlyne), 3 structured (NSE bulk/block deals, NSE insider trades, Screener.in fundamental screen). `SOURCES`/`SCRAPER_FNS` in `tools/market_picks_tools.py` merge the five satellite modules' `*_SOURCES`/`*_SCRAPERS` exports at import time | 6 workers |
+| `_phase_extract` | One LLM call per source; checks `output/_extract_cache/` (6h, content-aware key) first; Jaccard ≥ 0.60 syndication detection down-weights the same story appearing across sources | 6 workers |
+| `_phase_consolidate` | Groups by ticker, validates against the NSE equity master, confirms a live yfinance price (guards pre-IPO/unlisted names), rapidfuzz company-name matching | — |
+| `_phase_research` | Per candidate: `stock_info` + `research` + `run_signal_engine()` + absolute valuation anchor via `peer_analytics.build_peer_result()` — sharing the same `"peers"` cache entry as `GET /api/peers/{symbol}`, so a re-scan doesn't re-scrape Screener for every candidate | 3-4 workers, ≤ `_MAX_STOCKS` (35) |
+| `_phase_analyze` | Batched LLM calls (8 stocks/batch) for qualitative summary + bull/bear factors. Never asked for prices | parallel |
+| `_phase_score` | Deterministic: `_compute_confidence()` = 50% signal engine + 30% consensus + 20% recency, ±3 valuation-percentile nudge, clamped 0-100. The 4-tier rec is a *separate* formula (`0.55 × consensus + 0.45 × signal_score`, thresholded, with a quant-veto demoting BUY → WATCHLIST on a strongly negative score). Entry/target/stop from price + signal score, never the LLM. `_apply_sector_balance()` caps 2 per sector in the primary list. Writes `output/_history/<date>.json` | — |
+
+Two health gates set `self.healthy = False` (logged, and surfaced so a CLI/cron run can fail
+loudly rather than "succeed" with empty data): more than 70% of sources returning zero articles
+(`_MAX_ACCEPTABLE_EMPTY_SOURCE_RATE`), or zero picks surviving consolidation. After `_phase_score`,
+`_aggregate_source_stats()` → `source_quality.record_run()` writes per-source articles-fetched /
+picks-extracted / picks-validated telemetry for the run — see "Observability" below.
 
 ```text
 Browser → EventSource → /api/market-picks[?force=true] → Next.js proxy → FastAPI :8000
@@ -130,10 +143,7 @@ Browser → EventSource → /api/market-picks[?force=true] → Next.js proxy →
   5. Result saved via market_picks_pipeline.save_picks_cache()
 ```
 
-**Weekly auto-refresh**: `.github/workflows/market-picks-cron.yml` (Mondays 01:30 UTC) calls
-`GET /api/market-picks?force=true` on the deployed backend directly — the picks cache is a local
-file, not reachable from a GitHub Actions runner, unlike the Postgres-backed SME/Screener cron
-jobs. `GET /api/market-picks/status` exposes cache metadata (`last_run_at`, `cache_fresh`,
+`GET /api/market-picks/status` exposes cache metadata (`last_run_at`, `cache_fresh`,
 `next_scheduled_at`) with no pipeline run, powering the idle page's "Last scan / Next scheduled
 scan" line. `GET /api/market-picks/history` aggregates `output/_history/<date>.json` snapshots
 into a per-symbol track record (win rate, Nifty-benchmarked alpha) or, with `?date=`, returns one
@@ -163,9 +173,9 @@ golden/death crosses), RSI(14), volume-spike, liquidity, and market cap, then up
 rate computed via a `LEAD(...) OVER (PARTITION BY symbol ...)` window-function query.
 `GET /api/sme-signals/{symbol}/history` adds per-cross forward returns (`ret_10d_pct`,
 `ret_20d_pct`). `POST /api/sme-signals/refresh` runs the pipeline in the background (409 while
-already running, on top of a separate rate limit). Daily cron: `.github/workflows/sme-cron.yml`
-(13:00 UTC weekdays). CLI: `--setup-db`, `--reset-db` (drops/recreates **every** table via the
-shared `MetaData()` — a disclosed footgun, see CLAUDE.md), `--force`, `--lookback N`.
+already running, on top of a separate rate limit). CLI: `--setup-db`, `--reset-db`
+(drops/recreates **every** table via the shared `MetaData()` — a disclosed footgun, see CLAUDE.md),
+`--force`, `--lookback N`.
 
 The DB column is `cross_type` (`CROSS` is a reserved SQL keyword); the API/TS field is `cross`.
 
@@ -182,9 +192,10 @@ cap/sector) and `signals.technical.technical_signal` (RSI14 + EMA trend, off the
 by `industry` (NSE's own published classification — preferred over yfinance's `sector`, whose
 GICS-vs-Indian-market taxonomy is a disclosed unverified assumption), `ema_trend`, `pe_max`,
 `market_cap_min`, `rsi_min/max`; `sort` is validated against a column whitelist before being
-interpolated into `ORDER BY` (can't bind a column name as a parameter). `POST
-/api/screener/refresh` mirrors the SME refresh endpoint's 409-then-429 lock ordering. Daily cron:
-`.github/workflows/screener-cron.yml` (14:00 UTC weekdays, staggered after `sme-cron.yml`).
+interpolated into `ORDER BY` (can't bind a column name as a parameter). A `NULL` metric excludes
+that stock from that filter rather than being guessed a value. The response's `industries` field is
+the real currently-populated set, so the frontend's filter chips are never a hardcoded list.
+`POST /api/screener/refresh` mirrors the SME refresh endpoint's 409-then-429 lock ordering.
 `--reset-db` here is correctly scoped to only `screener_stocks.drop()`/`.create()`.
 
 ---
@@ -202,11 +213,10 @@ archived to `output/_bhavcopy/` before parsing (replay without re-hitting NSE). 
 symbol that stops appearing is detectable as delisted) and `prices_daily` (only `EQ`/`BE`/`BZ`
 series; debt/rights series filtered at parse time).
 
-Default run mode is self-healing: ingests any missing date in the last 5 trading days, not just
-today, so a cron run that fires before the file is published isn't a permanent gap. CLI:
-`--setup-db`/`--reset-db` (scoped to its own 3 tables), `--date YYYY-MM-DD`, `--backfill
-YYYY-MM-DD`. Cron: `.github/workflows/eod-prices-cron.yml`, `15 14 * * 1-5` (14:15 UTC / 19:45 IST
-weekdays — after the bhavcopy's ~19:00 IST publish, after `sme-cron.yml`).
+Default run mode is self-healing: `_missing_dates()` ingests any gap in the last `_GAP_WINDOW` (5)
+weekdays, not just today, so a cron run that fires before the file is published isn't a permanent
+hole. CLI: `--setup-db`/`--reset-db` (scoped to its own 3 tables), `--date YYYY-MM-DD`,
+`--backfill YYYY-MM-DD`. Scheduled after the bhavcopy's ~19:00 IST publish — see the cron table.
 
 `corporate_actions_pipeline.py` (`tools/corporate_actions.py` for the fetch/parse) ingests NSE's
 corporate-actions feed (splits/bonuses/dividends/rights, parsed from the free-text PURPOSE field —
@@ -223,10 +233,11 @@ prices → portfolio valuations.
 
 ## Request flow: Portfolio Aggregator
 
-A **separate** personal net-worth tracker (`/portfolio-aggregator`) — not to be confused with the
-unrelated, already-existing `/portfolio` page (the "I bought this" Market Picks P&L tracker,
-backed by the `positions` table above). No auth: profiles are a bare picker with no credentials,
-a deliberate personal-scale-tool decision, not an oversight.
+A **separate** personal net-worth tracker (`/portfolio-aggregator`), distinct from `/portfolio` —
+the "I bought this" Market Picks P&L tracker backed by the `positions` table. The two share a
+`/api/portfolio` URL prefix by accident of routing, nothing else: different tables, different
+lifecycle, different purpose. This one has **no auth** — profiles are a bare picker with no
+credentials, a deliberate personal-scale-tool decision, not an oversight.
 
 - **Foundation** (`routes/portfolio_aggregator.py`, mounted at `/api/portfolio`): `profiles` →
   `accounts` (bank/broker/amc/epfo/other) → `assets` (mf/stock/fd/epf/ppf/cash/manual/loan, with a
@@ -265,8 +276,57 @@ a deliberate personal-scale-tool decision, not an oversight.
   as-is and adds a warning, never silently guessing. `holdings.units` is derived as
   `Σbuy − Σsell` across all of an asset's transactions (any source), floored at 0 with a warning.
 - `tools/securities_master.py::get_full_securities_master()` (used by `resolve_symbol` above)
-  merges NSE main-board (queried from the `securities` table the EOD pipeline populates) + a new
-  BSE main-board fetch + the existing NSE Emerge/BSE SME lists, deduped by ISIN.
+  merges NSE main-board (queried from the `securities` table the EOD pipeline populates), a BSE
+  main-board fetch (24h cache, `output/_bse_main_master.json`), and the NSE Emerge/BSE SME lists,
+  deduped by ISIN.
+
+---
+
+## Batch pipelines & scheduling
+
+Six standalone batch jobs, all sharing the same shape: a `run()` that returns a bool, a `main()`
+CLI wrapper that exits non-zero when `run()` is false, and a health gate so a substantially-failed
+run fails its GitHub Actions job loudly rather than "succeeding" with mostly-empty data.
+
+| Job | Schedule (UTC) | Writes | Health gate |
+|---|---|---|---|
+| `sme_ema_pipeline.py` | `0 13 * * 1-5` (18:30 IST) | `sme_stocks`, `ema_signals` | empty stock list, or OHLCV error rate > 50% (`_MAX_ACCEPTABLE_ERROR_RATE`) |
+| `watchlist_alerts.py` | `30 13 * * 1-5` | emails; `verdict_history` snapshots | per-symbol failure rate > 50% |
+| `screener_pipeline.py` | `0 14 * * 1-5` | `screener_stocks` | — |
+| `eod_prices_pipeline.py` | `15 14 * * 1-5` (19:45 IST) | `securities`, `prices_daily`, `mf_nav_daily`; then corporate actions, then portfolio valuations | — |
+| `market_picks_pipeline.py` | `30 1 * * 1` (Mondays) | `output/_market_picks/`, `output/_history/` | > 70% empty sources, or zero consolidated picks |
+| `tests_live/` contract check | `0 6 * * 1` (Mondays) | nothing — early-warning only | job fails on a real contract break |
+
+Staggering is deliberate: SME → watchlist alerts → screener → EOD, 30-60 min apart, so two jobs
+don't contend for the same DB connection pool. All Postgres-backed jobs need a `DATABASE_URL`
+repository secret and fail fast with a clear message when it's missing rather than a raw traceback.
+`.github/workflows/ci.yml` is the ordinary pytest + `tsc` + Playwright gate, unrelated to these.
+
+`market-picks-cron.yml` is the odd one out — it calls `GET /api/market-picks?force=true` on the
+already-deployed backend over HTTP rather than running the pipeline itself, because the picks cache
+is a local file on the backend host and a GitHub runner's computed result would have nowhere to
+land. `market_picks_pipeline.py`'s own `main()` exists for a self-hosted crontab on that same host.
+
+### Watchlist alert emails (`watchlist_alerts.py`)
+
+The one batch job wired to the *single-stock* pipeline rather than a bulk scrape. One query joins
+`watchlist_items` to `users` filtered to `user_id IS NOT NULL` — an anonymous `client_id` row has
+no email to notify — and groups by symbol, so a stock five users watch is re-analysed once, not
+five times. Each symbol then re-runs the same `main._fetch_task()` → `run_signal_engine()` →
+`run_analysis_with_fallback()` flow the CLI runs, **respecting the existing cache TTLs**, so a
+symbol some visitor already refreshed on the website today isn't re-fetched or re-billed.
+`verdict_history.save_snapshot()` is called on every path including the all-fresh cache-hit path,
+so a day is never silently missing a snapshot.
+
+`verdict_history.detect_recent_changes(symbol, threshold_pct)` compares the two most recent stored
+snapshots and yields up to two alert kinds per symbol: a **recommendation change** (differs from
+the prior verdict; needs both rows to exist, so a first-time symbol never alerts) and a **price
+move** ≥ `_PRICE_MOVE_THRESHOLD_PCT` (10%) — a stock can move double digits and still close as a
+HOLD, which the recommendation check alone would miss. `_MAX_ALERT_SYMBOLS` (50) caps distinct
+symbols per run, since each one is a real paid LLM call; symbols past the cap are logged, not
+silently dropped. `email_sender.py` sends **one digest per user per run**, not one email per
+symbol; it shares `_send_via_smtp()` with the magic-link sender and is best-effort — returns
+`True`/`False`, never raises, and a missing `SMTP_HOST` just means nothing arrives.
 
 ---
 
@@ -288,10 +348,15 @@ one combined constraint can't cap either identity independently).
   /api/positions/claim` (session-required, real 401 if missing) move a browser's anonymous rows
   onto the signed-in account, oldest-first up to the account's remaining cap, skipping duplicates
   and reporting `skipped_over_cap` rather than silently exceeding the 200-item cap. Both share
-  `routes/_shared.py::claim_anonymous_rows_sync()` and are tightly rate-limited (5/hour, not the
-  ordinary 60/min) since a leaked `client_id` makes this a meaningfully more sensitive operation
-  than an ordinary read/write. The one caller is `/auth/verify`'s success page, which checks both
-  counts before redirecting and shows an explicit Claim/Skip prompt.
+  `routes/_shared.py::claim_anonymous_rows_sync()`, which takes the *same* per-account advisory
+  lock key the ordinary add endpoint takes (`watchlist:user:<id>`) — a separate lock namespace
+  would let a concurrent claim and add both read the same pre-write count and both commit, blowing
+  the cap. The one caller is `/auth/verify`'s success page, which checks both counts before
+  redirecting and shows an explicit Claim/Skip prompt.
+  **Disclosed residual risk**: `client_id` was never a secret, and claiming is more severe than an
+  ordinary read/write because it *exclusively* reassigns rows, permanently cutting off the original
+  browser. The 5/hour limit and a `watchlist_claimed` audit event bound automated abuse but do not
+  stop a single targeted guess of one leaked ID; that would need proof of possession.
 - `GET /api/watchlist/calendar?symbols=...` is a "what's coming up" roll-up over already-cached
   `filings` per symbol (via `filings_classifier.classify_filings()`) — not a DB query at all, no
   new scrape.
@@ -363,8 +428,15 @@ checkout flow. See CLAUDE.md's "Explicitly out of scope" section, item 3.
 
 ## Signal engine
 
-`signals/engine.py::run_signal_engine(symbol, all_data)` blends six independent signals into one
-`SignalResult` (`final_score` in [-1, 1], `verdict` BUY/HOLD/SELL, per-signal `SignalItem`s):
+`signals/engine.py::run_signal_engine(symbol, all_data)` runs `extract_features(all_data)` once,
+then blends six independent `Signal`s into one `SignalResult` — `final_score` in [-1, 1] plus a
+**5-tier** `verdict`, thresholded on the *rounded* score (`> 0.5` BUY, `> 0.1` WATCHLIST, `> -0.3`
+HOLD, `> -0.6` AVOID, else SELL). Deciding and reporting off the same rounded value is deliberate:
+float arithmetic yields `0.10000000000000003`, so thresholding the raw score while displaying a
+rounded copy could report `final_score: 0.1` next to `verdict: WATCHLIST` when this engine's own
+rule says 0.1 isn't a WATCHLIST score — a self-contradiction shown to the user *and* fed verbatim
+into the analyst prompt. (Distinct from Market Picks' own 4-tier BUY/WATCHLIST/HOLD/SELL rating,
+which is a separate formula — see that pipeline's `_phase_score`.)
 
 | Signal | Module | Does its own I/O? | Default weight |
 |---|---|---|---|
@@ -375,13 +447,13 @@ checkout flow. See CLAUDE.md's "Explicitly out of scope" section, item 3.
 | `technical` | `signals/technical.py` | **Yes** — RSI(14) + EMA20/50 posture off a cached `price_history` series | 0.2 |
 | `macro` | `signals/macro.py` | **Yes** — FII/DII net flow + RBI repo rate/CPI, cached under a fixed `"_MACRO"` pseudo-symbol (identical for every stock on a given day) | 0.15 |
 
-`technical`/`macro` are the two signals with their own network calls (both against their own
-independently-TTL'd caches — `price_history` at 6h, `fii_dii_flow`/`macro_context` at 24h,
-decoupled from the six-task cache lockstep). Because of that, `run_signal_engine()` itself is no
-longer pure CPU, so every caller on an asyncio event loop (`api.py`'s SSE endpoint) must invoke it
-through `loop.run_in_executor()` — the other three callers (`main.py`'s CLI,
-`watchlist_alerts.py`'s batch loop, `market_picks_pipeline.py`'s `_phase_research`) already ran
-inside a sync script or executor thread, so no change was needed there.
+`technical`/`macro` hit their own caches, independently TTL'd from the six-task lockstep — so a
+`?force=true` re-analysis bypasses `ALL_DATA_TASKS` but **not** these, and the technical signal can
+lag up to 6h behind everything else in the same report. Acceptable for a momentum confirmation on
+daily closes; surprising in a support ticket if you don't know it. Their I/O also means
+`run_signal_engine()` is not pure CPU, so any caller on an event loop must go through
+`loop.run_in_executor()`; the three other callers (`main.py` CLI, `watchlist_alerts.py`,
+`_phase_research`) are already in a sync script or an executor thread.
 
 **Sector-aware weight tilts** (`_weights_for_sector()`, keyed off yfinance's `sector` field):
 rate-sensitive sectors (Financial Services, Real Estate, Utilities) get valuation/macro weighted
@@ -419,12 +491,38 @@ a `signal_context` is available, three quant-vs-LLM cross-checks:
    `confidence == HIGH` → rejected — a HIGH-confidence call isn't supportable when the quant
    engine itself found almost nothing directional.
 
-Then a grounded-claims check (`_analysis_support_issues`) rejects language implying support (e.g.
-"strong institutional buying") not backed by the actual source data. A guardrail failure triggers
-one corrective LLM retry with the validation error appended.
+A missing `signal_context` skips these three rather than raising — a `KeyError` here would be
+caught by an outer broad `except` and misread as a provider outage, burning a failover attempt.
 
-**Cross-provider failover**: `_attempt_provider()` is one full attempt (its own guardrail retry +
-rate-limit retry) against one provider. `run_analysis_with_fallback()` tries the primary
+Then two content checks run over the analyst's own prose (`summary`, `business_quality`,
+`news_highlights`, `institutional_trend`, and the three factor/risk lists, concatenated):
+
+- **Grounded claims** (`_analysis_support_issues`) — rejects language implying support (e.g.
+  "strong institutional buying") that the actual source data doesn't back.
+- **Numeric misread** (`_analysis_numeric_issues`) — the LLM transcribing a real number wrongly
+  (a 0.46% dividend yield written as "47%") is a distinct failure from inventing one, and the
+  grounded-claims check doesn't catch it. `_NUMERIC_FIELD_CHECKS` pairs nine metrics (dividend
+  yield, P/E, ROE, ROCE, book value, sales growth, profit growth, EBITDA margin, market cap) with
+  a regex for how the analyst might name them and a getter for the true value out of `all_data`.
+  Any cited figure off by more than **2x** from the source value is rejected; anything closer is
+  assumed to be legitimate rounding. Sales/profit growth accept *either* the 3Y or 5Y window
+  (analyst prose rarely says which) and only fail when off by 2x from both. Market cap has its own
+  parser (`_parse_cited_market_cap`) because the unit is written every possible way — crore, lakh
+  crore, bn, USD.
+- **Sector-range plausibility** (`_sector_range_issues`, folded into the same list) — the
+  single-stock flow fetches *no* peer-benchmark data, so any analyst-cited "sector average P/E"
+  or "peer average ROE" is by construction ungrounded. A cited figure outside a static plausible
+  range for that stock's own sector bucket is rejected. **Disclosed limitation**: the ranges are
+  hand-set judgment, not fetched data — this catches obvious fabrication, not a plausible-looking
+  wrong number.
+
+A guardrail failure triggers one corrective LLM retry with the validation error appended.
+
+**Cross-provider failover**: six providers have a default model (`_ANALYST_DEFAULTS`) — Anthropic,
+OpenAI, Groq, Google, OpenRouter, Ollama. Five are auto-detectable from an API key
+(`_API_KEY_ENV`, checked in that order); Ollama is local and has no key, so it only ever runs via
+an explicit `LLM_PROVIDER=ollama`. `_attempt_provider()` is one full attempt (its own guardrail
+retry + rate-limit retry) against one provider. `run_analysis_with_fallback()` tries the primary
 (`_resolve_provider()` — explicit `LLM_PROVIDER` wins, else auto-detected first configured key),
 and, **only when `LLM_PROVIDER` was never explicitly set**, one alternate — the first other
 configured provider's key found (`_configured_providers()`). An explicit `LLM_PROVIDER` is treated
@@ -464,15 +562,34 @@ every cache independently, multiplying scraper load on already rate-limit-sensit
   entry at all** for that key. A stale/failed Redis entry is trusted as-is, never overridden by a
   possibly-fresher local disk copy — falling through there would silently reintroduce the same
   per-host fork this feature exists to close.
-- A Redis read/write failure logs a warning and falls back to disk for that one call — same
-  graceful-degradation convention as every other optional-infra module in this codebase.
+- A Redis read/write failure logs a warning and falls back to disk for that one call.
+- `save()` refuses to write a failed payload at all (`_is_failed_payload` — a dict with a
+  top-level `error` key), so a transient scrape failure is never cached as if it were data. It
+  also returns `_meta` rather than mutating the caller's dict, because several endpoints return
+  the very object they just cached and an in-place stamp would leak `_meta` into the HTTP response.
 
-Current TTL map (`cache.TTL_HOURS`): `stock_info` 1h, `news` 1h, `research` 24h, `analysis` 24h,
-`shareholding` 168h, `mf_holdings` 168h, `price_history` 6h, `peers` 24h, `financials` 24h,
-`index_history` 24h, `insider_activity` 24h, `fii_dii_flow` 24h, `macro_context` 24h,
-`street_consensus` 24h. Market Picks caches separately: `output/_market_picks/picks.json` (7
-days), `output/_extract_cache/<hash>.json` (6h, content-aware key), `output/_nse_master.txt` (24h
-list), `output/_history/<date>.json` (permanent, one snapshot per day).
+**TTL map** (`cache.TTL_HOURS`, 15 entries):
+
+| Hours | Tasks |
+|---|---|
+| 1 | `stock_info`, `news` |
+| 6 | `price_history` |
+| 24 | `research`, `analysis`, `peers`, `financials`, `index_history`, `insider_activity`, `fii_dii_flow`, `macro_context`, `street_consensus` |
+| 168 (7d) | `shareholding`, `mf_holdings`, `shareholding_detail` |
+
+**Cache-key conventions**: the key is `(symbol, task)` → `output/<SYMBOL>/<task>.json` on disk,
+`cache:<SYMBOL>:<task>` in Redis. Three tasks aren't per-symbol at all and use a **pseudo-symbol**
+so they get one shared entry instead of one per stock analysed: `"_MACRO"` for
+`fii_dii_flow`/`macro_context` (identical market-wide for a given day) and `"NSEI"` for
+`index_history` (the Nifty50 benchmark series). Concurrent workers can race to fill a pseudo-symbol
+entry; the atomic tempfile + `os.replace` write means the worst case is a few redundant fetches,
+never a corrupt file.
+
+**Outside `cache.py` entirely**: `output/_market_picks/picks.json` (192h / 7d + 24h buffer, its own
+`_PICKS_CACHE_TTL_HOURS`), `output/_extract_cache/<hash>.json` (6h, content-aware key over title +
+URL + summary, pruned once per pipeline run), `output/_nse_master.txt` (24h),
+`output/_bse_main_master.json` (24h, securities master), `output/_history/<date>.json` (permanent,
+one snapshot per day), `output/_bhavcopy/` and `output/_cas/` (raw/parsed archives for replay).
 
 ---
 
@@ -495,7 +612,7 @@ SQLAlchemy Core (not an ORM) — all tables declared against one shared `MetaDat
 | `corporate_actions` | Splits/bonuses/dividends, feeds `prices_daily.adj_close` |
 | `profiles`, `accounts`, `assets`, `holdings`, `valuations`, `transactions` | Portfolio Aggregator (the separate net-worth tracker — see its own section below) |
 
-21 tables total (`grep -c "= Table(" db/models.py`).
+21 tables total (`grep -c "= Table(" backend/db/models.py`).
 
 **Schema-of-record process**: Alembic (`alembic.ini` + `migrations/env.py`, targeting
 `db.models.metadata` directly — no second, Alembic-specific model layer). Three revisions today:
@@ -520,88 +637,148 @@ the database, not just its own two — a disclosed, not-yet-fixed footgun (see C
 
 ## Route module extraction (`routes/`)
 
-`api.py` is still the majority of the backend (~2900+ lines, ~28 routes) — three domains have been
-split out into `APIRouter` modules so far (the first two were the most duplicated; the third,
-`portfolio_aggregator.py`, is a large, self-contained new domain that made more sense as its own
-router from the start than as more inline `api.py` routes):
+`api.py` is still the majority of the backend (~2,760 lines, **29 of the 57 routes**) — three
+domains have been split out into `APIRouter` modules so far (the first two were the most
+duplicated; the third, `portfolio_aggregator.py`, is a large self-contained new domain that made
+more sense as its own router from the start):
 
 ```text
 routes/
 ├── _shared.py                run_owned_db_call() — the rate-limit → 503-if-no-DATABASE_URL →
 │                              run_in_executor → sanitize-error wrapper multiple domains share;
 │                              also claim_anonymous_rows_sync() (watchlist/positions claim flow)
-├── watchlist.py               /api/watchlist, /api/watchlist/calendar, /api/watchlist/claim
+├── watchlist.py    (5)        GET/POST /api/watchlist, DELETE /api/watchlist/{symbol},
+│                              GET /api/watchlist/calendar, POST /api/watchlist/claim
 │                              + resolve_owner()/owner_column()/WatchlistOwner (shared identity
 │                              resolution, imported directly by positions.py)
-├── positions.py               /api/positions, /api/positions/{symbol} (PATCH shares),
-│                              /api/positions/claim, /api/portfolio/concentration
-│                              (sector-concentration overlay for Market Picks — reads this
-│                              table only, unrelated to the Portfolio Aggregator below despite
-│                              the shared `/api/portfolio` prefix)
-└── portfolio_aggregator.py    /api/portfolio/{profiles,accounts,assets,networth,
-                               refresh-valuations,xirr,import-cas,import-csv...} — the
-                               Portfolio Aggregator net-worth tracker, see its own section below
+├── positions.py    (6)        GET/POST /api/positions, PATCH+DELETE /api/positions/{symbol},
+│                              POST /api/positions/claim, GET /api/portfolio/concentration
+│                              (sector-concentration overlay for Market Picks — reads the
+│                              positions table only, unrelated to the Portfolio Aggregator
+│                              despite the shared /api/portfolio prefix, which it lands on
+│                              because this router has no prefix= of its own)
+└── portfolio_aggregator.py (17)  APIRouter(prefix="/api/portfolio") — profiles, accounts,
+                               assets (+/valuations), networth, refresh-valuations, xirr,
+                               import-cas, import-csv(/preview). Full CRUD, hence the count
 ```
 
-All three routers `import api` (not `from api import X`) to reach shared state (`_get_db_engine`,
-`_rate_limit`, `LOGGER`, `log_event`) via dotted access at call time — this avoids a circular
-import (`api.py` registers these routers, so they can't import `api.py`'s names at their own
-module top-level before those names exist) and preserves existing `unittest.mock.patch("api.X",
-...)` test conventions, which only intercept lookups through the module object, not a name a
-`from X import Y` already copied at import time. `api.py` re-exports
-`_MAX_WATCHLIST_ITEMS_PER_CLIENT`/`_MAX_POSITIONS_PER_CLIENT` for backward compatibility with
-existing tests that read them as plain values.
+**`run_owned_db_call(request, rate_limit_name, max_calls, sync_fn, event_prefix, window_seconds=60)`**
+is the wrapper the DB-backed endpoints share instead of each re-implementing it: rate-limit → 503
+immediately if `DATABASE_URL` is unset → run `sync_fn` off the event loop via `run_in_executor` →
+map exceptions to status codes. `ValueError` → 422 (validation, e.g. cap exceeded),
+`PermissionError` → 401 (session-required endpoint with no valid session), a deliberate
+`HTTPException` from inside `sync_fn` → re-raised as-is (so a 404 for a missing id isn't swallowed),
+anything else → a **sanitized** 503 with the real exception logged server-side, never returned.
 
-Everything else — SME signals, Screener, Market Picks, auth, API keys, financials, peers, insider
-activity, street consensus, verdict history, consolidated view, symbol validation, prices — is
-still defined inline in `api.py`. Splitting further is disclosed future work, not attempted in
-this pass (same "first increment, not the full file" scope call as `tests_live/`'s scraper
-coverage).
+All three routers `import api` (not `from api import X`) and reach shared state (`_get_db_engine`,
+`_rate_limit`, `LOGGER`, `log_event`) via dotted access at call time. Two reasons: `api.py`
+registers these routers, so they can't bind `api.py`'s names at their own module top level before
+those names exist; and `unittest.mock.patch("api.X", ...)` only intercepts lookups made through the
+module object, not a name a `from X import Y` already copied at import time. `api.py` re-exports
+`_MAX_WATCHLIST_ITEMS_PER_CLIENT`/`_MAX_POSITIONS_PER_CLIENT` (both 200) because existing tests read
+them as plain values, not just as patch targets.
+
+The other 29 routes — SME signals, Screener, Market Picks, auth, API keys, financials, peers,
+insider activity, street consensus, shareholding detail, verdict history, consolidated view, symbol
+validation, prices — are still inline in `api.py`. Splitting further is disclosed future work.
 
 ---
 
-## Shared-state & guard infrastructure
+## Rate limiting & shared guard state
 
-Three pieces of backend guard state were originally single-process/in-memory, which silently
-became *per-worker* the moment the backend scaled past one process. All three now optionally share
-state through Redis, with an in-memory fallback:
+Three pieces of backend guard state were originally in-memory, which silently became *per-worker*
+the moment the backend scaled past one process. All three now optionally share state through Redis.
 
-- **`rate_limiter.py`** — `is_allowed()` (sliding-window rate limit), `try_acquire_slot()`/
-  `release_slot()` (named concurrency ceiling, e.g. the LLM-call slot), `try_acquire_lock()`/
-  `release_lock()` (single-run lock, e.g. the SME/Screener refresh guard). Redis-backed via small
-  Lua scripts / `SET NX EX` for atomic check-and-set; falls back to the original in-memory
-  implementation when `REDIS_URL` is unset or a Redis call fails. `get_usage_count()` is a
-  non-mutating peek (used by the API-keys usage dashboard) that doesn't itself count as a call.
-  A Redis-held slot/lock carries a TTL so a crashed worker can't strand it permanently.
-- **Trusted client IP** (`api.py::_client_ip()`): every request arrives via the Next.js proxy
-  server-to-server, so `request.client.host` is always the Next.js server's own IP — collapsing
-  every per-IP limiter into one shared site-wide bucket. `_client_ip()` only trusts a caller-
-  supplied `X-Forwarded-For` value when the request also presents a matching
-  `TRUSTED_PROXY_SECRET` via `X-Internal-Proxy-Secret` (set on both processes); otherwise it falls
-  back to `request.client.host` unchanged. `frontend/lib/proxy-headers.ts::clientIpHeaders()` is
-  the frontend half, merged into every proxy route's outbound fetch.
-- **`observability.py` + `error_tracking.py`** — `log_event()` is the one structured-JSON-logging
-  entry point every module in this codebase calls; its error-level path optionally forwards
-  `(event, fields, exc)` to `error_tracking.capture_error()` when `SENTRY_DSN` is set (unset by
-  default — zero behavior change out of the box). Pluggable in the sense of "any Sentry-protocol-
-  compatible ingest endpoint," not a multi-backend registry. `init_error_tracking()` is called once
-  per process at every CLI/server entry point; idempotent, since `sentry_sdk.init()` isn't safe to
-  call twice. A broken/unreachable Sentry backend can never break the primary log line itself.
-- **`schema_drift.py`** — for the six `ALL_DATA_TASKS` slices only: `schemas.CONTRACTS`'s optional
-  `"types"` map (`{field: dict|list}`) is the single source of truth; `check_drift()` flags a field
-  that's *present but the wrong shape* (never a field that's legitimately absent, per this
-  codebase's "never invent" convention). Wired into `main._fetch_task()`, the one choke point every
-  entry point already goes through; logs at `warning`, never raises.
-- **`source_health.py`** — for the 20 Market Picks sources + the two macro-overlay fetches: tracks
-  a per-source daily ok/not-ok result under `output/_source_health/`, warning once a source with an
-  established healthy baseline (≥5 prior days) has failed 3 consecutive *days*. Time-normalized
-  (same-day repeat calls collapse to one data point) and lock-guarded (`fcntl.flock`) against
-  concurrent writers racing on the same source file.
-- **`scraper_error_counters.py`** — for the standalone per-symbol endpoints (`peers`,
-  `financials`, `insider_activity`'s two sub-fetches, `street_consensus`'s two sub-fetches), where
-  an empty result is the expected common case and volume-anomaly detection would just be noise.
-  Distinguishes a genuine `{"error": ...}` tool result from a legitimate empty one and logs/counts
-  only the former — a grep-able counter file plus a log line, not a metrics platform.
+**`rate_limiter.py`** exposes three primitives: `is_allowed()` (sliding window), `try_acquire_slot()`/
+`release_slot()` (named concurrency ceiling — the LLM-call slot), `try_acquire_lock()`/
+`release_lock()` (single-run lock — the SME/Screener refresh guard). Redis-backed via small Lua
+scripts / `SET NX EX` for atomic check-and-set, falling back to the original in-memory
+implementation when `REDIS_URL` is unset or a Redis call raises. A Redis-held slot/lock carries a
+TTL (600s for slots, 3600s for the SME refresh lock) so a worker that crashes before releasing
+can't strand it; the in-memory path needs no TTL since a crash resets it anyway.
+`get_usage_count()` is a **non-mutating** peek at the same sliding-window state (`ZREMRANGEBYSCORE`
+then `ZCARD`), used by the API-keys usage dashboard — checking your usage must not itself count.
+
+**Who is "per IP"** (`api.py::_client_ip()`): every request reaches FastAPI through the Next.js
+proxy server-to-server, so `request.client.host` is always the Next.js server's own IP — which
+would collapse every per-IP limiter into one site-wide bucket. `_client_ip()` trusts the first
+`X-Forwarded-For` address **only** when the request also presents a matching `TRUSTED_PROXY_SECRET`
+in `X-Internal-Proxy-Secret`; otherwise it falls back to `request.client.host` unchanged. The
+secret is what proves the forwarded value came from this deployment's own frontend — without it,
+any direct caller could spoof `X-Forwarded-For` to dodge its own limit or to get an innocent IP
+throttled. `frontend/lib/proxy-headers.ts::clientIpHeaders()` is the frontend half, merged into
+every proxy route's outbound fetch. Scoped to rate limiting only — no log line or stored record
+uses this value.
+
+**Applied limits** (`_rate_limit(request, bucket, max_calls, window_seconds)`; every bucket is
+keyed `<bucket>:<client_ip>`):
+
+| Limit | Routes |
+|---|---|
+| 3 / hour | `market-picks?force=true`, `sme-signals/refresh`, `screener/refresh` |
+| 5 / 15 min | `auth/request-link` (**plus** a separate 5/hour keyed on the target *email address* — rotating IPs would otherwise allow unbounded inbox-bombing of one victim) |
+| 5 / hour | `watchlist/claim`, `positions/claim` (a claim permanently reassigns rows away from the anonymous browser, so it's held far tighter than an ordinary write) |
+| 20 / 5 min | `analyse/{symbol}`, `auth/verify` |
+| 20 / hour | `api-keys` create |
+| 30 / min | `validate`, `prices`, `peers`, `financials`, `shareholding-detail`, `insider-activity`, `street-consensus`, `consolidated`, `watchlist/calendar` |
+| 60 / min | `prices/history`, `verdict-history`, `sme-signals` (+ history), `screener`, `market-picks/status`, `market-picks/history`, `api-keys` list/revoke |
+| tier-scaled / hour | `/api/v1/*`, keyed on `user_id` not IP — a legitimate integration may run from a shared or rotating IP |
+
+The two refresh endpoints take their single-run lock **before** the rate-limit check and release it
+on a 429, preserving "409 already-running takes priority over 429 too-many-requests".
+
+---
+
+## Observability
+
+- **`observability.py`** — `log_event(logger, event, level=..., exc=None, **fields)` is the single
+  structured-JSON-logging entry point every backend module calls. `LOG_LEVEL` (default `INFO`)
+  gates it.
+- **`error_tracking.py`** — `log_event()`'s error-level path forwards `(event, fields, exc)` to
+  `capture_error()` when `SENTRY_DSN` is set (unset by default: zero behavior change out of the
+  box). Pluggable in the sense of "any Sentry-protocol ingest endpoint," not a multi-backend
+  registry. `init_error_tracking()` runs once per process at every CLI/server entry point and is
+  idempotent, since `sentry_sdk.init()` isn't safe to call twice. It passes
+  `LoggingIntegration(event_level=None)` explicitly — the SDK's default would auto-capture the
+  plain `logger.error()` line `log_event` emits *immediately before* calling `capture_error()`,
+  shipping every error as two differently-shaped events. A broken or unreachable Sentry backend
+  can never break the primary log line.
+- **`schema_drift.py`** — type-drift detection, for the six `ALL_DATA_TASKS` slices only.
+  `schemas.CONTRACTS`'s optional `"types"` map (`{field: dict|list}`) is the single source of
+  truth, so there's no second field list to drift from `schemas.py`. `check_drift()` flags a field
+  that is *present but the wrong shape* — never one that's legitimately absent, which is the
+  common, expected case under this codebase's "never invent" convention. Wired into
+  `main._fetch_task()`, the one choke point both the CLI and the SSE endpoint already go through.
+  Logs at `warning` (a human should look at the scraper; this isn't a page), never raises.
+- **`source_health.py`** — volume/freshness anomaly detection, for the 20 Market Picks sources +
+  the two macro-overlay fetches. Records a per-source daily ok/not-ok result under
+  `output/_source_health/` and warns once a source with an established healthy baseline (≥5 prior
+  days, at least one successful) has failed 3 consecutive *days*. Time-normalized — several calls
+  on the same UTC day collapse to one data point, so a burst of `?force=true` retries can't trip
+  the threshold in minutes. Lock-guarded (`fcntl.flock`) per source file: the atomic write alone
+  prevents a torn write, only the lock prevents two racing read-modify-write cycles losing an
+  update. A brand-new source never alerts (no baseline to regress from).
+- **`source_quality.py`** — per-*run* Market Picks source telemetry, complementing the day-level
+  view above: one JSON file per run under `output/_source_quality/`, recording for each source how
+  many articles it yielded, how many picks the LLM extracted from them, and how many survived
+  NSE-symbol validation. This is the funnel `source_health.py` can't see — a source that reliably
+  returns articles which never once become a validated pick looks perfectly healthy to a
+  boolean ok/not-ok check. Each run writes a uniquely-named file, so no lock is needed.
+  `source_quality_report.py` is the CLI that aggregates these across runs.
+- **`scraper_error_counters.py`** — for the standalone per-symbol endpoints (`peers`, `financials`,
+  `insider_activity`'s two sub-fetches, `street_consensus`'s two sub-fetches), where an empty
+  result is the expected common case and the volume-anomaly heuristic above would be pure noise.
+  Distinguishes a genuine `{"error": ...}` tool result from a legitimate empty one and counts/logs
+  only the former — no "N bad days" threshold, since these are on-demand endpoints where a single
+  error already means one real user's request degraded. A grep-able counter file plus a warning
+  log line, not a metrics platform.
+- **`llm_cost.py`** — see "LLM analyst layer" above.
+- **`tests_live/`** — a second, opt-in test root (`RUN_LIVE_TESTS=1`, weekly cron) that checks four
+  high-blast-radius scrapers against live responses, so a contract break surfaces before production
+  traffic finds it. It probes each host with a bare `requests.head()` **first**: tools never raise,
+  so a connectivity failure and a real layout change both look like `{"error": ...}`, and only a
+  reachable host makes a still-failing scrape a genuine contract failure. Four scrapers, not all
+  ~10 standalone ones — a disclosed starting point, not full coverage.
 
 ### SSE bridge pattern (critical)
 
@@ -636,15 +813,15 @@ a CAS import from a previously-archived parse, for debugging/recovery without re
 
 ## File layout
 
-All backend paths below are relative to `backend/` (a sibling of `frontend/` at the repo root) —
-the same split documented in `CLAUDE.md`'s "Repo Structure" section. No import paths changed when
-the backend moved into its own directory, only the top-level nesting did.
+Backend paths are relative to `backend/`, a sibling of `frontend/`. Python imports are unqualified
+(`import cache`, `from routes.watchlist import ...`), so **every backend command must run from
+inside `backend/`** — the directory move changed the top-level nesting, not any import path.
 
 ```text
 stock-research/
 ├── backend/
-│   ├── api.py                     FastAPI server — ~28 routes, SSE endpoints, symbol validation,
-│   │                               shared helpers routes/ and _shared.py depend on
+│   ├── api.py                     FastAPI server — 29 of the 57 routes, both SSE endpoints,
+│   │                               symbol validation, shared helpers routes/ depends on
 │   ├── main.py                    CLI entry point; _fetch_task/_build_report shared with api.py
 │   ├── crew.py                    Analyst guardrails, cross-provider failover, run_analysis_with_fallback
 │   ├── llm_cost.py                Per-call LLM cost instrumentation + running daily total
@@ -699,6 +876,7 @@ stock-research/
 │   │   ├── technical.py             RSI14 + EMA20/50 posture — own I/O (price_history cache)
 │   │   ├── macro.py                 FII/DII flow + RBI rate/CPI — own I/O ("_MACRO" pseudo-symbol cache)
 │   │   ├── filings_classifier.py    Corporate actions / rating action / next-results-date text classifier
+│   │   ├── models.py                Signal / SignalResult dataclasses
 │   │   ├── interpreter.py           SignalResult → plain-English string
 │   │   └── store.py                 Write-only 90-day audit trail (signals_data/<SYMBOL>/<date>.json)
 │   ├── tools/                     Data-fetching functions (never raise — return {"error": ...})
@@ -716,14 +894,21 @@ stock-research/
 │   │   ├── trendlyne_agent.py        GNews search for Trendlyne-cited coverage
 │   │   ├── trendlyne_scraper.py      Direct trendlyne.com numeric consensus scrape
 │   │   ├── price_history_tools.py    Shared daily-close OHLCV fetch (sparklines, technical signal)
-│   │   ├── screener_scanner.py       (peer/valuation-band table parsing helpers)
+│   │   ├── screener_scanner.py       Screener.in fundamental-screen scraper — a Market Picks source
 │   │   ├── eod_sources.py            NSE bhavcopy + equity-master fetch/parse, AMFI NAV fetch/parse
 │   │   ├── corporate_actions.py      NSE corporate-actions fetch + PURPOSE-string parser
 │   │   ├── securities_master.py      NSE+BSE main-board + SME merge, resolve_symbol() (broker-code
 │   │   │                               → canonical symbol; consumed by csv_import.py)
+│   │   ├── _gnews_timeout.py         Patches a hard timeout onto gnews→feedparser→urllib, which
+│   │   │                               has none — one hung GNews call would otherwise block
+│   │   │                               _phase_scrape's executor shutdown indefinitely
 │   │   └── _nse_session.py           Shared NSE session-priming helper every NSE module delegates to
-│   ├── tests/                     unittest-based, no live network calls
-│   ├── tests_live/                Opt-in (RUN_LIVE_TESTS=1), weekly-cron-only live contract checks
+│   ├── tests/                     1,502 unittest-based tests, collected by pytest. Heavy deps
+│   │                               (crewai, tool imports) mocked via sys.modules patching; no
+│   │                               live network call, ever. `python -m pytest tests/`
+│   ├── tests_live/                Opt-in (RUN_LIVE_TESTS=1), weekly-cron-only live contract
+│   │                               checks. A separate root precisely so the command above
+│   │                               can never pick them up
 │   └── output/                    Cache files (gitignored) + CLI report JSON
 │       ├── <SYMBOL>/                 Per-symbol task caches
 │       ├── _extract_cache/           LLM extraction cache (6h TTL)
@@ -735,16 +920,19 @@ stock-research/
 │       ├── _source_quality/          Per-run Market Picks source telemetry JSON
 │       ├── _bhavcopy/                Raw NSE bhavcopy CSV archive (EOD price store replay)
 │       ├── _cas/                     PII-scrubbed parsed CAS-import JSON archive (replay)
-│       └── _nse_master.txt           NSE equity symbol master (24h refresh)
-├── .env.example                Shared by both stacks; stays at the repo root
-├── docker-compose.yml
-├── .github/workflows/         market-picks-cron, sme-cron, screener-cron, watchlist-alerts-cron,
-│                               eod-prices-cron, live-contract-check
-├── frontend/                  Next.js 15 (TypeScript, Tailwind, App Router)
+│       ├── _nse_master.txt           NSE equity symbol master (24h refresh)
+│       └── _bse_main_master.json     BSE main-board master (24h) — securities_master.py
+├── .env / .env.example         Shared by both stacks; stays at the repo root
+├── docker-compose.yml          backend + frontend + postgres + redis
+├── .github/workflows/         ci, market-picks-cron, sme-cron, screener-cron,
+│                               watchlist-alerts-cron, eod-prices-cron, live-contract-check
+├── frontend/                  Next.js 15 (TypeScript, Tailwind, App Router) — 13 pages, all
+│   │                           'use client'; no React Query, no state library
 │   ├── app/
 │   │   ├── page.tsx               Stock analysis (?symbol= deep links)
 │   │   ├── compare/page.tsx       Two reports side by side + diff table
 │   │   ├── market-picks/page.tsx
+│   │   ├── market-picks/history/page.tsx  Per-symbol track record + snapshot date picker
 │   │   ├── sme-signals/page.tsx
 │   │   ├── screener/page.tsx
 │   │   ├── watchlist/page.tsx
@@ -756,19 +944,24 @@ stock-research/
 │   │   ├── login/page.tsx         Magic-link request form
 │   │   ├── auth/verify/page.tsx   Consumes ?token=, claim-my-data prompt
 │   │   ├── manifest.ts, icon.tsx, apple-icon.tsx, manifest-icons/[size]/route.tsx  PWA assets
-│   │   └── api/                   ~30 thin proxy routes → FastAPI (adds client-IP + auth headers)
-│   ├── components/                One file per card/domain (see "Dashboard component extraction"
-│   │                               in CLAUDE.md) — results-dashboard.tsx, financial-statements-card,
-│   │                               peer-comparison-card, insider-activity-card, street-consensus-card,
-│   │                               verdict-timeline, quarterly-trend-card, price-sparkline,
-│   │                               market-picks-dashboard, positions-strip, watchlist-button,
-│   │                               position-button, header-search, consolidated-card, auth-widget,
-│   │                               site-nav, ema-chart, sector-heatmap, service-worker-registration
+│   │   │                           (icons generated at request time via next/og ImageResponse —
+│   │   │                            no binary assets checked in)
+│   │   └── api/                   34 thin proxy routes → FastAPI (adds client-IP + auth headers;
+│   │                               auth/verify additionally sets the httpOnly session cookie)
+│   ├── components/                29 files — one per card/domain (see "Dashboard component
+│   │                               extraction" in CLAUDE.md), plus dashboard-format.ts and
+│   │                               dashboard-primitives.tsx for shared helpers/atoms
 │   ├── lib/                       watchlist.ts, positions.ts, auth.ts, auth-cookie.ts,
 │   │                               useStockAnalysis.ts, proxy-headers.ts
-│   ├── e2e/                       Playwright specs — every backend response mocked at page.route()
+│   ├── public/sw.js               Hand-written service worker (no Workbox): cache-first statics,
+│   │                               network-first navigations, never intercepts /api/*, never
+│   │                               caches a URL with a query string (/auth/verify?token= is a
+│   │                               single-use credential and Cache API keys on the full URL)
+│   ├── e2e/                       44 Playwright specs — every backend response mocked at
+│   │                               page.route(); no FastAPI process runs in the E2E job at all
 │   └── types/index.ts             Canonical TS types for every SSE message + report field
-└── docs/                     Setup/deployment/architecture/tools/output-schema reference docs
+└── docs/                     index, architecture, setup, deployment, tools, output-schema,
+                              PRD, design, feature-catalog
 ```
 
 ---

@@ -43,12 +43,12 @@ research modes, a cross-mode watchlist/positions layer, and a minimal account sy
   the other modes have already cached/computed for a symbol, with zero new fetching or LLM calls.
 - **Accounts & API access** — passwordless magic-link sign-in, plus long-lived API keys with
   tiered (free/pro) rate limiting for a small external `/api/v1/*` surface, and an informational
-  pricing page (no real payment processing exists yet — see `CLAUDE.md`).
+  pricing page (no real payment processing exists yet — see `backend/CLAUDE.md`).
 
 ## Tech stack
 
 - **Backend**: Python 3.13, FastAPI (SSE streaming), the `crewai.tools` `@tool` decorator (no
-  agent orchestration — see `CLAUDE.md`), litellm, a custom quantitative signals engine
+  agent orchestration — see `backend/CLAUDE.md`), litellm, a custom quantitative signals engine
 - **Frontend**: Next.js 15 (App Router), React 19, TypeScript (strict), Tailwind CSS v3, installable
   as a PWA
 - **Data sources**: Yahoo Finance, Screener.in, stockanalysis.com (quote fallback), Google News
@@ -62,7 +62,7 @@ research modes, a cross-mode watchlist/positions layer, and a minimal account sy
   screener, the EOD price store (securities/daily prices/MF NAVs + corporate actions), and the
   Portfolio Aggregator (profiles/accounts/assets/holdings/valuations/transactions) all live there,
   managed with **Alembic** migrations. A file-based TTL cache under
-  `output/` still backs the six per-symbol scrape tasks and a handful of standalone endpoints
+  `backend/output/` still backs the six per-symbol scrape tasks and a handful of standalone endpoints
   (peers, financials, insider activity, street consensus). **Redis** is optional, opt-in via
   `REDIS_URL` — it backs shared rate limiting/concurrency guards and mirrors the file cache so both
   work correctly across multiple backend workers/hosts; everything degrades gracefully to
@@ -153,6 +153,7 @@ stock-research/
 ├── frontend/                     Next.js 15 app (TypeScript, Tailwind CSS)
 │   ├── app/page.tsx                    Stock analysis page (supports ?symbol= deep links)
 │   ├── app/market-picks/page.tsx       Weekly picks page
+│   ├── app/market-picks/history/page.tsx  Pick track record (per-symbol + per-day snapshots)
 │   ├── app/sme-signals/page.tsx        SME golden cross screener
 │   ├── app/screener/page.tsx           NIFTY 500 custom screener
 │   ├── app/watchlist/page.tsx          Cross-mode watchlist page
@@ -171,11 +172,13 @@ stock-research/
 │   ├── lib/watchlist.ts / positions.ts / auth.ts   Shared-cache hooks (DB-backed)
 │   ├── e2e/                             Playwright E2E specs — every backend response is mocked
 │   └── types/index.ts                   Canonical TS types for all SSE messages and reports
-├── docs/                         Setup/deployment/architecture/tools/output-schema/design/PRD docs
-└── CLAUDE.md, README.md          Root-level docs (this file among them)
+├── docs/                         index, setup, deployment, architecture, tools, output-schema,
+│                              design, PRD, feature-catalog
+└── CLAUDE.md, README.md          Root-level docs (backend/CLAUDE.md and
+                               frontend/CLAUDE.md hold the per-stack detail)
 ```
 
-See `CLAUDE.md` for the complete, exhaustive repo structure and per-feature design notes.
+See `backend/CLAUDE.md` for the complete, exhaustive repo structure and per-feature design notes.
 
 ## Prerequisites
 
@@ -203,7 +206,7 @@ cp .env.example .env               # .env stays at the repo root — shared by b
 Edit `.env` with your provider credentials — set exactly one LLM provider key (Anthropic, OpenAI,
 Groq, Google, or OpenRouter), or configure Ollama locally. `.env.example` documents every other
 optional variable (`DATABASE_URL`, `REDIS_URL`, `FRONTEND_URL` + `SMTP_*` for magic-link/alert
-emails, `SENTRY_DSN`, `TRUSTED_PROXY_SECRET`, `ALLOWED_ORIGINS`) — see `CLAUDE.md`'s "Environment &
+emails, `SENTRY_DSN`, `TRUSTED_PROXY_SECRET`, `ALLOWED_ORIGINS`) — see `backend/CLAUDE.md`'s "Environment &
 Config" section for what each one gates.
 
 ### Database setup (PostgreSQL)
@@ -213,14 +216,18 @@ Once `DATABASE_URL` is set, create the schema via Alembic rather than any pipeli
 
 ```bash
 cd backend
-alembic upgrade head        # fresh database — creates all tables
-# or, for a database that already has the tables (e.g. created by an older
-# --setup-db flag before Alembic existed):
-alembic stamp head           # records "already at head" without running any DDL
+alembic upgrade head        # fresh database — creates all 21 tables
+
+# For a database that predates Alembic and has only the original 11 tables, stamp the
+# baseline first, then upgrade. NOT `alembic stamp head` — that would mark the EOD price
+# store / Portfolio Aggregator tables as present when they aren't, and Alembic would then
+# never create them. The revision id is `0001`, not the filename stem.
+alembic stamp 0001 && alembic upgrade head
 ```
 
-See `CLAUDE.md`'s "Schema migrations" section for details, and `docs/setup.md` for a fuller
-walkthrough.
+`alembic stamp head` on its own is correct only for a database already fully caught up. See
+`backend/CLAUDE.md`'s "Schema migrations" section and [docs/setup.md](docs/setup.md) for the
+full fresh-vs-existing walkthrough.
 
 ## Frontend setup
 
@@ -282,7 +289,7 @@ cd backend
 # SME Signals (golden/death cross)
 python sme_ema_pipeline.py              # fetch, compute crosses, store
 python sme_ema_pipeline.py --force      # bypass the stock-list cache
-python sme_ema_pipeline.py --reset-db   # drop + recreate its tables (see CLAUDE.md's disclosed
+python sme_ema_pipeline.py --reset-db   # drop + recreate its tables (see backend/CLAUDE.md's disclosed
                                          # blast-radius caveat — this one uses the shared MetaData())
 
 # NIFTY 500 custom screener
@@ -333,10 +340,11 @@ handful of scraper targets on a weekly schedule — it is never part of the defa
 
 ## API endpoints
 
-The backend exposes 55+ routes across all modes; the table below covers the major ones per mode.
-**See `CLAUDE.md` for the complete, current list** (or, from `backend/`, run
-`grep -n "@app\.\(get\|post\|delete\|patch\)" api.py` and
-`grep -rn "@router\.\(get\|post\|delete\|patch\)" routes/`). The Next.js app proxies all of these
+The backend exposes **57 routes** — 29 in `api.py`, 28 across `routes/` (17 Portfolio Aggregator,
+6 Positions, 5 Watchlist). The table below covers the major ones per mode; **see
+`backend/CLAUDE.md` for the complete, current list** (or, from `backend/`, run
+`grep -c "@app\.\(get\|post\|delete\|patch\)" api.py` and
+`grep -rc "@router\.\(get\|post\|delete\|patch\)" routes/`). The Next.js app proxies all of these
 through `frontend/app/api/`.
 
 | Endpoint | Description |
@@ -366,12 +374,12 @@ through `frontend/app/api/`.
 | `GET /api/v1/consolidated/{symbol}` | Tier-rate-limited external API surface (`X-API-Key` header) |
 
 `/api/market-picks` supports `?force=true` to bypass its result cache;
-`/api/sme-signals`/`/api/screener` support their own `?refresh`-style endpoints — see `CLAUDE.md`
+`/api/sme-signals`/`/api/screener` support their own `?refresh`-style endpoints — see `backend/CLAUDE.md`
 for rate limits and query-parameter details on each.
 
 ## Cache behavior
 
-Per-symbol task caches under `output/<SYMBOL>/` (or Redis-mirrored, when `REDIS_URL` is set):
+Per-symbol task caches under `backend/output/<SYMBOL>/` (or Redis-mirrored, when `REDIS_URL` is set):
 
 | Task | TTL |
 |---|---|
@@ -384,9 +392,9 @@ Per-symbol task caches under `output/<SYMBOL>/` (or Redis-mirrored, when `REDIS_
 | `shareholding` | 7 days |
 | `mf_holdings` | 7 days |
 
-Market picks result cache: `output/_market_picks/picks.json`, 7-day TTL (weekly refresh cadence).
+Market picks result cache: `backend/output/_market_picks/picks.json`, 7-day TTL (weekly refresh cadence).
 Do not shorten these TTLs without understanding the NSE/Screener rate-limit implications — see
-`CLAUDE.md`.
+`backend/CLAUDE.md`.
 
 ## Customizing analyst behavior
 
@@ -396,7 +404,7 @@ Do not shorten these TTLs without understanding the NSE/Screener rate-limit impl
 
 Adding a field to the analyst's JSON output requires updating `config/analyst.json`,
 `crew._validate_analysis_payload()`, `main._build_report()`, and
-`frontend/types/index.ts`'s `Analysis` interface together — see `CLAUDE.md`'s "Important Rules for
+`frontend/types/index.ts`'s `Analysis` interface together — see `backend/CLAUDE.md`'s "Important Rules for
 Claude" section.
 
 ## Notes

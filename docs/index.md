@@ -17,7 +17,7 @@ recommendation streamed to the browser via SSE. Layered on top: peer comparison,
 financials + DCF valuation, insider/institutional activity, street consensus, and a verdict
 timeline with win/loss scoring.
 
-**Market Picks** — a multi-agent pipeline that scrapes ~28 Indian and global financial sources,
+**Market Picks** — a multi-agent pipeline that scrapes 20 Indian and global financial sources,
 extracts stock recommendations with an LLM, validates symbols against the NSE equity master,
 runs due diligence on each, and returns a confidence-ranked, sector-balanced watchlist with
 `BUY` / `WATCHLIST` / `HOLD` / `SELL` ratings and deterministic entry/target/stop-loss levels.
@@ -61,48 +61,54 @@ access to a public `/api/v1/*` surface.
 
 ## Quick start
 
+All paths below are relative to the repo root. The venv and `.env` live at the root; every
+backend command runs from inside `backend/`.
+
 ```bash
-# 1. Backend
-/opt/homebrew/bin/python3.13 -m venv .venv
+# 1. Backend (venv at the repo root, shared by the whole backend)
+python3.13 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+cd backend && pip install -r requirements.txt && cd ..
 cp .env.example .env   # add your LLM provider key
 
 # 2. Frontend
-cd frontend && npm install
+cd frontend && npm install && cd ..
 
 # 3. Database schema (PostgreSQL — required for Watchlist, Positions, Screener, SME Signals,
 #    accounts, and verdict/MF-holdings history; optional for a bare stock-analysis-only setup)
+cd backend
 alembic upgrade head    # fresh database
-# or, for a database that already has these tables from before Alembic existed:
-alembic stamp head
+# For a database that predates Alembic and has only the original 11 tables, stamp the
+# baseline first — NOT `stamp head`, which would skip creating the 10 newer tables:
+#   alembic stamp 0001 && alembic upgrade head
+cd ..
 
 # 4. Run both in separate terminals
 # Terminal A — backend
-source .venv/bin/activate
+source .venv/bin/activate && cd backend
 uvicorn api:app --reload --port 8000
 
 # Terminal B — frontend
 cd frontend && npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) for stock analysis. See [Setup](setup.md)
-for the full list of routes (`/market-picks`, `/sme-signals`, `/screener`, `/watchlist`,
-`/portfolio`, `/portfolio-aggregator`, `/compare`, `/login`, `/api-keys`, `/pricing`) and which
-env vars each needs.
+Open [http://localhost:3000](http://localhost:3000) for stock analysis. The other 12 pages are
+`/market-picks`, `/market-picks/history`, `/sme-signals`, `/screener`, `/watchlist`, `/portfolio`,
+`/portfolio-aggregator`, `/compare`, `/login`, `/auth/verify`, `/api-keys`, and `/pricing` — see
+[Setup](setup.md) for which env vars each needs.
 
 ## Output locations
 
 | Path | Contents |
 |---|---|
-| `output/<SYMBOL>/` | Per-symbol task caches and report JSON |
-| `output/_extract_cache/` | LLM extraction cache for market picks (6 h TTL) |
-| `output/_history/` | Daily pick snapshots for trend tracking |
-| `output/_market_picks/` | Market picks result cache (6 h TTL) |
-| `output/_nse_master.txt` | NSE equity symbol master (refreshed every 24 h) |
-| `output/_llm_cost/` | Daily LLM call-cost/token counters |
-| `output/_source_health/`, `output/_scraper_error_counters/` | Scraper freshness/error monitoring |
-| `output/_bhavcopy/` | Raw NSE bhavcopy CSV archive (EOD price store ingestion replay) |
-| `output/_cas/` | Scrubbed CAS-import parse archive (portfolio aggregator, replay) |
+| `backend/output/<SYMBOL>/` | Per-symbol task caches and report JSON |
+| `backend/output/_extract_cache/` | LLM extraction cache for market picks (6 h TTL) |
+| `backend/output/_history/` | Daily pick snapshots for trend tracking |
+| `backend/output/_market_picks/` | Market picks result cache (192 h / 7-day TTL, matching the weekly cron cadence) |
+| `backend/output/_nse_master.txt` | NSE equity symbol master (refreshed every 24 h) |
+| `backend/output/_llm_cost/` | Daily LLM call-cost/token counters |
+| `backend/output/_source_health/`, `backend/output/_scraper_error_counters/` | Scraper freshness/error monitoring |
+| `backend/output/_bhavcopy/` | Raw NSE bhavcopy CSV archive (EOD price store ingestion replay) |
+| `backend/output/_cas/` | Scrubbed CAS-import parse archive (portfolio aggregator, replay) |
 | PostgreSQL (`DATABASE_URL`) | 21 tables — SME signals, screener, watchlist, positions, verdict history, MF-holdings history, accounts/sessions/API keys, EOD price store (securities/prices_daily/mf_nav_daily), corporate actions, and the portfolio aggregator (profiles/accounts/assets/holdings/valuations/transactions) (see [Architecture](architecture.md)) |
 | Redis (`REDIS_URL`, optional) | Shared rate-limit/cache state across multiple backend workers/hosts |
