@@ -173,7 +173,7 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
           onClick={handleAnalyse}
           disabled={status !== 'valid' || disabled}
           className={`rounded-xl font-semibold tracking-wide
-            bg-accent text-white shadow-accent
+            bg-accent text-bg shadow-accent
             hover:opacity-90 hover:shadow-accent-lg
             active:scale-[.98] transition-all duration-150
             disabled:opacity-30 disabled:cursor-not-allowed disabled:shadow-none

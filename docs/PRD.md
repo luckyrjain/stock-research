@@ -389,6 +389,23 @@ answer more urgent, not less. **Needs:** a SEBI-competent professional's read on
 feature set before any material distribution push. Recorded here as an open question, not as an
 implied claim in either direction.
 
+**Partial mitigation shipped — explicitly not a substitute for the above.** Every surface that
+carries a recommendation now states that AlphaPulse is *not registered with SEBI as a Research
+Analyst or Investment Adviser*, alongside the pre-existing "not investment advice" language: the
+global footer (`app/layout.tsx`), the single-stock verdict (`results-dashboard.tsx`), and the
+Market Picks list (`market-picks-dashboard.tsx`). Those disclaimers were also raised from
+`text-muted/50`–`/60` to full `text-muted` — they had been rendering at **2.41:1 and 2.95:1**
+contrast, the least legible text in the product, which is a poor property for a legal notice as
+well as an accessibility failure. At full `muted` they measure 6.12:1.
+
+Two caveats, stated so this isn't mistaken for resolution:
+1. **A disclaimer is risk-reduction, not compliance.** If the activity does fall within SEBI's
+   Research Analyst regulations, disclaiming registration does not cure the absence of it. This
+   buys honesty with users, not a legal position.
+2. **The non-registration statement is an assumption, not a verified fact.** It reflects that no
+   registration is known to exist for this project. If the operator *is* SEBI-registered, that
+   copy is wrong and must be corrected in the three files named above.
+
 ---
 
 ## Appendix — Documentation Map

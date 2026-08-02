@@ -26,10 +26,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="font-sans">
         <ServiceWorkerRegistration />
         {children}
-        <footer className="max-w-6xl mx-auto px-6 py-6 text-[11px] text-muted/50 text-center">
-          AlphaPulse generates recommendations with AI models from public data. Nothing here is
-          investment advice — verify independently and consult a registered financial advisor
-          before trading.
+        {/* Rendered at full `muted` (6.12:1 on bg), not the /50 it used to be
+            (2.41:1). A disclaimer is only worth anything if it is legible —
+            this was the least readable text in the product. */}
+        <footer className="max-w-6xl mx-auto px-6 py-6 text-[11px] text-muted text-center">
+          AlphaPulse is <strong className="font-semibold">not registered with SEBI</strong> as a
+          Research Analyst or Investment Adviser. It generates recommendations with AI models from
+          public data for informational purposes only. Nothing here is investment advice — verify
+          independently and consult a SEBI-registered adviser before trading.
         </footer>
       </body>
     </html>

@@ -128,13 +128,16 @@ opacity, because it is a lower-conviction bullish tier. Do not give it `accent` 
 class slots per verdict, used together on the hero: `bg` `bg-{tone}/10`, `border`
 `border-{tone}/30`, `text` `text-{tone}`, `badge` `bg-{tone} text-bg`, `strip` `bg-{tone}`.
 
-**Ink on a solid signal fill is `text-bg`, never `text-white`.** These fills are deliberately
-bright; white on them measures 1.85:1 (`buy`) and 2.03:1 (`hold`) — failing even the 3:1 bar for
-large text, on the most prominent element in the product. `text-bg` (`#0b1120`) measures
-**10.17:1 on `buy`, 9.29:1 on `hold`, 5.08:1 on `sell`**. Applied to all three, not just the two
-that failed, so the pill doesn't flip ink colour by outcome. Same rule applies anywhere else a
-solid signal fill carries text — e.g. the completed-step circle in `/market-picks`' progress
-stepper. The *tinted* variants (`text-{tone}` over a dark surface) are unaffected and pass:
+**Ink on any solid tone fill is `text-bg`, never `text-white` — no exceptions.** These fills are
+deliberately bright; white on them measures 1.85:1 (`buy`), 2.03:1 (`hold`), 3.70:1 (`sell`) and
+3.62:1 (`accent`) — the first two failing even the 3:1 bar for large text, on the most prominent
+element in the product. `text-bg` (`#0b1120`) measures **10.17:1 on `buy`, 9.29:1 on `hold`,
+5.08:1 on `sell`, 5.20:1 on `accent`**. Applied uniformly so a pill doesn't flip ink colour by
+outcome. Covers every solid fill carrying text: the hero verdict badge, the `#1` rank badge, the
+primary CTA, `/compare`'s submit, and both the done and active circles in `/market-picks`'
+progress stepper.
+
+The *tinted* variants (`text-{tone}` over a dark surface) are a different case and are unaffected:
 `text-buy` 8.67:1, `text-hold` 7.92:1 on `card`.
 
 **Verdict timeline** — `TIMELINE_REC_CLS` in `verdict-timeline.tsx` reuses the 4-tier
@@ -668,12 +671,17 @@ Bold = below 4.5:1. State of play:
 2. **Solid signal badges now use `text-bg`, not `text-white`** — 10.17:1 on `buy`, 9.29:1 on
    `hold`, 5.08:1 on `sell`, versus 1.85 / 2.03 / 3.70 with white. Covers the `REC_CONFIG` hero
    badge and the `/market-picks` completed-step circle.
-3. **Still open:** `text-white` on `bg-accent` is **3.62:1** — the primary CTA (`text-[15px]
-   font-semibold`, so the 4.5:1 small-text bar applies) and the active progress-step circle.
-   Left as-is deliberately: white-on-blue is the conventional button treatment and 3.62 is
-   marginal rather than illegible, unlike the 1.85 it sits next to. Fixing it means either
-   darkening `accent` or switching the CTA to dark ink — a brand call, not a mechanical one.
+3. **Solid `accent` fills now use `text-bg` too** — 5.20:1, versus 3.62:1 with white. This turned
+   out not to be a brand decision at all: half the app (`/login`, `/api-keys`, `/auth/verify`,
+   `/portfolio-aggregator`) was *already* using `bg-accent text-bg`, and the other half
+   (`ticker-search`, `/compare`, `/market-picks` ×3, the rank badge) used `text-white`. It was an
+   inconsistency, and the passing variant was already the house pattern. Now uniform.
 4. **Still open:** `sell` (4.33:1) and `accent` (4.43:1) as *text* on `card` sit just under AA.
+   Both are within rounding distance of the bar; closing them means shifting brand hues, so they
+   are recorded rather than chased.
+5. **Still open:** reduced-opacity `muted` — `/70` is 3.59:1, `/60` 2.95:1, `/50` 2.41:1, all
+   below AA. Legal disclaimers were moved off these to full `muted` (6.12:1); remaining uses are
+   decorative or tertiary. Do not put anything a user must read below full `muted`.
 
 **Rule for new work:** on a solid signal fill use `text-bg`; otherwise prefer the tinted pattern
 (`bg-{tone}/12 text-{tone} border-{tone}/25`). Do not introduce new `text-muted` on `card-hi`, and
@@ -750,10 +758,14 @@ match.
    `theme.colors.accent`, which is exactly how the original rotted unnoticed).
 2. ~~**No global focus indicator.**~~ **Fixed.** See §10 "Focus indicator". The five
    `focus:outline-none` inputs that out-specify the global rule remain a known exception.
-3. ~~**`muted` fails AA on `card`; white-on-`buy`/`hold` badges fail the large-text bar.**~~
-   **Fixed.** `muted` raised `#6b7fa8` → `#8093bd` (3.99 → 5.22 on `card`); solid signal badges
-   moved from `text-white` to `text-bg`. Still open: `text-white` on `bg-accent` at 3.62:1, and
-   the reduced-opacity `muted` variants. See §10.
+3. ~~**`muted` fails AA; white-on-solid-fill text fails contrast.**~~
+   **Fixed.** `muted` raised `#6b7fa8` → `#8093bd` (3.99 → 5.22 on `card`); every solid tone fill
+   — signal *and* `accent` — moved from `text-white` to `text-bg`. The `accent` half turned out to
+   be an inconsistency rather than a design decision: half the app already used `bg-accent
+   text-bg`. Still open: reduced-opacity `muted` variants, and `sell`/`accent` as text on `card`.
+   See §10.
+   Legal disclaimers (global footer, verdict card, picks list) were also moved off `text-muted/50`
+   –`/60` (2.41:1 / 2.95:1 — the least legible text in the product) to full `text-muted` (6.12:1).
 4. **Page container width is not standardised** (§4) — five distinct `max-w-*` values across
    twelve pages. Reasonable per page, but there is no stated rule beyond "narrowest that fits".
 5. **Two focus treatments on inputs** — `focus:border-accent/40` (most) vs. `focus:ring-2
