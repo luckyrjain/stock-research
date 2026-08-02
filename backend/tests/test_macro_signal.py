@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import cache
-import source_health
 from signals.macro import macro_signal
+from state_store_harness import isolated_state_store
 
 
 class MacroSignalTest(unittest.TestCase):
@@ -17,9 +17,9 @@ class MacroSignalTest(unittest.TestCase):
         self._cache_patch = patch.object(cache, "CACHE_DIR", Path(self._tmpdir))
         self._cache_patch.start()
         self.addCleanup(self._cache_patch.stop)
-        self._health_patch = patch.object(source_health, "_HEALTH_DIR", Path(self._tmpdir) / "_source_health")
-        self._health_patch.start()
-        self.addCleanup(self._health_patch.stop)
+        # source_health now persists through state_store, so point it at a
+        # throwaway in-memory DB rather than a temp directory.
+        self.addCleanup(isolated_state_store().close)
 
     def _run(self, flow: dict, macro: dict):
         with patch("signals.macro.get_fii_dii_flow", return_value=flow), \

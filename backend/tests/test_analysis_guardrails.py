@@ -4,7 +4,6 @@ import shutil
 import sys
 import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -26,7 +25,7 @@ sys.modules.setdefault(
 )
 
 import crew
-import llm_cost
+from state_store_harness import isolated_state_store
 
 
 def _llm_response(content: str) -> SimpleNamespace:
@@ -65,15 +64,11 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
     }
 
     def setUp(self) -> None:
-        # crew.py now records LLM cost on every completion() call via
-        # llm_cost.py — redirect its file writes to a scratch directory so
-        # this test file never touches the real repo's output/ tree, same
-        # convention as every other stateful module's own test file.
-        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-llm-cost-test-")
-        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
-        self._cost_dir_patch = patch.object(llm_cost, "_COST_DIR", Path(self._tmpdir))
-        self._cost_dir_patch.start()
-        self.addCleanup(self._cost_dir_patch.stop)
+        # crew.py records LLM cost on every completion() call via llm_cost.py —
+        # point its persistence at a throwaway in-memory DB so this test file
+        # never touches a real one, same convention as every other stateful
+        # module's own test file.
+        self.addCleanup(isolated_state_store().close)
 
         self.all_data = {
             "stock_info": {
@@ -851,9 +846,7 @@ class CrossProviderFailoverTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-llm-cost-test-")
         self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
-        self._cost_dir_patch = patch.object(llm_cost, "_COST_DIR", Path(self._tmpdir))
-        self._cost_dir_patch.start()
-        self.addCleanup(self._cost_dir_patch.stop)
+        self.addCleanup(isolated_state_store().close)
 
         # clear=False alone isn't enough for isolation: a real developer
         # .env can set LLM_PROVIDER (explicit pin disables failover per

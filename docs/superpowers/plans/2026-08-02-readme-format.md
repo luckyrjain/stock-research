@@ -1,3 +1,58 @@
+# README Reformat Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Rewrite `README.md` from an exhaustive ~400-line engineering reference into a ~120-150
+line GitHub-visitor-facing overview, moving all detail already covered in `docs/*.md` /
+`backend/CLAUDE.md` / `frontend/CLAUDE.md` out of the README and replacing it with links.
+
+**Architecture:** Single-file content edit. No code changes, no tests to write — this is prose
+restructuring. Verification is: (1) every fact kept is still accurate against current code/docs,
+(2) every link resolves, (3) length target met.
+
+**Tech Stack:** Markdown only.
+
+## Global Constraints
+
+- Target length: ~120-150 lines (spec §Structure)
+- No new facts invented — trim/restructure existing accurate prose only (spec §Cut entirely)
+- Drop drifting counts (endpoint count, table count) from README prose entirely rather than
+  re-stating them (spec §Cut entirely — this caused a prior staleness bug)
+- No screenshots/GIFs this pass (spec §Out of scope)
+- No changes to `docs/*.md` or `CLAUDE.md` content (spec §Out of scope)
+- Single README file — no CONTRIBUTING.md split (spec §Out of scope)
+
+---
+
+### Task 1: Rewrite README.md
+
+**Files:**
+- Modify: `README.md` (full rewrite, same path)
+
+**Interfaces:** N/A — standalone content file, nothing else in the repo imports or parses it
+programmatically.
+
+- [ ] **Step 1: Re-read source-of-truth docs for accuracy**
+
+Before writing, re-check the current facts you'll keep, against their authoritative source (not
+against the existing README, which is the thing being trimmed):
+- `docs/index.md` — for the doc-links table (7 files: setup, architecture, deployment,
+  api-reference, database, tools, output-schema, design, backlog, PRD, feature-catalog — confirm
+  exact filenames via `ls docs/*.md`)
+- `.github/workflows/ci.yml` — confirm the CI badge URL still matches (org `luckyrjain`, repo
+  `stock-research`, workflow file `ci.yml`)
+- `backend/requirements.txt` / `frontend/package.json` — confirm Python/Node version floors
+  (Python 3.13, Node 18+) still match `.python-version`/`engines` if present, else keep as-is from
+  current README since these are stated facts, not derived
+- `docker-compose.yml` — confirm service names/ports (backend :8000, frontend :3000, postgres,
+  redis) for the Docker quickstart block
+
+- [ ] **Step 2: Write the new README.md**
+
+Replace the full file with this structure (fill placeholder-free — use the current README's
+existing prose for each bullet, trimmed to 1-2 lines, not reworded facts):
+
+```markdown
 # Stock Research
 
 [![CI](https://github.com/luckyrjain/stock-research/actions/workflows/ci.yml/badge.svg)](https://github.com/luckyrjain/stock-research/actions/workflows/ci.yml)
@@ -65,14 +120,16 @@ Backend on `http://localhost:8000`, frontend on `http://localhost:3000`.
 PostgreSQL is optional for single-stock analysis but required for every other mode.
 
 ```bash
-make setup   # creates .venv, installs backend+frontend deps, copies .env.example -> .env
-make check   # verifies Python/Node/npm/.env/DB/Redis are all in place
-```
+# Backend
+python3.13 -m venv .venv && source .venv/bin/activate
+cd backend && pip install -r requirements.txt && cd ..
+cp .env.example .env   # edit with your provider key + DATABASE_URL
 
-Edit `.env` with your provider key. If `DATABASE_URL` is set, run the migration once:
-
-```bash
+# Database (once DATABASE_URL is set)
 cd backend && alembic upgrade head && cd ..
+
+# Frontend
+cd frontend && npm install && cd ..
 ```
 
 Run it:
@@ -96,13 +153,6 @@ path.
 ## Tests
 
 ```bash
-make test        # backend pytest + frontend tsc --noEmit
-make test-e2e     # frontend Playwright e2e (installs Chromium on first run)
-```
-
-Equivalent, run directly:
-
-```bash
 cd backend && python -m pytest tests/       # no live network calls
 cd frontend && npx tsc --noEmit && npm run test:e2e   # Playwright, backend fully mocked
 ```
@@ -122,3 +172,35 @@ cd frontend && npx tsc --noEmit && npm run test:e2e   # Playwright, backend full
 | [docs/backlog.md](docs/backlog.md) | The single "what's left" list |
 | [docs/PRD.md](docs/PRD.md) | Product strategy — vision, goals, roadmap |
 | [docs/feature-catalog.md](docs/feature-catalog.md) | Detailed feature inventory |
+```
+
+- [ ] **Step 3: Verify length**
+
+Run: `wc -l README.md`
+Expected: between 100 and 160 lines (target 120-150; some slack for exact wording).
+
+- [ ] **Step 4: Verify every relative link resolves**
+
+Run:
+```bash
+grep -oE '\]\(([^)]+\.md)\)' README.md | sed 's/[](]//g; s/)//g' | sort -u | while read f; do
+  test -f "$f" && echo "OK  $f" || echo "MISSING  $f"
+done
+```
+Expected: every line prints `OK`, no `MISSING` lines. (This checks relative `.md` links only —
+the CI badge and any `http(s)://` links are external and not checked by this command.)
+
+- [ ] **Step 5: Manual read-through against the spec's success criteria**
+
+Confirm by inspection:
+- Reads top-to-bottom in under a minute (no walls of table/tree beyond the trimmed structure block)
+- No endpoint/table counts stated in prose (spec's staleness-bug avoidance)
+- Every cut section (full tree, endpoint table, TTL table, migration walkthrough, analyst
+  customization) has a working link to where it now lives
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add README.md
+git commit -m "docs: trim README to a GitHub-visitor-facing overview, link out for depth"
+```

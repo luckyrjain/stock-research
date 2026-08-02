@@ -1,5 +1,9 @@
 # Setup & Configuration
 
+> Run `make check` from the repo root anytime to verify the prerequisites below automatically
+> (tool versions, `.env`, and — if set — `DATABASE_URL`/`REDIS_URL` reachability). `make setup`
+> automates the "Backend setup" steps further down this page.
+
 ## What you need
 
 - Python 3.13
@@ -155,7 +159,7 @@ python main.py RELIANCE --force   # bypass cache
 ## Database schema setup (Alembic)
 
 Every PostgreSQL-backed feature (SME Signals, Screener, Watchlist, Positions, auth, API keys, the
-EOD price store, corporate actions, and the Portfolio Aggregator — 21 tables total) shares one
+EOD price store, corporate actions, and the Portfolio Aggregator — 22 tables total) shares one
 SQLAlchemy Core `MetaData()` object (`db/models.py`). Schema changes
 are now managed through **Alembic** rather than ad-hoc `create_all()` calls or hand-edited
 `ALTER TABLE` statements in `db/schema.sql` (see backend/CLAUDE.md's "Schema migrations" section for the
@@ -174,8 +178,9 @@ alembic upgrade head
 
 This runs all revisions in order — `0001_baseline_schema.py` (the original 11 tables),
 `684c8a31e7e0_add_eod_price_store_and_corporate_.py` (EOD price store + corporate actions, 4
-tables), and `8613aafc2d9d_add_portfolio_aggregator_foundation_.py` (Portfolio Aggregator, 6
-tables) — creating all 21 tables, indexes, and constraints from scratch.
+tables), `8613aafc2d9d_add_portfolio_aggregator_foundation_.py` (Portfolio Aggregator, 6
+tables), and `a7f2c1d09b34_add_app_state_durable_json_state.py` (`app_state`, 1 table) — creating
+all 22 tables, indexes, and constraints from scratch.
 
 **Existing deployment with only the original 11 tables** (created by hand via `db/schema.sql`, or
 via one of the pipelines' `--setup-db` flags before Alembic existed — i.e. predates the EOD price
@@ -236,10 +241,12 @@ python sme_ema_pipeline.py --force      # bypass the 24 h stock-list cache
 python sme_ema_pipeline.py --lookback 10  # report window for the CLI summary
 ```
 
-**`--reset-db` drops and recreates every table in the shared `MetaData()`, not just this
-pipeline's own** — see backend/CLAUDE.md's "SME golden cross flow" section for the disclosed blast-radius
-caveat. Don't run it against a database with real Watchlist/Positions/account data unless you
-mean to lose it.
+**`--reset-db` is scoped to this pipeline's own two tables** (`ema_signals`, `sme_stocks`) — it
+does not touch the shared `MetaData()` as a whole. This used to be a real footgun (an early
+version called `metadata.drop_all()` and wiped every table, including Watchlist/Positions/account
+data); see backend/CLAUDE.md's "SME golden cross flow" section for the fix and the scoping
+convention it established for every pipeline after it (`screener_pipeline.py`,
+`eod_prices_pipeline.py`, `corporate_actions_pipeline.py`).
 
 The screener page's **Refresh Data** button triggers the same pipeline via `POST /api/sme-signals/refresh`.
 The CLI exits non-zero (and the API logs an `sme_refresh_unhealthy` warning) when a run was
@@ -371,8 +378,9 @@ by the same Alembic step as everything else above).
   transaction history exists — either import path below populates `transactions`.
 - **CAS import** (`POST /api/portfolio/import-cas`) — upload a CAMS/KFintech detailed CAS PDF +
   its password on `/portfolio-aggregator`. New dependency `casparser` (already in
-  `requirements.txt`, pulls `pdfminer.six`). Parsed statements are archived (PII-scrubbed) to
-  `output/_cas/` for replay: from `backend/`, `python cas_import.py --replay output/_cas/<file>.json --account-id N`.
+  `requirements.txt`, pulls `pdfminer.six`). Parsed statements are archived (PII-scrubbed) under
+  the `cas_archive` namespace in `app_state`, keyed by timestamp, for replay: from `backend/`,
+  `python cas_import.py --replay <key> --account-id N`.
 - **Broker CSV import** (`POST /api/portfolio/import-csv/preview` then `.../import-csv`) — upload
   a broker trade export (Zerodha tradebook auto-detected; any other broker via a column-mapping
   UI). New dependency `openpyxl` (already in `requirements.txt`, for `.xlsx` files — `pandas`
@@ -460,10 +468,11 @@ Market picks-specific caches:
 | `backend/output/_market_picks/picks.json` | 7 days (192 h) | Full pipeline result |
 | `backend/output/_extract_cache/` | 6 hours | Per-source LLM extraction |
 | `backend/output/_nse_master.txt` | 24 hours | NSE equity symbol list |
-| `backend/output/_history/` | Permanent | Daily snapshots for trend labels + `/market-picks/history` |
-| `backend/output/_llm_cost/<date>.json` | Permanent (one file per day) | Running LLM cost/call counters — see `llm_cost.py` |
-| `backend/output/_source_health/` | Permanent | Per-source freshness/volume tracking — see `source_health.py` |
-| `backend/output/_scraper_error_counters/` | Permanent | Error counters for the standalone per-symbol scrapers |
+
+Everything durable that used to live beside these — daily pick snapshots, LLM cost counters,
+per-source health, scraper error counters, source-quality telemetry — is now in PostgreSQL, in
+the `app_state` table under one namespace each. `backend/output/` holds only regenerable cache.
+See [Database](database.md).
 
 When `REDIS_URL` is set, `cache.py` writes through to Redis in addition to local disk — see
 [Deployment](deployment.md#scaling-read-this-before-adding-workers-or-replicas).
@@ -594,7 +603,7 @@ stamp you need depends on **which** tables it already has:
   `mf_nav_daily`, `corporate_actions`, `profiles`, `accounts`, `assets`, `holdings`,
   `valuations`, `transactions`), and the EOD price store and Portfolio Aggregator fail at
   runtime with nothing having gone wrong at migration time.
-- **All 21 tables already present** (fully caught up — e.g. created by a recent pipeline
+- **All 22 tables already present** (fully caught up — e.g. created by a recent pipeline
   `--setup-db`, which auto-stamps): `alembic stamp head` is the correct command here, and the
   only case where it is.
 

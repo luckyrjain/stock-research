@@ -316,7 +316,7 @@ export interface MarketPicksStatus {
   next_scheduled_at: string;          // ISO timestamp of the next cron-triggered refresh
 }
 
-// ── Market Picks track record (output/_history/ aggregated) ──────────────────
+// ── Market Picks track record (daily snapshots aggregated) ───────────────────
 
 export interface MarketPickTrackRecord {
   symbol:              string;
@@ -351,9 +351,10 @@ export interface MarketPicksHistoryResponse {
   available_dates: string[];        // 'YYYY-MM-DD', every date with a stored snapshot
 }
 
-// One pick as stored in a single day's output/_history/<date>.json snapshot —
-// a narrower field set than the live MarketPick (see market_picks_pipeline.py's
-// _save_history), since only what's needed for trend tracking is persisted.
+// One pick as stored in a single day's snapshot (the `market_picks_history`
+// namespace in the backend's app_state table) — a narrower field set than the
+// live MarketPick (see market_picks_pipeline.py's _save_history), since only
+// what's needed for trend tracking is persisted.
 export interface MarketPicksSnapshotPick {
   symbol:            string;
   confidence:        number;

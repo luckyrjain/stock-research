@@ -1,40 +1,33 @@
-import json
 import multiprocessing
 import shutil
 import tempfile
 import threading
-import time
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import llm_cost
+from state_store_harness import isolated_state_store, shared_state_store
 
 
-def _mp_record_call(cost_dir: str, date: str) -> None:
+def _mp_record_call(state_dir: str, date: str) -> None:
     """Top-level (picklable) worker for MultiProcessConcurrencySafetyTest —
     runs in a genuinely separate OS process, not a thread, to exercise the
-    actual guarantee fcntl.flock provides (keyed on the open file
-    description across processes) rather than only the in-process
-    serialization threads already prove. Reassigns _COST_DIR directly
-    (not via unittest.mock.patch, which doesn't need to cross a process
-    boundary here since the fork start method copies this module's already-
-    imported state, but setting it explicitly keeps this independent of
-    that assumption)."""
+    actual cross-process guarantee state_store.mutate()'s row lock provides
+    rather than only the in-process serialization threads already prove.
+
+    Builds its own engine over the parent's SQLite file rather than
+    inheriting one: a SQLAlchemy engine is not fork-safe, since its pooled
+    connections are file descriptors the parent also holds."""
     import llm_cost as _llm_cost
 
-    _llm_cost._COST_DIR = Path(cost_dir)
-    with patch.object(_llm_cost, "_today", return_value=date):
-        _llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)
+    with shared_state_store(state_dir, create=False):
+        with patch.object(_llm_cost, "_today", return_value=date):
+            _llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)
 
 
 class LlmCostTest(unittest.TestCase):
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-llm-cost-test-")
-        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
-        self._patch = patch.object(llm_cost, "_COST_DIR", Path(self._tmpdir))
-        self._patch.start()
-        self.addCleanup(self._patch.stop)
+        self.addCleanup(isolated_state_store().close)
 
     def test_estimate_cost_usd_never_raises_on_an_unrecognized_model(self) -> None:
         fake_response = object()  # not a real litellm response shape
@@ -62,13 +55,6 @@ class LlmCostTest(unittest.TestCase):
         totals = llm_cost.get_daily_totals("2020-01-01")
         self.assertEqual(totals, {"call_count": 0, "total_cost_usd": 0.0, "calls_with_unknown_cost": 0})
 
-    def test_get_daily_totals_never_raises_on_a_corrupt_file(self) -> None:
-        path = llm_cost._COST_DIR / f"{llm_cost._today()}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("not json")
-        totals = llm_cost.get_daily_totals()
-        self.assertEqual(totals["call_count"], 0)
-
     def test_record_call_cost_logs_a_structured_event(self) -> None:
         with patch("llm_cost.log_event") as mock_log:
             llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50, run_id="run-1")
@@ -95,18 +81,6 @@ class LlmCostTest(unittest.TestCase):
         with patch("llm_cost.log_event", side_effect=[Exception("boom"), None]):
             llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)  # must not raise
 
-    def test_a_broken_cost_dir_never_raises(self) -> None:
-        blocked = Path(self._tmpdir) / "blocked"
-        blocked.write_text("not a directory")
-        with patch.object(llm_cost, "_COST_DIR", blocked / "nested"):
-            llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)  # must not raise
-
-    def test_save_writes_atomically_leaving_no_temp_files_behind(self) -> None:
-        llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)
-
-        leftover_temp_files = [p for p in Path(self._tmpdir).iterdir() if p.name.endswith(".tmp")]
-        self.assertEqual(leftover_temp_files, [])
-
     def test_multiple_days_are_tracked_independently(self) -> None:
         with patch("llm_cost._today", return_value="2026-01-01"):
             llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)
@@ -117,52 +91,42 @@ class LlmCostTest(unittest.TestCase):
         self.assertEqual(llm_cost.get_daily_totals("2026-01-02")["total_cost_usd"], 0.05)
 
 
+class BrokenStateStoreTest(unittest.TestCase):
+    """Cost tracking must degrade, never break the analysis request it's
+    observing — the same guarantee the old "a broken _COST_DIR never raises"
+    and "a corrupt counter file reads as zeros" tests covered when this was a
+    directory of JSON files."""
+
+    def setUp(self) -> None:
+        self.addCleanup(isolated_state_store().close)
+
+    def test_record_call_cost_never_raises_when_the_store_is_broken(self) -> None:
+        with patch("state_store._get_engine", side_effect=RuntimeError("db down")):
+            llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)  # must not raise
+
+    def test_get_daily_totals_degrades_to_zeros_when_the_store_is_broken(self) -> None:
+        with patch("state_store._get_engine", side_effect=RuntimeError("db down")):
+            totals = llm_cost.get_daily_totals()
+        self.assertEqual(totals, {"call_count": 0, "total_cost_usd": 0.0, "calls_with_unknown_cost": 0})
+
+
 class ConcurrencySafetyTest(unittest.TestCase):
-    """Regression coverage for the cross-process lost-update race a plain
-    in-memory threading.Lock can't prevent: two backend *worker processes*
-    (the exact multi-worker/REDIS_URL topology docs/deployment.md's
-    "Scaling" section documents as supported) racing to record a call on
-    the same UTC day must not silently undercount call_count/total_cost_usd
-    — same fcntl.flock-based fix and same test shape as
-    tests/test_source_health.py's own ConcurrencySafetyTest."""
+    """Regression coverage for the lost-update race a plain in-memory
+    threading.Lock can't prevent: two backend workers (the multi-worker
+    topology docs/deployment.md's "Scaling" section documents as supported)
+    racing to record a call on the same UTC day must not silently undercount
+    call_count/total_cost_usd — same shape as tests/test_source_health.py's
+    own ConcurrencySafetyTest.
+
+    File-backed, not in-memory: StaticPool would hand every thread the same
+    DBAPI connection, which can't hold concurrent transactions at all."""
 
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-llm-cost-lock-test-")
         self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
-        self._patch = patch.object(llm_cost, "_COST_DIR", Path(self._tmpdir))
-        self._patch.start()
-        self.addCleanup(self._patch.stop)
-
-    def test_locked_excludes_concurrent_holders(self) -> None:
-        intervals = []
-        lock_guard = threading.Lock()
-
-        def hold(label: str) -> None:
-            with llm_cost._locked("2026-01-01"):
-                start = time.monotonic()
-                time.sleep(0.05)
-                end = time.monotonic()
-            with lock_guard:
-                intervals.append((label, start, end))
-
-        threads = [threading.Thread(target=hold, args=(f"t{i}",)) for i in range(4)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        self.assertEqual(len(intervals), 4)
-        intervals.sort(key=lambda x: x[1])
-        for (_, _, end_a), (_, start_b, _) in zip(intervals, intervals[1:]):
-            self.assertLessEqual(end_a, start_b)  # no overlap between consecutive holders
+        self.addCleanup(shared_state_store(self._tmpdir).close)
 
     def test_concurrent_record_call_cost_loses_no_calls(self) -> None:
-        # Regression test: an in-process threading.Lock alone can't prevent
-        # a lost update across two *processes* -- this exercises many
-        # threads racing for the same file to at least prove the
-        # file-level lock serializes correctly within one process; the
-        # real multi-process guarantee comes from fcntl.flock being keyed
-        # on the open file description, not the process.
         with patch("llm_cost._today", return_value="2026-03-01"):
             def worker() -> None:
                 llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)
@@ -178,7 +142,7 @@ class ConcurrencySafetyTest(unittest.TestCase):
         self.assertEqual(totals["call_count"], 30)
         self.assertAlmostEqual(totals["total_cost_usd"], 0.30)
 
-    def test_concurrent_calls_never_corrupt_the_file(self) -> None:
+    def test_concurrent_calls_never_corrupt_the_record(self) -> None:
         errors = []
 
         def worker(i: int) -> None:
@@ -194,24 +158,22 @@ class ConcurrencySafetyTest(unittest.TestCase):
             t.join()
 
         self.assertEqual(errors, [])
-        path = llm_cost._COST_DIR / f"{llm_cost._today()}.json"
-        data = json.loads(path.read_text())  # raises if corrupted
-        self.assertEqual(data["call_count"], 20)
+        self.assertEqual(llm_cost.get_daily_totals()["call_count"], 20)
 
 
 class MultiProcessConcurrencySafetyTest(unittest.TestCase):
-    """The gap ConcurrencySafetyTest's own comments disclose: its tests
-    only spawn threads within one process, proving the file-level lock
-    serializes correctly in-process — but the bug this module's _locked()
-    fix actually targets (docs/deployment.md's supported multi-worker
-    topology) is two separate *processes* racing to update the same day's
-    counter file, which a plain threading.Lock cannot prevent at all. This
-    spawns real OS processes (multiprocessing, fork start method) to
-    exercise fcntl.flock's actual cross-process guarantee."""
+    """The gap ConcurrencySafetyTest's own comments disclose: its tests only
+    spawn threads within one process. The race state_store.mutate() actually
+    targets (docs/deployment.md's supported multi-worker topology) is two
+    separate *processes* contending for the same day's counter, which a plain
+    threading.Lock cannot prevent at all. This spawns real OS processes."""
 
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-llm-cost-mp-test-")
         self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        # create=True here so the child processes (create=False) find the
+        # tables already there rather than 12 of them racing to create them.
+        self.addCleanup(shared_state_store(self._tmpdir).close)
 
     def test_concurrent_processes_lose_no_calls(self) -> None:
         ctx = multiprocessing.get_context("fork")
@@ -223,11 +185,10 @@ class MultiProcessConcurrencySafetyTest(unittest.TestCase):
         for p in procs:
             p.start()
         for p in procs:
-            p.join(timeout=30)
+            p.join(timeout=60)
             self.assertEqual(p.exitcode, 0)
 
-        with patch.object(llm_cost, "_COST_DIR", Path(self._tmpdir)):
-            totals = llm_cost.get_daily_totals(date)
+        totals = llm_cost.get_daily_totals(date)
 
         self.assertEqual(totals["call_count"], 12)
         self.assertAlmostEqual(totals["total_cost_usd"], 0.12, places=6)

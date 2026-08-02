@@ -91,7 +91,7 @@ These tool functions are decorated with `@tool` from `crewai.tools` purely for a
 | `_phase_consolidate` | Groups picks by ticker, validates against NSE equity master, confirms live price via yfinance (guards pre-IPO / unlisted names). Uses rapidfuzz for fuzzy company-name matching. |
 | `_phase_research` | Fetches `stock_info` + `research` + signal engine + a valuation percentile per stock (4 workers, up to `_MAX_STOCKS` stocks). |
 | `_phase_analyze` | Batched LLM calls (8 stocks/batch, parallel) for qualitative summary + bull/bear factors. Does NOT ask the LLM for prices. |
-| `_phase_score` | Deterministic confidence scoring (`_compute_confidence`: 50% signal engine + 30% consensus + 20% recency, 0–100, plus a small ±3-point valuation nudge layered on top — see below). The 4-tier rec (BUY / WATCHLIST / HOLD / SELL) is a *separate* formula on top — `combined_dir = 0.55 × consensus + 0.45 × signal_score`, thresholded, with a quant-veto that demotes BUY → WATCHLIST on a strongly negative signal score. Entry/target/stop-loss computed from price and signal score — no LLM. Sector-balanced (`_apply_sector_balance()`): max 2 stocks per sector promoted to the primary list, excess deferred to the end — `sector` stays on every pick in the response (real, filterable data, not popped like the old internal-only `_sector`). Saves a daily snapshot to `output/_history/` for trend tracking. |
+| `_phase_score` | Deterministic confidence scoring (`_compute_confidence`: 50% signal engine + 30% consensus + 20% recency, 0–100, plus a small ±3-point valuation nudge layered on top — see below). The 4-tier rec (BUY / WATCHLIST / HOLD / SELL) is a *separate* formula on top — `combined_dir = 0.55 × consensus + 0.45 × signal_score`, thresholded, with a quant-veto that demotes BUY → WATCHLIST on a strongly negative signal score. Entry/target/stop-loss computed from price and signal score — no LLM. Sector-balanced (`_apply_sector_balance()`): max 2 stocks per sector promoted to the primary list, excess deferred to the end — `sector` stays on every pick in the response (real, filterable data, not popped like the old internal-only `_sector`). Saves a daily snapshot under the `market_picks_history` namespace in `state_store.py` for trend tracking. |
 
 **Deliberately not decomposed in this pass**: at ~1,600 lines, `market_picks_pipeline.py` is the
 single largest Python module in this repo, and `_phase_extract`/`_phase_consolidate` are each
@@ -121,18 +121,19 @@ user-facing 'degraded' signal and no attempt at a second configured provider."
    pricing table hasn't caught up to), and a missing price degrades to `None`, never a fabricated
    number that looks like a real cost. Each call's cost/tokens are logged immediately
    (`llm_call_cost` event, queryable through whatever this deployment already does with structured
-   logs) and accumulated into a small running-total JSON file, `output/_llm_cost/<date>.json`
-   (`call_count`, `total_cost_usd`, `calls_with_unknown_cost`) — the same "grep-able counter file
-   plus a log line" convention as `scraper_error_counters.py`/`source_health.py`, a real answer to
-   "what's today's total LLM spend" without a second billing/observability platform. The daily
-   file's read-modify-write cycle is guarded by `_locked(date)`, an advisory `fcntl.flock`-based
-   cross-process lock (same pattern as `source_health.py`'s own `_locked()`) — an own-adversarial-
-   review pass caught that the first version of this module used only an in-process
-   `threading.Lock`, which does nothing to prevent two backend *worker processes* (the exact
-   multi-worker/`REDIS_URL` topology `docs/deployment.md`'s "Scaling" section documents as
+   logs) and accumulated into a running per-UTC-day total under the `llm_cost` namespace in
+   `state_store.py` (`call_count`, `total_cost_usd`, `calls_with_unknown_cost`) — the same "one
+   counter plus a log line" convention as `scraper_error_counters.py`/`source_health.py`, a real
+   answer to "what's today's total LLM spend" without a second billing/observability platform.
+   The daily read-modify-write cycle is serialized by `state_store.mutate()`'s row lock — an
+   own-adversarial-review pass caught that the first version of this module used only an
+   in-process `threading.Lock`, which does nothing to prevent two backend *worker processes* (the
+   exact multi-worker/`REDIS_URL` topology `docs/deployment.md`'s "Scaling" section documents as
    supported) from both reading the same prior `call_count`, both incrementing locally, and the
    second write silently overwriting the first — undercounting cost with no warning logged,
-   directly undermining the one thing this module exists to get right. Fixed and covered by a
+   directly undermining the one thing this module exists to get right. That was first fixed with
+   an `fcntl.flock` advisory lock over a JSON file at `output/_llm_cost/<date>.json`; the row lock
+   that replaced it holds across separate *hosts* too, which `flock` never did. Covered by a
    `ConcurrencySafetyTest` in `tests/test_llm_cost.py`, mirroring `source_health.py`'s own.
 2. **Cross-provider failover** (`crew.py`) — `run_analysis_with_fallback()`'s single-provider LLM
    call is extracted into `_attempt_provider()` (its own guardrail retry once, rate-limit retry
@@ -974,7 +975,7 @@ between a GitHub Actions cron expression and this Python computation). Powers th
 hero's true "Last scan" / "Next scheduled scan" line, replacing an unverifiable "every week" claim.
 
 **Browsing a specific day's picks**: `GET /api/market-picks/history` normally aggregates every
-`output/_history/<date>.json` snapshot into a per-symbol first/last-seen roll-up (see "Market picks
+stored daily snapshot into a per-symbol first/last-seen roll-up (see "Market picks
 track record" below) — it never surfaces one day's actual full list. `?date=YYYY-MM-DD` is a second
 code path on the same handler that skips aggregation entirely and returns that single day's snapshot
 verbatim (`{"date": ..., "picks": [...]}`, the same shape `_save_history()` wrote it in — just the six
@@ -1214,7 +1215,7 @@ transaction-level history XIRR needs.
    (`transactions_t.c.meta["source"].as_string()`, portable across the Postgres/SQLite backends
    this codebase's tests and production both use).
 4. `archive_parsed()` writes the parsed JSON, scrubbed of PAN/KYC/investor identity, to
-   `output/_cas/YYYY-MM-DD-HHMMSS.json` — mirrors the `output/_bhavcopy/` raw-archive convention
+   the `cas_archive` namespace in `state_store.py`, keyed `YYYY-MM-DD-HHMMSS` — same replay-archive intent as `output/_bhavcopy/`
    the EOD price store already established, so an import can be replayed for debugging without
    re-uploading the PDF: `python cas_import.py --replay <file> --account-id N`. The PDF bytes
    themselves are never written to disk.
@@ -1565,9 +1566,9 @@ fetches: `_SOURCE_CREDIBILITY` weights every source into confidence scoring, so 
 doesn't error, it just quietly stops contributing to every future pick's score.
 
 1. `source_health.record_and_check(source_name, ok, **context)` records this run's boolean
-   ok/not-ok result, under today's UTC calendar day, to a small per-source JSON file under
-   `output/_source_health/` (same "cache directory" convention as everything else in this
-   codebase — no database needed for something this lightweight), then warns via
+   ok/not-ok result, under today's UTC calendar day, to one record per source under the
+   `source_health` namespace in `state_store.py` (this used to be a per-source JSON file
+   under `output/_source_health/`), then warns via
    `observability.log_event(level="warning")` once a source that had an established healthy
    baseline (≥5 prior days, at least one of which succeeded) has now failed 3 consecutive
    *days* in a row. Never raises — a broken health-tracking file must not break the
@@ -1582,18 +1583,15 @@ doesn't error, it just quietly stops contributing to every future pick's score.
    per-call argument rather than a patchable module-level "now" function, since a process-wide
    monkeypatch of a shared function is itself racy across the concurrent-caller tests this
    module needs (one thread's patched value can leak into another's call).
-3. **Concurrency-safe**: the whole read-modify-write cycle for one source's file is guarded by
-   `_locked()`, an advisory `fcntl.flock`-based exclusive lock keyed per source (POSIX-only,
-   matching this codebase's Linux-only deployment assumption). Without it, two callers racing to
+3. **Concurrency-safe**: the whole read-modify-write cycle for one source is guarded by
+   `state_store.mutate()`'s row lock, keyed per source. Without it, two callers racing to
    update the same source at once — e.g. several `market_picks_pipeline.py` `_phase_scrape`
    workers, or the same `signals/macro.py` cache-miss race across worker threads CLAUDE.md's
    "Shared state and queues" section already documents for `fii_dii_flow`/`macro_context` — is a
    classic lost-update race: both read the same prior history, both write their own updated
-   version, and the second write can either corrupt the file (interleaved writes) or silently
-   clobber the first caller's update, including resetting the rolling baseline. The file itself
-   is still written atomically (tempfile + `os.replace`, same convention as `cache.py::save()`)
-   as defense in depth, but the lock is what actually prevents the lost-update race — an atomic
-   write alone only prevents a *torn* write, not two full read-modify-write cycles racing.
+   version, and the second write silently clobbers the first caller's update, including
+   resetting the rolling baseline. This was previously an `fcntl.flock` advisory lock over a
+   JSON file; the row lock also holds across separate *hosts*, which `flock` never did.
 4. Deliberately **not** wired into the three genuinely per-symbol standalone endpoints (peers,
    insider activity, street consensus) — most individual stocks legitimately have zero insider
    trades or zero Trendlyne-cited coverage on a given day, which is this codebase's own
@@ -1613,7 +1611,7 @@ source that's technically "healthy" (returns articles every run) but whose picks
 validation is invisible to both of those modules.
 
 1. `source_quality.record_run(run_id, source_stats)` writes one JSON file per pipeline run to
-   `output/_source_quality/<run_id>.json` (tempfile + `os.replace` atomic write, same convention
+   the `source_quality` namespace in `state_store.py`, keyed by run id (same convention
    as `cache.py`/`source_health.py` — no lock needed since each run writes its own uniquely-named
    file, unlike those modules' shared per-source file). Never raises — a telemetry write failure
    must never affect a real pipeline run.
@@ -1650,7 +1648,7 @@ this directly: "the ~10 standalone scrapers outside [the six-task] path have no 
 logging of their own — a silent layout change there degrades with no log line to grep for."
 
 1. `scraper_error_counters.record_scraper_error(scraper_name, **context)` increments a small
-   persisted counter (`output/_scraper_error_counters/<name>.json`, same tempfile +
+   persisted counter (the `scraper_errors` namespace in `state_store.py`, same
    `os.replace` atomic-write convention as `cache.py`/`source_health.py`) and immediately logs
    a `level="warning"` event — no "N bad days in a row" threshold like `source_health.py`,
    since a single error at one of these on-demand, per-request endpoints already means one
@@ -2124,11 +2122,11 @@ own, because nothing enforced a narrower blast radius).
    a genuinely empty database and verified (against a real local Postgres instance) to both
    `alembic upgrade head` cleanly onto nothing and `alembic downgrade base` cleanly back to
    nothing, producing exactly the same 11 tables, indexes, and constraints
-   `db/schema.sql`/`metadata.create_all()` already produce. **There are 3 revisions today** —
+   `db/schema.sql`/`metadata.create_all()` already produce. **There are 4 revisions today** —
    `0001_baseline_schema`, then `684c8a31e7e0_add_eod_price_store_and_corporate_` (the
    `securities`/`prices_daily`/`mf_nav_daily`/`corporate_actions` tables) and
    `8613aafc2d9d_add_portfolio_aggregator_foundation_` (`profiles`/`accounts`/`assets`/
-   `holdings`/`valuations`/`transactions`), bringing the schema to its current 21 tables. Both
+   `holdings`/`valuations`/`transactions`), bringing the schema to 21 tables; a fourth, `a7f2c1d09b34`, adds `app_state` for 22. The first two
    later revisions were autogenerated and round-trip-verified (upgrade → `alembic check` clean →
    downgrade → upgrade) against an isolated scratch Postgres, the same way `0001` was.
 3. **A deployment predating Alembic must `alembic stamp 0001` and THEN
@@ -2549,7 +2547,7 @@ file never left disk, and `api.py`'s SSE endpoint didn't write anything comparab
    row per `(symbol, verdict_date)` into the `verdict_history` Postgres table (recommendation,
    confidence, current_price, signal_score); `load_history(symbol, limit=60)` reads them back
    oldest-first. Both are best-effort — a missing `DATABASE_URL` or a DB hiccup is logged and
-   swallowed, never raised, the same convention `signals/store.py` uses for its own audit trail.
+   swallowed, never raised, the same convention `state_store.py` uses for its own audit writes.
 2. `save_snapshot()` is called from **both** entry points that produce a report — `main.py`'s
    CLI pipeline (all three exit paths: cache-hit early return and the normal run) and `api.py`'s
    `/api/analyse/{symbol}` SSE stream, right after `_build_report()` — so the timeline reflects
@@ -2649,8 +2647,21 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
   appears to need one, say so and stop rather than building it. The binding list and the reasoning
   are in that file; `docs/backlog.md` links to it.
 - **Scope every pipeline's `--reset-db` to the tables that pipeline owns.** Never
-  `metadata.drop_all()` — the shared `MetaData()` carries all 21 tables, six of which hold
+  `metadata.drop_all()` — the shared `MetaData()` carries all 22 tables, six of which hold
   non-regenerable personal financial data. See `docs/database.md` for the ownership map.
+- **`output/` is cache only. Durable state goes to PostgreSQL.** Every file under `output/` must
+  be regenerable by re-running something; if losing it would lose real information, it belongs in
+  the database. Anything shaped like "a JSON blob under a key" goes through `state_store.py`
+  (`load`/`save`/`items`/`mutate`/`delete_older_than` over the `app_state` table) under its own
+  namespace, rather than a new directory of files or a new near-identical table — that module
+  replaced six such directories. A namespace with unbounded per-run growth (e.g. `source_quality`)
+  should call `delete_older_than()` after each write, the way `source_quality.py::record_run()`
+  does — the disk directories this module replaced were at least `rm`-able by hand; a Postgres
+  table isn't, without this. Use `mutate()`, never `load()`-then-`save()`, wherever more than one worker can
+  touch the same key: it holds a row lock for the whole read-modify-write, which is what the three
+  hand-rolled `fcntl.flock` helpers it replaced existed to do (and it works across hosts, which
+  they did not). Every entry point degrades to a logged no-op without `DATABASE_URL`, so callers
+  stay best-effort.
 - **Schema boundary is sacred.** Raw tool output must be normalized through `schemas.normalize()` before being passed to cache, guardrails, signal engine, or analyst prompt. If a tool changes its output shape, only `schemas.py` needs updating.
 - **Never add fields to the analyst JSON output schema** without also updating `config/analyst.json` (`output_schema`), `crew._validate_analysis_payload()`, `main._build_report()`, and `frontend/types/index.ts` (`Analysis` interface). These four are in lockstep.
 - **Tools must not raise.** All functions in `tools/` must return `{"error": "...", ...}` on failure. The cache layer silently discards error payloads; guardrails detect them and trigger retries.
@@ -2661,11 +2672,10 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
 - **4-tier recommendation in market picks**: BUY / WATCHLIST / HOLD / SELL. Do not collapse these to 3-tier. `WATCHLIST` is a distinct lower-conviction tier between BUY and HOLD.
 - **Trade levels are deterministic in market picks** (entry/target/stop computed from signal score and 52w range). Do not add LLM-driven price generation — it produces null values when context overflows.
 - **Extraction cache** (`output/_extract_cache/`) avoids re-calling the LLM for the same source articles within 6 h. The cache key is content-aware (title + URL + summary hash), so edits or new articles get a fresh key automatically. Expired files aren't just ignored on read — `_prune_extract_cache()` deletes them once per pipeline run, or this directory grows by one file per (source, article-batch) forever.
-- **`signals_data/<SYMBOL>/<date>.json`** (written by `signals/store.save_signal`) is a write-only audit trail — nothing reads it back. Pruned to a 90-day retention window per symbol on every write (`signals/store._prune_old_signals`).
 - **Source credibility weights** in `_SOURCE_CREDIBILITY` determine how much each source contributes to confidence scoring. Adding a new source requires adding a credibility entry; missing sources default to 0.50.
 - **HDFC Securities sources** live in `tools/hdfc_sec_agent.py` and are merged into `SOURCES` / `SCRAPER_FNS` at import time in `tools/market_picks_tools.py`. Adding a new brokerage source follows the same pattern: define scrapers in a separate module, export `*_SOURCES` and `*_SCRAPERS`, merge in `market_picks_tools.py`.
 - **Rate limiting** is a sliding window (`api.py`'s `_rate_limit()` → `rate_limiter.is_allowed()`), applied only to expensive/abusable routes: `/api/analyse/{symbol}` (20 req / 5 min per IP), `/api/market-picks?force=true` (3 req / hour per IP), `/api/sme-signals/refresh` (3 req / hour per IP, on top of the existing single-run guard). Backed by Redis (shared across workers) when `REDIS_URL` is set, an in-memory per-process counter otherwise — see "Shared-state rate limiting" below. The "per IP" is `api.py::_client_ip()`, not raw `request.client.host` — see "Trusted client IP for per-IP rate limiting" below for why that distinction matters given every request arrives via the Next.js proxy routes.
-- **`output/_history/<date>.json` snapshot schema** (`symbol`, `confidence`, `effective_signal`, `mention_count`, `current_price`, `recommendation`) is read by two independent consumers: the in-pipeline `_load_trend()` (confidence trend) and `GET /api/market-picks/history` (price track record, `/market-picks/history` page). Snapshots written before `current_price`/`recommendation` were added won't have them — the history endpoint handles this by returning `change_pct: null` rather than guessing. Keep both consumers in mind if the snapshot shape changes.
+- **The `market_picks_history` snapshot schema** (`state_store.py`) (`symbol`, `confidence`, `effective_signal`, `mention_count`, `current_price`, `recommendation`) is read by two independent consumers: the in-pipeline `_load_trend()` (confidence trend) and `GET /api/market-picks/history` (price track record, `/market-picks/history` page). Snapshots written before `current_price`/`recommendation` were added won't have them — the history endpoint handles this by returning `change_pct: null` rather than guessing. Keep both consumers in mind if the snapshot shape changes.
 - **`GET /api/market-picks/history`** also computes an overall `win_rate` (share of tracked picks with `change_pct > 0`), a `tier_stats` breakdown keyed by `recommendation_then` (count/avg change/win rate per BUY/WATCHLIST/HOLD/SELL), and per-symbol `nifty_change_pct`/`alpha_pct` benchmarked against `^NSEI` over the same `first_seen` → `last_seen` window (`avg_alpha_pct` at the top level). The Nifty series is fetched once per request-range via `yfinance.Ticker("^NSEI").history()` — not once per snapshot date — and cached through `cache.py` using `"NSEI"` as a pseudo-symbol (`index_history`, 24 h TTL, re-fetched whenever a new snapshot date widens the needed range). A closed-market snapshot date (weekend/holiday) falls back to the nearest earlier trading day's close, never a later one. A yfinance outage degrades to `null` alpha fields, not a failed request.
 - **CORS** is restricted via `CORSMiddleware` to origins in `ALLOWED_ORIGINS` (comma-separated env var, defaults to `http://localhost:3000`). This is defense in depth, not something normal operation relies on — the Next.js proxy routes talk to the backend server-to-server, which CORS doesn't apply to. Add your production frontend's origin to `ALLOWED_ORIGINS` before deploying, or direct browser calls to the backend will be rejected.
 

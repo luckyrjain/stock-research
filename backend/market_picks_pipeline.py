@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 
 import source_health
 import source_quality
+import state_store
 from error_tracking import init_error_tracking
 from observability import get_logger, log_event
 
@@ -382,14 +383,17 @@ def save_picks_cache(picks: list, generated_at: str) -> None:
 
 
 # ── Historical tracking ───────────────────────────────────────────────────────
-_HISTORY_DIR = Path("output/_history")
+# One record per UTC day under this namespace, keyed by YYYY-MM-DD — so lexical
+# key order is chronological order, and "the last N days" is an ORDER BY ...
+# DESC LIMIT N rather than the sorted-glob over output/_history/*.json this
+# used to be. Read by two independent consumers: _load_trend() below, and
+# api.py's GET /api/market-picks/history.
+HISTORY_NAMESPACE = "market_picks_history"
 
 
 def _save_history(picks: list[dict]) -> None:
-    """Append today's pick snapshot to output/_history/YYYY-MM-DD.json."""
-    _HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    """Store today's pick snapshot under HISTORY_NAMESPACE."""
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    path = _HISTORY_DIR / f"{date_str}.json"
     snapshot = [
         {
             "symbol":           p["symbol"],
@@ -401,26 +405,22 @@ def _save_history(picks: list[dict]) -> None:
         }
         for p in picks
     ]
-    try:
-        path.write_text(json.dumps({"date": date_str, "picks": snapshot}))
-    except Exception:
-        pass
+    state_store.save(HISTORY_NAMESPACE, date_str, {"date": date_str, "picks": snapshot})
 
 
 def _load_trend(symbol: str, today_confidence: float) -> dict:
     """
     Return {"trend": "rising"|"falling"|"stable"|"new", "delta": float|None}
-    based on the previous 3 days of history files.
+    based on the previous 3 days of stored snapshots.
     """
-    if not _HISTORY_DIR.exists():
-        return {"trend": "new", "delta": None}
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     past_scores: list[float] = []
-    for path in sorted(_HISTORY_DIR.glob("*.json"))[-4:]:
-        if path.stem == today:
+    # 4 newest, since today's own snapshot may already be among them and is
+    # skipped — leaving the 3 prior days this trend is defined over.
+    for date_str, data in state_store.items(HISTORY_NAMESPACE, limit=4, newest_first=True):
+        if date_str == today:
             continue
         try:
-            data = json.loads(path.read_text())
             for row in data.get("picks", []):
                 if row["symbol"] == symbol:
                     past_scores.append(row["confidence"])

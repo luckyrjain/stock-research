@@ -11,23 +11,26 @@ per-analysis cost instrumentation and no margin model anywhere.
 a guardrail-retry or a failed failover attempt still cost real tokens).
 It logs the call's own cost immediately via `observability.log_event()`
 (queryable right away through whatever this deployment already does with
-structured logs) and accumulates a running per-day total to a small JSON
-file, `output/_llm_cost/<date>.json` — the same "grep-able counter file
-plus a log line" convention as `scraper_error_counters.py`/
+structured logs) and accumulates a running per-day total under the
+`llm_cost` namespace in `state_store.py` (one record per UTC day) — the same
+"one counter plus a log line" convention as `scraper_error_counters.py`/
 `source_health.py`, deliberately not a full observability/billing platform.
-"""
-import json
-import os
-import tempfile
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from pathlib import Path
 
+That counter used to be a JSON file, `output/_llm_cost/<date>.json`, guarded
+by an `fcntl.flock` advisory lock so two worker *processes* couldn't both
+read the same prior `call_count` and have the second silently overwrite the
+first. `state_store.mutate()` does that with a row lock instead, which also
+holds across separate hosts — see its docstring.
+"""
+from datetime import datetime, timezone
+
+import state_store
 from observability import get_logger, log_event
 
 LOGGER = get_logger("llm_cost")
 
-_COST_DIR = Path("output/_llm_cost")
+_NAMESPACE = "llm_cost"
+_EMPTY = {"call_count": 0, "total_cost_usd": 0.0, "calls_with_unknown_cost": 0}
 
 
 def _today() -> str:
@@ -35,36 +38,6 @@ def _today() -> str:
     simulate a specific calendar day without sleeping in real time — same
     convention as source_health.py's own _today()."""
     return datetime.now(timezone.utc).date().isoformat()
-
-
-def _lock_path(date: str) -> Path:
-    return _COST_DIR / f".{date}.lock"
-
-
-@contextmanager
-def _locked(date: str):
-    """Advisory, blocking, cross-process exclusive lock guarding one day's
-    read-modify-write cycle — same `fcntl.flock` pattern as
-    source_health.py's own `_locked()`. Without this, two backend *worker
-    processes* (not just threads within one process — a plain
-    `threading.Lock` doesn't reach across processes at all) racing to
-    record a call on the same UTC day can both read the same prior
-    `call_count`, both increment locally, and the second write silently
-    overwrites the first — undercounting cost/calls with no warning logged,
-    exactly the multi-worker deployment this app's own docs already say
-    `REDIS_URL` makes supported. fcntl is POSIX-only, matching this
-    codebase's existing Linux-only deployment assumption; imported lazily
-    so a non-POSIX environment can still import this module's pure helpers."""
-    import fcntl
-
-    _COST_DIR.mkdir(parents=True, exist_ok=True)
-    fd = os.open(_lock_path(date), os.O_CREAT | os.O_RDWR)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
 
 
 def estimate_cost_usd(response, model: str) -> float | None:
@@ -93,42 +66,27 @@ def record_call_cost(
 ) -> None:
     """Logs this one call's cost/tokens immediately, then accumulates a
     running per-UTC-day total (call_count, total_cost_usd,
-    calls_with_unknown_cost) to a small JSON file — a real, grep-able
-    answer to "what's today's total LLM spend so far" without a second
-    billing system. Never raises: a broken cost-tracking file must not
-    break the analysis request it's observing, the same "tools must not
-    raise" instinct this codebase applies to every other piece of
-    non-critical observability infrastructure."""
-    date = _today()
+    calls_with_unknown_cost) — a real answer to "what's today's total LLM
+    spend so far" without a second billing system. Never raises: broken cost
+    tracking must not break the analysis request it's observing, the same
+    "tools must not raise" instinct this codebase applies to every other
+    piece of non-critical observability infrastructure."""
     try:
         log_event(
             LOGGER, "llm_call_cost", symbol=symbol, model=model, provider=provider,
             cost_usd=cost_usd, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             run_id=run_id,
         )
-        _COST_DIR.mkdir(parents=True, exist_ok=True)
-        path = _COST_DIR / f"{date}.json"
-        with _locked(date):
-            data = {"call_count": 0, "total_cost_usd": 0.0, "calls_with_unknown_cost": 0}
-            if path.exists():
-                try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                except Exception:  # pylint: disable=broad-exception-caught
-                    data = {"call_count": 0, "total_cost_usd": 0.0, "calls_with_unknown_cost": 0}
+
+        def _accumulate(data: dict) -> dict:
             data["call_count"] = data.get("call_count", 0) + 1
             if cost_usd is not None:
                 data["total_cost_usd"] = round(data.get("total_cost_usd", 0.0) + cost_usd, 6)
             else:
                 data["calls_with_unknown_cost"] = data.get("calls_with_unknown_cost", 0) + 1
+            return data
 
-            fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(json.dumps(data))
-                os.replace(tmp_path, path)
-            except Exception:
-                Path(tmp_path).unlink(missing_ok=True)
-                raise
+        state_store.mutate(_NAMESPACE, _today(), _accumulate, dict(_EMPTY))
     except Exception as exc:  # pylint: disable=broad-exception-caught
         log_event(LOGGER, "llm_cost_tracking_failed", level="warning", error=str(exc))
 
@@ -136,12 +94,5 @@ def record_call_cost(
 def get_daily_totals(date: str | None = None) -> dict:
     """Non-mutating read for tests and a future ops surface. `date`
     defaults to today (UTC); never raises, degrading to an all-zero
-    result for a day with no recorded calls or a corrupt file."""
-    empty = {"call_count": 0, "total_cost_usd": 0.0, "calls_with_unknown_cost": 0}
-    try:
-        path = _COST_DIR / f"{date or _today()}.json"
-        if not path.exists():
-            return empty
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:  # pylint: disable=broad-exception-caught
-        return empty
+    result for a day with no recorded calls."""
+    return state_store.load(_NAMESPACE, date or _today()) or dict(_EMPTY)

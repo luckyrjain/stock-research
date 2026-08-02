@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 import api
 import cache
 import rate_limiter
+import state_store
+from state_store_harness import isolated_state_store
 import routes.positions as routes_positions
 
 client = TestClient(api.app)
@@ -682,11 +684,9 @@ class FetchNiftyClosesCacheSharingTest(unittest.TestCase):
 
 class MarketPicksHistoryEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-picks-history-test-")
-        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
-        self._history_patch = patch.object(api, "_PICKS_HISTORY_DIR", Path(self._tmpdir))
-        self._history_patch.start()
-        self.addCleanup(self._history_patch.stop)
+        # Daily snapshots live in state_store now, not a directory of JSON
+        # files — point it at a throwaway in-memory DB.
+        self.addCleanup(isolated_state_store().close)
 
         # _fetch_nifty_closes() reads/writes the real cache.py module (using
         # "NSEI" as a pseudo-symbol) — isolate it the same way
@@ -700,7 +700,7 @@ class MarketPicksHistoryEndpointTest(unittest.TestCase):
         self.addCleanup(self._cache_patch.stop)
 
     def _write_snapshot(self, date: str, picks: list) -> None:
-        (Path(self._tmpdir) / f"{date}.json").write_text(json.dumps({"date": date, "picks": picks}))
+        state_store.save(api._PICKS_HISTORY_NS, date, {"date": date, "picks": picks})
 
     def _fake_nifty_ticker(self, closes: dict[str, float]) -> MagicMock:
         idx = pd.to_datetime(list(closes.keys()))
@@ -709,8 +709,7 @@ class MarketPicksHistoryEndpointTest(unittest.TestCase):
         fake_ticker.history.return_value = df
         return fake_ticker
 
-    def test_no_history_dir_returns_empty(self) -> None:
-        shutil.rmtree(self._tmpdir)
+    def test_no_stored_snapshots_returns_empty(self) -> None:
         resp = client.get("/api/market-picks/history")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {
@@ -759,7 +758,7 @@ class MarketPicksHistoryEndpointTest(unittest.TestCase):
     def test_date_param_ignores_aggregation_entirely(self) -> None:
         # A malformed sibling snapshot must not affect a valid ?date= lookup —
         # the date path never touches the aggregation loop at all.
-        (Path(self._tmpdir) / "2026-06-01.json").write_text("{not valid json")
+        state_store.save(api._PICKS_HISTORY_NS, "2026-06-01", {"date": "2026-06-01", "picks": "not-a-list"})
         self._write_snapshot("2026-07-01", [
             {"symbol": "ABC", "confidence": 60, "mention_count": 1, "current_price": 100.0, "recommendation": "BUY"},
         ])
@@ -813,8 +812,11 @@ class MarketPicksHistoryEndpointTest(unittest.TestCase):
         self.assertEqual(len(body["symbols"]), 1)
         self.assertIsNone(body["symbols"][0]["change_pct"])
 
-    def test_malformed_snapshot_file_is_skipped_not_fatal(self) -> None:
-        (Path(self._tmpdir) / "2026-07-01.json").write_text("{not valid json")
+    def test_malformed_snapshot_is_skipped_not_fatal(self) -> None:
+        # The stored-JSON analogue of the old "a file with invalid JSON bytes"
+        # case: a record whose `picks` isn't a list of pick dicts must be
+        # skipped (and left out of snapshot_count), not 500 the endpoint.
+        state_store.save(api._PICKS_HISTORY_NS, "2026-07-01", {"date": "2026-07-01", "picks": "not-a-list"})
         self._write_snapshot("2026-07-02", [
             {"symbol": "ABC", "confidence": 60, "mention_count": 2, "current_price": 100.0, "recommendation": "BUY"},
         ])
