@@ -2640,6 +2640,16 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
 
 ## Important Rules for Claude
 
+- **Respect the architectural constraints in the root [`CLAUDE.md`](../CLAUDE.md).** This is a
+  deliberately boring monolith: PostgreSQL is the only datastore, Redis is optional and never a
+  hard dependency, parallelism is `ThreadPoolExecutor`, scheduling is GitHub Actions cron. Do not
+  introduce a broker (Celery/Kafka/RabbitMQ/Temporal), a second database, an orchestrator
+  (Airflow/Prefect), Kubernetes, or event sourcing — and do not scaffold "for later." If a task
+  appears to need one, say so and stop rather than building it. The binding list and the reasoning
+  are in that file; `docs/backlog.md` links to it.
+- **Scope every pipeline's `--reset-db` to the tables that pipeline owns.** Never
+  `metadata.drop_all()` — the shared `MetaData()` carries all 21 tables, six of which hold
+  non-regenerable personal financial data. See `docs/database.md` for the ownership map.
 - **Schema boundary is sacred.** Raw tool output must be normalized through `schemas.normalize()` before being passed to cache, guardrails, signal engine, or analyst prompt. If a tool changes its output shape, only `schemas.py` needs updating.
 - **Never add fields to the analyst JSON output schema** without also updating `config/analyst.json` (`output_schema`), `crew._validate_analysis_payload()`, `main._build_report()`, and `frontend/types/index.ts` (`Analysis` interface). These four are in lockstep.
 - **Tools must not raise.** All functions in `tools/` must return `{"error": "...", ...}` on failure. The cache layer silently discards error payloads; guardrails detect them and trigger retries.

@@ -28,6 +28,43 @@ A shared **search box** (`HeaderSearch`, in every page's nav bar) answers "what 
 
 ---
 
+## Architectural Constraints — binding
+
+**This is a settled decision, not a preference. Do not propose, scaffold, or introduce anything
+on the rejected list below without the human explicitly asking for it first.** If a task seems to
+call for one of them, say so and stop — don't build it.
+
+The target is an **extremely reliable monolith**, sized for a single operator and tens of users.
+Keep to:
+
+| Keep | Not this |
+|---|---|
+| FastAPI + Next.js in one repo, no service split | Microservices, a service mesh, an API gateway |
+| PostgreSQL as the only datastore | Cassandra, ClickHouse, TimescaleDB, MongoDB, a data lake, a feature store |
+| Redis strictly optional — shared rate-limit/cache state across workers, never a hard dependency | Redis as a queue, cache-of-record, or required infra |
+| `ThreadPoolExecutor` for parallelism | Celery, Kafka, RabbitMQ, SQS, Temporal, any broker |
+| GitHub Actions cron for scheduled jobs | Airflow, Prefect, Dagster |
+| File cache under `backend/output/` — debuggable, inspectable | A caching service |
+| Plain deploys (Docker Compose / single host) | Kubernetes, Helm, autoscaling groups |
+| Straightforward CRUD + upserts | Event sourcing, CQRS |
+
+**The reasoning, so it isn't re-litigated:** the risk to this project is not scale — current
+volume is roughly a hundred analyses and one nightly pipeline run per day. The risk is
+**maintenance fatigue from infrastructure only one person can operate** (see the bus-factor entry
+in `docs/PRD.md` §17.1). Every item in the right column adds an operational surface that has to
+be understood, monitored, upgraded, and debugged at 3am by the same single engineer. That cost is
+real and immediate; the scale it buys is hypothetical.
+
+**When this should be revisited:** a specific, measured performance wall — not an anticipated one.
+"This query takes 4s at p95 and users notice" is a reason. "This won't scale" is not.
+
+Corollaries that follow from the above and are enforced elsewhere: prefer the standard library and
+already-installed dependencies over new ones; scope each pipeline's `--reset-db` to the tables it
+owns rather than `metadata.drop_all()` (see `docs/database.md`); and keep new abstractions to
+things with more than one real caller.
+
+---
+
 ## Repo Structure
 
 **All backend paths in this document — every bare filename or path like `crew.py`,

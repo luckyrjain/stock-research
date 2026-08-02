@@ -14,19 +14,19 @@ Severity is about *consequence if left alone*, not effort.
 
 ## Architectural stance — decided, not up for re-litigation
 
-For a personal platform at this scale (single operator, tens of users), the target is an
-**extremely reliable monolith**, not a distributed system. Keep as-is:
+**Moved to [`../CLAUDE.md`](../CLAUDE.md) §Architectural Constraints, which is the authoritative
+copy** — it lives there because Claude Code loads `CLAUDE.md` on every task, so the constraint is
+actually enforced rather than merely recorded. `backend/CLAUDE.md`'s "Important Rules for Claude"
+restates the backend-facing half.
 
-- FastAPI + Next.js, no service split.
-- PostgreSQL as the only datastore. Redis is opt-in and purely for shared rate-limit/cache state
-  across workers — not a dependency.
-- `ThreadPoolExecutor`, not a queue/broker. Current volume doesn't justify one.
-- File cache under `backend/output/` — fine, and it aids debugging.
-- GitHub Actions cron for the nightly pipelines.
+In short: an extremely reliable monolith, sized for one operator and tens of users. PostgreSQL
+only; Redis optional and never required; `ThreadPoolExecutor` not a broker; GitHub Actions cron
+not an orchestrator; plain deploys not Kubernetes. Rejected outright — Kafka, RabbitMQ, Celery,
+Temporal, Airflow, Kubernetes, microservices, a feature store, a data lake, event sourcing. The
+risk here is maintenance fatigue from infrastructure one person has to operate alone, not scale.
+Revisit only on a measured performance wall, never an anticipated one.
 
-Explicitly rejected as over-engineering here: Kafka, RabbitMQ, Airflow, Temporal, Kubernetes,
-microservices, a feature store, a data lake, event sourcing. The risk to a project like this is
-not scale — it is maintenance fatigue from infrastructure only one person can operate.
+Nothing on that rejected list should be proposed or scaffolded without the human asking first.
 
 ---
 
