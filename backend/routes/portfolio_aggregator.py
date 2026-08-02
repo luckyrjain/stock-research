@@ -462,12 +462,13 @@ async def import_csv_endpoint(
 ):
     file_bytes = await file.read()
     filename = file.filename or ""
+    from csv_import import REQUIRED_FIELDS
+
     try:
         mapping_dict = json.loads(mapping)
     except (json.JSONDecodeError, TypeError):
         raise HTTPException(status_code=422, detail="mapping must be a JSON object")
-    missing = [f for f in ("date", "symbol", "side", "quantity", "price")
-               if not mapping_dict.get(f)]
+    missing = [f for f in REQUIRED_FIELDS if not mapping_dict.get(f)]
     if missing:
         raise HTTPException(status_code=422, detail=f"mapping missing required field(s): {missing}")
 

@@ -655,16 +655,6 @@ def _rate_limit_wait_secs(exc: Exception) -> float:
     return 60.0
 
 
-def _call_direct_llm(analyst_llm, prompt: str):
-    if hasattr(analyst_llm, "call"):
-        return analyst_llm.call(prompt)
-    if hasattr(analyst_llm, "invoke"):
-        return analyst_llm.invoke(prompt)
-    if callable(analyst_llm):
-        return analyst_llm(prompt)
-    return None
-
-
 def _resolve_provider() -> str:
     """LLM_PROVIDER wins if explicitly set; otherwise the first provider
     (in _API_KEY_ENV's declared order) with a usable API key."""

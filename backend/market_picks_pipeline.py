@@ -152,24 +152,6 @@ def _llm_call(prompt: str, temperature: float = 0.3, _retries: int = 3) -> str:
     return ""
 
 
-def _to_num(v: object) -> float | None:
-    """Coerce LLM output (int, float, or numeric string) to float; return None on failure."""
-    if v is None:
-        return None
-    try:
-        return float(str(v).replace(",", "").replace("₹", "").strip())
-    except (ValueError, TypeError):
-        return None
-
-
-def _price_fallback(stock_info: dict, pct: float) -> float | None:
-    """Return current_price × (1 + pct), rounded to nearest rupee. None if no price."""
-    price = stock_info.get("current_price") if stock_info else None
-    if not price:
-        return None
-    return round(price * (1 + pct))
-
-
 def _parse_json_from(text: str) -> dict | list | None:
     m = re.search(r'\{.*\}|\[.*\]', text, re.DOTALL)
     if m:

@@ -28,7 +28,6 @@ load_dotenv()
 LOGGER = get_logger("csv_import")
 
 REQUIRED_FIELDS = ("date", "symbol", "side", "quantity", "price")
-OPTIONAL_FIELDS = ("amount", "isin")
 
 _DATE_FORMATS = ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d-%b-%Y", "%d %b %Y")
 _BUY_ALIASES = {"buy", "b", "bought", "purchase"}
