@@ -1,5 +1,9 @@
 # Setup & Configuration
 
+> Run `make check` from the repo root anytime to verify the prerequisites below automatically
+> (tool versions, `.env`, and — if set — `DATABASE_URL`/`REDIS_URL` reachability). `make setup`
+> automates the "Backend setup" steps further down this page.
+
 ## What you need
 
 - Python 3.13
