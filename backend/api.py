@@ -11,33 +11,33 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from error_tracking import init_error_tracking
+from core.error_tracking import init_error_tracking
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from observability import get_logger, log_event
+from core.observability import get_logger, log_event
 from pydantic import BaseModel, Field
 from signals.interpreter import interpret
 
 load_dotenv()
 
 # ── Market picks cache ────────────────────────────────────────────────────────
-# Defined in market_picks_pipeline.py (the module that owns this pipeline's
+# Defined in pipelines/market_picks_pipeline.py (the module that owns this pipeline's
 # output) so its own cron entrypoint and this file's on-demand SSE endpoint
 # read/write the exact same cache — re-exported here under the historical
 # names so existing call sites (and test patches targeting api._load_picks_cache
 # / api._save_picks_cache) keep working unchanged.
-from market_picks_pipeline import HISTORY_NAMESPACE as _PICKS_HISTORY_NS
-from market_picks_pipeline import load_picks_cache as _load_picks_cache
-from market_picks_pipeline import save_picks_cache as _save_picks_cache
-import rate_limiter
-import state_store
+from pipelines.market_picks_pipeline import HISTORY_NAMESPACE as _PICKS_HISTORY_NS
+from pipelines.market_picks_pipeline import load_picks_cache as _load_picks_cache
+from pipelines.market_picks_pipeline import save_picks_cache as _save_picks_cache
+from core import rate_limiter
+from core import state_store
 # Re-exported under their original names since this file (and its existing
 # tests) call them as api._compute_peer_percentiles / api._compute_valuation_anchor —
-# see peer_analytics.py's own docstring for why the math itself lives there.
-from peer_analytics import compute_peer_percentiles as _compute_peer_percentiles
-from peer_analytics import compute_valuation_anchor as _compute_valuation_anchor
-from peer_analytics import build_peer_result as _build_peer_result
+# see analytics/peer_analytics.py's own docstring for why the math itself lives there.
+from analytics.peer_analytics import compute_peer_percentiles as _compute_peer_percentiles
+from analytics.peer_analytics import compute_valuation_anchor as _compute_valuation_anchor
+from analytics.peer_analytics import build_peer_result as _build_peer_result
 
 
 # ── Global LLM concurrency ceiling ───────────────────────────────────────────
@@ -46,7 +46,7 @@ from peer_analytics import build_peer_result as _build_peer_result
 # expensive LLM pipeline at the same time: a single-stock analyst call, or a
 # full market-picks run (up to 35 stocks, dozens of LLM calls). Cap how many
 # such pipelines can run at once, regardless of caller or IP. Backed by
-# rate_limiter.py — Redis-shared across workers when REDIS_URL is set, an
+# core/rate_limiter.py — Redis-shared across workers when REDIS_URL is set, an
 # in-memory per-process counter otherwise (see docs/deployment.md).
 _LLM_CONCURRENCY_LIMIT = int(os.getenv("LLM_CONCURRENCY_LIMIT", "4"))
 _LLM_SLOT_NAME = "llm_concurrency"
@@ -64,7 +64,7 @@ def _release_llm_slot() -> None:
 
 # ── SME signals: shared engine + refresh state ───────────────────────────────
 # The SME refresh guard (see refresh_sme_signals below) is now a
-# rate_limiter.py lock — Redis-shared across workers when REDIS_URL is set,
+# core/rate_limiter.py lock — Redis-shared across workers when REDIS_URL is set,
 # so two workers can no longer both start a refresh at once (previously a
 # single-process-only guard; see docs/deployment.md).
 _DB_ENGINE = None
@@ -95,7 +95,7 @@ def _get_db_engine():
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 # Sliding-window limiter, keyed by (bucket, client IP). Only guards the
 # expensive/abusable routes (fresh LLM calls, forced full rescans, forced SME
-# pipeline runs). Backed by rate_limiter.py — Redis-shared across workers when
+# pipeline runs). Backed by core/rate_limiter.py — Redis-shared across workers when
 # REDIS_URL is set, an in-memory per-process counter otherwise.
 
 # Every browser request reaches this backend via the Next.js proxy routes,
@@ -167,7 +167,7 @@ def _log_startup_config_warnings() -> None:
     analysis finding this closes). Logged once at process startup so an
     operator has a fighting chance of catching them before a user does.
     """
-    from crew import _configured_providers
+    from analyst.crew import _configured_providers
 
     providers = _configured_providers()
     if not providers:
@@ -644,13 +644,13 @@ async def analyse(symbol: str, request: Request, force: bool = False):
         loop = asyncio.get_running_loop()
         llm_slot_acquired = False
         try:
-            import cache
-            from crew import ALL_DATA_TASKS
+            from core import cache
+            from analyst.crew import ALL_DATA_TASKS
             from main import _fetch_task, _build_report
-            from mf_holdings_history import compute_stake_deltas as compute_mf_holdings_deltas
-            from schemas import normalize as schema_normalize, validate as schema_validate
+            from analytics.mf_holdings_history import compute_stake_deltas as compute_mf_holdings_deltas
+            from core.schemas import normalize as schema_normalize, validate as schema_validate
             from signals.engine import run_signal_engine
-            from verdict_history import save_snapshot as save_verdict_snapshot
+            from analytics.verdict_history import save_snapshot as save_verdict_snapshot
 
             # ── Determine what needs fetching ─────────────────────────────
             stale = [n for n in ALL_DATA_TASKS if force or not cache.is_fresh(sym, n)]
@@ -685,7 +685,7 @@ async def analyse(symbol: str, request: Request, force: bool = False):
                         # every REST endpoint already follows. The dict returned
                         # to the caller stays internal (feeds cache/report-building
                         # logic that only checks for the presence of an "error"
-                        # key, per cache.py's _is_failed_payload()), but is
+                        # key, per core/cache.py's _is_failed_payload()), but is
                         # sanitized too rather than trusting that boundary forever.
                         await q.put({"event": "task_done", "task": name, "ok": False, "error": _SANITIZED_ERROR})
                         return name, {"error": _SANITIZED_ERROR, "symbol": sym}
@@ -732,7 +732,7 @@ async def analyse(symbol: str, request: Request, force: bool = False):
                 yield _sse({"event": "analysing"})
 
                 def _run_analyst():
-                    from crew import run_analysis_with_fallback
+                    from analyst.crew import run_analysis_with_fallback
                     return run_analysis_with_fallback(
                         sym, all_data, signal_context=signal_context, run_id=run_id
                     )
@@ -946,7 +946,7 @@ async def market_picks(request: Request, force: bool = Query(default=False)):
 
             def run_pipeline():
                 try:
-                    from market_picks_pipeline import MarketPicksPipeline
+                    from pipelines.market_picks_pipeline import MarketPicksPipeline
                     pipeline = MarketPicksPipeline()
                     picks = pipeline.run(on_event=on_event)
                     generated_at = datetime.now(timezone.utc).isoformat()
@@ -1044,7 +1044,7 @@ async def get_market_picks_status(request: Request):
     """
     _rate_limit(request, "market_picks_status", max_calls=60, window_seconds=60)
 
-    from market_picks_pipeline import picks_cache_status
+    from pipelines.market_picks_pipeline import picks_cache_status
 
     loop = asyncio.get_running_loop()
     status = await loop.run_in_executor(None, picks_cache_status)
@@ -1060,7 +1060,7 @@ def _fetch_nifty_closes(start_date: str, end_date: str) -> dict[str, float]:
     """^NSEI daily closes covering [start_date, end_date], keyed by ISO date.
     One yfinance request for the whole range rather than one per snapshot
     date — cheaper and just as complete, since a ranged history() call already
-    returns every trading day's close in between. Cached via cache.py using
+    returns every trading day's close in between. Cached via core/cache.py using
     'NSEI' as a pseudo-symbol (there's no real per-symbol subject here, just
     one shared index series) — 24h TTL.
 
@@ -1082,7 +1082,7 @@ def _fetch_nifty_closes(start_date: str, end_date: str) -> dict[str, float]:
     returns — the alpha column/stat is simply omitted, same as any other
     "a hiccup in one section must not fail the rest" section in this file.
     """
-    import cache
+    from core import cache
 
     cached = cache.load("NSEI", "index_history")
     if cached and cached.get("start", "9999-99-99") <= start_date and cached.get("end", "0000-00-00") >= end_date:
@@ -1420,7 +1420,7 @@ async def get_peers(request: Request, symbol: str):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
 
     def _fetch_sync() -> dict:
-        import cache
+        from core import cache
 
         cached = cache.load(sym, "peers")
         if cached is not None:
@@ -1434,7 +1434,7 @@ async def get_peers(request: Request, symbol: str):
 
         raw = json.loads(get_peer_comparison.run(symbol=sym))
         if raw.get("error"):
-            import scraper_error_counters
+            from telemetry import scraper_error_counters
             scraper_error_counters.record_scraper_error("peers", symbol=sym)
             return {
                 "symbol": sym, "self": None, "peers": [], "sector_median": None,
@@ -1458,7 +1458,7 @@ async def get_financials(request: Request, symbol: str):
     ever showed current-year ratios and a short quarterly Sales/EPS/OPM
     trend, never full statement history. Also carries a deterministic DCF
     fair-value estimate computed off the cash-flow table (see
-    dcf_valuation.py) — a second, independent valuation lens alongside the
+    portfolio/dcf_valuation.py) — a second, independent valuation lens alongside the
     existing peer-percentile and absolute P/E-anchor views, answering "cheap
     vs. what its cash flows are worth" rather than "cheap vs. peers/its own
     trading history". Also carries `concalls` — Screener's own list of
@@ -1471,7 +1471,7 @@ async def get_financials(request: Request, symbol: str):
     Each of profit_loss/balance_sheet/cash_flow/dcf is independently
     optional (null, never guessed) — a company Screener doesn't have one of
     these tables for, or whose cash flow doesn't support a DCF (see
-    dcf_valuation.py's own preconditions), just has that field come back
+    portfolio/dcf_valuation.py's own preconditions), just has that field come back
     null rather than a fabricated number. `concalls` is `[]` (never null)
     when Screener has no calls on record for this company, matching how
     every other empty-but-not-missing list in this app is represented.
@@ -1485,7 +1485,7 @@ async def get_financials(request: Request, symbol: str):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
 
     def _fetch_sync() -> dict:
-        import cache
+        from core import cache
 
         cached = cache.load(sym, "financials")
         if cached is not None:
@@ -1507,12 +1507,12 @@ async def get_financials(request: Request, symbol: str):
             # transient scrape failure should be retried on the next
             # request, not locked in as "this company has no financials"
             # for a full 24h TTL.
-            import scraper_error_counters
+            from telemetry import scraper_error_counters
             scraper_error_counters.record_scraper_error("financials", symbol=sym)
             return {"symbol": sym, "profit_loss": None, "balance_sheet": None, "cash_flow": None, "dcf": None, "concalls": []}
 
         stock_info = cache.load(sym, "stock_info") or {}
-        from dcf_valuation import compute_dcf_estimate
+        from portfolio.dcf_valuation import compute_dcf_estimate
 
         dcf = compute_dcf_estimate(
             raw.get("cash_flow"),
@@ -1564,7 +1564,7 @@ async def get_shareholding_breakdown(request: Request, symbol: str):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
 
     def _fetch_sync() -> dict:
-        import cache
+        from core import cache
 
         cached = cache.load(sym, "shareholding_detail")
         if cached is not None:
@@ -1585,7 +1585,7 @@ async def get_shareholding_breakdown(request: Request, symbol: str):
             # Note this task's TTL is 168h (7 days — same quarterly NSE XBRL
             # filing as mf_holdings), not the 24h those two use, so locking a
             # failure in here would be correspondingly worse.
-            import scraper_error_counters
+            from telemetry import scraper_error_counters
             scraper_error_counters.record_scraper_error("shareholding_detail", symbol=sym)
             return {"symbol": sym, "as_of_date": None, "promoters": [], "shareholder_categories": [], "unavailable": True}
 
@@ -1622,7 +1622,7 @@ async def get_insider_activity(request: Request, symbol: str):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
 
     def _load_cached() -> dict | None:
-        import cache
+        from core import cache
 
         cached = cache.load(sym, "insider_activity")
         if cached is None:
@@ -1651,7 +1651,7 @@ async def get_insider_activity(request: Request, symbol: str):
         # both of which previously collapsed to the same empty list with no
         # way for the UI to tell them apart.
         try:
-            import scraper_error_counters
+            from telemetry import scraper_error_counters
             from tools.nse_insider_trades import fetch_insider_trades_for_symbol
 
             raw = fetch_insider_trades_for_symbol(sym)
@@ -1669,7 +1669,7 @@ async def get_insider_activity(request: Request, symbol: str):
 
     def _fetch_bulk_block() -> tuple[list[dict], bool]:
         try:
-            import scraper_error_counters
+            from telemetry import scraper_error_counters
             from tools.nse_bulk_block_deals import fetch_bulk_block_deals_for_symbol
 
             raw = fetch_bulk_block_deals_for_symbol(sym)
@@ -1699,7 +1699,7 @@ async def get_insider_activity(request: Request, symbol: str):
     # a failure" convention GET /api/peers/{symbol} already follows.
     if not insider_unavailable and not bulk_unavailable:
         def _save_cache() -> None:
-            import cache
+            from core import cache
 
             cache.save(sym, "insider_activity", result)
 
@@ -1736,7 +1736,7 @@ async def get_street_consensus(request: Request, symbol: str):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
 
     def _load_cached() -> dict | None:
-        import cache
+        from core import cache
 
         cached = cache.load(sym, "street_consensus")
         if cached is None:
@@ -1764,7 +1764,7 @@ async def get_street_consensus(request: Request, symbol: str):
         # failure from "no Trendlyne-cited coverage today" (the expected
         # common case) — both previously collapsed to the same [].
         try:
-            import scraper_error_counters
+            from telemetry import scraper_error_counters
             from tools.trendlyne_agent import fetch_trendlyne_consensus_for_symbol
 
             raw = fetch_trendlyne_consensus_for_symbol(sym)
@@ -1783,7 +1783,7 @@ async def get_street_consensus(request: Request, symbol: str):
         # to never raise anyway, but this endpoint doesn't lean on that
         # guarantee alone.
         try:
-            import scraper_error_counters
+            from telemetry import scraper_error_counters
             from tools.trendlyne_scraper import fetch_trendlyne_numeric_consensus
 
             result = fetch_trendlyne_numeric_consensus(sym)
@@ -1818,7 +1818,7 @@ async def get_street_consensus(request: Request, symbol: str):
     # in as a confident-looking empty answer for the full 24h TTL.
     if not articles_unavailable and not numeric_unavailable:
         def _save_cache() -> None:
-            import cache
+            from core import cache
 
             cache.save(sym, "street_consensus", result)
 
@@ -1883,7 +1883,7 @@ async def get_verdict_history(request: Request, symbol: str):
     if not _TICKER_RE.match(sym):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
 
-    from verdict_history import load_history
+    from analytics.verdict_history import load_history
 
     loop = asyncio.get_running_loop()
     history = await loop.run_in_executor(None, load_history, sym)
@@ -2194,7 +2194,7 @@ async def refresh_sme_signals(request: Request):
 
     def _run_pipeline():
         try:
-            from sme_ema_pipeline import run as run_sme_pipeline
+            from pipelines.sme_ema_pipeline import run as run_sme_pipeline
             healthy = run_sme_pipeline()
             if not healthy:
                 log_event(
@@ -2216,7 +2216,7 @@ async def refresh_sme_signals(request: Request):
 
 
 # ── Custom screener ───────────────────────────────────────────────────────────
-# Stored-metrics table over the NIFTY 500 universe (screener_pipeline.py,
+# Stored-metrics table over the NIFTY 500 universe (pipelines/screener_pipeline.py,
 # see CLAUDE.md's "Custom screener flow"), generalizing SME Signals' filter-
 # chip pattern to the main NSE/BSE market instead of SME/Emerge stocks.
 
@@ -2247,7 +2247,7 @@ async def get_screener(
     offset:         int = Query(0, ge=0),
 ):
     """Filterable/sortable view over the NIFTY 500 screener_stocks table
-    (screener_pipeline.py). Every numeric filter is optional and additive
+    (pipelines/screener_pipeline.py). Every numeric filter is optional and additive
     (AND-ed together); a filter Screener/yfinance didn't have for a stock
     (NULL in the DB) excludes that stock from that filter rather than
     guessing a value for it. `industries` in the response is the real,
@@ -2361,7 +2361,7 @@ async def refresh_screener(request: Request):
 
     def _run_pipeline():
         try:
-            from screener_pipeline import run as run_screener_pipeline
+            from pipelines.screener_pipeline import run as run_screener_pipeline
             healthy = run_screener_pipeline()
             if not healthy:
                 log_event(
@@ -2426,7 +2426,7 @@ async def _consolidated_payload(sym: str) -> dict:
     either way, only who's allowed to ask and how often differs."""
 
     def _analysis_sync() -> dict | None:
-        import cache
+        from core import cache
 
         data = cache.load(sym, "analysis")
         if not data:
@@ -2501,7 +2501,7 @@ async def get_consolidated(request: Request, symbol: str):
 
 
 # ── Account & magic-link auth ────────────────────────────────────────────────
-# Minimal, passwordless auth (see auth.py + email_sender.py). A session token
+# Minimal, passwordless auth (see auth.py + core/email_sender.py). A session token
 # is a bearer credential the frontend's Next.js proxy routes hold in an
 # httpOnly cookie and send here as `Authorization: Bearer <token>` — this
 # file never sees a cookie. Existing watchlist_items/positions stay keyed by
@@ -2543,7 +2543,7 @@ async def request_magic_link(request: Request, body: AuthRequestLinkRequest):
 
     def _sync() -> bool:
         import auth as _auth
-        from email_sender import send_magic_link_email
+        from core.email_sender import send_magic_link_email
 
         token = _auth.create_magic_link(email)
         login_url = f"{_FRONTEND_URL}/auth/verify?token={token}"

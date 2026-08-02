@@ -10,9 +10,9 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 import api
-import cache
-import rate_limiter
-import state_store
+from core import cache
+from core import rate_limiter
+from core import state_store
 from state_store_harness import isolated_state_store
 import routes.positions as routes_positions
 
@@ -94,21 +94,21 @@ class StartupConfigWarningsTest(unittest.TestCase):
     for the deep gap analysis finding this closes."""
 
     def test_warns_when_no_llm_provider_is_configured(self) -> None:
-        with patch("crew._configured_providers", return_value=[]), \
+        with patch("analyst.crew._configured_providers", return_value=[]), \
              patch("api.log_event") as mock_log:
             api._log_startup_config_warnings()
         events = [c.args[1] for c in mock_log.call_args_list]
         self.assertIn("startup_no_llm_provider_configured", events)
 
     def test_no_warning_when_a_provider_is_configured(self) -> None:
-        with patch("crew._configured_providers", return_value=["anthropic"]), \
+        with patch("analyst.crew._configured_providers", return_value=["anthropic"]), \
              patch("api.log_event") as mock_log:
             api._log_startup_config_warnings()
         events = [c.args[1] for c in mock_log.call_args_list]
         self.assertNotIn("startup_no_llm_provider_configured", events)
 
     def test_warns_when_non_default_origin_has_no_proxy_secret(self) -> None:
-        with patch("crew._configured_providers", return_value=["anthropic"]), \
+        with patch("analyst.crew._configured_providers", return_value=["anthropic"]), \
              patch("api._ALLOWED_ORIGINS", ["https://alphapulse.example.com"]), \
              patch("api._TRUSTED_PROXY_SECRET", None), \
              patch("api.log_event") as mock_log:
@@ -117,7 +117,7 @@ class StartupConfigWarningsTest(unittest.TestCase):
         self.assertIn("startup_trusted_proxy_secret_unset", events)
 
     def test_no_warning_when_proxy_secret_is_set(self) -> None:
-        with patch("crew._configured_providers", return_value=["anthropic"]), \
+        with patch("analyst.crew._configured_providers", return_value=["anthropic"]), \
              patch("api._ALLOWED_ORIGINS", ["https://alphapulse.example.com"]), \
              patch("api._TRUSTED_PROXY_SECRET", "shared-secret"), \
              patch("api.log_event") as mock_log:
@@ -128,7 +128,7 @@ class StartupConfigWarningsTest(unittest.TestCase):
     def test_no_warning_for_default_localhost_origin_even_without_secret(self) -> None:
         # The default single-host local-dev setup never needed the secret —
         # only flag deployments that look non-default.
-        with patch("crew._configured_providers", return_value=["anthropic"]), \
+        with patch("analyst.crew._configured_providers", return_value=["anthropic"]), \
              patch("api._ALLOWED_ORIGINS", ["http://localhost:3000"]), \
              patch("api._TRUSTED_PROXY_SECRET", None), \
              patch("api.log_event") as mock_log:
@@ -539,7 +539,7 @@ class MarketPicksStatusEndpointTest(unittest.TestCase):
 
     def test_returns_cache_metadata_and_next_scheduled_run(self) -> None:
         fake_status = {"last_run_at": "2026-07-20T00:00:00+00:00", "is_fresh": True}
-        with patch("market_picks_pipeline.picks_cache_status", return_value=fake_status):
+        with patch("pipelines.market_picks_pipeline.picks_cache_status", return_value=fake_status):
             resp = client.get("/api/market-picks/status")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -549,7 +549,7 @@ class MarketPicksStatusEndpointTest(unittest.TestCase):
 
     def test_no_cache_returns_null_last_run(self) -> None:
         fake_status = {"last_run_at": None, "is_fresh": False}
-        with patch("market_picks_pipeline.picks_cache_status", return_value=fake_status):
+        with patch("pipelines.market_picks_pipeline.picks_cache_status", return_value=fake_status):
             resp = client.get("/api/market-picks/status")
         body = resp.json()
         self.assertIsNone(body["last_run_at"])
@@ -630,7 +630,7 @@ class FetchNiftyClosesCacheSharingTest(unittest.TestCase):
         # their own -- last write wins, and if the narrower caller's write
         # landed after the wider caller's, the cached coverage would shrink,
         # violating this module's own "coverage only ever grows" invariant.
-        import cache as cache_module
+        from core import cache as cache_module
 
         # Caller A: a wide range, populates the cache from empty.
         wide = {f"2026-01-{d:02d}": 20000.0 + d for d in range(1, 29)}
@@ -657,7 +657,7 @@ class FetchNiftyClosesCacheSharingTest(unittest.TestCase):
             return real_load(*args, **kwargs)  # the fix's re-read-before-write
 
         with patch("yfinance.Ticker", return_value=self._fake_ticker(narrow)), \
-             patch("cache.load", side_effect=_stale_first_read):
+             patch("core.cache.load", side_effect=_stale_first_read):
             api._fetch_nifty_closes("2026-01-10", "2026-01-10")
 
         final = cache_module.load("NSEI", "index_history")
@@ -672,7 +672,7 @@ class FetchNiftyClosesCacheSharingTest(unittest.TestCase):
         # old {"range": "...", "closes": {...}} shape) must not KeyError on
         # its first read post-deploy — it should just be treated as
         # non-covering and trigger a normal fresh fetch.
-        import cache as cache_module
+        from core import cache as cache_module
 
         cache_module.save("NSEI", "index_history", {"range": "2025-01-01:2025-01-10", "closes": {"2025-01-01": 100.0}})
         fresh = {f"2026-01-{d:02d}": 20000.0 + d for d in range(1, 11)}
@@ -688,7 +688,7 @@ class MarketPicksHistoryEndpointTest(unittest.TestCase):
         # files — point it at a throwaway in-memory DB.
         self.addCleanup(isolated_state_store().close)
 
-        # _fetch_nifty_closes() reads/writes the real cache.py module (using
+        # _fetch_nifty_closes() reads/writes the real core/cache.py module (using
         # "NSEI" as a pseudo-symbol) — isolate it the same way
         # PriceHistoryEndpointTest isolates cache.CACHE_DIR, so a test that
         # mocks yfinance to return real data can't leak into the repo's own
@@ -1174,7 +1174,7 @@ class PeersEndpointTest(unittest.TestCase):
         fake_tool = MagicMock()
         fake_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
         with patch("tools.screener_tools.get_peer_comparison", fake_tool), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/peers/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -1196,7 +1196,7 @@ class PeersEndpointTest(unittest.TestCase):
         fake_tool = MagicMock()
         fake_tool.run.return_value = raw
         with patch("tools.screener_tools.get_peer_comparison", fake_tool), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/peers/TCS")
         self.assertEqual(resp.status_code, 200)
         mock_record.assert_not_called()
@@ -1328,7 +1328,7 @@ class FinancialsEndpointTest(unittest.TestCase):
         fake_tool = MagicMock()
         fake_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
         with patch("tools.screener_tools.get_financial_statements", fake_tool), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/financials/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -1343,7 +1343,7 @@ class FinancialsEndpointTest(unittest.TestCase):
         succeeding_tool = MagicMock()
         succeeding_tool.run.return_value = json.dumps({"symbol": "TCS"})
         with patch("tools.screener_tools.get_financial_statements", succeeding_tool), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/financials/TCS")
         self.assertEqual(resp.status_code, 200)
         mock_record.assert_not_called()
@@ -1487,7 +1487,7 @@ class ShareholdingDetailEndpointTest(unittest.TestCase):
         fake_tool = MagicMock()
         fake_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
         with patch("tools.nse_tools.get_shareholding_detail", fake_tool), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/shareholding-detail/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -1500,7 +1500,7 @@ class ShareholdingDetailEndpointTest(unittest.TestCase):
         succeeding_tool = MagicMock()
         succeeding_tool.run.return_value = json.dumps({"symbol": "TCS", "promoters": [], "shareholder_categories": []})
         with patch("tools.nse_tools.get_shareholding_detail", succeeding_tool), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/shareholding-detail/TCS")
         self.assertEqual(resp.status_code, 200)
         mock_record.assert_not_called()
@@ -1616,7 +1616,7 @@ class InsiderActivityEndpointTest(unittest.TestCase):
                    return_value={"symbol": "TCS", "error": "NSE request failed"}), \
              patch("tools.nse_bulk_block_deals.fetch_bulk_block_deals_for_symbol",
                    return_value={"symbol": "TCS", "deals": []}), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/insider-activity/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -1636,7 +1636,7 @@ class InsiderActivityEndpointTest(unittest.TestCase):
                    return_value={"symbol": "TCS", "trades": []}), \
              patch("tools.nse_bulk_block_deals.fetch_bulk_block_deals_for_symbol",
                    return_value={"symbol": "TCS", "error": "NSE request failed"}), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/insider-activity/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -1727,7 +1727,7 @@ class StreetConsensusEndpointTest(unittest.TestCase):
         }
         with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol", side_effect=RuntimeError("boom")), \
              patch("tools.trendlyne_scraper.fetch_trendlyne_numeric_consensus", return_value=fake_numeric), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/street-consensus/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -1754,7 +1754,7 @@ class StreetConsensusEndpointTest(unittest.TestCase):
         }
         with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol", return_value=fake_articles), \
              patch("tools.trendlyne_scraper.fetch_trendlyne_numeric_consensus", return_value=fake_numeric_with_error), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/street-consensus/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -2584,7 +2584,7 @@ class WatchlistCalendarEndpointTest(unittest.TestCase):
 
     def test_symbol_with_notable_price_move_is_included_without_filings(self) -> None:
         move = {"old_price": 100.0, "new_price": 115.0, "change_pct": 15.0}
-        with patch("verdict_history.detect_recent_changes", return_value={"recommendation_change": None, "price_move": move}):
+        with patch("analytics.verdict_history.detect_recent_changes", return_value={"recommendation_change": None, "price_move": move}):
             resp = client.get("/api/watchlist/calendar?symbols=TCS")
         self.assertEqual(resp.status_code, 200)
         entries = resp.json()["entries"]
@@ -2595,7 +2595,7 @@ class WatchlistCalendarEndpointTest(unittest.TestCase):
 
     def test_symbol_with_recommendation_change_is_included_without_filings(self) -> None:
         change = {"old_recommendation": "HOLD", "new_recommendation": "SELL", "confidence": "HIGH"}
-        with patch("verdict_history.detect_recent_changes", return_value={"recommendation_change": change, "price_move": None}):
+        with patch("analytics.verdict_history.detect_recent_changes", return_value={"recommendation_change": change, "price_move": None}):
             resp = client.get("/api/watchlist/calendar?symbols=TCS")
         self.assertEqual(resp.status_code, 200)
         entries = resp.json()["entries"]
@@ -2613,7 +2613,7 @@ class WatchlistCalendarEndpointTest(unittest.TestCase):
         def fake_changes(sym, *_a, **_kw):
             return {"recommendation_change": None, "price_move": move if sym == "ZZZ" else None}
 
-        with patch("verdict_history.detect_recent_changes", side_effect=fake_changes):
+        with patch("analytics.verdict_history.detect_recent_changes", side_effect=fake_changes):
             resp = client.get("/api/watchlist/calendar?symbols=AAA,ZZZ")
         entries = resp.json()["entries"]
         self.assertEqual([e["symbol"] for e in entries], ["ZZZ", "AAA"])
@@ -2642,7 +2642,7 @@ class WatchlistCalendarEndpointTest(unittest.TestCase):
         def fake_changes(sym, *_a, **_kw):
             return {"recommendation_change": None, "price_move": move if sym == "TCS" else None}
 
-        with patch("verdict_history.detect_recent_changes", side_effect=fake_changes):
+        with patch("analytics.verdict_history.detect_recent_changes", side_effect=fake_changes):
             resp = client.get("/api/watchlist/calendar?symbols=tcs")
         entries = resp.json()["entries"]
         self.assertEqual([e["symbol"] for e in entries], ["TCS"])
@@ -3439,7 +3439,7 @@ class PortfolioConcentrationEndpointTest(unittest.TestCase):
 
         with patch("api._get_db_engine", return_value=fake_engine), \
              patch("api._fetch_live_price_sync", return_value={"price": 3500.0, "change_pct": 1.0}), \
-             patch("cache.load", return_value={"sector": "IT"}):
+             patch("core.cache.load", return_value={"sector": "IT"}):
             resp = client.get("/api/portfolio/concentration?client_id=client-abc")
 
         self.assertEqual(resp.status_code, 200)
@@ -3460,7 +3460,7 @@ class PortfolioConcentrationEndpointTest(unittest.TestCase):
 
         with patch("api._get_db_engine", return_value=fake_engine), \
              patch("api._fetch_live_price_sync", return_value={"price": 3500.0, "change_pct": 1.0}), \
-             patch("cache.load", return_value=None):
+             patch("core.cache.load", return_value=None):
             resp = client.get("/api/portfolio/concentration?client_id=client-abc")
 
         self.assertEqual(resp.status_code, 200)
@@ -3487,7 +3487,7 @@ class VerdictHistoryEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 429)
 
     def test_returns_empty_history_when_nothing_stored(self) -> None:
-        with patch("verdict_history.load_history", return_value=[]), \
+        with patch("analytics.verdict_history.load_history", return_value=[]), \
              patch.object(api, "_fetch_live_price_sync", return_value={}):
             resp = client.get("/api/verdict-history/TCS")
         self.assertEqual(resp.status_code, 200)
@@ -3504,7 +3504,7 @@ class VerdictHistoryEndpointTest(unittest.TestCase):
         ]
         # Live price is up from every stored snapshot: BUY should score a win,
         # SELL a loss, HOLD stays unscored (no directional claim to grade).
-        with patch("verdict_history.load_history", return_value=fake_history), \
+        with patch("analytics.verdict_history.load_history", return_value=fake_history), \
              patch.object(api, "_fetch_live_price_sync", return_value={"price": 121.0, "change_pct": 0.5}):
             resp = client.get("/api/verdict-history/tcs")
         self.assertEqual(resp.status_code, 200)
@@ -3528,7 +3528,7 @@ class VerdictHistoryEndpointTest(unittest.TestCase):
         fake_history = [
             {"date": "2026-07-24", "recommendation": "BUY", "confidence": "HIGH", "current_price": 110.5, "signal_score": 6.0},
         ]
-        with patch("verdict_history.load_history", return_value=fake_history), \
+        with patch("analytics.verdict_history.load_history", return_value=fake_history), \
              patch.object(api, "_fetch_live_price_sync") as fetch_live:
             resp = client.get("/api/verdict-history/TCS")
         body = resp.json()
@@ -3543,7 +3543,7 @@ class VerdictHistoryEndpointTest(unittest.TestCase):
             {"date": "2026-07-01", "recommendation": "HOLD", "confidence": "MEDIUM", "current_price": 100.0, "signal_score": 2.0},
             {"date": "2026-07-24", "recommendation": "BUY", "confidence": "HIGH", "current_price": 110.5, "signal_score": 6.0},
         ]
-        with patch("verdict_history.load_history", return_value=fake_history), \
+        with patch("analytics.verdict_history.load_history", return_value=fake_history), \
              patch.object(api, "_fetch_live_price_sync", return_value={}) as fetch_live:
             resp = client.get("/api/verdict-history/TCS")
         body = resp.json()
@@ -3742,7 +3742,7 @@ class AuthRequestLinkEndpointTest(unittest.TestCase):
     def test_valid_email_creates_link_and_sends_email(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         with patch("auth.create_magic_link", return_value="raw-token") as create_link, \
-             patch("email_sender.send_magic_link_email", return_value=True) as send_email:
+             patch("core.email_sender.send_magic_link_email", return_value=True) as send_email:
             resp = client.post("/api/auth/request-link", json={"email": "User@Example.com"})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {"sent": True})
@@ -3757,7 +3757,7 @@ class AuthRequestLinkEndpointTest(unittest.TestCase):
         # still created either way.
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         with patch("auth.create_magic_link", return_value="raw-token"), \
-             patch("email_sender.send_magic_link_email", return_value=False):
+             patch("core.email_sender.send_magic_link_email", return_value=False):
             resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {"sent": True})
@@ -3788,7 +3788,7 @@ class AuthRequestLinkEndpointTest(unittest.TestCase):
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         rate_limiter._memory_calls["auth_request_link_email:someone-else@example.com"] = [api.time.monotonic()] * 5
         with patch("auth.create_magic_link", return_value="raw-token"), \
-             patch("email_sender.send_magic_link_email", return_value=True):
+             patch("core.email_sender.send_magic_link_email", return_value=True):
             resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
         self.assertEqual(resp.status_code, 200)
 
@@ -4079,7 +4079,7 @@ class ConsolidatedV1EndpointTest(unittest.TestCase):
 
     def test_valid_key_returns_consolidated_payload(self) -> None:
         with patch("auth.get_user_for_api_key", return_value={"user_id": 7}), \
-             patch("cache.load", return_value=None), \
+             patch("core.cache.load", return_value=None), \
              patch.object(api, "_load_picks_cache", return_value=None):
             resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "apk_x"})
         self.assertEqual(resp.status_code, 200)
@@ -4101,7 +4101,7 @@ class ConsolidatedV1EndpointTest(unittest.TestCase):
         # above) but must not exhaust pro's higher one.
         rate_limiter._memory_calls["api_v1:7"] = [api.time.monotonic()] * 100
         with patch("auth.get_user_for_api_key", return_value={"user_id": 7, "tier": "pro"}), \
-             patch("cache.load", return_value=None), \
+             patch("core.cache.load", return_value=None), \
              patch.object(api, "_load_picks_cache", return_value=None):
             resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "apk_x"})
         self.assertEqual(resp.status_code, 200)

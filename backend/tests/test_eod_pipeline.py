@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from sqlalchemy import create_engine, text
 
 from db.models import metadata, mf_nav_daily, prices_daily, securities
-from eod_prices_pipeline import (
+from pipelines.eod_prices_pipeline import (
     _missing_dates, _upsert_navs, _upsert_prices, _upsert_seen, ingest_day,
 )
 
@@ -99,8 +99,8 @@ class UpsertTest(unittest.TestCase):
 
 
 class IngestDayTest(unittest.TestCase):
-    @patch("eod_prices_pipeline.parse_bhavcopy")
-    @patch("eod_prices_pipeline.download_bhavcopy")
+    @patch("pipelines.eod_prices_pipeline.parse_bhavcopy")
+    @patch("pipelines.eod_prices_pipeline.download_bhavcopy")
     def test_empty_bhavcopy_is_error(self, mock_download: MagicMock, mock_parse: MagicMock) -> None:
         mock_download.return_value = {"status": "ok", "csv": "SYMBOL, SERIES, ...\n"}
         mock_parse.return_value = {"rows": [], "skipped_series": 0, "malformed": 0}
@@ -113,7 +113,7 @@ class HeldSchemeCodesTest(unittest.TestCase):
     def test_returns_empty_set_when_assets_table_missing(self) -> None:
         # This codebase has no portfolio `assets` table yet — NAV ingestion
         # must degrade gracefully (log + empty set), never raise.
-        from eod_prices_pipeline import _held_scheme_codes
+        from pipelines.eod_prices_pipeline import _held_scheme_codes
         engine = create_engine("sqlite://")
         self.assertEqual(_held_scheme_codes(engine), set())
 

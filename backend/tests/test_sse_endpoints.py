@@ -15,9 +15,9 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 import api
-import cache
-import market_picks_pipeline
-import rate_limiter
+from core import cache
+from pipelines import market_picks_pipeline
+from core import rate_limiter
 from signals.models import Signal, SignalResult
 
 client = TestClient(api.app)
@@ -75,10 +75,10 @@ class AnalyseSuccessPathTest(unittest.TestCase):
             return {"symbol": symbol, "task": task_name}
 
         with patch("main._fetch_task", side_effect=_fake_fetch_task), \
-             patch("schemas.normalize", side_effect=lambda name, data: data), \
-             patch("schemas.validate", return_value=(True, "")), \
+             patch("core.schemas.normalize", side_effect=lambda name, data: data), \
+             patch("core.schemas.validate", return_value=(True, "")), \
              patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")), \
-             patch("crew.run_analysis_with_fallback", return_value=_fake_analysis("TCS")):
+             patch("analyst.crew.run_analysis_with_fallback", return_value=_fake_analysis("TCS")):
             resp = client.get("/api/analyse/TCS")
 
         self.assertEqual(resp.status_code, 200)
@@ -115,10 +115,10 @@ class AnalyseSuccessPathTest(unittest.TestCase):
             return {"symbol": symbol, "task": task_name}
 
         with patch("main._fetch_task", side_effect=_fake_fetch_task), \
-             patch("schemas.normalize", side_effect=lambda name, data: data), \
-             patch("schemas.validate", return_value=(True, "")), \
+             patch("core.schemas.normalize", side_effect=lambda name, data: data), \
+             patch("core.schemas.validate", return_value=(True, "")), \
              patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")), \
-             patch("crew.run_analysis_with_fallback", return_value=_fake_analysis("TCS")), \
+             patch("analyst.crew.run_analysis_with_fallback", return_value=_fake_analysis("TCS")), \
              patch("api._release_llm_slot", wraps=api._release_llm_slot) as mock_release:
             resp = client.get("/api/analyse/TCS")
 
@@ -129,8 +129,8 @@ class AnalyseSuccessPathTest(unittest.TestCase):
     def test_llm_capacity_rejection_emits_error_event(self) -> None:
         with patch("api._acquire_llm_slot", return_value=False), \
              patch("main._fetch_task", return_value={"symbol": "TCS"}), \
-             patch("schemas.normalize", side_effect=lambda name, data: data), \
-             patch("schemas.validate", return_value=(True, "")), \
+             patch("core.schemas.normalize", side_effect=lambda name, data: data), \
+             patch("core.schemas.validate", return_value=(True, "")), \
              patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")):
             resp = client.get("/api/analyse/TCS")
 
@@ -144,8 +144,8 @@ class AnalyseSuccessPathTest(unittest.TestCase):
         # must never leak there, same sanitization convention every REST
         # endpoint already follows for its own errors.
         with patch("main._fetch_task", side_effect=RuntimeError("connection refused: password=hunter2")), \
-             patch("schemas.normalize", side_effect=lambda name, data: data), \
-             patch("schemas.validate", return_value=(True, "")), \
+             patch("core.schemas.normalize", side_effect=lambda name, data: data), \
+             patch("core.schemas.validate", return_value=(True, "")), \
              patch("signals.engine.run_signal_engine", side_effect=RuntimeError("connection refused: password=hunter2")):
             resp = client.get("/api/analyse/TCS")
 
@@ -213,11 +213,11 @@ class AnalysisPersistedDespiteDisconnectTest(unittest.IsolatedAsyncioTestCase):
             return _fake_analysis("TCS")
 
         patch("main._fetch_task", side_effect=_fake_fetch_task).start()
-        patch("schemas.normalize", side_effect=lambda name, data: data).start()
-        patch("schemas.validate", return_value=(True, "")).start()
+        patch("core.schemas.normalize", side_effect=lambda name, data: data).start()
+        patch("core.schemas.validate", return_value=(True, "")).start()
         patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")).start()
-        patch("crew.run_analysis_with_fallback", side_effect=_slow_analysis).start()
-        patch("verdict_history.save_snapshot").start()
+        patch("analyst.crew.run_analysis_with_fallback", side_effect=_slow_analysis).start()
+        patch("analytics.verdict_history.save_snapshot").start()
 
         scope = {"type": "http", "method": "GET", "headers": [], "client": ("testclient", 12345)}
         request = Request(scope)
@@ -261,7 +261,7 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-picks-sse-test-")
         self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
         # load_picks_cache/save_picks_cache (re-exported into api.py under
-        # their historical names) live in market_picks_pipeline.py and read
+        # their historical names) live in pipelines/market_picks_pipeline.py and read
         # _PICKS_CACHE_PATH from that module's own globals — must patch it
         # there, not on api.py (which no longer defines that name itself).
         patch.object(market_picks_pipeline, "_PICKS_CACHE_PATH", Path(self._tmpdir) / "picks.json").start()
@@ -284,7 +284,7 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
 
     def test_healthy_run_emits_done_and_writes_cache(self) -> None:
         picks = [{"symbol": "TCS", "confidence_score": 80}]
-        with patch("market_picks_pipeline.MarketPicksPipeline", self._fake_pipeline(picks, healthy=True)):
+        with patch("pipelines.market_picks_pipeline.MarketPicksPipeline", self._fake_pipeline(picks, healthy=True)):
             resp = client.get("/api/market-picks?force=true")
 
         events = _parse_sse(resp.text)
@@ -299,7 +299,7 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
 
     def test_degraded_run_is_not_cached(self) -> None:
         picks = [{"symbol": "TCS", "confidence_score": 80}]
-        with patch("market_picks_pipeline.MarketPicksPipeline", self._fake_pipeline(picks, healthy=False)):
+        with patch("pipelines.market_picks_pipeline.MarketPicksPipeline", self._fake_pipeline(picks, healthy=False)):
             resp = client.get("/api/market-picks?force=true")
 
         events = _parse_sse(resp.text)
@@ -307,7 +307,7 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
         self.assertFalse(market_picks_pipeline._PICKS_CACHE_PATH.exists())
 
     def test_empty_result_is_not_cached(self) -> None:
-        with patch("market_picks_pipeline.MarketPicksPipeline", self._fake_pipeline([], healthy=True)):
+        with patch("pipelines.market_picks_pipeline.MarketPicksPipeline", self._fake_pipeline([], healthy=True)):
             resp = client.get("/api/market-picks?force=true")
 
         events = _parse_sse(resp.text)
@@ -335,7 +335,7 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
         # run. This confirms an ordinary cache-miss request now acquires
         # and cleanly releases the same lock as an explicit ?force=true.
         picks = [{"symbol": "TCS", "confidence_score": 80}]
-        with patch("market_picks_pipeline.MarketPicksPipeline", self._fake_pipeline(picks, healthy=True)):
+        with patch("pipelines.market_picks_pipeline.MarketPicksPipeline", self._fake_pipeline(picks, healthy=True)):
             resp = client.get("/api/market-picks")
 
         events = _parse_sse(resp.text)
@@ -351,7 +351,7 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
         self.assertTrue(rate_limiter.try_acquire_lock("market_picks_refresh", 60))
         self.addCleanup(rate_limiter.release_lock, "market_picks_refresh")
 
-        with patch("market_picks_pipeline.MarketPicksPipeline") as mock_pipeline_cls:
+        with patch("pipelines.market_picks_pipeline.MarketPicksPipeline") as mock_pipeline_cls:
             resp = client.get("/api/market-picks")
 
         events = _parse_sse(resp.text)
@@ -365,7 +365,7 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
         # browser as raw text via this SSE event.
         failing_pipeline = MagicMock()
         failing_pipeline.run.side_effect = RuntimeError("connection refused: password=hunter2")
-        with patch("market_picks_pipeline.MarketPicksPipeline", MagicMock(return_value=failing_pipeline)):
+        with patch("pipelines.market_picks_pipeline.MarketPicksPipeline", MagicMock(return_value=failing_pipeline)):
             resp = client.get("/api/market-picks?force=true")
 
         events = _parse_sse(resp.text)

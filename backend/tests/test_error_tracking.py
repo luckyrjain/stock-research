@@ -5,8 +5,8 @@ import unittest
 import warnings
 from unittest.mock import MagicMock, patch
 
-import error_tracking
-import observability
+from core import error_tracking
+from core import observability
 
 try:
     import sentry_sdk as _real_sentry_sdk
@@ -179,26 +179,26 @@ class LogEventIntegrationTest(_StateResetMixin, unittest.TestCase):
         self.logger.addHandler(logging.NullHandler())
 
     def test_error_level_forwards_to_capture_error(self) -> None:
-        with patch("observability.error_tracking.capture_error") as mock_capture:
+        with patch("core.observability.error_tracking.capture_error") as mock_capture:
             observability.log_event(self.logger, "boom_event", level="error", symbol="TCS")
 
         mock_capture.assert_called_once_with("boom_event", {"symbol": "TCS"}, exc=None)
 
     def test_error_level_forwards_exception_object(self) -> None:
         exc = ValueError("bad")
-        with patch("observability.error_tracking.capture_error") as mock_capture:
+        with patch("core.observability.error_tracking.capture_error") as mock_capture:
             observability.log_event(self.logger, "boom_event", level="error", exc=exc, symbol="TCS")
 
         mock_capture.assert_called_once_with("boom_event", {"symbol": "TCS"}, exc=exc)
 
     def test_info_level_never_forwards(self) -> None:
-        with patch("observability.error_tracking.capture_error") as mock_capture:
+        with patch("core.observability.error_tracking.capture_error") as mock_capture:
             observability.log_event(self.logger, "fine_event", level="info", symbol="TCS")
 
         mock_capture.assert_not_called()
 
     def test_capture_error_exception_never_breaks_logging(self) -> None:
-        with patch("observability.error_tracking.capture_error", side_effect=RuntimeError("boom")):
+        with patch("core.observability.error_tracking.capture_error", side_effect=RuntimeError("boom")):
             observability.log_event(self.logger, "boom_event", level="error", symbol="TCS")  # must not raise
 
 
@@ -243,7 +243,7 @@ class RealSdkRegressionTest(_StateResetMixin, unittest.TestCase):
         # observability.log_event() calls logger.error(...) itself (the
         # plain structured-log line) immediately before it explicitly calls
         # capture_error() — without disabling the integration's event-level
-        # auto-capture (event_level=None in error_tracking.py's
+        # auto-capture (event_level=None in core/error_tracking.py's
         # LoggingIntegration(...) call), this fires an extra, low-quality
         # duplicate event alongside the properly-tagged one.
         transport = self._init_with_recording_transport()

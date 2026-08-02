@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-import mf_holdings_history
+from analytics import mf_holdings_history
 
 
 class _FakeConn:
@@ -35,7 +35,7 @@ class SaveSnapshotTest(unittest.TestCase):
         mf_holdings_history._ENGINE = None
 
     def test_noop_without_database_url(self) -> None:
-        with patch("mf_holdings_history._get_engine") as get_engine:
+        with patch("analytics.mf_holdings_history._get_engine") as get_engine:
             mf_holdings_history.save_snapshot("TCS", {
                 "as_of_date": "2026-03-31",
                 "mutual_funds": [{"fund": "HDFC MF", "holding_pct": 3.5}],
@@ -44,7 +44,7 @@ class SaveSnapshotTest(unittest.TestCase):
 
     def test_noop_on_error_payload(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        with patch("mf_holdings_history._get_engine") as get_engine:
+        with patch("analytics.mf_holdings_history._get_engine") as get_engine:
             mf_holdings_history.save_snapshot("TCS", {"error": "boom", "symbol": "TCS"})
         get_engine.assert_not_called()
 
@@ -54,7 +54,7 @@ class SaveSnapshotTest(unittest.TestCase):
         # so only the error-key branch — not the missing-field branches
         # exercised above — can be responsible for skipping the save here.
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        with patch("mf_holdings_history._get_engine") as get_engine:
+        with patch("analytics.mf_holdings_history._get_engine") as get_engine:
             mf_holdings_history.save_snapshot("TCS", {
                 "error": "boom", "symbol": "TCS",
                 "as_of_date": "2026-03-31",
@@ -64,19 +64,19 @@ class SaveSnapshotTest(unittest.TestCase):
 
     def test_noop_on_non_dict_payload(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        with patch("mf_holdings_history._get_engine") as get_engine:
+        with patch("analytics.mf_holdings_history._get_engine") as get_engine:
             mf_holdings_history.save_snapshot("TCS", "not a dict")
         get_engine.assert_not_called()
 
     def test_noop_without_as_of_date(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        with patch("mf_holdings_history._get_engine") as get_engine:
+        with patch("analytics.mf_holdings_history._get_engine") as get_engine:
             mf_holdings_history.save_snapshot("TCS", {"mutual_funds": [{"fund": "HDFC MF", "holding_pct": 3.5}]})
         get_engine.assert_not_called()
 
     def test_noop_without_any_funds(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        with patch("mf_holdings_history._get_engine") as get_engine:
+        with patch("analytics.mf_holdings_history._get_engine") as get_engine:
             mf_holdings_history.save_snapshot("TCS", {"as_of_date": "2026-03-31", "mutual_funds": []})
         get_engine.assert_not_called()
 
@@ -86,7 +86,7 @@ class SaveSnapshotTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.begin.return_value = conn
 
-        with patch("mf_holdings_history._get_engine", return_value=fake_engine):
+        with patch("analytics.mf_holdings_history._get_engine", return_value=fake_engine):
             mf_holdings_history.save_snapshot("tcs", {
                 "as_of_date": "2026-03-31",
                 "mutual_funds": [
@@ -107,7 +107,7 @@ class SaveSnapshotTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.begin.return_value = conn
 
-        with patch("mf_holdings_history._get_engine", return_value=fake_engine):
+        with patch("analytics.mf_holdings_history._get_engine", return_value=fake_engine):
             mf_holdings_history.save_snapshot("TCS", {
                 "as_of_date": "2026-03-31",
                 "mutual_funds": [
@@ -119,7 +119,7 @@ class SaveSnapshotTest(unittest.TestCase):
 
     def test_swallows_db_errors(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        with patch("mf_holdings_history._get_engine", side_effect=RuntimeError("connection refused: password exposed")):
+        with patch("analytics.mf_holdings_history._get_engine", side_effect=RuntimeError("connection refused: password exposed")):
             mf_holdings_history.save_snapshot("TCS", {
                 "as_of_date": "2026-03-31",
                 "mutual_funds": [{"fund": "HDFC MF", "holding_pct": 3.5}],
@@ -157,7 +157,7 @@ class ComputeStakeDeltasTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.connect.return_value = conn
 
-        with patch("mf_holdings_history._get_engine", return_value=fake_engine):
+        with patch("analytics.mf_holdings_history._get_engine", return_value=fake_engine):
             deltas = mf_holdings_history.compute_stake_deltas("tcs")
 
         self.assertEqual(len(deltas), 2)
@@ -167,7 +167,7 @@ class ComputeStakeDeltasTest(unittest.TestCase):
 
     def test_swallows_db_errors_and_returns_empty(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        with patch("mf_holdings_history._get_engine", side_effect=RuntimeError("connection refused: password exposed")):
+        with patch("analytics.mf_holdings_history._get_engine", side_effect=RuntimeError("connection refused: password exposed")):
             self.assertEqual(mf_holdings_history.compute_stake_deltas("TCS"), [])
 
     def test_no_stored_snapshot_returns_empty(self) -> None:
@@ -178,7 +178,7 @@ class ComputeStakeDeltasTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.connect.return_value = conn
 
-        with patch("mf_holdings_history._get_engine", return_value=fake_engine):
+        with patch("analytics.mf_holdings_history._get_engine", return_value=fake_engine):
             self.assertEqual(mf_holdings_history.compute_stake_deltas("TCS"), [])
 
 

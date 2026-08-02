@@ -3,7 +3,7 @@
 gnews's GNews.get_news() delegates to feedparser.parse(url, agent=...),
 which uses urllib under the hood with no per-call timeout parameter of its
 own — a slow/unresponsive Google News response can hang the calling thread
-indefinitely. market_picks_pipeline.py's _phase_scrape runs each source
+indefinitely. pipelines/market_picks_pipeline.py's _phase_scrape runs each source
 scraper inside a ThreadPoolExecutor, whose `with` block waits (shutdown
 with wait=True) for every submitted thread to finish, so one hung GNews
 call there would hang the entire weekly pipeline run, not just that one

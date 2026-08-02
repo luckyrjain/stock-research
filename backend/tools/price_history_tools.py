@@ -6,7 +6,7 @@ output/<SYMBOL>/price_history.json), so this is the one place that talks to
 yfinance for it. Extracted out of api.py rather than duplicated, matching
 this repo's shared-helper convention (e.g. api._fetch_live_price_sync).
 """
-import cache
+from core import cache
 
 # api.py's GET /api/prices/history/{symbol} accepts days in [7, 365] — the
 # cache always fetches/stores this maximum window and every caller-specific

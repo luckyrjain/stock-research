@@ -39,4 +39,4 @@ jobs:
       - name: Run EOD price store pipeline (bhavcopy + AMFI NAV + corporate actions)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python eod_prices_pipeline.py
+        run: python -m pipelines.eod_prices_pipeline

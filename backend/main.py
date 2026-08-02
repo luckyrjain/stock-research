@@ -15,24 +15,24 @@ import requests
 
 from dotenv import load_dotenv
 
-import cache
-from crew import ALL_DATA_TASKS, _configured_providers, parse_json_object, run_analysis_with_fallback
-from error_tracking import init_error_tracking
-from mf_holdings_history import compute_stake_deltas as compute_mf_holdings_deltas
-from mf_holdings_history import save_snapshot as save_mf_holdings_snapshot
-from observability import get_logger, log_event
-from schema_drift import log_drift_if_any
-from schemas import normalize as schema_normalize
-from schemas import validate as schema_validate
+from core import cache
+from analyst.crew import ALL_DATA_TASKS, _configured_providers, parse_json_object, run_analysis_with_fallback
+from core.error_tracking import init_error_tracking
+from analytics.mf_holdings_history import compute_stake_deltas as compute_mf_holdings_deltas
+from analytics.mf_holdings_history import save_snapshot as save_mf_holdings_snapshot
+from core.observability import get_logger, log_event
+from core.schema_drift import log_drift_if_any
+from core.schemas import normalize as schema_normalize
+from core.schemas import validate as schema_validate
 from signals.engine import run_signal_engine
 from signals.filings_classifier import classify_filings
-import state_store
+from core import state_store
 from signals.interpreter import interpret
 from tools.news_tools import get_latest_news
 from tools.nse_tools import get_mf_holdings, get_stock_quote
 from tools.screener_tools import get_fundamentals, get_holdings
 from tools.nse_filings_tools import get_nse_filings
-from verdict_history import save_snapshot as save_verdict_snapshot
+from analytics.verdict_history import save_snapshot as save_verdict_snapshot
 
 load_dotenv()
 
@@ -56,7 +56,7 @@ def _save_raw_tool_output(symbol: str, task_name: str, raw_payload: object) -> N
     on an already-successful fetch, and could exhaust every attempt and
     discard real, successfully-scraped data as {"error": ...} — the same
     "auxiliary/debug persistence must not break the primary operation"
-    convention schema_drift.py::log_drift_if_any() already follows."""
+    convention core/schema_drift.py::log_drift_if_any() already follows."""
     if task_name not in {"research", "shareholding", "filings"}:
         return
 
@@ -254,7 +254,7 @@ def _print_status(symbol: str) -> None:
 
 def _save_report(symbol: str, report_key: str, report: dict) -> None:
     """Persists the CLI's finished report — Postgres when available, else the
-    disk write the core CLI flow always did before state_store.py existed.
+    disk write the core CLI flow always did before core/state_store.py existed.
     DATABASE_URL is not required for `python main.py TCS` (see backend/CLAUDE.md's
     env var table), so a missing one must not silently drop the report."""
     if state_store.save(REPORT_NAMESPACE, report_key, report):
@@ -278,7 +278,7 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     parser.add_argument("--force", action="store_true", help="Ignore cache and re-fetch all data")
     args = parser.parse_args()
 
-    # Delegates to crew.py's own provider-key registry rather than a
+    # Delegates to analyst/crew.py's own provider-key registry rather than a
     # hand-duplicated list of env var names -- a hardcoded tuple here had
     # drifted out of sync with _API_KEY_ENV (missing OPENROUTER_API_KEY, a
     # fully-supported 5th provider api.py's own equivalent startup check
@@ -423,7 +423,7 @@ def _build_report(
         # previous LLM outage converged straight to a safe-fallback HOLD
         # that was indistinguishable from a real one anywhere in the
         # report, since _strip_meta() dropped the one flag that said
-        # otherwise. See crew.py::_safe_analysis_fallback and
+        # otherwise. See analyst/crew.py::_safe_analysis_fallback and
         # ResultsDashboard's degraded-analysis banner.
         "degraded": bool(analysis.get("_degraded", False)),
         "signals": signals or {},

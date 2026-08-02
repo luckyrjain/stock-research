@@ -6,8 +6,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-import cache
-import schemas
+from core import cache
+from core import schemas
 
 
 class CacheFailureHandlingTest(unittest.TestCase):

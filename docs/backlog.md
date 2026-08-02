@@ -131,7 +131,7 @@ that no client can rely on a uniform rule.
   Trendlyne DOM, NSE XBRL tags, RBI table layout, the sector taxonomy). Each degrades to
   empty/`None` rather than a wrong value, and `tests_live/` covers the four
   highest-blast-radius ones weekly — the rest are unverified.
-- **Market-picks source curation.** Per-source telemetry now ships (`source_quality.py`); actually
+- **Market-picks source curation.** Per-source telemetry now ships (`telemetry/source_quality.py`); actually
   dropping or down-weighting sources in `_SOURCE_CREDIBILITY` is deliberately deferred until real
   telemetry accrues. Decide by reading the report, not by guessing.
 
@@ -161,7 +161,7 @@ Fixed on this branch: global focus indicator, `muted` contrast, solid-fill ink, 
 
 - **`api.py` is ~2,760 lines and holds 29 of the 57 routes.** Only watchlist, positions and the
   Portfolio Aggregator have been extracted to `routes/`.
-- **`market_picks_pipeline.py` has never been decomposed** — the largest module in the repo, with
+- **`pipelines/market_picks_pipeline.py` has never been decomposed** — the largest module in the repo, with
   six phases sharing mutable state and threading/async coordination.
 - **No typed config module.** ~20 env vars read via scattered `os.getenv`; `docs/setup.md` is the
   closest thing to a schema.

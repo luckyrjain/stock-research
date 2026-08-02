@@ -47,7 +47,7 @@ class AnalystJsonInstructionsAndValuationGuidanceTest(unittest.TestCase):
     never referenced anywhere in build_analysis_prompt() — an operator editing
     either list (e.g. the filings-materiality classification instruction, or
     the P/E/ROCE/ROE calibration bands) had zero effect on the actual LLM
-    prompt, silently contradicting crew.py's own comment claiming the filings
+    prompt, silently contradicting analyst/crew.py's own comment claiming the filings
     instruction reaches the model."""
 
     def test_a_real_instruction_from_analyst_json_appears_in_the_built_prompt(self) -> None:

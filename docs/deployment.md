@@ -54,7 +54,7 @@ If you need process supervision (auto-restart on crash, log rotation), run it un
 or similar rather than backgrounding it directly. See "Scaling" below before adding `--workers`.
 
 > **The working directory must be `<repo>/backend`, not the repo root.** This is the one thing the
-> backend-directory move can break silently. A dozen-odd paths — `cache.py`'s
+> backend-directory move can break silently. A dozen-odd paths — `core/cache.py`'s
 > `CACHE_DIR = Path("output")`, the market-picks and extraction caches, the bhavcopy archive,
 > the NSE/SME/NIFTY-500 master caches — are resolved relative
 > to the current working directory, not to `__file__`.
@@ -97,14 +97,14 @@ revision id and fails on the longer form.
 
 From here on, schema changes ship as new Alembic revisions (`alembic revision --autogenerate`,
 then `alembic upgrade head` on deploy) rather than hand-edited `db/schema.sql` guards or ad-hoc
-`metadata.create_all()` calls. `sme_ema_pipeline.py` and `screener_pipeline.py`'s
+`metadata.create_all()` calls. `pipelines/sme_ema_pipeline.py` and `pipelines/screener_pipeline.py`'s
 `--setup-db`/`--reset-db` flags also stamp Alembic head automatically after their own
 `create_all()`/`drop_all()`, so a deployment provisioned through one of those flags still ends up
 in a state `alembic upgrade head` can build on later without conflict.
 
 **Error tracking / APM (optional)**: set `SENTRY_DSN` (and optionally `SENTRY_ENVIRONMENT`,
 default `production`) to forward every error-level `observability.log_event()` call to a
-Sentry-compatible ingest endpoint (`error_tracking.py`). This is genuinely optional — `sentry-sdk`
+Sentry-compatible ingest endpoint (`core/error_tracking.py`). This is genuinely optional — `sentry-sdk`
 is already in `requirements.txt`, but without `SENTRY_DSN` set the whole module is a no-op and
 logging behaves exactly as it did before this existed. Worth setting in any production deployment
 that doesn't already have another way to get paged on a backend error; there's no equivalent
@@ -139,7 +139,7 @@ backend actually sees, exactly as before this existed.
 
 ## Scaling: read this before adding workers or replicas
 
-`rate_limiter.py` backs three kinds of guard state — the sliding-window rate limiter, the LLM
+`core/rate_limiter.py` backs three kinds of guard state — the sliding-window rate limiter, the LLM
 concurrency ceiling, and a set of single-run refresh locks (SME, Screener, Market Picks, each its
 own named lock on the same primitive) — with Redis when `REDIS_URL` is set, falling back to
 the same in-memory-per-process behavior this app had before Redis support existed when it's unset:
@@ -150,19 +150,19 @@ the same in-memory-per-process behavior this app had before Redis support existe
 | LLM concurrency ceiling | Caps concurrent analyst/market-picks LLM pipelines across all callers (`LLM_CONCURRENCY_LIMIT`, default 4) | Each worker gets its own ceiling — `N` workers × the configured limit can run concurrently instead of the limit as a whole |
 | Refresh locks (SME, Screener, Market Picks) | One `/api/sme-signals/refresh`, `/api/screener/refresh`, or force-refresh `/api/market-picks` run at a time, each independently | Two workers can both accept the same POST and run the pipeline concurrently — wasteful (duplicate NSE/yfinance/scraper calls), not corrupting (every underlying upsert is idempotent) |
 | Cached DB engine (`_DB_ENGINE`) | Reused SQLAlchemy engine | Harmless either way — each worker just gets its own connection pool, not a bug, just not shared |
-| `cache.py`'s six-task cache (`stock_info`, `research`, `news`, ...) | The persistent shared state behind every analysis/market-picks/peers/etc. cache TTL | **Only a problem across separate *hosts*/replicas without a shared disk volume** (same-host workers already share one local disk) — each host forks its own copy of every cache entry, multiplying scraper load on Screener.in/NSE/Trendlyne/RBI by however many hosts are running, since none of them see each other's writes |
+| `core/cache.py`'s six-task cache (`stock_info`, `research`, `news`, ...) | The persistent shared state behind every analysis/market-picks/peers/etc. cache TTL | **Only a problem across separate *hosts*/replicas without a shared disk volume** (same-host workers already share one local disk) — each host forks its own copy of every cache entry, multiplying scraper load on Screener.in/NSE/Trendlyne/RBI by however many hosts are running, since none of them see each other's writes |
 
 **Set `REDIS_URL`** (Docker Compose does this automatically via its `redis` service) before scaling
 the backend past one worker/replica — with it set, the three rate-limiter-backed guards above are
-correctly shared across workers on one host, *and* `cache.py` becomes genuinely cross-host shared
-state (see `cache.py`'s own module docstring) — the fix for the single biggest ceiling on running
+correctly shared across workers on one host, *and* `core/cache.py` becomes genuinely cross-host shared
+state (see `core/cache.py`'s own module docstring) — the fix for the single biggest ceiling on running
 this backend across more than one host, since every scraped data slice was previously only ever
 cached per-instance. The default `CMD` in `Dockerfile` (which currently omits `--workers`) can safely
 gain one once `REDIS_URL` is set. Without it, keep the backend at a single worker/replica — the gaps
 in the table still apply, cache included. The frontend has no such constraint; scale it however you like.
 
-A Redis outage mid-flight degrades gracefully, not fatally: every `rate_limiter.py` call falls back to
-its in-memory equivalent for that one call, and `cache.py` falls back to its own local-disk read/write
+A Redis outage mid-flight degrades gracefully, not fatally: every `core/rate_limiter.py` call falls back to
+its in-memory equivalent for that one call, and `core/cache.py` falls back to its own local-disk read/write
 for that one call, each logging a warning (`redis_rate_limit_failed`, `cache_redis_read_failed`, etc.)
 — the backend keeps serving requests with per-worker/per-host-only guards until Redis is reachable
 again, the same "missing optional infra degrades rather than breaks" convention as
@@ -175,21 +175,21 @@ Six workflows under `.github/workflows/` run on a schedule (all also support man
 
 | Workflow | Schedule | Requires | What it does |
 |---|---|---|---|
-| `sme-cron.yml` | Weekdays 13:00 UTC (18:30 IST) | `DATABASE_URL` secret | Runs `sme_ema_pipeline.py` directly on the GitHub-hosted runner — writes straight to Postgres, reachable from anywhere |
-| `screener-cron.yml` | Weekdays 14:00 UTC (19:30 IST) | `DATABASE_URL` secret | Runs `screener_pipeline.py` directly on the runner, same shape as the SME cron. Scheduled an hour after `sme-cron.yml` and 30 min after `watchlist-alerts-cron.yml` so the three independent jobs don't contend for the same DB connection pool at once |
-| `watchlist-alerts-cron.yml` | Weekdays 13:30 UTC (19:00 IST) | `DATABASE_URL` secret, an LLM provider key secret (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GROQ_API_KEY`/`GOOGLE_API_KEY`, plus optionally `LLM_PROVIDER`/`ANALYST_MODEL`), and the `SMTP_*` secrets if you want alert emails to actually send | Runs `watchlist_alerts.py` — re-analyses every account-owned watchlist symbol and emails a digest on a recommendation change or a large price move. Unattended, so it can't fall back to "no provider configured" the way the interactive CLI does — it fails the job loudly if no LLM key is set |
-| `eod-prices-cron.yml` | Weekdays 14:15 UTC (19:45 IST) | `DATABASE_URL` secret | Runs `eod_prices_pipeline.py` directly on the runner (self-healing 5-day gap-fill) — ingests the NSE bhavcopy + AMFI NAVs, then corporate actions/adjusted prices and the Portfolio Aggregator's nightly valuation refresh as isolated final steps of the same run. Scheduled after the bhavcopy's ~19:00 IST publish and after `sme-cron.yml` |
+| `sme-cron.yml` | Weekdays 13:00 UTC (18:30 IST) | `DATABASE_URL` secret | Runs `pipelines/sme_ema_pipeline.py` directly on the GitHub-hosted runner — writes straight to Postgres, reachable from anywhere |
+| `screener-cron.yml` | Weekdays 14:00 UTC (19:30 IST) | `DATABASE_URL` secret | Runs `pipelines/screener_pipeline.py` directly on the runner, same shape as the SME cron. Scheduled an hour after `sme-cron.yml` and 30 min after `watchlist-alerts-cron.yml` so the three independent jobs don't contend for the same DB connection pool at once |
+| `watchlist-alerts-cron.yml` | Weekdays 13:30 UTC (19:00 IST) | `DATABASE_URL` secret, an LLM provider key secret (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GROQ_API_KEY`/`GOOGLE_API_KEY`, plus optionally `LLM_PROVIDER`/`ANALYST_MODEL`), and the `SMTP_*` secrets if you want alert emails to actually send | Runs `pipelines/watchlist_alerts.py` — re-analyses every account-owned watchlist symbol and emails a digest on a recommendation change or a large price move. Unattended, so it can't fall back to "no provider configured" the way the interactive CLI does — it fails the job loudly if no LLM key is set |
+| `eod-prices-cron.yml` | Weekdays 14:15 UTC (19:45 IST) | `DATABASE_URL` secret | Runs `pipelines/eod_prices_pipeline.py` directly on the runner (self-healing 5-day gap-fill) — ingests the NSE bhavcopy + AMFI NAVs, then corporate actions/adjusted prices and the Portfolio Aggregator's nightly valuation refresh as isolated final steps of the same run. Scheduled after the bhavcopy's ~19:00 IST publish and after `sme-cron.yml` |
 | `market-picks-cron.yml` | Mondays 01:30 UTC (07:00 IST) | `MARKET_PICKS_API_URL` secret (your backend's public URL) | Does **not** run the pipeline on the runner — the picks cache is a local file on the backend host, not Postgres, so a GitHub-hosted run would compute picks nobody's live site would see. Instead it calls `GET {MARKET_PICKS_API_URL}/api/market-picks?force=true` on your already-deployed backend, exactly like a user clicking "Fresh scan" |
 | `live-contract-check.yml` | Weekly, Mondays 06:00 UTC | None (no secrets — hits public third-party sites directly with `RUN_LIVE_TESTS=1`) | Runs `tests_live/test_scraper_contracts.py` against the 4 highest-blast-radius scrapers (Screener.in peer table, Trendlyne resolution, NSE FII/DII flow, RBI rates) as an early-warning signal for a layout/schema change on the live site — separate from and never run by the regular `ci.yml`/`pytest tests/` suite |
 
 If you're self-hosting these instead of using GitHub Actions (e.g. because the picks cache or
 other local-disk state needs to live next to the backend), each pipeline also has a direct CLI
 entrypoint suitable for a crontab entry — see [Setup & Configuration](setup.md) for the
-`sme_ema_pipeline.py`/`screener_pipeline.py`/`market_picks_pipeline.py`/`watchlist_alerts.py`/
-`eod_prices_pipeline.py` crontab examples. Self-hosted crons don't need GitHub Actions repository
+`pipelines/sme_ema_pipeline.py`/`pipelines/screener_pipeline.py`/`pipelines/market_picks_pipeline.py`/`pipelines/watchlist_alerts.py`/
+`pipelines/eod_prices_pipeline.py` crontab examples. Self-hosted crons don't need GitHub Actions repository
 secrets at all — they read the same `.env`/environment the backend process already uses.
 
-The Portfolio Aggregator's CAS PDF import and broker CSV import (`cas_import.py`, `csv_import.py`)
+The Portfolio Aggregator's CAS PDF import and broker CSV import (`portfolio/cas_import.py`, `portfolio/csv_import.py`)
 have no scheduled job — they're interactive, upload-triggered flows only (`/portfolio-aggregator`
 in the browser), not something a cron re-runs.
 

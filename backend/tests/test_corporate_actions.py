@@ -2,7 +2,7 @@ import unittest
 from datetime import date
 from unittest.mock import MagicMock
 
-from corporate_actions_pipeline import _missed_factor_suspects
+from pipelines.corporate_actions_pipeline import _missed_factor_suspects
 from tools.corporate_actions import (
     fetch_corporate_actions, parse_corporate_actions, parse_purpose,
 )

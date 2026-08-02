@@ -7,14 +7,14 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import cache
+from core import cache
 import main
 from main import _build_report, _fetch_task, _save_report, _strip_meta
 
 
 class SaveReportTest(unittest.TestCase):
     """Regression tests for a review finding: main.py's CLI report used to
-    always write to disk with zero setup; the state_store.py migration made
+    always write to disk with zero setup; the core/state_store.py migration made
     it silently require DATABASE_URL. _save_report() must fall back to the
     disk write when state_store.save() reports it didn't persist."""
 
@@ -66,7 +66,7 @@ class BuildReportTest(unittest.TestCase):
         # _degraded is stripped from `analysis` (see the test above) but must
         # still reach the frontend somehow, or a provider outage's safe
         # fallback is indistinguishable from a real HOLD verdict — see
-        # crew.py::_safe_analysis_fallback and types/index.ts's `degraded`.
+        # analyst/crew.py::_safe_analysis_fallback and types/index.ts's `degraded`.
         analysis = {"symbol": "TCS", "recommendation": "HOLD", "_degraded": True}
         report = _build_report("TCS", {}, analysis, {})
         self.assertTrue(report["degraded"])
@@ -263,7 +263,7 @@ class FetchTaskRawOutputAuditFailureTest(unittest.TestCase):
 class CliPreflightProviderCheckTest(unittest.TestCase):
     """Regression test for an adversarial-review finding: main()'s CLI
     preflight check used to hand-duplicate a list of provider env var names
-    that had drifted out of sync with crew.py's _API_KEY_ENV (missing
+    that had drifted out of sync with analyst/crew.py's _API_KEY_ENV (missing
     OPENROUTER_API_KEY, a fully-supported 5th provider api.py's own
     equivalent startup check already accounts for). A deployment configured
     with only OPENROUTER_API_KEY immediately hit SystemExit(1) here, even

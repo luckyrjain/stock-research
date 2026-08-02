@@ -260,7 +260,7 @@ These feed the standalone, on-demand endpoints (`/api/peers`, `/api/financials`,
 `/api/insider-activity`, `/api/street-consensus`) — cached (24h TTL) but intentionally **outside**
 `ALL_DATA_TASKS`, so they never block the six-task analysis SSE stream.
 
-### `dcf_valuation.py::compute_dcf_estimate`
+### `portfolio/dcf_valuation.py::compute_dcf_estimate`
 
 - File: **`backend/dcf_valuation.py`** (backend root, *not* under `tools/`) — a pure computation module, not a scraper
 - Input: the `cash_flow` dict from `get_financial_statements`, plus `current_price` and `market_cap_cr`
@@ -474,7 +474,7 @@ Scrapers live in `tools/market_picks_tools.py`, `tools/hdfc_sec_agent.py`,
 `*_SOURCES`/`*_SCRAPERS` exports (`HDFC_SEC_SOURCES`, `NSE_BULK_SOURCES`, `INSIDER_SOURCES`,
 `SCREENER_SCAN_SOURCES`, `TRENDLYNE_SOURCES`) — 14 defined directly in that file + 2 (HDFC) + 1
 (NSE bulk/block) + 1 (NSE insider) + 1 (Screener.in scan) + 1 (Trendlyne) = **20 total**.
-Credibility weights (`_SOURCE_CREDIBILITY` in `market_picks_pipeline.py`) — sources not listed
+Credibility weights (`_SOURCE_CREDIBILITY` in `pipelines/market_picks_pipeline.py`) — sources not listed
 default to **0.50** (`_DEFAULT_CREDIBILITY`):
 
 | Source name | Type | Mechanism | Credibility weight |
@@ -520,13 +520,13 @@ can therefore change from `brokerage` to `news` at runtime.
 1. Define scraper functions in a new module (e.g. `tools/my_brokerage.py`)
 2. Export `MY_SOURCES` (list of `(name, type, fn_name)` tuples) and `MY_SCRAPERS` (dict of `name → fn`)
 3. Import and merge into `SOURCES` and `SCRAPER_FNS` at the bottom of `tools/market_picks_tools.py`
-4. Add a credibility entry in `_SOURCE_CREDIBILITY` in `market_picks_pipeline.py`
+4. Add a credibility entry in `_SOURCE_CREDIBILITY` in `pipelines/market_picks_pipeline.py`
 
 ---
 
 ## SME stock-list fetchers
 
-Used only by `sme_ema_pipeline.py`. Live in `tools/sme_tools.py`; lists are cached under `backend/output/` for 24 h.
+Used only by `pipelines/sme_ema_pipeline.py`. Live in `tools/sme_tools.py`; lists are cached under `backend/output/` for 24 h.
 
 | Function | Source | Returns |
 |---|---|---|
@@ -546,7 +546,7 @@ Used only by `sme_ema_pipeline.py`. Live in `tools/sme_tools.py`; lists are cach
 
 ## NIFTY 500 constituent fetcher
 
-Used only by `screener_pipeline.py` (the custom NIFTY 500 screener, `/screener` /
+Used only by `pipelines/screener_pipeline.py` (the custom NIFTY 500 screener, `/screener` /
 `GET /api/screener`) — the bounded, curated universe a daily per-stock `yfinance .info` scrape is
 reasonable at, unlike the full ~2000-symbol NSE equity master.
 
@@ -566,8 +566,8 @@ verified against a live response in this sandbox.
 
 ## EOD price store + Portfolio Aggregator support tools
 
-Feeds `eod_prices_pipeline.py`, `corporate_actions_pipeline.py`, and (via `resolve_symbol`)
-`csv_import.py`'s broker-CSV import — see backend/CLAUDE.md's "EOD price store + corporate actions flow",
+Feeds `pipelines/eod_prices_pipeline.py`, `pipelines/corporate_actions_pipeline.py`, and (via `resolve_symbol`)
+`portfolio/csv_import.py`'s broker-CSV import — see backend/CLAUDE.md's "EOD price store + corporate actions flow",
 "Securities master + symbol resolver", and "Portfolio Aggregator" sections for full design detail.
 
 ### `tools/eod_sources.py`
@@ -595,12 +595,12 @@ reconciled.
 
 | Function | Source | Returns |
 |---|---|---|
-| `load_nse_main_board(engine)` | The `securities` table (populated by `eod_prices_pipeline.py` from the bhavcopy) | `{"symbol", "name", "isin", "exchange": "NSE", "series"}` dicts |
+| `load_nse_main_board(engine)` | The `securities` table (populated by `pipelines/eod_prices_pipeline.py` from the bhavcopy) | `{"symbol", "name", "isin", "exchange": "NSE", "series"}` dicts |
 | `fetch_bse_main_board(force=False)` | BSE `ListofScripData` API, looped over main-board groups (A/B/T/Z/X/XT/P/MT/TS) | Same shape, `exchange="BSE"`; 24h file-mtime cache, dedup by scrip code across groups |
 | `get_full_securities_master(engine, force=False)` | Merges the above two + the existing `tools/sme_tools.py::get_all_sme_stocks()` | Combined list, deduped by ISIN (NSE preferred on collision) |
 | `resolve_symbol(engine, code, company_name=None, isin=None)` | — | `{"symbol", "exchange", "confidence": "isin"\|"exact"\|"fuzzy"\|"unresolved", "candidate_name"}` — resolution order: ISIN exact → code exact (with EQ/SM/ST/BE/BZ/IV suffix-stripping) → fuzzy company-name (rapidfuzz, threshold 85, case-insensitive) → unresolved |
 
-`resolve_symbol()`'s only current consumer is `csv_import.py`'s new-asset creation path: an
+`resolve_symbol()`'s only current consumer is `portfolio/csv_import.py`'s new-asset creation path: an
 `"isin"`/`"exact"` match substitutes the resolved symbol; `"fuzzy"`/`"unresolved"` keeps the
 broker's raw code as-is and adds a warning — never silently substituting a guessed symbol.
 
@@ -634,7 +634,7 @@ success.
 `tools/_gnews_timeout.py` has no functions — importing it *is* the side effect. `gnews`'s
 `GNews.get_news()` delegates to `feedparser.parse()`, which uses `urllib` with no per-call
 timeout of its own, so a slow Google News response can hang the calling thread indefinitely.
-Since `market_picks_pipeline.py`'s `_phase_scrape` runs each source scraper in a
+Since `pipelines/market_picks_pipeline.py`'s `_phase_scrape` runs each source scraper in a
 `ThreadPoolExecutor` whose `with` block waits for every submitted thread, one hung GNews call
 would hang the entire weekly pipeline run — not just that one source.
 
@@ -651,7 +651,7 @@ from several call sites is idempotent.
 
 Raw tool output from the six `ALL_DATA_TASKS` tools is always normalized through
 `schemas.normalize(task_name, raw)` before it is passed to the cache, signal engine, guardrails,
-or analyst prompt. If a tool changes its output shape, only `schemas.py` needs updating. The
+or analyst prompt. If a tool changes its output shape, only `core/schemas.py` needs updating. The
 standalone enrichment tools above (peers, financials, insider activity, street consensus, price
 history, macro) are **not** part of this six-task contract — their endpoints (`api.py`) read
 tool output directly and build their own response shape.
@@ -660,7 +660,7 @@ All tool functions must return `{"error": "...", "symbol": sym}` (or an equivale
 shape for the newer non-`@tool` helpers) on failure — never raise. The cache layer silently
 discards error payloads; guardrails detect them and trigger retries.
 
-`schema_drift.py` additionally checks that the *type* (not just presence) of container-shaped
+`core/schema_drift.py` additionally checks that the *type* (not just presence) of container-shaped
 raw fields (e.g. `research.ratios` should stay a `dict`) hasn't silently changed shape — see
 `schemas.CONTRACTS`'s `"types"` entries and backend/CLAUDE.md's "Schema-drift detection" section. This is
 scoped to the six data slices only, not the standalone tools in this doc.

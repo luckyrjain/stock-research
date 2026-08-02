@@ -22,9 +22,9 @@ def extract_features(all_data: dict) -> dict:
         filings_task = {}
 
     # A scraped nested field can be present with the WRONG TYPE rather than
-    # simply absent (schema drift, a malformed cache entry) -- schemas.py's
+    # simply absent (schema drift, a malformed cache entry) -- core/schemas.py's
     # own contract check only validates presence, not type (see
-    # schema_drift.py's own disclosed "often silently breaks downstream"
+    # core/schema_drift.py's own disclosed "often silently breaks downstream"
     # caveat). ratios/filings feed every signal module's own .get()/
     # iteration calls, which assume dict/list respectively; a wrong type
     # here must degrade to an empty default the same way missing data

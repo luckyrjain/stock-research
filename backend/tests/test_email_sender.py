@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-import email_sender
+from core import email_sender
 
 
 class SendMagicLinkEmailTest(unittest.TestCase):
@@ -111,7 +111,7 @@ class SendMagicLinkEmailTest(unittest.TestCase):
         # to be parsed with int() BEFORE the try/except block, so a
         # malformed value (a plausible operator copy-paste typo) raised
         # ValueError straight out of this "never raises" function.
-        # watchlist_alerts.py's run() has no try/except around its per-user
+        # pipelines/watchlist_alerts.py's run() has no try/except around its per-user
         # send call at all, so this would have crashed the unattended daily
         # cron job mid-batch.
         os.environ["SMTP_HOST"] = "smtp.example.com"

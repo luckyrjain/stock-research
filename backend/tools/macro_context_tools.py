@@ -19,7 +19,7 @@ import re
 import requests
 from bs4 import BeautifulSoup
 
-from observability import get_logger, log_event
+from core.observability import get_logger, log_event
 
 LOGGER = get_logger("macro_context_tools")
 

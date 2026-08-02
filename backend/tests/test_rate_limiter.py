@@ -3,7 +3,7 @@ import unittest
 import uuid
 from unittest.mock import MagicMock, patch
 
-import rate_limiter
+from core import rate_limiter
 
 
 class _MemoryStateResetMixin:
@@ -97,7 +97,7 @@ class IsAllowedRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         fake_client = MagicMock()
         fake_client.eval.return_value = 1
         fixed_uuid = uuid.UUID(int=0)
-        with patch("rate_limiter._get_redis_client", return_value=fake_client), \
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client), \
              patch("time.time", return_value=1234.5), \
              patch("uuid.uuid4", return_value=fixed_uuid):
             allowed = rate_limiter.is_allowed("k", max_calls=5, window_seconds=60)
@@ -110,14 +110,14 @@ class IsAllowedRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
         fake_client.eval.return_value = 0
-        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client):
             self.assertFalse(rate_limiter.is_allowed("k", max_calls=5, window_seconds=60))
 
     def test_falls_back_to_memory_on_redis_error(self) -> None:
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
         fake_client.eval.side_effect = ConnectionError("boom")
-        with patch("rate_limiter._get_redis_client", return_value=fake_client), \
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client), \
              patch("time.monotonic", return_value=1000.0):
             self.assertTrue(rate_limiter.is_allowed("k", max_calls=1, window_seconds=60))
             self.assertFalse(rate_limiter.is_allowed("k", max_calls=1, window_seconds=60))
@@ -148,7 +148,7 @@ class GetUsageCountRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
         fake_client.eval.return_value = 3
-        with patch("rate_limiter._get_redis_client", return_value=fake_client), \
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client), \
              patch("time.time", return_value=1234.5):
             count = rate_limiter.get_usage_count("k", 60)
         self.assertEqual(count, 3)
@@ -160,7 +160,7 @@ class GetUsageCountRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
         fake_client.eval.side_effect = ConnectionError("boom")
-        with patch("rate_limiter._get_redis_client", return_value=fake_client), \
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client), \
              patch("time.monotonic", return_value=1000.0):
             rate_limiter._is_allowed_memory("k", max_calls=10, window_seconds=60)
             self.assertEqual(rate_limiter.get_usage_count("k", 60), 1)
@@ -194,7 +194,7 @@ class SlotConcurrencyRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
         fake_client.eval.return_value = 1
-        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client):
             self.assertTrue(rate_limiter.try_acquire_slot("llm", limit=4))
         fake_client.eval.assert_called_once_with(
             rate_limiter._ACQUIRE_SLOT_SCRIPT, 1, "slot:llm", 4, rate_limiter._SLOT_TTL_SECONDS,
@@ -204,13 +204,13 @@ class SlotConcurrencyRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
         fake_client.eval.return_value = 0
-        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client):
             self.assertFalse(rate_limiter.try_acquire_slot("llm", limit=4))
 
     def test_release_calls_redis(self) -> None:
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
-        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client):
             rate_limiter.release_slot("llm")
         fake_client.eval.assert_called_once_with(rate_limiter._RELEASE_SLOT_SCRIPT, 1, "slot:llm")
 
@@ -218,7 +218,7 @@ class SlotConcurrencyRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
         fake_client.eval.side_effect = ConnectionError("boom")
-        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client):
             self.assertTrue(rate_limiter.try_acquire_slot("llm", limit=1))
             self.assertFalse(rate_limiter.try_acquire_slot("llm", limit=1))
 
@@ -227,7 +227,7 @@ class SlotConcurrencyRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         rate_limiter._memory_slots["llm"] = 1
         fake_client = MagicMock()
         fake_client.eval.side_effect = ConnectionError("boom")
-        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client):
             rate_limiter.release_slot("llm")
         self.assertEqual(rate_limiter._memory_slots["llm"], 0)
 
@@ -267,7 +267,7 @@ class LockRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
         fake_client.set.return_value = True
-        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client):
             self.assertTrue(rate_limiter.try_acquire_lock("job", ttl_seconds=60))
         _, kwargs = fake_client.set.call_args
         self.assertTrue(kwargs.get("nx"))
@@ -277,13 +277,13 @@ class LockRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
         fake_client.set.return_value = None
-        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client):
             self.assertFalse(rate_limiter.try_acquire_lock("job", ttl_seconds=60))
 
     def test_release_deletes_key(self) -> None:
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
-        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client):
             rate_limiter.release_lock("job")
         fake_client.delete.assert_called_once()
 
@@ -291,14 +291,14 @@ class LockRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
         fake_client.exists.return_value = 1
-        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client):
             self.assertTrue(rate_limiter.is_locked("job"))
 
     def test_acquire_falls_back_to_memory_on_redis_error(self) -> None:
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
         fake_client.set.side_effect = ConnectionError("boom")
-        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client):
             self.assertTrue(rate_limiter.try_acquire_lock("job", ttl_seconds=60))
             self.assertFalse(rate_limiter.try_acquire_lock("job", ttl_seconds=60))
 
@@ -315,7 +315,7 @@ class LockRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         # Redis. Must fail closed (True) instead.
         fake_client = MagicMock()
         fake_client.exists.side_effect = ConnectionError("boom")
-        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client):
             self.assertTrue(rate_limiter.is_locked("job"))
 
     def test_is_locked_uses_memory_state_during_a_sustained_redis_outage(self) -> None:
@@ -336,7 +336,7 @@ class LockRedisTest(_MemoryStateResetMixin, unittest.TestCase):
         fake_client.set.side_effect = ConnectionError("boom")
         fake_client.delete.side_effect = ConnectionError("boom")
         fake_client.exists.side_effect = ConnectionError("boom")
-        with patch("rate_limiter._get_redis_client", return_value=fake_client):
+        with patch("core.rate_limiter._get_redis_client", return_value=fake_client):
             self.assertTrue(rate_limiter.try_acquire_lock("job", ttl_seconds=60))
             self.assertTrue(rate_limiter.is_locked("job"))  # genuinely held (in memory)
             rate_limiter.release_lock("job")

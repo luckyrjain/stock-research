@@ -3,7 +3,7 @@ test file.
 
 test_analysis_guardrails.py uses sys.modules.setdefault(...) to stub out
 tools.nse_tools / tools.screener_tools / tools.news_tools so it can import
-crew.py without pulling in crewai's real (heavy) tool machinery. setdefault()
+analyst/crew.py without pulling in crewai's real (heavy) tool machinery. setdefault()
 only takes effect if the name isn't already cached — but pytest imports every
 test module during collection before running any of them, so whichever test
 file gets collected first otherwise decides, for the rest of the process,

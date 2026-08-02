@@ -2,7 +2,7 @@ import logging
 import unittest
 from unittest.mock import MagicMock, patch
 
-import schema_drift
+from core import schema_drift
 from main import _fetch_task
 
 
@@ -69,7 +69,7 @@ class LogDriftIfAnyTest(unittest.TestCase):
         self.logger.addHandler(logging.NullHandler())
 
     def test_logs_warning_when_drift_found(self) -> None:
-        with patch("schema_drift.log_event") as mock_log:
+        with patch("core.schema_drift.log_event") as mock_log:
             schema_drift.log_drift_if_any("research", {"symbol": "TCS", "ratios": []}, run_id="r1", symbol="TCS")
 
         mock_log.assert_called_once()
@@ -82,13 +82,13 @@ class LogDriftIfAnyTest(unittest.TestCase):
         self.assertEqual(len(kwargs["problems"]), 1)
 
     def test_does_not_log_when_no_drift(self) -> None:
-        with patch("schema_drift.log_event") as mock_log:
+        with patch("core.schema_drift.log_event") as mock_log:
             schema_drift.log_drift_if_any("research", {"symbol": "TCS", "ratios": {}})
 
         mock_log.assert_not_called()
 
     def test_never_raises_even_if_logging_itself_fails(self) -> None:
-        with patch("schema_drift.log_event", side_effect=RuntimeError("boom")):
+        with patch("core.schema_drift.log_event", side_effect=RuntimeError("boom")):
             schema_drift.log_drift_if_any("research", {"symbol": "TCS", "ratios": []})  # must not raise
 
     def test_never_raises_on_malformed_input(self) -> None:
@@ -97,10 +97,10 @@ class LogDriftIfAnyTest(unittest.TestCase):
     def test_check_drift_bug_is_traced_not_silently_swallowed(self) -> None:
         # A bug in check_drift() itself (e.g. a future CONTRACTS["types"]
         # typo) must leave some trace rather than silently disabling the
-        # whole feature — same instinct as error_tracking.py's own
+        # whole feature — same instinct as core/error_tracking.py's own
         # capture_error() logging once before it degrades.
-        with patch("schema_drift.check_drift", side_effect=RuntimeError("boom")), \
-             patch("schema_drift.log_event") as mock_log:
+        with patch("core.schema_drift.check_drift", side_effect=RuntimeError("boom")), \
+             patch("core.schema_drift.log_event") as mock_log:
             schema_drift.log_drift_if_any("research", {"symbol": "TCS"})  # must not raise
 
         mock_log.assert_called_once()

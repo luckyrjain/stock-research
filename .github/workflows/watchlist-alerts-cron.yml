@@ -50,4 +50,4 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
-        run: python watchlist_alerts.py
+        run: python -m pipelines.watchlist_alerts
