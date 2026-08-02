@@ -69,8 +69,10 @@ if [ -f .env ]; then
     val=$(env_var "$key")
     [ -n "$val" ] && has_llm_key=1
   done
-  ollama=$(env_var OLLAMA_BASE_URL)
-  if [ "$has_llm_key" -eq 1 ] || [ -n "$ollama" ]; then
+  # OLLAMA_BASE_URL is a documented no-op (litellm reads OLLAMA_API_BASE instead),
+  # and Ollama isn't in the auto-detect order — it only activates via LLM_PROVIDER=ollama.
+  llm_provider=$(env_var LLM_PROVIDER)
+  if [ "$has_llm_key" -eq 1 ] || [ "$llm_provider" = "ollama" ]; then
     pass "LLM provider key configured"
   else
     warn "No LLM provider key set in .env — analysis calls will fail"
