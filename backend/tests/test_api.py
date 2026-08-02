@@ -1174,7 +1174,7 @@ class PeersEndpointTest(unittest.TestCase):
         fake_tool = MagicMock()
         fake_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
         with patch("tools.screener_tools.get_peer_comparison", fake_tool), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/peers/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -1196,7 +1196,7 @@ class PeersEndpointTest(unittest.TestCase):
         fake_tool = MagicMock()
         fake_tool.run.return_value = raw
         with patch("tools.screener_tools.get_peer_comparison", fake_tool), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/peers/TCS")
         self.assertEqual(resp.status_code, 200)
         mock_record.assert_not_called()
@@ -1328,7 +1328,7 @@ class FinancialsEndpointTest(unittest.TestCase):
         fake_tool = MagicMock()
         fake_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
         with patch("tools.screener_tools.get_financial_statements", fake_tool), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/financials/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -1343,7 +1343,7 @@ class FinancialsEndpointTest(unittest.TestCase):
         succeeding_tool = MagicMock()
         succeeding_tool.run.return_value = json.dumps({"symbol": "TCS"})
         with patch("tools.screener_tools.get_financial_statements", succeeding_tool), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/financials/TCS")
         self.assertEqual(resp.status_code, 200)
         mock_record.assert_not_called()
@@ -1487,7 +1487,7 @@ class ShareholdingDetailEndpointTest(unittest.TestCase):
         fake_tool = MagicMock()
         fake_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
         with patch("tools.nse_tools.get_shareholding_detail", fake_tool), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/shareholding-detail/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -1500,7 +1500,7 @@ class ShareholdingDetailEndpointTest(unittest.TestCase):
         succeeding_tool = MagicMock()
         succeeding_tool.run.return_value = json.dumps({"symbol": "TCS", "promoters": [], "shareholder_categories": []})
         with patch("tools.nse_tools.get_shareholding_detail", succeeding_tool), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/shareholding-detail/TCS")
         self.assertEqual(resp.status_code, 200)
         mock_record.assert_not_called()
@@ -1616,7 +1616,7 @@ class InsiderActivityEndpointTest(unittest.TestCase):
                    return_value={"symbol": "TCS", "error": "NSE request failed"}), \
              patch("tools.nse_bulk_block_deals.fetch_bulk_block_deals_for_symbol",
                    return_value={"symbol": "TCS", "deals": []}), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/insider-activity/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -1636,7 +1636,7 @@ class InsiderActivityEndpointTest(unittest.TestCase):
                    return_value={"symbol": "TCS", "trades": []}), \
              patch("tools.nse_bulk_block_deals.fetch_bulk_block_deals_for_symbol",
                    return_value={"symbol": "TCS", "error": "NSE request failed"}), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/insider-activity/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -1727,7 +1727,7 @@ class StreetConsensusEndpointTest(unittest.TestCase):
         }
         with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol", side_effect=RuntimeError("boom")), \
              patch("tools.trendlyne_scraper.fetch_trendlyne_numeric_consensus", return_value=fake_numeric), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/street-consensus/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -1754,7 +1754,7 @@ class StreetConsensusEndpointTest(unittest.TestCase):
         }
         with patch("tools.trendlyne_agent.fetch_trendlyne_consensus_for_symbol", return_value=fake_articles), \
              patch("tools.trendlyne_scraper.fetch_trendlyne_numeric_consensus", return_value=fake_numeric_with_error), \
-             patch("scraper_error_counters.record_scraper_error") as mock_record:
+             patch("telemetry.scraper_error_counters.record_scraper_error") as mock_record:
             resp = client.get("/api/street-consensus/TCS")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()

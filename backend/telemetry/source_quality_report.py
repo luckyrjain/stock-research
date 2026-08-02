@@ -1,14 +1,14 @@
-"""Aggregates source_quality.py's per-run records into a per-source
+"""Aggregates telemetry/source_quality.py's per-run records into a per-source
 signal-quality report, sorted worst-survival-first.
 
-Usage: python source_quality_report.py --days 14
+Usage: python -m telemetry.source_quality_report --days 14
 """
 
 import argparse
 from datetime import datetime, timedelta, timezone
 
 from core import state_store
-from source_quality import NAMESPACE
+from telemetry.source_quality import NAMESPACE
 
 
 def aggregate(days: int, now: datetime | None = None) -> dict[str, dict]:

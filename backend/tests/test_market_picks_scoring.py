@@ -829,7 +829,7 @@ class PhaseScrapeSourceHealthTest(unittest.TestCase):
         pipeline = MarketPicksPipeline()
         with patch("tools.market_picks_tools.SCRAPER_FNS", {"Source A": fn_a, "Source B": fn_b}), \
              patch("tools.market_picks_tools.SOURCES", fake_sources), \
-             patch("source_health.record_and_check") as mock_record:
+             patch("telemetry.source_health.record_and_check") as mock_record:
             pipeline._phase_scrape(emit=lambda p: None)
 
         calls = {c.args[0]: c.args[1] for c in mock_record.call_args_list}
@@ -847,7 +847,7 @@ class PhaseScrapeSourceHealthTest(unittest.TestCase):
         pipeline = MarketPicksPipeline()
         with patch("tools.market_picks_tools.SCRAPER_FNS", {"Source A": fn_a}), \
              patch("tools.market_picks_tools.SOURCES", fake_sources), \
-             patch("source_health.record_and_check", side_effect=RuntimeError("boom")):
+             patch("telemetry.source_health.record_and_check", side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
                 pipeline._phase_scrape(emit=lambda p: None)
         # Documents current behavior: _phase_scrape does not itself guard
@@ -860,7 +860,7 @@ class ExtractionCacheSetTest(unittest.TestCase):
     """Regression tests for an adversarial-review finding:
     _extraction_cache_set() used a plain write_text() instead of the
     tempfile+os.replace atomic-write convention core/cache.py::save() and
-    source_health.py already use — an overlapping pipeline run (e.g. a
+    telemetry/source_health.py already use — an overlapping pipeline run (e.g. a
     manual ?force=true firing while a scheduled run is still in flight)
     racing on the same (source, article-batch) cache key could leave a
     torn/partial JSON file on disk for the next reader."""

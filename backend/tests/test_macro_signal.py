@@ -84,7 +84,7 @@ class MacroSignalTest(unittest.TestCase):
     def test_health_is_recorded_once_per_real_fetch_not_per_cache_hit(self) -> None:
         with patch("signals.macro.get_fii_dii_flow", return_value={"fii_net_cr": 1000.0}), \
              patch("signals.macro.get_macro_context", return_value={"repo_rate_pct": 6.5}), \
-             patch("source_health.record_and_check") as mock_record:
+             patch("telemetry.source_health.record_and_check") as mock_record:
             macro_signal()
             macro_signal()
         calls = {c.args[0]: c.args[1] for c in mock_record.call_args_list}
@@ -131,7 +131,7 @@ class MacroSignalTest(unittest.TestCase):
     def test_health_reports_not_ok_when_fetch_returns_no_usable_fields(self) -> None:
         with patch("signals.macro.get_fii_dii_flow", return_value={"error": "boom"}), \
              patch("signals.macro.get_macro_context", return_value={"error": "boom"}), \
-             patch("source_health.record_and_check") as mock_record:
+             patch("telemetry.source_health.record_and_check") as mock_record:
             macro_signal()
         calls = {c.args[0]: c.args[1] for c in mock_record.call_args_list}
         self.assertEqual(calls, {"fii_dii_flow": False, "macro_context": False})

@@ -123,7 +123,7 @@ user-facing 'degraded' signal and no attempt at a second configured provider."
    (`llm_call_cost` event, queryable through whatever this deployment already does with structured
    logs) and accumulated into a running per-UTC-day total under the `llm_cost` namespace in
    `core/state_store.py` (`call_count`, `total_cost_usd`, `calls_with_unknown_cost`) — the same "one
-   counter plus a log line" convention as `scraper_error_counters.py`/`source_health.py`, a real
+   counter plus a log line" convention as `telemetry/scraper_error_counters.py`/`telemetry/source_health.py`, a real
    answer to "what's today's total LLM spend" without a second billing/observability platform.
    The daily read-modify-write cycle is serialized by `state_store.mutate()`'s row lock — an
    own-adversarial-review pass caught that the first version of this module used only an
@@ -134,7 +134,7 @@ user-facing 'degraded' signal and no attempt at a second configured provider."
    directly undermining the one thing this module exists to get right. That was first fixed with
    an `fcntl.flock` advisory lock over a JSON file at `output/_llm_cost/<date>.json`; the row lock
    that replaced it holds across separate *hosts* too, which `flock` never did. Covered by a
-   `ConcurrencySafetyTest` in `tests/test_llm_cost.py`, mirroring `source_health.py`'s own.
+   `ConcurrencySafetyTest` in `tests/test_llm_cost.py`, mirroring `telemetry/source_health.py`'s own.
 2. **Cross-provider failover** (`crew.py`) — `run_analysis_with_fallback()`'s single-provider LLM
    call is extracted into `_attempt_provider()` (its own guardrail retry once, rate-limit retry
    once — unchanged from before this existed), so a second, differently-configured provider can
@@ -1521,7 +1521,7 @@ false-positive noise on exactly the symbols/fields this convention already expec
 
 ### Live scraper contract checks (`tests_live/`)
 
-`core/schema_drift.py`/`source_health.py` above only ever learn a scraper broke from *production*
+`core/schema_drift.py`/`telemetry/source_health.py` above only ever learn a scraper broke from *production*
 traffic, after the fact — there was previously no earlier, narrower signal, and this repo's own
 docs disclose roughly a dozen scraper assumptions (Screener's section ids, Trendlyne's DOM
 labels, NSE's XBRL field names, RBI's table layout, the NIFTY 500 CSV shape, the sector-taxonomy
@@ -1556,7 +1556,7 @@ sandbox (no outbound internet to non-allowlisted hosts, repeated throughout this
    scrapers, not all ~10 standalone ones outside `ALL_DATA_TASKS`. A starting point at the
    highest-blast-radius sources, not full coverage.
 
-### Source freshness/volume monitoring (`source_health.py`)
+### Source freshness/volume monitoring (`telemetry/source_health.py`)
 
 `core/schema_drift.py` above only catches *type* drift on the six `ALL_DATA_TASKS` fields — it has
 nothing to say about a source that's still returning well-shaped data but has silently gone
@@ -1601,9 +1601,9 @@ doesn't error, it just quietly stops contributing to every future pick's score.
    established baseline yet to regress from, and a source that's simply always been empty (e.g.
    genuinely thin coverage) shouldn't page anyone either.
 
-### Source-quality telemetry (`source_quality.py`)
+### Source-quality telemetry (`telemetry/source_quality.py`)
 
-`source_health.py` (day-level freshness/volume) and `scraper_error_counters.py` (error counting
+`telemetry/source_health.py` (day-level freshness/volume) and `telemetry/scraper_error_counters.py` (error counting
 for the 4 standalone per-symbol endpoints) both answer "is this source broken" — neither gives a
 per-*run* view of "how many articles did source X yield this run, how many did the LLM extract a
 pick from, how many of those survived NSE-symbol validation into a real consolidated pick." A
@@ -1612,7 +1612,7 @@ validation is invisible to both of those modules.
 
 1. `source_quality.record_run(run_id, source_stats)` writes one JSON file per pipeline run to
    the `source_quality` namespace in `core/state_store.py`, keyed by run id (same convention
-   as `core/cache.py`/`source_health.py` — no lock needed since each run writes its own uniquely-named
+   as `core/cache.py`/`telemetry/source_health.py` — no lock needed since each run writes its own uniquely-named
    file, unlike those modules' shared per-source file). Never raises — a telemetry write failure
    must never affect a real pipeline run.
 2. `pipelines/market_picks_pipeline.py::_aggregate_source_stats(raw_sources, raw_picks, consolidated)`
@@ -1628,17 +1628,17 @@ validation is invisible to both of those modules.
    own call site inside `_phase_scrape`, but here it needs the fully-scored pipeline output to
    know which picks actually survived validation, so it can't fire any earlier. Skipped on the
    empty-pipeline early-return path, same as `source_health`'s own per-phase calls.
-4. `source_quality_report.py` is a standalone aggregation CLI (`python source_quality_report.py
+4. `telemetry/source_quality_report.py` is a standalone aggregation CLI (`python -m telemetry.source_quality_report
    --days 14`) — sums the three counts across every run file within the lookback window, computes
    a yield rate (extracted/fetched) and survival rate (validated/extracted) per source, and prints
    a table sorted worst-survival-first (a source with no extractions yet sorts last, not first,
    since there's nothing to be worst *at*). Same "grep-able counter files plus a report script,
-   not a metrics dashboard" scope as `scraper_error_counters.py`'s own disclosed scope.
+   not a metrics dashboard" scope as `telemetry/scraper_error_counters.py`'s own disclosed scope.
 
-### Standalone scraper error counters (`scraper_error_counters.py`)
+### Standalone scraper error counters (`telemetry/scraper_error_counters.py`)
 
 Point 4 above deliberately excludes `peers`/`insider-activity`/`street-consensus` from
-`source_health.py`'s volume-anomaly heuristic, since an empty result is their expected common
+`telemetry/source_health.py`'s volume-anomaly heuristic, since an empty result is their expected common
 case — but that left those endpoints with genuinely no signal at all when something actually
 broke. `fetch_insider_trades_for_symbol(sym).get("trades", [])`-shaped call sites silently
 mapped both "NSE returned nothing today" (normal) and "NSE request failed" (a real, silent
@@ -1649,8 +1649,8 @@ logging of their own — a silent layout change there degrades with no log line 
 
 1. `scraper_error_counters.record_scraper_error(scraper_name, **context)` increments a small
    persisted counter (the `scraper_errors` namespace in `core/state_store.py`, same
-   `os.replace` atomic-write convention as `core/cache.py`/`source_health.py`) and immediately logs
-   a `level="warning"` event — no "N bad days in a row" threshold like `source_health.py`,
+   `os.replace` atomic-write convention as `core/cache.py`/`telemetry/source_health.py`) and immediately logs
+   a `level="warning"` event — no "N bad days in a row" threshold like `telemetry/source_health.py`,
    since a single error at one of these on-demand, per-request endpoints already means one
    real user's request degraded, unlike a scheduled batch job where a single bad run is
    expected background noise. Never raises. `get_error_count(scraper_name)` is a non-mutating
@@ -1663,7 +1663,7 @@ logging of their own — a silent layout change there degrades with no log line 
    `GET /api/street-consensus/{symbol}`'s two independent sub-fetches
    (`"trendlyne_articles"`, `"trendlyne_numeric_consensus"`). A legitimate empty result (no
    `"error"` key) never touches this module — same "don't manufacture noise from the expected
-   common case" instinct `source_health.py` already applies.
+   common case" instinct `telemetry/source_health.py` already applies.
 3. **Deliberately not a full observability platform** — this is a grep-able counter file plus
    a log line, not a metrics dashboard, alerting integration, or a new `/api/*` status
    endpoint. Consistent with this codebase's other disclosed "first increment" scope calls
@@ -2655,7 +2655,7 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
   (`load`/`save`/`items`/`mutate`/`delete_older_than` over the `app_state` table) under its own
   namespace, rather than a new directory of files or a new near-identical table — that module
   replaced six such directories. A namespace with unbounded per-run growth (e.g. `source_quality`)
-  should call `delete_older_than()` after each write, the way `source_quality.py::record_run()`
+  should call `delete_older_than()` after each write, the way `telemetry/source_quality.py::record_run()`
   does — the disk directories this module replaced were at least `rm`-able by hand; a Postgres
   table isn't, without this. Use `mutate()`, never `load()`-then-`save()`, wherever more than one worker can
   touch the same key: it holds a row lock for the whole read-modify-write, which is what the three

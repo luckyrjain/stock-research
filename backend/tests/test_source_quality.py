@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from pipelines import market_picks_pipeline as mpp
-import source_quality as sq
+from telemetry import source_quality as sq
 from core import state_store
 from state_store_harness import isolated_state_store
 

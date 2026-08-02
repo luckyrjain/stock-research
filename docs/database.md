@@ -762,8 +762,8 @@ first adding one.
   the prior payload, so `fn` runs inside the transaction holding the lock. A plain
   `SELECT ... FOR UPDATE` would not do: it locks nothing when the row does not exist yet, so two
   workers racing on a brand-new key would both fall through to an INSERT. This replaced three
-  separate hand-rolled `fcntl.flock` helpers (`llm_cost.py`, `source_health.py`,
-  `scraper_error_counters.py`), and unlike `flock` the row lock also holds across separate hosts.
+  separate hand-rolled `fcntl.flock` helpers (`llm_cost.py`, `telemetry/source_health.py`,
+  `telemetry/scraper_error_counters.py`), and unlike `flock` the row lock also holds across separate hosts.
 
 | Namespace | Key | Written by | Payload |
 |---|---|---|---|

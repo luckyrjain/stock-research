@@ -9,8 +9,8 @@ six near-identical tables. `output/` is now strictly a regenerable TTL cache.
 
 Two things this buys beyond "nothing durable is written to the folder":
 
-- **The `fcntl.flock` locks are gone.** `llm_cost.py`, `source_health.py` and
-  `scraper_error_counters.py` each carried their own advisory-lock helper to
+- **The `fcntl.flock` locks are gone.** `llm_cost.py`, `telemetry/source_health.py` and
+  `telemetry/scraper_error_counters.py` each carried their own advisory-lock helper to
   make a read-modify-write cycle safe across worker *processes*. `mutate()`
   below does the same job with a row lock, which — unlike `flock` — also holds
   across separate *hosts*, the multi-replica topology `docs/deployment.md`

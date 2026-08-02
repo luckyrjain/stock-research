@@ -79,7 +79,7 @@ report has loaded, so none of them can delay or fail the SSE stream:
 
 All degrade to `null`/`[]`/an empty section rather than failing the page. A genuine scrape
 *failure* is deliberately **not** cached (retried next request) and increments a
-`scraper_error_counters.py` counter; a legitimately empty result is cached normally. See
+`telemetry/scraper_error_counters.py` counter; a legitimately empty result is cached normally. See
 CLAUDE.md's per-flow sections for exact shapes and the disclosed scraper-verification caveats.
 
 **Filings classification**: `signals/filings_classifier.py` runs pure text classification (no new
@@ -752,7 +752,7 @@ on a 429, preserving "409 already-running takes priority over 429 too-many-reque
   common, expected case under this codebase's "never invent" convention. Wired into
   `main._fetch_task()`, the one choke point both the CLI and the SSE endpoint already go through.
   Logs at `warning` (a human should look at the scraper; this isn't a page), never raises.
-- **`source_health.py`** — volume/freshness anomaly detection, for the 20 Market Picks sources +
+- **`telemetry/source_health.py`** — volume/freshness anomaly detection, for the 20 Market Picks sources +
   the two macro-overlay fetches. Records a per-source daily ok/not-ok result in `app_state`'s
   `source_health` namespace and warns once a source with an established healthy baseline (≥5 prior
   days, at least one successful) has failed 3 consecutive *days*. Time-normalized — several calls
@@ -760,14 +760,14 @@ on a 429, preserving "409 already-running takes priority over 429 too-many-reque
   the threshold in minutes. Serialized per source by `state_store.mutate()`'s row lock, which is
   what stops two racing read-modify-write cycles losing an update. A brand-new source never alerts
   (no baseline to regress from).
-- **`source_quality.py`** — per-*run* Market Picks source telemetry, complementing the day-level
+- **`telemetry/source_quality.py`** — per-*run* Market Picks source telemetry, complementing the day-level
   view above: one record per run in `app_state`'s `source_quality` namespace, recording for each source how
   many articles it yielded, how many picks the LLM extracted from them, and how many survived
-  NSE-symbol validation. This is the funnel `source_health.py` can't see — a source that reliably
+  NSE-symbol validation. This is the funnel `telemetry/source_health.py` can't see — a source that reliably
   returns articles which never once become a validated pick looks perfectly healthy to a
   boolean ok/not-ok check. Each run owns its own key, so no lock is needed.
-  `source_quality_report.py` is the CLI that aggregates these across runs.
-- **`scraper_error_counters.py`** — for the standalone per-symbol endpoints (`peers`, `financials`,
+  `telemetry/source_quality_report.py` is the CLI that aggregates these across runs.
+- **`telemetry/scraper_error_counters.py`** — for the standalone per-symbol endpoints (`peers`, `financials`,
   `insider_activity`'s two sub-fetches, `street_consensus`'s two sub-fetches), where an empty
   result is the expected common case and the volume-anomaly heuristic above would be pure noise.
   Distinguishes a genuine `{"error": ...}` tool result from a legitimate empty one and counts/logs
@@ -832,8 +832,8 @@ stock-research/
 │   ├── core/rate_limiter.py            Shared-state (Redis or in-memory) rate limits, slots, locks
 │   ├── core/schemas.py                 Normalization contracts: raw tool output → canonical dicts
 │   ├── core/schema_drift.py            Type-drift detection for the six ALL_DATA_TASKS slices
-│   ├── source_health.py           Freshness/volume monitoring for Market Picks' 20 sources + macro
-│   ├── scraper_error_counters.py  Error counters for the 4 standalone per-symbol scrapers
+│   ├── telemetry/source_health.py           Freshness/volume monitoring for Market Picks' 20 sources + macro
+│   ├── telemetry/scraper_error_counters.py  Error counters for the 4 standalone per-symbol scrapers
 │   ├── core/observability.py           Structured JSON logging (log_event())
 │   ├── core/error_tracking.py          Optional Sentry-compatible hook, wired into log_event()
 │   ├── peer_analytics.py          Peer-percentile + absolute valuation-anchor math (shared by
@@ -850,8 +850,8 @@ stock-research/
 │   ├── pipelines/eod_prices_pipeline.py     NSE bhavcopy + AMFI NAV ingestion; also runs corporate-actions
 │   │                               and portfolio-valuation as isolated final steps
 │   ├── pipelines/corporate_actions_pipeline.py  NSE corporate-actions ingestion + adj_close recompute
-│   ├── source_quality.py          Per-run Market Picks source telemetry (yield, dedup, extraction rate)
-│   ├── source_quality_report.py   CLI aggregating source_quality.py's per-run JSON files
+│   ├── telemetry/source_quality.py          Per-run Market Picks source telemetry (yield, dedup, extraction rate)
+│   ├── telemetry/source_quality_report.py   CLI aggregating telemetry/source_quality.py's per-run JSON files
 │   ├── portfolio/portfolio_valuation.py     Portfolio Aggregator: refresh_valuations(), xirr(), xirr_report()
 │   ├── portfolio/cas_import.py              CAMS/KFintech CAS PDF import → Portfolio Aggregator transactions
 │   ├── portfolio/csv_import.py              Generic broker-CSV import (Zerodha preset) → transactions

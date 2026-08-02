@@ -3,7 +3,7 @@ outside ALL_DATA_TASKS' own schema-drift coverage (peers, financials,
 insider activity, street consensus) — see CLAUDE.md's "Standalone scraper
 error counters" section.
 
-Deliberately NOT the same shape as source_health.py's record_and_check():
+Deliberately NOT the same shape as telemetry/source_health.py's record_and_check():
 that module tracks day-level *volume* anomalies across sources with a
 genuine "should usually have data" baseline (the 20 Market Picks sources,
 the market-wide macro/FII-DII overlay) and is explicitly documented there
@@ -35,7 +35,7 @@ def record_scraper_error(scraper_name: str, **context) -> None:
     """Call this at a standalone scraper's call site whenever its result
     carries a top-level "error" key — never for a legitimate empty result.
     Increments a persisted per-scraper counter and always logs a warning
-    immediately, unlike source_health.py's "wait for N bad days" threshold —
+    immediately, unlike telemetry/source_health.py's "wait for N bad days" threshold —
     a single error here already means one real user's request degraded, and
     these are on-demand per-request calls, not a scheduled batch where a
     single bad run is expected background noise. Never raises — broken

@@ -10,7 +10,7 @@ the Nifty benchmark series under a "NSEI" pseudo-symbol.
 from datetime import datetime, timezone
 
 from core import cache
-import source_health
+from telemetry import source_health
 from signals.models import Signal
 from tools.macro_context_tools import get_macro_context
 from tools.nse_fii_dii_tools import get_fii_dii_flow

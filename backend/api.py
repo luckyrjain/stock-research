@@ -1434,7 +1434,7 @@ async def get_peers(request: Request, symbol: str):
 
         raw = json.loads(get_peer_comparison.run(symbol=sym))
         if raw.get("error"):
-            import scraper_error_counters
+            from telemetry import scraper_error_counters
             scraper_error_counters.record_scraper_error("peers", symbol=sym)
             return {
                 "symbol": sym, "self": None, "peers": [], "sector_median": None,
@@ -1507,7 +1507,7 @@ async def get_financials(request: Request, symbol: str):
             # transient scrape failure should be retried on the next
             # request, not locked in as "this company has no financials"
             # for a full 24h TTL.
-            import scraper_error_counters
+            from telemetry import scraper_error_counters
             scraper_error_counters.record_scraper_error("financials", symbol=sym)
             return {"symbol": sym, "profit_loss": None, "balance_sheet": None, "cash_flow": None, "dcf": None, "concalls": []}
 
@@ -1585,7 +1585,7 @@ async def get_shareholding_breakdown(request: Request, symbol: str):
             # Note this task's TTL is 168h (7 days — same quarterly NSE XBRL
             # filing as mf_holdings), not the 24h those two use, so locking a
             # failure in here would be correspondingly worse.
-            import scraper_error_counters
+            from telemetry import scraper_error_counters
             scraper_error_counters.record_scraper_error("shareholding_detail", symbol=sym)
             return {"symbol": sym, "as_of_date": None, "promoters": [], "shareholder_categories": [], "unavailable": True}
 
@@ -1651,7 +1651,7 @@ async def get_insider_activity(request: Request, symbol: str):
         # both of which previously collapsed to the same empty list with no
         # way for the UI to tell them apart.
         try:
-            import scraper_error_counters
+            from telemetry import scraper_error_counters
             from tools.nse_insider_trades import fetch_insider_trades_for_symbol
 
             raw = fetch_insider_trades_for_symbol(sym)
@@ -1669,7 +1669,7 @@ async def get_insider_activity(request: Request, symbol: str):
 
     def _fetch_bulk_block() -> tuple[list[dict], bool]:
         try:
-            import scraper_error_counters
+            from telemetry import scraper_error_counters
             from tools.nse_bulk_block_deals import fetch_bulk_block_deals_for_symbol
 
             raw = fetch_bulk_block_deals_for_symbol(sym)
@@ -1764,7 +1764,7 @@ async def get_street_consensus(request: Request, symbol: str):
         # failure from "no Trendlyne-cited coverage today" (the expected
         # common case) — both previously collapsed to the same [].
         try:
-            import scraper_error_counters
+            from telemetry import scraper_error_counters
             from tools.trendlyne_agent import fetch_trendlyne_consensus_for_symbol
 
             raw = fetch_trendlyne_consensus_for_symbol(sym)
@@ -1783,7 +1783,7 @@ async def get_street_consensus(request: Request, symbol: str):
         # to never raise anyway, but this endpoint doesn't lean on that
         # guarantee alone.
         try:
-            import scraper_error_counters
+            from telemetry import scraper_error_counters
             from tools.trendlyne_scraper import fetch_trendlyne_numeric_consensus
 
             result = fetch_trendlyne_numeric_consensus(sym)

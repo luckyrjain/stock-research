@@ -27,8 +27,8 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-import source_health
-import source_quality
+from telemetry import source_health
+from telemetry import source_quality
 from core import state_store
 from core.error_tracking import init_error_tracking
 from core.observability import get_logger, log_event

@@ -1,9 +1,9 @@
 """Per-source signal-quality telemetry for the market-picks pipeline.
 
 Writes one record per pipeline run under the `source_quality` namespace in
-`core/state_store.py` (keyed by run id). Read by source_quality_report.py to
-aggregate signal quality across runs. Complements source_health.py (day-level
-freshness/volume) and scraper_error_counters.py (error counting for standalone
+`core/state_store.py` (keyed by run id). Read by telemetry/source_quality_report.py to
+aggregate signal quality across runs. Complements telemetry/source_health.py (day-level
+freshness/volume) and telemetry/scraper_error_counters.py (error counting for standalone
 per-symbol endpoints) — neither gives a per-run view of "how many articles did
 source X yield this run, how many survived to a validated pick."
 """
@@ -14,7 +14,7 @@ from core import state_store
 from core.observability import get_logger, log_event
 
 NAMESPACE = "source_quality"
-_RETENTION_DAYS = 90  # well beyond source_quality_report.py's default 14-day lookback
+_RETENTION_DAYS = 90  # well beyond telemetry/source_quality_report.py's default 14-day lookback
 _logger = get_logger("source_quality")
 
 

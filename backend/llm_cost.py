@@ -13,8 +13,8 @@ It logs the call's own cost immediately via `observability.log_event()`
 (queryable right away through whatever this deployment already does with
 structured logs) and accumulates a running per-day total under the
 `llm_cost` namespace in `core/state_store.py` (one record per UTC day) — the same
-"one counter plus a log line" convention as `scraper_error_counters.py`/
-`source_health.py`, deliberately not a full observability/billing platform.
+"one counter plus a log line" convention as `telemetry/scraper_error_counters.py`/
+`telemetry/source_health.py`, deliberately not a full observability/billing platform.
 
 That counter used to be a JSON file, `output/_llm_cost/<date>.json`, guarded
 by an `fcntl.flock` advisory lock so two worker *processes* couldn't both
@@ -36,7 +36,7 @@ _EMPTY = {"call_count": 0, "total_cost_usd": 0.0, "calls_with_unknown_cost": 0}
 def _today() -> str:
     """Isolated as its own function purely so tests can patch it to
     simulate a specific calendar day without sleeping in real time — same
-    convention as source_health.py's own _today()."""
+    convention as telemetry/source_health.py's own _today()."""
     return datetime.now(timezone.utc).date().isoformat()
 
 

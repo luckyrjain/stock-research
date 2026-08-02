@@ -131,7 +131,7 @@ that no client can rely on a uniform rule.
   Trendlyne DOM, NSE XBRL tags, RBI table layout, the sector taxonomy). Each degrades to
   empty/`None` rather than a wrong value, and `tests_live/` covers the four
   highest-blast-radius ones weekly — the rest are unverified.
-- **Market-picks source curation.** Per-source telemetry now ships (`source_quality.py`); actually
+- **Market-picks source curation.** Per-source telemetry now ships (`telemetry/source_quality.py`); actually
   dropping or down-weighting sources in `_SOURCE_CREDIBILITY` is deliberately deferred until real
   telemetry accrues. Decide by reading the report, not by guessing.
 

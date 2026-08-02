@@ -84,41 +84,42 @@ stock-research/
 │   ├── crew.py                 Analyst guardrails, run_analysis_with_fallback (direct litellm call,
 │   │                           cross-provider failover)
 │   ├── llm_cost.py             Per-call LLM cost instrumentation + running daily total
-│   ├── source_quality.py       Per-run Market Picks source-quality telemetry
-│   ├── source_quality_report.py  Aggregation CLI for the above
 │   ├── verdict_history.py      Daily verdict/price snapshots (PostgreSQL) — powers the hero's timeline strip
 │   ├── mf_holdings_history.py  Quarterly MF stake snapshots (PostgreSQL) — powers the stake-delta badges
 │   ├── auth.py                 Magic-link auth: token/session issuance + validation (PostgreSQL)
 │   ├── email_sender.py         Sends the magic-link sign-in + watchlist-alert emails over generic SMTP
 │   ├── peer_analytics.py       Peer-percentile + absolute valuation-anchor math (api.py + pipelines/market_picks_pipeline.py)
-│   ├── source_health.py        Freshness/volume monitoring for market-picks sources + macro overlay
-│   ├── scraper_error_counters.py  Error (not empty-result) counters for the 4 standalone per-symbol scrapers
 │   ├── requirements.txt
 │   ├── alembic.ini             Schema-migration config (see "Schema migrations" below)
 │   ├── migrations/             Alembic migration scripts — env.py + versions/*.py
 │   ├── Dockerfile              Backend image (see docker-compose.yml at the repo root)
 │   ├── core/                   Shared infra utilities, no per-feature business logic
-│   │   ├── core/cache.py                File-based TTL cache (output/<SYMBOL>/<task>.json)
-│   │   ├── core/schemas.py              Normalization contracts: raw tool output → canonical dicts
-│   │   ├── core/state_store.py          Durable JSON state (PostgreSQL app_state table) — daily pick
+│   │   ├── cache.py                File-based TTL cache (output/<SYMBOL>/<task>.json)
+│   │   ├── schemas.py              Normalization contracts: raw tool output → canonical dicts
+│   │   ├── state_store.py          Durable JSON state (PostgreSQL app_state table) — daily pick
 │   │   │                           snapshots, telemetry, counters, CAS archives, CLI reports
-│   │   ├── core/rate_limiter.py         Shared sliding-window rate limit / concurrency-slot / lock primitives
-│   │   ├── core/observability.py        Structured JSON logging via log_event()
-│   │   ├── core/error_tracking.py       Optional Sentry-style hook, wired into log_event()'s error-level path
-│   │   └── core/schema_drift.py         Type-drift detection for the six scraped data slices
+│   │   ├── rate_limiter.py         Shared sliding-window rate limit / concurrency-slot / lock primitives
+│   │   ├── observability.py        Structured JSON logging via log_event()
+│   │   ├── error_tracking.py       Optional Sentry-style hook, wired into log_event()'s error-level path
+│   │   └── schema_drift.py         Type-drift detection for the six scraped data slices
 │   ├── pipelines/               Standalone batch jobs, each with its own CLI entry point
-│   │   ├── pipelines/market_picks_pipeline.py  Multi-agent weekly picks pipeline (6 phases)
-│   │   ├── pipelines/sme_ema_pipeline.py     SME golden/death cross batch pipeline (PostgreSQL)
-│   │   ├── pipelines/screener_pipeline.py    NIFTY 500 custom screener batch pipeline (PostgreSQL)
-│   │   ├── pipelines/eod_prices_pipeline.py  EOD bhavcopy + AMFI NAV ingestion (PostgreSQL) — see "EOD price
+│   │   ├── market_picks_pipeline.py  Multi-agent weekly picks pipeline (6 phases)
+│   │   ├── sme_ema_pipeline.py     SME golden/death cross batch pipeline (PostgreSQL)
+│   │   ├── screener_pipeline.py    NIFTY 500 custom screener batch pipeline (PostgreSQL)
+│   │   ├── eod_prices_pipeline.py  EOD bhavcopy + AMFI NAV ingestion (PostgreSQL) — see "EOD price
 │   │   │                           store + corporate actions flow" below
-│   │   ├── pipelines/corporate_actions_pipeline.py  Split/bonus/dividend-adjusted close recompute
-│   │   └── pipelines/watchlist_alerts.py     Daily batch job: emails signed-in users on a watched stock's recommendation change
+│   │   ├── corporate_actions_pipeline.py  Split/bonus/dividend-adjusted close recompute
+│   │   └── watchlist_alerts.py     Daily batch job: emails signed-in users on a watched stock's recommendation change
 │   ├── portfolio/               Portfolio Aggregator's valuation + statement-import modules
-│   │   ├── portfolio/portfolio_valuation.py  Nightly auto-valuation + XIRR engine
-│   │   ├── portfolio/cas_import.py           CAS PDF (CAMS/KFintech) mutual-fund statement import
-│   │   ├── portfolio/csv_import.py           Broker CSV/XLSX tradebook import (Zerodha preset)
-│   │   └── portfolio/dcf_valuation.py        Deterministic two-stage DCF off the cash-flow statement
+│   │   ├── portfolio_valuation.py  Nightly auto-valuation + XIRR engine
+│   │   ├── cas_import.py           CAS PDF (CAMS/KFintech) mutual-fund statement import
+│   │   ├── csv_import.py           Broker CSV/XLSX tradebook import (Zerodha preset)
+│   │   └── dcf_valuation.py        Deterministic two-stage DCF off the cash-flow statement
+│   ├── telemetry/               Scraper/Market-Picks source observability — freshness, per-run yield, error counts
+│   │   ├── source_health.py        Freshness/volume monitoring for market-picks sources + macro overlay
+│   │   ├── source_quality.py       Per-run Market Picks source-quality telemetry
+│   │   ├── source_quality_report.py  Aggregation CLI for the above
+│   │   └── scraper_error_counters.py  Error (not empty-result) counters for the 4 standalone per-symbol scrapers
 │   ├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
 │   ├── routes/                 Per-domain FastAPI routers extracted out of api.py (see
 │   │                           "Route module extraction" below) — watchlist.py, positions.py,
