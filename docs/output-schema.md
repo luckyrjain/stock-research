@@ -1,5 +1,14 @@
 # Output Schema
 
+**Scope.** This doc covers **response payload shapes** — the merged report, the `MarketPick`
+shape, standalone endpoint response bodies, and the on-disk cache-file formats. It does *not*
+cover how to call anything.
+
+The **request contract** — every endpoint's method, path, auth, query/path params, request body,
+status codes, rate limits, and cache TTLs — lives in [`api-reference.md`](api-reference.md).
+The two are deliberately non-overlapping: when you need to know *what a field means*, read here;
+when you need to know *how to make the call*, read there.
+
 ## Per-symbol cache files
 
 Each symbol gets its own folder under `backend/output/<SYMBOL>/` (or, when `REDIS_URL` is set, the same
@@ -380,9 +389,11 @@ primary list; excess picks of an over-represented sector are deferred to the end
 
 ## Standalone endpoint response shapes
 
-These endpoints are outside the six-task analysis pipeline — fetched on demand by the frontend,
-independently cached (24h TTL each, `cache.py`'s `peers`/`financials`/`insider_activity`/
-`street_consensus` tasks). See `docs/tools.md` for the underlying tool functions.
+These endpoints are outside the six-task analysis pipeline — fetched on demand by the frontend
+after the main report loads, each independently cached. **Response bodies only below**; for each
+one's params, status codes, rate limit, and cache TTL see
+[`api-reference.md`](api-reference.md#per-symbol-research-add-ons). See [`tools.md`](tools.md)
+for the underlying tool functions.
 
 ### `GET /api/peers/{symbol}`
 
@@ -437,10 +448,12 @@ P/E history — it answers "cheap/expensive vs. its own history," distinct from 
 
 `profit_loss`/`balance_sheet`/`cash_flow`/`dcf` are each independently `null` when Screener
 doesn't have that table, or (for `dcf`) `compute_dcf_estimate()`'s own preconditions aren't met
-(see `docs/tools.md`). `concalls` is `[]` (never `null`) when Screener has no calls on record. A
-`null` value inside a statement row's `values` array is a genuine per-year gap (e.g. a line item
-that didn't exist pre-IPO), not a parse failure. A scrape failure isn't cached (unlike a genuine
-"no data" result) — retried on the next request rather than locked in for the full 24h TTL.
+(see [`tools.md`](tools.md)). `concalls` is `[]` (never `null`) when Screener has no calls on
+record. A `null` value inside a statement row's `values` array is a genuine per-year gap (e.g. a
+line item that didn't exist pre-IPO), not a parse failure. Note that this endpoint has no
+`unavailable` flag — an upstream outage and a genuine "Screener has no data" produce identical
+bodies (see [api-reference.md § Response-contract
+inconsistencies](api-reference.md#response-contract-inconsistencies)).
 
 ### `GET /api/insider-activity/{symbol}`
 
@@ -462,8 +475,7 @@ that didn't exist pre-IPO), not a parse failure. A scrape failure isn't cached (
 recent activity. The two `*_unavailable` flags distinguish a genuine scrape failure from that
 common empty case — both previously collapsed to the same empty list with no way for the UI to
 tell them apart; a card renders "temporarily unavailable" only when the corresponding flag is
-`true`. The whole payload is only cached when **both** sections succeeded — a fetch failure isn't
-cached as "no activity" (same "don't cache a failure" convention as `/api/peers`).
+`true`.
 
 ### `GET /api/shareholding-detail/{symbol}`
 
@@ -494,8 +506,7 @@ named holders above the plausibility threshold — the expected common case for 
 filing, not an error. `category` is NSE's own raw filing category, cleaned up for display — not a
 fixed enum this app maintains (see `tools/nse_tools.py::get_shareholding_detail`'s own disclosed
 limitation). `unavailable: true` distinguishes a genuine scrape failure from that legitimately-
-thin case, same convention as insider activity/street consensus below; a failure isn't cached
-(retried on the next request instead of locking in for the full 7-day TTL).
+thin case, same convention as insider activity/street consensus below.
 
 ### `GET /api/street-consensus/{symbol}`
 
@@ -542,8 +553,9 @@ One row per day the analysis pipeline actually ran (both CLI and web, same-day r
 rather than duplicate) — see `verdict_history.py`. `return_since_pct`/`outcome` grade each entry
 against **today's** live price; `outcome` is only ever `'win'`/`'loss'` for `BUY`/`SELL` calls (a
 `HOLD` makes no directional claim, so it's never graded) and `null` when ungraded or the live
-price fetch failed. Degrades to `{"symbol", "history": [], "win_rate": null, "scored_count": 0}`
-(200, not 503) when `DATABASE_URL` is unset or the query fails.
+price fetch failed. An unset `DATABASE_URL` or a failed query degrades to the same shape with an
+empty `history` rather than erroring — see
+[api-reference.md](api-reference.md#get-apiverdict-historysymbol--15).
 
 ### `GET /api/consolidated/{symbol}` (and the API-key-gated `GET /api/v1/consolidated/{symbol}`)
 
@@ -587,9 +599,11 @@ contributes (e.g. no positions have a share count yet).
 
 ### Portfolio Aggregator (`/api/portfolio/*`)
 
-A separate personal net-worth tracker — `profiles`/`accounts`/`assets` are plain CRUD (standard
-`{..., "id": N}` create/list/patch/delete shapes, no auth). The three notable computed/import
-endpoints:
+A separate personal net-worth tracker. `profiles`/`accounts`/`assets` are plain CRUD returning
+standard `{"id": N}` / `{"ok": true}` / `{"<collection>": [...]}` shapes — see
+[api-reference.md § Portfolio Aggregator](api-reference.md#portfolio-aggregator-4157) for their
+full request contract (including the disclosed no-auth, no-ownership-scoping design). The
+computed and import endpoints have less obvious bodies:
 
 **`POST /api/portfolio/refresh-valuations`** — auto-values every non-archived `mf`/`stock` asset
 with a `holdings` row, from `prices_daily`/`mf_nav_daily` (live yfinance quote as a stock fallback):
@@ -607,7 +621,7 @@ with a `holdings` row, from `prices_daily`/`mf_nav_daily` (live yfinance quote a
 }
 ```
 
-**`GET /api/portfolio/xirr?profile_id=`** — per-asset and pooled portfolio XIRR from `transactions`
+**`GET /api/portfolio/xirr`** — per-asset and pooled portfolio XIRR from `transactions`
 + each asset's latest valuation as the terminal cashflow; `null` wherever an asset has no
 transaction history yet:
 
@@ -621,8 +635,7 @@ transaction history yet:
 }
 ```
 
-**`POST /api/portfolio/import-cas`** (multipart: `file`, `password`, `account_id`) — imports a
-CAMS/KFintech detailed CAS PDF:
+**`POST /api/portfolio/import-cas`** — imports a CAMS/KFintech detailed CAS PDF:
 
 ```json
 {
@@ -631,11 +644,12 @@ CAMS/KFintech detailed CAS PDF:
 }
 ```
 
-`{"error": "..."}` (422) on a wrong password, unparseable PDF, or a non-detailed (summary-only)
-statement; `{"error": "account not found"}` (404) for an unknown `account_id`.
+A wrong password, an unparseable PDF, a summary-only statement, or an unknown `account_id` never
+reach this shape — they surface as an `HTTPException` instead (see
+[api-reference.md](api-reference.md#computed--import)).
 
-**`POST /api/portfolio/import-csv/preview`** (multipart: `file`) — returns headers, a mapping
-suggestion, and Zerodha auto-detection:
+**`POST /api/portfolio/import-csv/preview`** — returns headers, a mapping suggestion, and Zerodha
+auto-detection:
 
 ```json
 {
@@ -647,8 +661,7 @@ suggestion, and Zerodha auto-detection:
 }
 ```
 
-**`POST /api/portfolio/import-csv`** (multipart `file` + form fields `mapping` (JSON string),
-`account_id`, `broker`) — imports the mapped rows, append + content-key dedupe:
+**`POST /api/portfolio/import-csv`** — imports the mapped rows, append + content-key dedupe:
 
 ```json
 {
@@ -697,3 +710,9 @@ batch. Standalone endpoints follow the same instinct but surface it differently 
 e.g. `/api/insider-activity` and `/api/street-consensus` use explicit `*_unavailable` boolean
 flags (see above) rather than a top-level `error` key, so a genuine scrape failure is
 distinguishable from the equally-common "nothing to report" empty case.
+
+This is distinct from an **HTTP** error, which is always FastAPI's `{"detail": "..."}` and never
+carries raw exception text. For which endpoint returns which status, and where the two
+mechanisms diverge between siblings, see
+[api-reference.md § Status codes](api-reference.md#status-codes) and
+[§ Response-contract inconsistencies](api-reference.md#response-contract-inconsistencies).

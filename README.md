@@ -342,9 +342,9 @@ handful of scraper targets on a weekly schedule — it is never part of the defa
 
 The backend exposes **57 routes** — 29 in `api.py`, 28 across `routes/` (17 Portfolio Aggregator,
 6 Positions, 5 Watchlist). The table below covers the major ones per mode; **see
-`backend/CLAUDE.md` for the complete, current list** (or, from `backend/`, run
-`grep -c "@app\.\(get\|post\|delete\|patch\)" api.py` and
-`grep -rc "@router\.\(get\|post\|delete\|patch\)" routes/`). The Next.js app proxies all of these
+[docs/api-reference.md](docs/api-reference.md) for all 57 with full contracts** — auth mode,
+params, request bodies, every status code and its trigger, rate limits, and the SSE event
+streams. The Next.js app proxies all of these
 through `frontend/app/api/`.
 
 | Endpoint | Description |
@@ -428,6 +428,8 @@ Claude" section.
 - [docs/setup.md](docs/setup.md)
 - [docs/architecture.md](docs/architecture.md)
 - [docs/deployment.md](docs/deployment.md)
+- [docs/api-reference.md](docs/api-reference.md) — all 57 endpoints: auth, params, status codes, rate limits
+- [docs/database.md](docs/database.md) — all 21 tables: columns, constraints, ownership model, migrations
 - [docs/tools.md](docs/tools.md)
 - [docs/output-schema.md](docs/output-schema.md)
 - [docs/design.md](docs/design.md) — AlphaPulse Design System

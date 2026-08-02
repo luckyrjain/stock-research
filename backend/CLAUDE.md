@@ -1707,17 +1707,20 @@ logging of their own — a silent layout change there degrades with no log line 
 CLI: `--setup-db` (create tables), `--reset-db` (drop + recreate — required after schema
 changes; data is fully regenerable), `--force` (bypass list cache), `--lookback N`.
 
-**Disclosed limitation**: `--reset-db` calls `metadata.drop_all(engine)`/`create_all(engine)`
-against the single shared `MetaData()` in `db/models.py` — the same object every other table
-in this app (`users`, `sessions`, `watchlist_items`, `verdict_history`, `api_keys`, and
-`screener_stocks`) is registered on. Running `sme_ema_pipeline.py --reset-db` therefore drops
-and recreates every table in the database, not just `sme_stocks`/`ema_signals` — "data is
-fully regenerable" above is only true for this pipeline's own tables, not for accounts/
-sessions/watchlist rows belonging to other features. `screener_pipeline.py --reset-db` (see
-"Custom screener flow" below) was scoped to its own table specifically to avoid repeating this;
-this script predates that fix and hasn't been changed to match, since a blast-radius change to
-an existing operational command is riskier to make speculatively than to flag here for whoever
-touches this next.
+**`--reset-db` is scoped to this pipeline's own two tables** — `ema_signals.drop()` then
+`sme_stocks.drop()` (child before parent, per the FK), then recreate in reverse, then
+`stamp_alembic_head()`. It deliberately does **not** call `metadata.drop_all(engine)`.
+
+This used to be the opposite, and was documented here as a disclosed limitation: the single
+shared `MetaData()` in `db/models.py` carries every table in the app, so `drop_all` wiped
+accounts, sessions, watchlist rows and everything else just to reset two SME tables.
+`screener_pipeline.py --reset-db` was scoped to its own table to avoid that; this script has now
+been brought in line. The blast radius mattered more once the Portfolio Aggregator landed —
+`profiles`/`accounts`/`assets`/`holdings`/`valuations`/`transactions` hold real personal
+financial data that is **not** regenerable, unlike this pipeline's own scraped tables.
+
+**Rule for any new pipeline:** scope `--reset-db` to the tables that pipeline owns. Never
+`metadata.drop_all()`. See `docs/database.md` for the full table-ownership map.
 
 The DB column for the cross is named `cross_type` (`'golden'`/`'death'`/`NULL`) because
 `CROSS` is a reserved SQL keyword; the API/TS field is `cross`.

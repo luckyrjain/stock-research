@@ -52,8 +52,10 @@ access to a public `/api/v1/*` surface.
 | [Setup & Configuration](setup.md) | Backend/frontend install, environment variables, local development |
 | [Deployment](deployment.md) | Docker Compose, manual production deployment, scaling caveats |
 | [Architecture](architecture.md) | Request flows, pipeline phases, caching, agent layers, file layout |
+| [API Reference](api-reference.md) | All 57 endpoints — auth, params, request bodies, status codes, rate limits, SSE event streams |
+| [Database](database.md) | All 21 tables — columns, constraints, indexes, ownership model, migrations, retention |
 | [Tools Reference](tools.md) | Data-fetching tools, market picks scrapers, sources, and output shapes |
-| [Output Schema](output-schema.md) | Report JSON structure, cache files, and standalone endpoint response shapes |
+| [Output Schema](output-schema.md) | Report JSON structure and response payload shapes (the contract itself lives in the API Reference) |
 | [Design System](design.md) | Colors, typography, spacing, component patterns |
 | [CLAUDE.md](../CLAUDE.md) | Root-level overview + pointers |
 | [backend/CLAUDE.md](../backend/CLAUDE.md) | Exhaustive backend engineering reference — the ground truth for exact behavior |
