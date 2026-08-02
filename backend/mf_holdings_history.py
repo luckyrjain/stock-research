@@ -8,13 +8,13 @@ cache hit (a cache hit never reaches _fetch_task at all).
 
 Best-effort throughout: a missing DATABASE_URL or a DB hiccup here must
 never break the analysis pipeline itself — failures are logged and
-swallowed, the same convention verdict_history.py and state_store.py use
+swallowed, the same convention verdict_history.py and core/state_store.py use
 for their own persistence.
 """
 import os
 import threading
 
-from observability import get_logger, log_event
+from core.observability import get_logger, log_event
 
 LOGGER = get_logger("mf_holdings_history")
 

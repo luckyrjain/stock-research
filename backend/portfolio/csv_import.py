@@ -21,7 +21,7 @@ import io
 
 from dotenv import load_dotenv
 
-from observability import get_logger, log_event
+from core.observability import get_logger, log_event
 from tools.securities_master import get_full_securities_master, resolve_symbol
 
 load_dotenv()

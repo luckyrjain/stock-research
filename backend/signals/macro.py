@@ -9,7 +9,7 @@ the Nifty benchmark series under a "NSEI" pseudo-symbol.
 """
 from datetime import datetime, timezone
 
-import cache
+from core import cache
 import source_health
 from signals.models import Signal
 from tools.macro_context_tools import get_macro_context
@@ -17,7 +17,7 @@ from tools.nse_fii_dii_tools import get_fii_dii_flow
 
 _MACRO_PSEUDO_SYMBOL = "_MACRO"
 
-# cache.py's own freshness check only knows when the HTTP call *succeeded*
+# core/cache.py's own freshness check only knows when the HTTP call *succeeded*
 # (_meta.fetched_at) — not whether NSE's response actually carried the
 # current trading session's numbers. NSE publishes this report once per
 # day; if it hasn't published yet (e.g. early in the day) or a scrape

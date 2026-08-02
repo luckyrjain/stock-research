@@ -1,10 +1,10 @@
 """
 NIFTY 500 constituent list fetcher — the "main NSE/BSE universe" bound for
-screener_pipeline.py's stored-metrics table (GET /api/screener). NIFTY 500
+pipelines/screener_pipeline.py's stored-metrics table (GET /api/screener). NIFTY 500
 (NSE's own published index membership) is used rather than the full NSE
 equity master (_nse_master.txt, ~2000 symbols, already used elsewhere in this
 codebase for symbol validation): a daily per-stock yfinance .info scrape —
-this codebase's heaviest documented per-symbol call, see sme_ema_pipeline.py's
+this codebase's heaviest documented per-symbol call, see pipelines/sme_ema_pipeline.py's
 own note on why it deliberately avoids that call for "hundreds of SME
 stocks" — is only reasonable at a bounded, curated scale. NIFTY 500 already
 covers the vast majority of stocks anyone would realistically screen for.
@@ -62,7 +62,7 @@ def _is_fresh(path: Path) -> bool:
 
 def _save_cache(data: list[dict]) -> None:
     # Written atomically (tempfile + os.replace), same convention as
-    # cache.py::save() -- a plain write_text() left a truncated/corrupt file
+    # core/cache.py::save() -- a plain write_text() left a truncated/corrupt file
     # behind on an interrupted write (process killed/OOM/container restart
     # mid-write, or two cron-triggered pipeline runs racing on the same
     # file), which every read site below then failed to parse.

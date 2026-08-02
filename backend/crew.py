@@ -10,7 +10,7 @@ import time
 from typing import Any, Tuple
 
 from config.crew_tasks import build_analysis_prompt
-from observability import get_logger, log_event
+from core.observability import get_logger, log_event
 
 LOGGER = get_logger("crew")
 
@@ -559,7 +559,7 @@ def _validate_analysis_payload(  # pylint: disable=too-many-return-statements
     if not isinstance(data.get("key_risks"), list) or len(data["key_risks"]) < 3:
         return False, "Field 'key_risks' must be a list with at least 3 items."
     # .get(), not signal_context["final_score"] — this function is called
-    # from more than one independent pipeline (main.py, watchlist_alerts.py,
+    # from more than one independent pipeline (main.py, pipelines/watchlist_alerts.py,
     # api.py), and a signal_context dict missing the key (a future caller
     # passing a differently-shaped dict, a partial signal-engine failure)
     # must degrade by skipping these three quant-cross-check guards, not

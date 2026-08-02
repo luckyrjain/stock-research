@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 import source_quality_report as sqr
-import state_store
+from core import state_store
 from source_quality import NAMESPACE
 from state_store_harness import isolated_state_store
 

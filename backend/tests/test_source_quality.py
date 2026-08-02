@@ -1,9 +1,9 @@
 import unittest
 from unittest.mock import patch
 
-import market_picks_pipeline as mpp
+from pipelines import market_picks_pipeline as mpp
 import source_quality as sq
-import state_store
+from core import state_store
 from state_store_harness import isolated_state_store
 
 
@@ -34,7 +34,7 @@ class RecordRunTest(unittest.TestCase):
         )
 
     def test_swallows_write_failure(self) -> None:
-        with patch("state_store._get_engine", side_effect=RuntimeError("db down")):
+        with patch("core.state_store._get_engine", side_effect=RuntimeError("db down")):
             try:
                 sq.record_run("xyz789", {"ET Markets": {"articles_fetched": 1, "picks_extracted": 0, "picks_validated": 0}})
             except Exception as exc:  # pragma: no cover - test fails via assertion below, not exception
@@ -98,7 +98,7 @@ class RunRecordsTelemetryTest(unittest.TestCase):
         pipeline._phase_analyze     = lambda cons, research, emit: {}
         pipeline._phase_score       = lambda cons, research, analyses, emit: [{"symbol": "TCS"}]
 
-        with patch("market_picks_pipeline.source_quality.record_run") as mock_record:
+        with patch("pipelines.market_picks_pipeline.source_quality.record_run") as mock_record:
             result = pipeline.run()
 
         self.assertEqual(result, [{"symbol": "TCS"}])

@@ -1,5 +1,5 @@
 """Technical (RSI14 + EMA20/50 posture) signal for the main NSE/BSE stock
-analysis flow — the same momentum-screener math sme_ema_pipeline.py already
+analysis flow — the same momentum-screener math pipelines/sme_ema_pipeline.py already
 computes for SME stocks, applied here to whatever symbol the six-task
 pipeline is analysing. Unlike the other signals in this package, this one
 needs a daily-close OHLCV series the six data-fetch tasks don't include, so

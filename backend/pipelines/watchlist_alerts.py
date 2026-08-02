@@ -2,7 +2,7 @@
 detects a recommendation change against the prior stored verdict, and emails
 a digest to each affected user.
 
-Mirrors sme_ema_pipeline.py's standalone-batch-job shape (PostgreSQL,
+Mirrors pipelines/sme_ema_pipeline.py's standalone-batch-job shape (PostgreSQL,
 `--force` CLI flag, a run()/main() split, a _MAX_ACCEPTABLE_ERROR_RATE-style
 health gate so a bad run fails a cron job loudly) applied to the existing
 stock-analysis pipeline (main._fetch_task + signals.engine + crew's analyst
@@ -16,15 +16,15 @@ import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import cache
+from core import cache
 import verdict_history
 from crew import ALL_DATA_TASKS, run_analysis_with_fallback
 from db.models import get_engine
 from email_sender import send_watchlist_alert_email
 from main import _fetch_task
-from error_tracking import init_error_tracking
-from observability import get_logger, log_event
-from schemas import normalize as schema_normalize
+from core.error_tracking import init_error_tracking
+from core.observability import get_logger, log_event
+from core.schemas import normalize as schema_normalize
 from signals.engine import run_signal_engine
 
 LOGGER = get_logger("watchlist_alerts")

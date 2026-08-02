@@ -1,11 +1,11 @@
 """Pure percentile/valuation-anchor math over a get_peer_comparison() result.
 
 Extracted out of api.py (where it originally lived only for the
-GET /api/peers/{symbol} endpoint) so market_picks_pipeline.py can reuse the
+GET /api/peers/{symbol} endpoint) so pipelines/market_picks_pipeline.py can reuse the
 exact same, already-reviewed math to fold a valuation signal into Market
 Picks confidence scoring — rather than duplicating it or having
-market_picks_pipeline.py import from api.py (which already imports FROM
-market_picks_pipeline.py at module level, so that direction would work
+pipelines/market_picks_pipeline.py import from api.py (which already imports FROM
+pipelines/market_picks_pipeline.py at module level, so that direction would work
 today only by accident of import timing; a shared leaf module avoids
 relying on that).
 """
@@ -16,7 +16,7 @@ def build_peer_result(symbol: str, raw: dict) -> dict:
     """Shape a get_peer_comparison() raw scrape into the response/cache
     value GET /api/peers/{symbol} returns and caches under cache key
     "peers" (24h TTL) — the single source of truth for that shape, so
-    api.py's endpoint and market_picks_pipeline.py's per-stock
+    api.py's endpoint and pipelines/market_picks_pipeline.py's per-stock
     valuation-percentile lookup (see _fetch_valuation_percentile) can
     transparently share one cache.load/save(symbol, "peers") entry per
     symbol, regardless of which caller populates it first. Assumes

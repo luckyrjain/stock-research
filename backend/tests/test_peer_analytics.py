@@ -40,7 +40,7 @@ class ComputeValuationAnchorTest(unittest.TestCase):
         # (a currently loss-making company) used to rank as arithmetically
         # "cheapest" against a positive historical P/E band -- percentile
         # near 0, rendered as bullish "cheap vs. its own history" and
-        # feeding a confidence-score nudge in market_picks_pipeline.py.
+        # feeding a confidence-score nudge in pipelines/market_picks_pipeline.py.
         # Same anti-pattern signals/valuation.py::valuation_signal() already
         # guards against for the identical reason: a negative P/E says
         # nothing about over/undervaluation.
@@ -57,7 +57,7 @@ class ComputeValuationAnchorTest(unittest.TestCase):
 class BuildPeerResultTest(unittest.TestCase):
     """build_peer_result() is the single source of truth for the shape
     cached under cache key "peers" — both api.py's GET /api/peers/{symbol}
-    and market_picks_pipeline.py's valuation-percentile fetch read/write
+    and pipelines/market_picks_pipeline.py's valuation-percentile fetch read/write
     this exact shape so they can transparently share one cache entry."""
 
     def test_shapes_a_raw_scrape_into_the_cached_response(self) -> None:

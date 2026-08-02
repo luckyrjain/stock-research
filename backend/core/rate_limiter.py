@@ -29,7 +29,7 @@ import threading
 import time
 import uuid
 
-from observability import get_logger, log_event
+from core.observability import get_logger, log_event
 
 LOGGER = get_logger("rate_limiter")
 

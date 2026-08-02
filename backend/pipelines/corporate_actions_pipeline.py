@@ -5,14 +5,14 @@ Ingests NSE corporate actions and maintains prices_daily.adj_close
 (split/bonus-adjusted; dividends recorded as data only).
 
 Usage:
-    python corporate_actions_pipeline.py                       # trailing 30-day window
-    python corporate_actions_pipeline.py --backfill 2024-07-01 # chunked history
-    python corporate_actions_pipeline.py --recompute TCS       # one symbol repair
-    python corporate_actions_pipeline.py --recompute-all       # full repair
+    python pipelines/corporate_actions_pipeline.py                       # trailing 30-day window
+    python pipelines/corporate_actions_pipeline.py --backfill 2024-07-01 # chunked history
+    python pipelines/corporate_actions_pipeline.py --recompute TCS       # one symbol repair
+    python pipelines/corporate_actions_pipeline.py --recompute-all       # full repair
 
 Also called from eod_prices_pipeline.run() as an isolated step (own
 try/except, never affects the pipeline's exit code) — after bhavcopy
-ingestion but before the actual final step, portfolio_valuation.py's
+ingestion but before the actual final step, portfolio/portfolio_valuation.py's
 refresh_valuations(), so freshly-adjusted closes are what gets valued.
 
 Parser changes require re-running --backfill and --recompute-all: recompute
@@ -26,8 +26,8 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 
 from db.models import corporate_actions, get_engine
-from error_tracking import init_error_tracking
-from observability import get_logger, log_event
+from core.error_tracking import init_error_tracking
+from core.observability import get_logger, log_event
 from tools.corporate_actions import fetch_corporate_actions, parse_corporate_actions
 from tools.eod_sources import make_nse_session
 
@@ -193,9 +193,9 @@ def backfill(engine, start: date) -> None:
 
 def setup_db(engine) -> None:
     """Create this pipeline's own table (corporate_actions) and exit —
-    scoped, same convention as screener_pipeline.py's setup_db(). The
+    scoped, same convention as pipelines/screener_pipeline.py's setup_db(). The
     prices_daily.adj_close column it writes into is owned by
-    eod_prices_pipeline.py's own table definition."""
+    pipelines/eod_prices_pipeline.py's own table definition."""
     corporate_actions.create(engine, checkfirst=True)
     log_event(LOGGER, "ca_db_table_created")
 

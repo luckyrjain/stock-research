@@ -4,9 +4,9 @@ CAS PDF Import
 Imports a CAMS/KFintech *detailed* CAS PDF into the portfolio tables:
 transactions (meta.source='cas'), holdings (units = closing balance), and
 missing mf assets. Parsed JSON (scrubbed of PII) is archived under the
-`cas_archive` namespace in state_store.py for replay:
+`cas_archive` namespace in core/state_store.py for replay:
 
-    python cas_import.py --replay <key> --account-id N
+    python portfolio/cas_import.py --replay <key> --account-id N
 """
 
 import copy
@@ -15,8 +15,8 @@ import json
 
 from dotenv import load_dotenv
 
-import state_store
-from observability import get_logger, log_event
+from core import state_store
+from core.observability import get_logger, log_event
 
 load_dotenv()
 LOGGER = get_logger("cas_import")

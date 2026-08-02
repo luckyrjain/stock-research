@@ -15,14 +15,14 @@ scraping/OHLCV logic:
 
 Stores the result in a stored-metrics table (screener_stocks) so
 GET /api/screener can filter/sort without a live fetch per request — the
-same "fetch once, filter/sort many" shape sme_ema_pipeline.py established for
+same "fetch once, filter/sort many" shape pipelines/sme_ema_pipeline.py established for
 SME stocks.
 
 Usage:
-    python screener_pipeline.py --setup-db   # create tables (idempotent)
-    python screener_pipeline.py              # run pipeline (24 h cache on constituent list)
-    python screener_pipeline.py --force      # bypass constituent-list cache
-    python screener_pipeline.py --reset-db   # drop and recreate DB tables, then exit
+    python pipelines/screener_pipeline.py --setup-db   # create tables (idempotent)
+    python pipelines/screener_pipeline.py              # run pipeline (24 h cache on constituent list)
+    python pipelines/screener_pipeline.py --force      # bypass constituent-list cache
+    python pipelines/screener_pipeline.py --reset-db   # drop and recreate DB tables, then exit
 """
 
 import argparse
@@ -33,8 +33,8 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 
 from db.models import get_engine, metadata, screener_stocks
-from error_tracking import init_error_tracking
-from observability import get_logger, log_event
+from core.error_tracking import init_error_tracking
+from core.observability import get_logger, log_event
 from tools.nifty500_tools import get_nifty500_constituents
 
 load_dotenv()
@@ -216,7 +216,7 @@ def main() -> None:
         # shared MetaData() in db/models.py holds every table in the app
         # (users, sessions, watchlist_items, ...), and dropping all of them
         # just to reset screener_stocks would take down unrelated,
-        # NOT-regenerable data. sme_ema_pipeline.py --reset-db predates this
+        # NOT-regenerable data. pipelines/sme_ema_pipeline.py --reset-db predates this
         # and still has that broader-than-intended blast radius — see
         # CLAUDE.md's disclosed limitation on it under "SME golden cross flow".
         engine = get_engine()

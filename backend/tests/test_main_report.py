@@ -7,14 +7,14 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import cache
+from core import cache
 import main
 from main import _build_report, _fetch_task, _save_report, _strip_meta
 
 
 class SaveReportTest(unittest.TestCase):
     """Regression tests for a review finding: main.py's CLI report used to
-    always write to disk with zero setup; the state_store.py migration made
+    always write to disk with zero setup; the core/state_store.py migration made
     it silently require DATABASE_URL. _save_report() must fall back to the
     disk write when state_store.save() reports it didn't persist."""
 

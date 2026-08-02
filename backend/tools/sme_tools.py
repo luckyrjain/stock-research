@@ -31,7 +31,7 @@ from tools._nse_session import get_nse_session
 
 logger = logging.getLogger(__name__)
 
-# Deliberately narrower than market_picks_pipeline.py's _norm_company (which
+# Deliberately narrower than pipelines/market_picks_pipeline.py's _norm_company (which
 # this was originally copied from). That version is used to widen a ticker
 # *search* — over-stripping there is safe because a live-price check catches
 # a wrong match afterward. Here the match result conclusively merges two
@@ -95,7 +95,7 @@ def _is_fresh(path: Path) -> bool:
 
 def _save_cache(path: Path, data: list[dict]) -> None:
     # Written atomically (tempfile + os.replace), same convention as
-    # cache.py::save() -- a plain write_text() left a truncated/corrupt file
+    # core/cache.py::save() -- a plain write_text() left a truncated/corrupt file
     # behind on an interrupted write (process killed/OOM/container restart
     # mid-write, or two cron-triggered pipeline runs racing on the same
     # file), which every read site below then failed to parse.

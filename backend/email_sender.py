@@ -8,7 +8,7 @@ import os
 import smtplib
 from email.message import EmailMessage
 
-from observability import get_logger, log_event
+from core.observability import get_logger, log_event
 
 LOGGER = get_logger("email_sender")
 
@@ -134,7 +134,7 @@ def send_magic_link_email(to_email: str, login_url: str) -> bool:
 
 
 def send_watchlist_alert_email(to_email: str, alerts: list[dict]) -> bool:
-    """Best-effort digest email for watchlist_alerts.py: one email per user
+    """Best-effort digest email for pipelines/watchlist_alerts.py: one email per user
     per run, listing every alert for that run — a recommendation change
     ({"kind": "recommendation_change", "symbol", "old_recommendation",
     "new_recommendation", "confidence"}, see

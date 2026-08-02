@@ -6,13 +6,13 @@ already share main._build_report().
 
 Best-effort throughout: a missing DATABASE_URL or a DB hiccup here must never
 break the analysis pipeline itself — failures are logged and swallowed, the
-same convention state_store.py uses for its own telemetry/audit writes.
+same convention core/state_store.py uses for its own telemetry/audit writes.
 """
 import os
 import threading
 from datetime import datetime, timezone
 
-from observability import get_logger, log_event
+from core.observability import get_logger, log_event
 
 LOGGER = get_logger("verdict_history")
 
@@ -37,7 +37,7 @@ def save_snapshot(symbol: str, analysis: dict, signal_context: dict | None, stoc
     Disclosed limitation: this is a plain `ON CONFLICT (symbol, verdict_date)
     DO UPDATE` — last write wins, with no session/request correlation. Two
     concurrent analyses of the same symbol on the same day (an ordinary
-    visitor and watchlist_alerts.py --force racing each other, or two
+    visitor and pipelines/watchlist_alerts.py --force racing each other, or two
     browser tabs) can legitimately produce two different LLM outputs;
     whichever commits last silently overwrites the other. VerdictTimeline
     then shows a "history" that may not match what an earlier visitor saw
@@ -49,11 +49,11 @@ def save_snapshot(symbol: str, analysis: dict, signal_context: dict | None, stoc
     instinct as this codebase's other documented residual risks.
 
     This same race also has a consequence beyond UI consistency: detect_
-    recent_changes() (used by both watchlist_alerts.py's own daily digest
+    recent_changes() (used by both pipelines/watchlist_alerts.py's own daily digest
     and GET /api/watchlist/calendar) diffs whichever row happens to have
     won this upsert against the row before it. If an ordinary visitor's
-    same-day re-analysis loses the race against watchlist_alerts.py's own
-    save_snapshot() call for that symbol, the row watchlist_alerts.py reads
+    same-day re-analysis loses the race against pipelines/watchlist_alerts.py's own
+    save_snapshot() call for that symbol, the row pipelines/watchlist_alerts.py reads
     back moments later to detect a change may already be the visitor's
     (different) result rather than its own just-saved one — potentially
     masking or fabricating an apparent recommendation/price change that
@@ -63,7 +63,7 @@ def save_snapshot(symbol: str, analysis: dict, signal_context: dict | None, stoc
 
     `signal_score` is `COALESCE`d against the existing stored value rather
     than blindly overwritten, unlike the other three columns — main.py's
-    cache-hit early return and watchlist_alerts.py's own "nothing to
+    cache-hit early return and pipelines/watchlist_alerts.py's own "nothing to
     re-analyze today" branch both intentionally call this with
     `signal_context=None` (no signal engine run for a cache hit), so a
     same-day no-op re-save must not silently NULL out a real signal_score a
@@ -77,7 +77,7 @@ def save_snapshot(symbol: str, analysis: dict, signal_context: dict | None, stoc
         return
 
     # Computed here (not SQL's CURRENT_DATE) so "today" is always the app's own
-    # UTC clock — the same explicit-UTC convention cache.py's freshness checks
+    # UTC clock — the same explicit-UTC convention core/cache.py's freshness checks
     # use — rather than whatever timezone the connected Postgres server happens
     # to be configured with.
     verdict_date = datetime.now(timezone.utc).date().isoformat()
@@ -154,7 +154,7 @@ def load_history(symbol: str, limit: int = 60) -> list[dict]:
 def detect_recent_changes(symbol: str, price_move_threshold_pct: float = 10.0) -> dict:
     """One shared read of the two most recent stored snapshots for `symbol`,
     returning both a recommendation-change flag and a price-move flag — the
-    same two conditions watchlist_alerts.py's daily digest already emails.
+    same two conditions pipelines/watchlist_alerts.py's daily digest already emails.
     Single source of truth for "what counts as a notable change" so the
     once-daily email and any same-day in-app surfacing (e.g. a watchlist
     badge) can never disagree on the threshold.

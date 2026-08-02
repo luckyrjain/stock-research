@@ -29,9 +29,9 @@ from dotenv import load_dotenv
 
 import source_health
 import source_quality
-import state_store
-from error_tracking import init_error_tracking
-from observability import get_logger, log_event
+from core import state_store
+from core.error_tracking import init_error_tracking
+from core.observability import get_logger, log_event
 
 load_dotenv()
 
@@ -187,7 +187,7 @@ def _extraction_cache_get(key: str) -> list[dict] | None:
 
 def _extraction_cache_set(key: str, picks: list[dict]) -> None:
     # Written atomically (tempfile + os.replace), same convention as
-    # cache.py::save() — _phase_extract runs one of these per source with up
+    # core/cache.py::save() — _phase_extract runs one of these per source with up
     # to 6 ThreadPoolExecutor workers, and while distinct sources normally
     # write distinct keys, overlapping pipeline runs (e.g. a manual
     # ?force=true firing while a scheduled run is still in flight) can have
@@ -308,7 +308,7 @@ def _reason_strength(reason: str) -> float:
 #
 # Note main() is only useful when it runs on the same host/disk as the API
 # server (e.g. a self-hosted crontab, same pattern CLAUDE.md documents for
-# sme_ema_pipeline.py) — market-picks-cron.yml runs on GitHub's own ephemeral
+# pipelines/sme_ema_pipeline.py) — market-picks-cron.yml runs on GitHub's own ephemeral
 # runners, which don't share a filesystem with wherever the backend is
 # actually deployed, so it can't call this script directly and expect the
 # result to reach the live site. It instead asks the live backend to run its
@@ -1423,7 +1423,7 @@ Return ONLY this JSON (no markdown, no extra text):
             try:
                 import json as _json
 
-                import cache
+                from core import cache
                 from peer_analytics import build_peer_result
                 from tools.screener_tools import get_peer_comparison
 
@@ -1445,7 +1445,7 @@ Return ONLY this JSON (no markdown, no extra text):
         def _research_one(symbol: str) -> tuple[str, dict]:
             try:
                 from main import _fetch_task
-                from schemas import normalize as schema_normalize
+                from core.schemas import normalize as schema_normalize
                 from signals.engine import run_signal_engine
                 from signals.interpreter import interpret
 
@@ -1799,13 +1799,13 @@ def main() -> None:
     bypassing api.py's SSE endpoint entirely. Only useful when run on the
     same host/disk as the API server — e.g. a self-hosted crontab entry
     (the same local-alternative pattern CLAUDE.md documents for
-    sme_ema_pipeline.py). GitHub's own market-picks-cron.yml workflow does
+    pipelines/sme_ema_pipeline.py). GitHub's own market-picks-cron.yml workflow does
     NOT call this script — its runners don't share a filesystem with wherever
     the backend is actually deployed, so it triggers a refresh over HTTP
     against the live backend instead; see that workflow file for why.
 
     Exits non-zero on an empty or degraded run — mirroring
-    sme_ema_pipeline.py's run() contract — so a bad scrape fails loudly
+    pipelines/sme_ema_pipeline.py's run() contract — so a bad scrape fails loudly
     instead of silently caching a result nobody should trust for the next
     7 days.
     """

@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import source_health
-import state_store
+from core import state_store
 from state_store_harness import isolated_state_store, shared_state_store
 
 
@@ -193,7 +193,7 @@ class RecordAndCheckTest(unittest.TestCase):
         mock_log.assert_not_called()
 
     def test_never_raises_even_if_the_state_store_is_broken(self) -> None:
-        with patch("state_store._get_engine", side_effect=RuntimeError("db down")):
+        with patch("core.state_store._get_engine", side_effect=RuntimeError("db down")):
             try:
                 source_health.record_and_check("Any Source", True)
             except Exception as exc:  # pragma: no cover - the assertion IS that this doesn't happen
@@ -254,7 +254,7 @@ class ConcurrencySafetyTest(unittest.TestCase):
 class MultiProcessConcurrencySafetyTest(unittest.TestCase):
     """The gap ConcurrencySafetyTest's own tests don't cover: they only spawn
     threads within one process. The race this module's locking actually
-    targets is two separate *processes* (several market_picks_pipeline.py
+    targets is two separate *processes* (several pipelines/market_picks_pipeline.py
     workers, or several backend API workers) contending for the same source's
     record, which a plain threading.Lock cannot prevent at all. This spawns
     real OS processes."""

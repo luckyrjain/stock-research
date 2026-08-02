@@ -101,11 +101,11 @@ class BrokenStateStoreTest(unittest.TestCase):
         self.addCleanup(isolated_state_store().close)
 
     def test_record_call_cost_never_raises_when_the_store_is_broken(self) -> None:
-        with patch("state_store._get_engine", side_effect=RuntimeError("db down")):
+        with patch("core.state_store._get_engine", side_effect=RuntimeError("db down")):
             llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)  # must not raise
 
     def test_get_daily_totals_degrades_to_zeros_when_the_store_is_broken(self) -> None:
-        with patch("state_store._get_engine", side_effect=RuntimeError("db down")):
+        with patch("core.state_store._get_engine", side_effect=RuntimeError("db down")):
             totals = llm_cost.get_daily_totals()
         self.assertEqual(totals, {"call_count": 0, "total_cost_usd": 0.0, "calls_with_unknown_cost": 0})
 

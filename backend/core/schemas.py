@@ -131,7 +131,7 @@ CONTRACTS: dict[str, dict] = {
     # silently changing from a dict to a list (e.g. a scraper's target site
     # restructuring a table) breaks every downstream `.get()`/iteration call
     # on it in a way "required" field presence alone doesn't catch, since
-    # the field is still there — schema_drift.py checks this on raw tool
+    # the field is still there — core/schema_drift.py checks this on raw tool
     # output, before normalize() runs. Only checked when the field is
     # present; a field this codebase's own "never invent" convention
     # legitimately omits per-symbol (e.g. a thin quarterly_trend window) is

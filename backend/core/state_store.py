@@ -28,7 +28,7 @@ import os
 import threading
 from datetime import datetime, timezone
 
-from observability import get_logger, log_event
+from core.observability import get_logger, log_event
 
 LOGGER = get_logger("state_store")
 
@@ -39,7 +39,7 @@ _ENGINE_LOCK = threading.Lock()
 def _get_engine():
     """Lazily-built, process-wide engine — same double-checked pattern as
     `verdict_history.py::_get_engine()`, and the same patch target tests use
-    (`patch("state_store._get_engine", ...)`)."""
+    (`patch("core.state_store._get_engine", ...)`)."""
     global _ENGINE
     if _ENGINE is None:
         with _ENGINE_LOCK:

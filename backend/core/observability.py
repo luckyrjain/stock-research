@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-import error_tracking
+from core import error_tracking
 
 
 def _configure_root_logger() -> None:
@@ -43,7 +43,7 @@ def log_event(
     getattr(logger, level.lower(), logger.info)(json.dumps(payload, ensure_ascii=False, default=str))
 
     if level.lower() == "error":
-        # Forward to the optional Sentry-style hook (see error_tracking.py) —
+        # Forward to the optional Sentry-style hook (see core/error_tracking.py) —
         # a no-op unless SENTRY_DSN is configured. Wrapped defensively so a
         # broken/unreachable error-tracking backend can never break the
         # primary structured-logging path this function exists for.

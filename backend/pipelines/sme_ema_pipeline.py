@@ -11,11 +11,11 @@ volume/turnover + market cap per stock, from the same OHLCV/fast_info fetch
 — to flag illiquid names and show market cap inline.
 
 Usage:
-    python sme_ema_pipeline.py --setup-db   # create tables (idempotent)
-    python sme_ema_pipeline.py              # run pipeline (24 h cache on stock lists)
-    python sme_ema_pipeline.py --force      # bypass stock-list cache
-    python sme_ema_pipeline.py --lookback 5 # days back to check crossovers (default 5)
-    python sme_ema_pipeline.py --reset-db   # drop and recreate DB tables, then exit
+    python pipelines/sme_ema_pipeline.py --setup-db   # create tables (idempotent)
+    python pipelines/sme_ema_pipeline.py              # run pipeline (24 h cache on stock lists)
+    python pipelines/sme_ema_pipeline.py --force      # bypass stock-list cache
+    python pipelines/sme_ema_pipeline.py --lookback 5 # days back to check crossovers (default 5)
+    python pipelines/sme_ema_pipeline.py --reset-db   # drop and recreate DB tables, then exit
 """
 
 import argparse
@@ -28,8 +28,8 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 
 from db.models import ema_signals, get_engine, metadata, sme_stocks
-from error_tracking import init_error_tracking
-from observability import get_logger, log_event
+from core.error_tracking import init_error_tracking
+from core.observability import get_logger, log_event
 from tools.sme_tools import get_all_sme_stocks
 
 load_dotenv()
@@ -541,10 +541,10 @@ def main() -> None:
         # the app, including real personal financial data (the Portfolio
         # Aggregator's profiles/accounts/assets/holdings/valuations/
         # transactions) added after this drop_all()-based reset was first
-        # written. This previously matched screener_pipeline.py's own
+        # written. This previously matched pipelines/screener_pipeline.py's own
         # documented "disclosed limitation" note about this exact command
         # having a broader-than-intended blast radius; scoped here the same
-        # way screener_pipeline.py --reset-db already is.
+        # way pipelines/screener_pipeline.py --reset-db already is.
         engine = get_engine()
         ema_signals.drop(engine, checkfirst=True)
         sme_stocks.drop(engine, checkfirst=True)

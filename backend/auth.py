@@ -10,7 +10,7 @@ proxy routes hold the raw session token in an httpOnly cookie and forward it
 to this API as `Authorization: Bearer <token>`; this module never sees a
 cookie, only a token string.
 
-Unlike verdict_history.py / state_store.py (best-effort, swallow-and-log),
+Unlike verdict_history.py / core/state_store.py (best-effort, swallow-and-log),
 create_magic_link/verify_magic_link/create_session raise on a DB failure —
 a broken auth write must surface as an error to the caller (api.py), not
 silently pretend to have sent a link or created a session. Read-path lookups
@@ -23,7 +23,7 @@ import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 
-from observability import get_logger, log_event
+from core.observability import get_logger, log_event
 
 LOGGER = get_logger("auth")
 

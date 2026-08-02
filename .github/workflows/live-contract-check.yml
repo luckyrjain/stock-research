@@ -7,7 +7,7 @@ on:
     # codebase's scrapers expect, independent of whether any user traffic
     # happened to exercise that code path recently. A low frequency is
     # deliberate: this isn't data collection, just an early-warning signal
-    # for the ~10 standalone scrapers outside schema_drift.py's own
+    # for the ~10 standalone scrapers outside core/schema_drift.py's own
     # coverage (see tests_live/test_scraper_contracts.py's docstring).
     - cron: '0 6 * * 1'
   workflow_dispatch:

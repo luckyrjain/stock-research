@@ -75,7 +75,7 @@ class SaveSnapshotTest(unittest.TestCase):
     def test_signal_score_upsert_preserves_existing_value_on_a_null_write(self) -> None:
         # Regression test for an adversarial-review finding, confirmed against
         # a real Postgres instance: main.py's cache-hit early return and
-        # watchlist_alerts.py's "nothing to re-analyze today" branch both
+        # pipelines/watchlist_alerts.py's "nothing to re-analyze today" branch both
         # intentionally call save_snapshot with signal_context=None (no
         # signal engine run for a cache hit). The upsert previously
         # unconditionally overwrote signal_score with EXCLUDED.signal_score,
@@ -143,7 +143,7 @@ class LoadHistoryTest(unittest.TestCase):
 
 
 class DetectRecentChangesTest(unittest.TestCase):
-    """Shared by watchlist_alerts.py's daily digest and
+    """Shared by pipelines/watchlist_alerts.py's daily digest and
     GET /api/watchlist/calendar's same-day in-app surfacing — one place
     deciding what counts as a notable change."""
 

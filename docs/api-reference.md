@@ -129,7 +129,7 @@ address) and `api_v1:<user_id>` (per account).
 
 ### Caching
 
-Endpoint-level caching uses `cache.py` (`backend/output/<SYMBOL>/<task>.json`, mirrored to Redis
+Endpoint-level caching uses `core/cache.py` (`backend/output/<SYMBOL>/<task>.json`, mirrored to Redis
 when `REDIS_URL` is set). Freshness is always re-derived from `_meta.fetched_at` against the
 current `TTL_HOURS` map, so a TTL change takes effect immediately on already-written entries.
 
@@ -256,7 +256,7 @@ BSE-forced slug, ticker/company name) — see backend/CLAUDE.md's "Symbol valida
 | **Path param** | `symbol` — **not** `_TICKER_RE`-validated. Uppercased and trimmed; only `1 ≤ len ≤ 40` is enforced, because ISINs, numeric BSE scrip codes, and hyphenated Screener slugs are all legitimate inputs here |
 | **Query** | `exchange` — string, optional, default `""`. Case-insensitive; only the value `BSE` is meaningful (forces Screener-slug resolution). Any other value is ignored |
 | **Rate limit** | `validate` — 30 / 60 s per IP |
-| **Caching** | ISIN→symbol map from NSE `EQUITY_L.csv`, 1 h in-process (`_ISIN_CACHE`), not `cache.py`. No per-symbol caching |
+| **Caching** | ISIN→symbol map from NSE `EQUITY_L.csv`, 1 h in-process (`_ISIN_CACHE`), not `core/cache.py`. No per-symbol caching |
 | **Status** | `200` always on a resolved *or* unresolved lookup · `422` empty or > 40 chars · `429` |
 
 A miss is **not** a 404 — it's `200` with `{"found": false, "valid": false, "symbol", "company":
@@ -809,7 +809,7 @@ flags `null`, and the filings half needs no DB at all. An all-invalid `symbols` 
 
 Two independent per-symbol sources, each optional: `classify_filings()` over cached filings, and
 `detect_recent_changes()` (same-day recommendation flip or ≥ 10 % price move — the same two
-conditions `watchlist_alerts.py`'s daily digest emails). A symbol contributing nothing from
+conditions `pipelines/watchlist_alerts.py`'s daily digest emails). A symbol contributing nothing from
 either source is omitted entirely. Sorted: anything with a notable change first, then by
 `next_results_date` ascending (entries without one sort last within their group).
 

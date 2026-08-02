@@ -5,9 +5,9 @@ Ingests NSE full bhavcopy (equities: OHLC, volume, delivery) and AMFI NAVs
 (held mutual fund schemes only) into PostgreSQL.
 
 Usage:
-    python eod_prices_pipeline.py                       # self-heal: last 5 weekdays
-    python eod_prices_pipeline.py --date 2026-07-03     # one specific day
-    python eod_prices_pipeline.py --backfill 2024-07-01 # every weekday from date to today
+    python pipelines/eod_prices_pipeline.py                       # self-heal: last 5 weekdays
+    python pipelines/eod_prices_pipeline.py --date 2026-07-03     # one specific day
+    python pipelines/eod_prices_pipeline.py --backfill 2024-07-01 # every weekday from date to today
 
 Table creation is this module's own setup_db() (--setup-db / --reset-db).
 
@@ -26,10 +26,10 @@ from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import text
 
-from corporate_actions_pipeline import run_ca_step
+from pipelines.corporate_actions_pipeline import run_ca_step
 from db.models import get_engine, metadata, mf_nav_daily, prices_daily, securities
-from error_tracking import init_error_tracking
-from observability import get_logger, log_event
+from core.error_tracking import init_error_tracking
+from core.observability import get_logger, log_event
 from tools.eod_sources import (
     download_bhavcopy, download_equity_master, fetch_nav_all,
     fetch_scheme_history, make_nse_session, parse_bhavcopy,
@@ -249,8 +249,8 @@ def ingest_navs(engine) -> None:
 def setup_db(engine) -> None:
     """Create this pipeline's own tables (securities, prices_daily,
     mf_nav_daily) and exit — scoped, not metadata.create_all(engine), same
-    convention as screener_pipeline.py's setup_db(). corporate_actions is
-    owned by corporate_actions_pipeline.py's own --setup-db instead."""
+    convention as pipelines/screener_pipeline.py's setup_db(). corporate_actions is
+    owned by pipelines/corporate_actions_pipeline.py's own --setup-db instead."""
     metadata.create_all(engine, tables=_EOD_TABLES)
     from db.models import stamp_alembic_head
     stamp_alembic_head()
@@ -286,7 +286,7 @@ def run(dates: list[date]) -> int:
         log_event(LOGGER, "eod_ca_step_failed", level="warning", error=str(exc))
 
     try:
-        from portfolio_valuation import refresh_valuations
+        from portfolio.portfolio_valuation import refresh_valuations
         refresh_valuations(engine)
     except Exception as exc:  # valuation step must never affect the equity exit code
         log_event(LOGGER, "eod_valuation_step_failed", level="warning", error=str(exc))
@@ -314,8 +314,8 @@ def main() -> None:
 
     if args.reset_db:
         # Scoped to this pipeline's own tables, not metadata.drop_all() —
-        # same reasoning as screener_pipeline.py's --reset-db (see CLAUDE.md's
-        # disclosed limitation on sme_ema_pipeline.py --reset-db for why a
+        # same reasoning as pipelines/screener_pipeline.py's --reset-db (see CLAUDE.md's
+        # disclosed limitation on pipelines/sme_ema_pipeline.py --reset-db for why a
         # blanket drop_all() is unsafe on a shared MetaData()).
         engine = get_engine()
         for table in reversed(_EOD_TABLES):

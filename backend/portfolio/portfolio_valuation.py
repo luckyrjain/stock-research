@@ -8,11 +8,11 @@ upsert), and computes XIRR from `transactions` where they exist.
 Runs nightly as the final isolated step of eod_prices_pipeline.run(), on
 demand via POST /api/portfolio/refresh-valuations, or standalone:
 
-    python portfolio_valuation.py
+    python portfolio/portfolio_valuation.py
 
 XIRR returns null for an asset with no rows in `transactions` — expected
-for manually-entered assets, or before a CAS PDF (cas_import.py) or broker
-CSV (csv_import.py) import has run for it. Both of those write real
+for manually-entered assets, or before a CAS PDF (portfolio/cas_import.py) or broker
+CSV (portfolio/csv_import.py) import has run for it. Both of those write real
 transaction rows; this function reads whatever they've written so far.
 """
 
@@ -21,7 +21,7 @@ from datetime import date
 from dotenv import load_dotenv
 from sqlalchemy import select, text
 
-from observability import get_logger, log_event
+from core.observability import get_logger, log_event
 
 load_dotenv()
 LOGGER = get_logger("portfolio_valuation")

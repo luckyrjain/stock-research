@@ -10,9 +10,9 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 import api
-import cache
-import rate_limiter
-import state_store
+from core import cache
+from core import rate_limiter
+from core import state_store
 from state_store_harness import isolated_state_store
 import routes.positions as routes_positions
 
@@ -539,7 +539,7 @@ class MarketPicksStatusEndpointTest(unittest.TestCase):
 
     def test_returns_cache_metadata_and_next_scheduled_run(self) -> None:
         fake_status = {"last_run_at": "2026-07-20T00:00:00+00:00", "is_fresh": True}
-        with patch("market_picks_pipeline.picks_cache_status", return_value=fake_status):
+        with patch("pipelines.market_picks_pipeline.picks_cache_status", return_value=fake_status):
             resp = client.get("/api/market-picks/status")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -549,7 +549,7 @@ class MarketPicksStatusEndpointTest(unittest.TestCase):
 
     def test_no_cache_returns_null_last_run(self) -> None:
         fake_status = {"last_run_at": None, "is_fresh": False}
-        with patch("market_picks_pipeline.picks_cache_status", return_value=fake_status):
+        with patch("pipelines.market_picks_pipeline.picks_cache_status", return_value=fake_status):
             resp = client.get("/api/market-picks/status")
         body = resp.json()
         self.assertIsNone(body["last_run_at"])
@@ -630,7 +630,7 @@ class FetchNiftyClosesCacheSharingTest(unittest.TestCase):
         # their own -- last write wins, and if the narrower caller's write
         # landed after the wider caller's, the cached coverage would shrink,
         # violating this module's own "coverage only ever grows" invariant.
-        import cache as cache_module
+        from core import cache as cache_module
 
         # Caller A: a wide range, populates the cache from empty.
         wide = {f"2026-01-{d:02d}": 20000.0 + d for d in range(1, 29)}
@@ -657,7 +657,7 @@ class FetchNiftyClosesCacheSharingTest(unittest.TestCase):
             return real_load(*args, **kwargs)  # the fix's re-read-before-write
 
         with patch("yfinance.Ticker", return_value=self._fake_ticker(narrow)), \
-             patch("cache.load", side_effect=_stale_first_read):
+             patch("core.cache.load", side_effect=_stale_first_read):
             api._fetch_nifty_closes("2026-01-10", "2026-01-10")
 
         final = cache_module.load("NSEI", "index_history")
@@ -672,7 +672,7 @@ class FetchNiftyClosesCacheSharingTest(unittest.TestCase):
         # old {"range": "...", "closes": {...}} shape) must not KeyError on
         # its first read post-deploy — it should just be treated as
         # non-covering and trigger a normal fresh fetch.
-        import cache as cache_module
+        from core import cache as cache_module
 
         cache_module.save("NSEI", "index_history", {"range": "2025-01-01:2025-01-10", "closes": {"2025-01-01": 100.0}})
         fresh = {f"2026-01-{d:02d}": 20000.0 + d for d in range(1, 11)}
@@ -688,7 +688,7 @@ class MarketPicksHistoryEndpointTest(unittest.TestCase):
         # files — point it at a throwaway in-memory DB.
         self.addCleanup(isolated_state_store().close)
 
-        # _fetch_nifty_closes() reads/writes the real cache.py module (using
+        # _fetch_nifty_closes() reads/writes the real core/cache.py module (using
         # "NSEI" as a pseudo-symbol) — isolate it the same way
         # PriceHistoryEndpointTest isolates cache.CACHE_DIR, so a test that
         # mocks yfinance to return real data can't leak into the repo's own
@@ -3439,7 +3439,7 @@ class PortfolioConcentrationEndpointTest(unittest.TestCase):
 
         with patch("api._get_db_engine", return_value=fake_engine), \
              patch("api._fetch_live_price_sync", return_value={"price": 3500.0, "change_pct": 1.0}), \
-             patch("cache.load", return_value={"sector": "IT"}):
+             patch("core.cache.load", return_value={"sector": "IT"}):
             resp = client.get("/api/portfolio/concentration?client_id=client-abc")
 
         self.assertEqual(resp.status_code, 200)
@@ -3460,7 +3460,7 @@ class PortfolioConcentrationEndpointTest(unittest.TestCase):
 
         with patch("api._get_db_engine", return_value=fake_engine), \
              patch("api._fetch_live_price_sync", return_value={"price": 3500.0, "change_pct": 1.0}), \
-             patch("cache.load", return_value=None):
+             patch("core.cache.load", return_value=None):
             resp = client.get("/api/portfolio/concentration?client_id=client-abc")
 
         self.assertEqual(resp.status_code, 200)
@@ -4079,7 +4079,7 @@ class ConsolidatedV1EndpointTest(unittest.TestCase):
 
     def test_valid_key_returns_consolidated_payload(self) -> None:
         with patch("auth.get_user_for_api_key", return_value={"user_id": 7}), \
-             patch("cache.load", return_value=None), \
+             patch("core.cache.load", return_value=None), \
              patch.object(api, "_load_picks_cache", return_value=None):
             resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "apk_x"})
         self.assertEqual(resp.status_code, 200)
@@ -4101,7 +4101,7 @@ class ConsolidatedV1EndpointTest(unittest.TestCase):
         # above) but must not exhaust pro's higher one.
         rate_limiter._memory_calls["api_v1:7"] = [api.time.monotonic()] * 100
         with patch("auth.get_user_for_api_key", return_value={"user_id": 7, "tier": "pro"}), \
-             patch("cache.load", return_value=None), \
+             patch("core.cache.load", return_value=None), \
              patch.object(api, "_load_picks_cache", return_value=None):
             resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "apk_x"})
         self.assertEqual(resp.status_code, 200)

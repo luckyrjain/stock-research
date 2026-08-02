@@ -6,7 +6,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine, insert
 from sqlalchemy.pool import StaticPool
 
-from csv_import import (
+from portfolio.csv_import import (
     _normalize_rows,
     _parse_date,
     _parse_num,
@@ -160,12 +160,12 @@ class ImportRowsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.engine = _sqlite_engine()
         self.account_id = _mk_account(self.engine)
-        self._resolve_patch = patch("csv_import.resolve_symbol", return_value={
+        self._resolve_patch = patch("portfolio.csv_import.resolve_symbol", return_value={
             "symbol": None, "exchange": None, "confidence": "unresolved", "candidate_name": None,
         })
         self.mock_resolve = self._resolve_patch.start()
         self.addCleanup(self._resolve_patch.stop)
-        self._master_patch = patch("csv_import.get_full_securities_master", return_value=[])
+        self._master_patch = patch("portfolio.csv_import.get_full_securities_master", return_value=[])
         self._master_patch.start()
         self.addCleanup(self._master_patch.stop)
 

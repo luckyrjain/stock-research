@@ -1,7 +1,7 @@
 """A simple, disclosed-assumptions two-stage DCF, computed deterministically
 from tools/screener_tools.py::get_financial_statements()'s cash_flow table —
 no LLM involved, same "deterministic, not model-generated" convention as
-market_picks_pipeline.py's entry/target/stop-loss levels.
+pipelines/market_picks_pipeline.py's entry/target/stop-loss levels.
 
 This is a genuinely different lens from the two valuation views this app
 already has (api.py's peer-relative percentile, and the absolute P/E-history

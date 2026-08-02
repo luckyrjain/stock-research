@@ -16,7 +16,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
 import api
-import rate_limiter
+from core import rate_limiter
 from db.models import (
     accounts, assets, holdings, metadata, mf_nav_daily, prices_daily, profiles,
     transactions, valuations,
@@ -305,7 +305,7 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
     def test_import_cas_endpoint_422_on_parse_error(self) -> None:
         pid = self._mk_profile()
         acc = self._mk_account(pid)
-        with patch("cas_import.parse_cas", return_value={"error": "Incorrect PDF password."}):
+        with patch("portfolio.cas_import.parse_cas", return_value={"error": "Incorrect PDF password."}):
             resp = client.post(
                 "/api/portfolio/import-cas",
                 files={"file": ("cas.pdf", b"fake", "application/pdf")},
@@ -314,7 +314,7 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 422)
 
     def test_import_cas_endpoint_404_on_unknown_account(self) -> None:
-        with patch("cas_import.parse_cas", return_value={"cas_type": "DETAILED", "folios": []}):
+        with patch("portfolio.cas_import.parse_cas", return_value={"cas_type": "DETAILED", "folios": []}):
             resp = client.post(
                 "/api/portfolio/import-cas",
                 files={"file": ("cas.pdf", b"fake", "application/pdf")},
@@ -329,8 +329,8 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
             "amfi": "INF090I01239", "isin": "INF090I01239", "close": 50.0,
             "scheme": "Test Fund", "rta": "CAMS", "transactions": [],
         }]}]}
-        with patch("cas_import.parse_cas", return_value=parsed), \
-             patch("cas_import.archive_parsed", return_value="2026-08-02-120000"):
+        with patch("portfolio.cas_import.parse_cas", return_value=parsed), \
+             patch("portfolio.cas_import.archive_parsed", return_value="2026-08-02-120000"):
             resp = client.post(
                 "/api/portfolio/import-cas",
                 files={"file": ("cas.pdf", b"fake", "application/pdf")},
@@ -385,9 +385,9 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         content = b"date,symbol,side,qty,price\n2024-01-01,TCS,buy,10,100\n"
         mapping = {"date": "date", "symbol": "symbol", "side": "side",
                   "quantity": "qty", "price": "price"}
-        with patch("csv_import.resolve_symbol", return_value={
+        with patch("portfolio.csv_import.resolve_symbol", return_value={
             "symbol": None, "exchange": None, "confidence": "unresolved", "candidate_name": None,
-        }), patch("csv_import.get_full_securities_master", return_value=[]):
+        }), patch("portfolio.csv_import.get_full_securities_master", return_value=[]):
             resp = client.post(
                 "/api/portfolio/import-csv",
                 files={"file": ("trades.csv", content, "text/csv")},

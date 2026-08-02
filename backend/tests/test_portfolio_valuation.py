@@ -9,7 +9,7 @@ from db.models import (
     accounts, assets, holdings, metadata, mf_nav_daily, prices_daily,
     profiles, transactions, valuations,
 )
-from portfolio_valuation import refresh_valuations, xirr
+from portfolio.portfolio_valuation import refresh_valuations, xirr
 
 
 def _silence_sqlite_date_adapter_warning() -> None:
@@ -127,7 +127,7 @@ class RefreshValuationsTest(unittest.TestCase):
             conn.execute(insert(valuations).values(
                 asset_id=aid, as_of=date(2026, 7, 1), value=500.0,
             ))
-        with patch("portfolio_valuation._yfinance_price", return_value=None):
+        with patch("portfolio.portfolio_valuation._yfinance_price", return_value=None):
             result = refresh_valuations(self.engine)
         self.assertEqual(result["valued"], 0)
         self.assertEqual(result["skipped"], 1)
@@ -137,7 +137,7 @@ class RefreshValuationsTest(unittest.TestCase):
 
     def test_yfinance_fallback_used_on_prices_miss(self) -> None:
         aid = self._add_asset("stock", "NEWLIST", units=2)
-        with patch("portfolio_valuation._yfinance_price", return_value=42.5) as mock_yf:
+        with patch("portfolio.portfolio_valuation._yfinance_price", return_value=42.5) as mock_yf:
             result = refresh_valuations(self.engine)
         mock_yf.assert_called_once_with("NEWLIST")
         self.assertEqual(result["valued"], 1)

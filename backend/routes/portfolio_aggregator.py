@@ -385,7 +385,7 @@ async def get_networth(request: Request, profile_id: int):
 async def refresh_valuations_endpoint(request: Request):
     def _sync() -> dict:
         import api
-        from portfolio_valuation import refresh_valuations
+        from portfolio.portfolio_valuation import refresh_valuations
 
         return refresh_valuations(api._get_db_engine())
 
@@ -396,7 +396,7 @@ async def refresh_valuations_endpoint(request: Request):
 async def get_xirr(request: Request, profile_id: int):
     def _sync() -> dict:
         import api
-        from portfolio_valuation import xirr_report
+        from portfolio.portfolio_valuation import xirr_report
 
         return xirr_report(api._get_db_engine(), profile_id)
 
@@ -414,8 +414,8 @@ async def import_cas_endpoint(
 
     def _sync() -> dict:
         import api
-        from cas_import import archive_parsed, import_cas, parse_cas
-        from portfolio_valuation import refresh_valuations
+        from portfolio.cas_import import archive_parsed, import_cas, parse_cas
+        from portfolio.portfolio_valuation import refresh_valuations
 
         parsed = parse_cas(pdf_bytes, password)
         if "error" in parsed:
@@ -436,7 +436,7 @@ async def import_csv_preview(request: Request, file: UploadFile = File(...)):
     filename = file.filename or ""
 
     def _sync() -> dict:
-        from csv_import import parse_broker_file, suggest_mapping
+        from portfolio.csv_import import parse_broker_file, suggest_mapping
 
         parsed = parse_broker_file(file_bytes, filename)
         if "error" in parsed:
@@ -462,7 +462,7 @@ async def import_csv_endpoint(
 ):
     file_bytes = await file.read()
     filename = file.filename or ""
-    from csv_import import REQUIRED_FIELDS
+    from portfolio.csv_import import REQUIRED_FIELDS
 
     try:
         mapping_dict = json.loads(mapping)
@@ -474,8 +474,8 @@ async def import_csv_endpoint(
 
     def _sync() -> dict:
         import api
-        from csv_import import import_rows, parse_broker_file
-        from portfolio_valuation import refresh_valuations
+        from portfolio.csv_import import import_rows, parse_broker_file
+        from portfolio.portfolio_valuation import refresh_valuations
 
         parsed = parse_broker_file(file_bytes, filename)
         if "error" in parsed:

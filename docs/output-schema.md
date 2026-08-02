@@ -12,7 +12,7 @@ when you need to know *how to make the call*, read there.
 ## Per-symbol cache files
 
 Each symbol gets its own folder under `backend/output/<SYMBOL>/` (or, when `REDIS_URL` is set, the same
-data lives in Redis and disk becomes a fast local mirror/fallback — see `cache.py` and backend/CLAUDE.md's
+data lives in Redis and disk becomes a fast local mirror/fallback — see `core/cache.py` and backend/CLAUDE.md's
 "Redis-backed cache for multi-host deployments" section). One file per cache "task", each with its
 own TTL (`cache.TTL_HOURS`):
 
@@ -36,7 +36,7 @@ backend/output/TCS/
 The CLI's finished report goes to PostgreSQL, under the `cli_report` namespace in `app_state`,
 keyed `SYMBOL:YYYY-MM-DD` (see the table further down) — or, when `DATABASE_URL` is unset (not
 required for the core `python main.py <SYMBOL>` flow), falls back to `output/<SYMBOL>/report_<date>.json`,
-the same disk write this codebase always did before `state_store.py` existed.
+the same disk write this codebase always did before `core/state_store.py` existed.
 
 `fii_dii_flow` and `macro_context` (both 24h) are cached under a fixed `"_MACRO"` pseudo-symbol
 (market-wide, not per-symbol), and `index_history` (24h) under a `"NSEI"` pseudo-symbol — neither
@@ -688,7 +688,7 @@ candidate name) rather than guessing.
 |---|---|---|---|
 | `backend/output/_extract_cache/<hash>.json` | 6 h | SHA-256 of source name + article titles/URLs | LLM extraction result per source |
 | `backend/output/_nse_master.txt` | 24 h | — | Newline-separated set of valid NSE equity symbols from EQUITY_L.csv |
-| `backend/output/_nifty500_master.json` | 24 h | — | NIFTY 500 constituent list (`{symbol, company_name, industry, isin}[]`) — screener_pipeline.py's universe |
+| `backend/output/_nifty500_master.json` | 24 h | — | NIFTY 500 constituent list (`{symbol, company_name, industry, isin}[]`) — pipelines/screener_pipeline.py's universe |
 | `backend/output/_bhavcopy/<YYYY-MM-DD>.csv` | Permanent | Trade date | Raw NSE bhavcopy archive — EOD price store ingestion replay without re-hitting NSE |
 
 Everything under `backend/output/` is regenerable cache. Durable state lives in PostgreSQL, in
@@ -701,7 +701,7 @@ the `app_state` table (`namespace`, `key`, `payload` JSON) — see [Database](da
 | `source_health` | Source name | Per-source daily ok/not-ok history for market-picks sources + macro overlay fetches |
 | `scraper_errors` | Scraper name (`peers`, `financials`, `insider_trades`, `bulk_block_deals`, `trendlyne_articles`, `trendlyne_numeric_consensus`) | Error counter for the standalone per-symbol scrapers |
 | `source_quality` | Market Picks run id | Per-run source telemetry (yield, syndication-dedup rate, extraction success) for the 20 Market Picks sources |
-| `cas_archive` | `YYYY-MM-DD-HHMMSS` | PII-scrubbed parsed CAS-statement JSON — replay via (from `backend/`) `python cas_import.py --replay <key> --account-id N` |
+| `cas_archive` | `YYYY-MM-DD-HHMMSS` | PII-scrubbed parsed CAS-statement JSON — replay via (from `backend/`) `python -m portfolio.cas_import --replay <key> --account-id N` |
 | `cli_report` | `SYMBOL:YYYY-MM-DD` | The CLI's own finished report (`main.py`); nothing reads it back; falls back to a disk write under `output/` when `DATABASE_URL` is unset |
 
 ---

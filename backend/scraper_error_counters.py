@@ -19,8 +19,8 @@ silently maps both "NSE returned nothing today" and "NSE request failed"
 to the same `[]`), which is exactly the "silent layout change degrades
 with no log line to grep for" gap this closes.
 """
-import state_store
-from observability import get_logger, log_event
+from core import state_store
+from core.observability import get_logger, log_event
 
 LOGGER = get_logger("scraper_error_counters")
 

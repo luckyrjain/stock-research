@@ -1,4 +1,4 @@
-"""Direct unit tests for market_picks_pipeline.py's pure scoring/dedup helpers.
+"""Direct unit tests for pipelines/market_picks_pipeline.py's pure scoring/dedup helpers.
 
 These previously had zero test coverage — tests/test_market_picks_sources.py
 only covers the source registry and insider-trade article formatting, not the
@@ -12,10 +12,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import cache
-import market_picks_pipeline
+from core import cache
+from pipelines import market_picks_pipeline
 from state_store_harness import isolated_state_store
-from market_picks_pipeline import (
+from pipelines.market_picks_pipeline import (
     MarketPicksPipeline,
     _apply_sector_balance,
     _build_ranking_reasons,
@@ -369,9 +369,9 @@ class PhaseExtractGuardrailTest(unittest.TestCase):
 
     def _run_extract(self, llm_response: dict) -> list[dict]:
         pipeline = MarketPicksPipeline()
-        with patch("market_picks_pipeline._llm_call", return_value=json.dumps(llm_response)), \
-             patch("market_picks_pipeline._extraction_cache_get", return_value=None), \
-             patch("market_picks_pipeline._extraction_cache_set"):
+        with patch("pipelines.market_picks_pipeline._llm_call", return_value=json.dumps(llm_response)), \
+             patch("pipelines.market_picks_pipeline._extraction_cache_get", return_value=None), \
+             patch("pipelines.market_picks_pipeline._extraction_cache_set"):
             return pipeline._phase_extract(self._raw_sources(), emit=lambda p: None)
 
     def test_pick_with_empty_reason_is_dropped(self) -> None:
@@ -410,9 +410,9 @@ class PhaseExtractGuardrailTest(unittest.TestCase):
 
     def test_llm_failure_returns_empty_list_not_raise(self) -> None:
         pipeline = MarketPicksPipeline()
-        with patch("market_picks_pipeline._llm_call", side_effect=RuntimeError("boom")), \
-             patch("market_picks_pipeline._extraction_cache_get", return_value=None), \
-             patch("market_picks_pipeline._extraction_cache_set"):
+        with patch("pipelines.market_picks_pipeline._llm_call", side_effect=RuntimeError("boom")), \
+             patch("pipelines.market_picks_pipeline._extraction_cache_get", return_value=None), \
+             patch("pipelines.market_picks_pipeline._extraction_cache_set"):
             picks = pipeline._phase_extract(self._raw_sources(), emit=lambda p: None)
         self.assertEqual(picks, [])
 
@@ -444,9 +444,9 @@ class PhaseExtractCrossSourceUrlDedupTest(unittest.TestCase):
 
     def test_both_sources_get_their_own_extraction_call_for_the_same_url(self) -> None:
         pipeline = MarketPicksPipeline()
-        with patch("market_picks_pipeline._llm_call", return_value=json.dumps({"picks": []})) as llm_call, \
-             patch("market_picks_pipeline._extraction_cache_get", return_value=None), \
-             patch("market_picks_pipeline._extraction_cache_set"):
+        with patch("pipelines.market_picks_pipeline._llm_call", return_value=json.dumps({"picks": []})) as llm_call, \
+             patch("pipelines.market_picks_pipeline._extraction_cache_get", return_value=None), \
+             patch("pipelines.market_picks_pipeline._extraction_cache_set"):
             pipeline._phase_extract(self._raw_sources(), emit=lambda p: None)
 
         # Both sources have an article to extract from, so both must trigger
@@ -469,9 +469,9 @@ class PhaseExtractTickerAttributionTest(unittest.TestCase):
 
     def _run_extract(self, articles: list[dict], llm_response: dict) -> list[dict]:
         pipeline = MarketPicksPipeline()
-        with patch("market_picks_pipeline._llm_call", return_value=json.dumps(llm_response)), \
-             patch("market_picks_pipeline._extraction_cache_get", return_value=None), \
-             patch("market_picks_pipeline._extraction_cache_set"):
+        with patch("pipelines.market_picks_pipeline._llm_call", return_value=json.dumps(llm_response)), \
+             patch("pipelines.market_picks_pipeline._extraction_cache_get", return_value=None), \
+             patch("pipelines.market_picks_pipeline._extraction_cache_set"):
             return pipeline._phase_extract(self._raw_sources(articles), emit=lambda p: None)
 
     def test_ticker_absent_from_every_article_does_not_default_to_first(self) -> None:
@@ -544,7 +544,7 @@ class PhaseResearchValuationPercentileTest(unittest.TestCase):
         fake_signal_result = MagicMock(final_score=0.5, verdict="BUY")
         pipeline = MarketPicksPipeline()
         with patch("main._fetch_task", return_value={}), \
-             patch("schemas.normalize", side_effect=lambda task, data: {}), \
+             patch("core.schemas.normalize", side_effect=lambda task, data: {}), \
              patch("signals.engine.run_signal_engine", return_value=fake_signal_result), \
              patch("signals.interpreter.interpret", return_value="insight"), \
              patch("tools.screener_tools.get_peer_comparison") as mock_peers, \
@@ -588,7 +588,7 @@ class PhaseResearchValuationPercentileTest(unittest.TestCase):
         fake_signal_result = MagicMock(final_score=0.5, verdict="BUY")
         pipeline = MarketPicksPipeline()
         with patch("main._fetch_task", return_value={}), \
-             patch("schemas.normalize", side_effect=lambda task, data: {}), \
+             patch("core.schemas.normalize", side_effect=lambda task, data: {}), \
              patch("signals.engine.run_signal_engine", return_value=fake_signal_result), \
              patch("signals.interpreter.interpret", return_value="insight"), \
              patch("tools.screener_tools.get_peer_comparison") as mock_peers, \
@@ -648,7 +648,7 @@ class PhaseResearchIsRecentIpoTest(unittest.TestCase):
             return fake
 
         with patch("main._fetch_task", return_value={}), \
-             patch("schemas.normalize", side_effect=lambda task, data: {}), \
+             patch("core.schemas.normalize", side_effect=lambda task, data: {}), \
              patch("signals.engine.run_signal_engine", return_value=fake_signal_result), \
              patch("signals.interpreter.interpret", return_value="insight"), \
              patch("tools.screener_tools.get_peer_comparison") as mock_peers, \
@@ -706,7 +706,7 @@ class PhaseConsolidateDedupMergeTest(unittest.TestCase):
         fake_session = self._fake_session([{"symbol": "TCS", "symbol_info": "Tata Consultancy Services Ltd"}])
 
         with patch("yfinance.Ticker", return_value=fake_ticker), \
-             patch("market_picks_pipeline._load_nse_symbol_master", return_value=set()), \
+             patch("pipelines.market_picks_pipeline._load_nse_symbol_master", return_value=set()), \
              patch.object(pipeline, "_nse_session_get", return_value=fake_session):
             result = pipeline._phase_consolidate(raw_picks, emit=lambda p: None)
 
@@ -770,7 +770,7 @@ class PhaseScoreMissingPriceTest(unittest.TestCase):
         research_data = {"NOPRICE": {"stock_info": {}, "signal_score": 0.0, "signal_verdict": "HOLD"}}
         pipeline = MarketPicksPipeline()
 
-        with patch("market_picks_pipeline.log_event") as mock_log:
+        with patch("pipelines.market_picks_pipeline.log_event") as mock_log:
             picks = pipeline._phase_score(consolidated, research_data, analyses={}, emit=lambda p: None)
 
         self.assertEqual(picks, [])
@@ -809,7 +809,7 @@ class PhaseAnalyzeEmptyBatchesTest(unittest.TestCase):
             "NOPRICE2": {"stock_info": {}, "research": {}},
         }
         pipeline = MarketPicksPipeline()
-        with patch("market_picks_pipeline._llm_call") as llm_call:
+        with patch("pipelines.market_picks_pipeline._llm_call") as llm_call:
             result = pipeline._phase_analyze(consolidated, research_data, emit=lambda p: None)
 
         self.assertEqual(result, {})
@@ -859,7 +859,7 @@ class PhaseScrapeSourceHealthTest(unittest.TestCase):
 class ExtractionCacheSetTest(unittest.TestCase):
     """Regression tests for an adversarial-review finding:
     _extraction_cache_set() used a plain write_text() instead of the
-    tempfile+os.replace atomic-write convention cache.py::save() and
+    tempfile+os.replace atomic-write convention core/cache.py::save() and
     source_health.py already use — an overlapping pipeline run (e.g. a
     manual ?force=true firing while a scheduled run is still in flight)
     racing on the same (source, article-batch) cache key could leave a

@@ -314,7 +314,7 @@ of possession (a signed token minted into the anonymous browser), not attempted.
 - **Lifecycle:** one row per (symbol, day) the pipeline actually ran. No pruning — grows with
   analysis traffic. `load_history`'s `limit` bounds the read, not the table.
 - **Disclosed limitation:** plain last-write-wins. Two concurrent same-day analyses of the same
-  symbol (a visitor and `watchlist_alerts.py --force`) can produce different LLM outputs; whichever
+  symbol (a visitor and `pipelines/watchlist_alerts.py --force`) can produce different LLM outputs; whichever
   commits last silently overwrites the other, and the change-detection diff may then compare against
   a row it did not write. Documented in the module docstring, not fixed.
 
@@ -487,12 +487,12 @@ API endpoint or frontend surface reads these directly; the only in-app consumers
 - PK `symbol`. No secondary indexes, no FKs.
 - `last_seen` is the last date the symbol appeared in a bhavcopy — a stale value detects a
   delisting/suspension without a separate status column.
-- **Writes:** two distinct upserts in `eod_prices_pipeline.py`, both `ON CONFLICT (symbol)`: a light
+- **Writes:** two distinct upserts in `pipelines/eod_prices_pipeline.py`, both `ON CONFLICT (symbol)`: a light
   one from each day's bhavcopy (`symbol`, `series`, `last_seen`) and a fuller one from
   `EQUITY_L.csv` (`isin`, `company_name`, `listing_date`, `face_value`).
 - **Reads:** `tools/securities_master.load_nse_main_board(engine)` — filtered to rows with a real
   `company_name`, since an unenriched row (bhavcopy-only, no `EQUITY_L.csv` join yet) is useless for
-  fuzzy name matching. That feeds `resolve_symbol()`, which `csv_import.py` uses to map a broker's
+  fuzzy name matching. That feeds `resolve_symbol()`, which `portfolio/csv_import.py` uses to map a broker's
   internal code to a canonical ticker.
 - **Lifecycle:** grows to the size of the NSE equity master (~2000). Never pruned.
 
@@ -515,7 +515,7 @@ API endpoint or frontend surface reads these directly; the only in-app consumers
 - `turnover_lacs` is already in lakhs — the bhavcopy's own unit, not converted.
 - Only `EQ`/`BE`/`BZ`/`SM`/`ST` series rows are stored; debt/rights series are filtered at parse time.
 - **`adj_close` has exactly one writer after insert.** It is seeded to `close` on insert, and
-  `corporate_actions_pipeline.py`'s recompute is the only thing that updates it thereafter.
+  `pipelines/corporate_actions_pipeline.py`'s recompute is the only thing that updates it thereafter.
   `_upsert_prices`'s `ON CONFLICT (symbol, trade_date) DO UPDATE` clause deliberately **omits**
   `adj_close`, so re-ingesting a day (an archive replay, a `--date` repair) cannot clobber an
   already-adjusted value back to raw. Split/bonus adjusted only — dividends, rights, and buybacks are
@@ -543,7 +543,7 @@ API endpoint or frontend surface reads these directly; the only in-app consumers
   ingestion to `SELECT DISTINCT symbol FROM assets WHERE type = 'mf' AND archived = FALSE AND symbol
   IS NOT NULL`. That query degrades to an empty set, never raising, in two distinguishable cases —
   they log different events, which matters when grepping: `assets` unreachable logs
-  `eod_held_schemes_failed` (`eod_prices_pipeline.py:210`); no MF assets logs `eod_nav_skipped`
+  `eod_held_schemes_failed` (`pipelines/eod_prices_pipeline.py:210`); no MF assets logs `eod_nav_skipped`
   (`:228`). Either way NAV ingestion is a no-op on a fresh install and activates by itself once
   someone adds an MF asset or imports a CAS PDF.
 - **Writes:** `eod_prices_pipeline` — `INSERT ... ON CONFLICT (scheme_code, nav_date) DO UPDATE`,
@@ -581,7 +581,7 @@ API endpoint or frontend surface reads these directly; the only in-app consumers
   when a group holds more than one distinct factor, applying only the highest-`id` row's factor and
   logging `ca_factor_conflict`. A symbol cannot legitimately have two splits on one ex-date, so this
   is always a revision, never two real actions to multiply.
-- **Writes/reads:** `corporate_actions_pipeline.py` only.
+- **Writes/reads:** `pipelines/corporate_actions_pipeline.py` only.
 - **Lifecycle:** grows with NSE's action feed. No pruning. Its daily step runs as part of
   `eod_prices_pipeline.run()` (isolated try/except — a failure never affects the equity-ingestion
   exit code), so there is no separate cron entry; the module stays independently runnable via
@@ -702,7 +702,7 @@ first adding one.
 - **Lifecycle:** `refresh_valuations()` runs as the fourth, isolated step of
   `eod_prices_pipeline.run()` (so a fresh EOD close/NAV feeds a same-day valuation on the next
   scheduled run), on demand via `POST /api/portfolio/refresh-valuations`, or standalone via
-  `python portfolio_valuation.py`. A per-asset price miss is skipped with a warning; the prior
+  `python -m portfolio.portfolio_valuation`. A per-asset price miss is skipped with a warning; the prior
   valuation stands untouched rather than being zeroed. No pruning.
 
 ### `transactions`
@@ -840,8 +840,8 @@ actual live schema rather than trusting a remembered `ALTER TABLE ... IF NOT EXI
 ### `stamp_alembic_head()`
 
 `db/models.py::stamp_alembic_head()` closes a drift vector between the two setup paths.
-`sme_ema_pipeline.py --setup-db`, `screener_pipeline.py --setup-db`, and
-`eod_prices_pipeline.py --setup-db` all call `metadata.create_all()` directly, bypassing Alembic — a
+`pipelines/sme_ema_pipeline.py --setup-db`, `pipelines/screener_pipeline.py --setup-db`, and
+`pipelines/eod_prices_pipeline.py --setup-db` all call `metadata.create_all()` directly, bypassing Alembic — a
 database created that way would have the tables but no `alembic_version` row, and a later
 `alembic upgrade head` would fail on tables that already exist. Each `--setup-db` therefore calls
 `stamp_alembic_head()` immediately afterwards. It never raises: a stamp failure (e.g. `alembic.ini`
@@ -861,25 +861,25 @@ that is not regenerable from any pipeline. Every pipeline in the repo now scopes
 
 | Command | Drops/recreates |
 |---|---|
-| `python sme_ema_pipeline.py --reset-db` | `ema_signals`, `sme_stocks` (in FK order: child dropped first, parent created first) |
-| `python screener_pipeline.py --reset-db` | `screener_stocks` |
-| `python eod_prices_pipeline.py --reset-db` | `securities`, `prices_daily`, `mf_nav_daily` |
-| `python corporate_actions_pipeline.py --reset-db` | `corporate_actions` |
+| `python -m pipelines.sme_ema_pipeline --reset-db` | `ema_signals`, `sme_stocks` (in FK order: child dropped first, parent created first) |
+| `python -m pipelines.screener_pipeline --reset-db` | `screener_stocks` |
+| `python -m pipelines.eod_prices_pipeline --reset-db` | `securities`, `prices_daily`, `mf_nav_daily` |
+| `python -m pipelines.corporate_actions_pipeline --reset-db` | `corporate_actions` |
 
 Implemented as `table.drop(engine, checkfirst=True)` / `table.create(engine, checkfirst=True)` per
 table, or `metadata.create_all(engine, tables=[...])`.
 
 `--setup-db` is a different matter: it still calls a full `metadata.create_all(engine)` in
-`sme_ema_pipeline.py` and `screener_pipeline.py`, which is safe (it only creates missing tables,
+`pipelines/sme_ema_pipeline.py` and `pipelines/screener_pipeline.py`, which is safe (it only creates missing tables,
 never alters or drops) and is what makes `stamp_alembic_head()` correct to call afterwards.
-`eod_prices_pipeline.py --setup-db` is scoped to its own three tables.
+`pipelines/eod_prices_pipeline.py --setup-db` is scoped to its own three tables.
 
-> Historical note: `sme_ema_pipeline.py --reset-db` originally *did* call `metadata.drop_all()` and
+> Historical note: `pipelines/sme_ema_pipeline.py --reset-db` originally *did* call `metadata.drop_all()` and
 > silently wiped accounts, sessions, and watchlists along with its own two tables. Both the code and
 > the docs describing it have been corrected; the rule is now stated as a binding constraint in the
 > root `CLAUDE.md` and in `backend/CLAUDE.md`'s "Important Rules for Claude".
 
-`corporate_actions_pipeline.py --setup-db` creates `corporate_actions` but does **not** call
+`pipelines/corporate_actions_pipeline.py --setup-db` creates `corporate_actions` but does **not** call
 `stamp_alembic_head()`, unlike the other three `--setup-db` commands. Harmless in the normal
 order (an earlier pipeline's setup will already have stamped), but it is the same drift vector
 that helper exists to prevent — a database whose *only* setup call was this one ends up with the
@@ -934,7 +934,7 @@ endpoint whose entire purpose is the database should say so.
 | `/api/portfolio/profiles\|accounts\|assets\|networth\|xirr` | **503.** |
 | `/api/portfolio/concentration` | **503** (it reads `positions`). |
 | `/api/v1/consolidated/{symbol}` | **401** `"Missing or invalid X-API-Key header."` — not 503. `_require_api_key_user()` checks `DATABASE_URL` in the same condition as the missing-key check (`api.py:2740`), so a caller cannot distinguish an unconfigured server from a bad key. |
-| `sme_ema_pipeline.py` / `screener_pipeline.py` / `eod_prices_pipeline.py` / `watchlist_alerts.py` | **Fail loudly** and exit non-zero. Unattended cron jobs must not "succeed" with nothing written. |
+| `pipelines/sme_ema_pipeline.py` / `pipelines/screener_pipeline.py` / `pipelines/eod_prices_pipeline.py` / `pipelines/watchlist_alerts.py` | **Fail loudly** and exit non-zero. Unattended cron jobs must not "succeed" with nothing written. |
 | Alembic | Unusable — `migrations/env.py` reads the same env var. |
 
 A DB error that is not a missing `DATABASE_URL` is sanitized before it reaches the client

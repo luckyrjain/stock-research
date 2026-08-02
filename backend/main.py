@@ -15,18 +15,18 @@ import requests
 
 from dotenv import load_dotenv
 
-import cache
+from core import cache
 from crew import ALL_DATA_TASKS, _configured_providers, parse_json_object, run_analysis_with_fallback
-from error_tracking import init_error_tracking
+from core.error_tracking import init_error_tracking
 from mf_holdings_history import compute_stake_deltas as compute_mf_holdings_deltas
 from mf_holdings_history import save_snapshot as save_mf_holdings_snapshot
-from observability import get_logger, log_event
-from schema_drift import log_drift_if_any
-from schemas import normalize as schema_normalize
-from schemas import validate as schema_validate
+from core.observability import get_logger, log_event
+from core.schema_drift import log_drift_if_any
+from core.schemas import normalize as schema_normalize
+from core.schemas import validate as schema_validate
 from signals.engine import run_signal_engine
 from signals.filings_classifier import classify_filings
-import state_store
+from core import state_store
 from signals.interpreter import interpret
 from tools.news_tools import get_latest_news
 from tools.nse_tools import get_mf_holdings, get_stock_quote
@@ -56,7 +56,7 @@ def _save_raw_tool_output(symbol: str, task_name: str, raw_payload: object) -> N
     on an already-successful fetch, and could exhaust every attempt and
     discard real, successfully-scraped data as {"error": ...} — the same
     "auxiliary/debug persistence must not break the primary operation"
-    convention schema_drift.py::log_drift_if_any() already follows."""
+    convention core/schema_drift.py::log_drift_if_any() already follows."""
     if task_name not in {"research", "shareholding", "filings"}:
         return
 
@@ -254,7 +254,7 @@ def _print_status(symbol: str) -> None:
 
 def _save_report(symbol: str, report_key: str, report: dict) -> None:
     """Persists the CLI's finished report — Postgres when available, else the
-    disk write the core CLI flow always did before state_store.py existed.
+    disk write the core CLI flow always did before core/state_store.py existed.
     DATABASE_URL is not required for `python main.py TCS` (see backend/CLAUDE.md's
     env var table), so a missing one must not silently drop the report."""
     if state_store.save(REPORT_NAMESPACE, report_key, report):

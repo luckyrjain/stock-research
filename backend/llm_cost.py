@@ -12,7 +12,7 @@ a guardrail-retry or a failed failover attempt still cost real tokens).
 It logs the call's own cost immediately via `observability.log_event()`
 (queryable right away through whatever this deployment already does with
 structured logs) and accumulates a running per-day total under the
-`llm_cost` namespace in `state_store.py` (one record per UTC day) — the same
+`llm_cost` namespace in `core/state_store.py` (one record per UTC day) — the same
 "one counter plus a log line" convention as `scraper_error_counters.py`/
 `source_health.py`, deliberately not a full observability/billing platform.
 
@@ -24,8 +24,8 @@ holds across separate hosts — see its docstring.
 """
 from datetime import datetime, timezone
 
-import state_store
-from observability import get_logger, log_event
+from core import state_store
+from core.observability import get_logger, log_event
 
 LOGGER = get_logger("llm_cost")
 

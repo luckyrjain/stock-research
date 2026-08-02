@@ -25,8 +25,8 @@ would have without this module.
 """
 from typing import Any
 
-from observability import get_logger, log_event
-from schemas import CONTRACTS
+from core.observability import get_logger, log_event
+from core.schemas import CONTRACTS
 
 LOGGER = get_logger("schema_drift")
 
@@ -71,7 +71,7 @@ def log_drift_if_any(task_name: str, raw_data: Any, **context: Any) -> None:
         # typo) must not go completely untraced, or this whole feature
         # could silently stop working with zero signal — same "log once via
         # the normal structured path, then degrade" instinct as
-        # error_tracking.py's own capture_error(). Best-effort itself: a
+        # core/error_tracking.py's own capture_error(). Best-effort itself: a
         # broken log_event() here still must not propagate.
         try:
             log_event(LOGGER, "schema_drift_check_failed", level="warning", task=task_name, error=str(exc))

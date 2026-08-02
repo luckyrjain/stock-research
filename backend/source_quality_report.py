@@ -7,7 +7,7 @@ Usage: python source_quality_report.py --days 14
 import argparse
 from datetime import datetime, timedelta, timezone
 
-import state_store
+from core import state_store
 from source_quality import NAMESPACE
 
 

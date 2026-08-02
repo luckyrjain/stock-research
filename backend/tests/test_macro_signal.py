@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-import cache
+from core import cache
 from signals.macro import macro_signal
 from state_store_harness import isolated_state_store
 
@@ -92,7 +92,7 @@ class MacroSignalTest(unittest.TestCase):
         self.assertEqual(mock_record.call_count, 2)  # one per source, not one per macro_signal() call
 
     def test_stale_flow_date_is_excluded_from_scoring(self) -> None:
-        # Regression test for the deep gap analysis finding: cache.py's own
+        # Regression test for the deep gap analysis finding: core/cache.py's own
         # freshness check only knows when the HTTP call succeeded, not
         # whether NSE's response actually carried a current-session row —
         # a stale (e.g. pre-long-weekend) flow figure must not be blended

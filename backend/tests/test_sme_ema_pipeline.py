@@ -4,8 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
-import sme_ema_pipeline
-from sme_ema_pipeline import (
+from pipelines import sme_ema_pipeline
+from pipelines.sme_ema_pipeline import (
     _compute_ema_signals, _compute_liquidity, _compute_rsi, _compute_volume_spike,
     _extract_market_cap, _fetch_ohlcv, _safe_market_cap_cr, _RSI_PERIOD,
     _VOLUME_SPIKE_WINDOW_DAYS, _STORE_DAYS,
@@ -37,7 +37,7 @@ class SetupDbStampsAlembicHeadTest(unittest.TestCase):
 
     def test_setup_db_calls_create_all_then_stamps_head(self) -> None:
         engine = MagicMock()
-        with patch("sme_ema_pipeline.metadata") as mock_metadata, \
+        with patch("pipelines.sme_ema_pipeline.metadata") as mock_metadata, \
              patch("db.models.stamp_alembic_head") as mock_stamp:
             sme_ema_pipeline.setup_db(engine)
         mock_metadata.create_all.assert_called_once_with(engine)
@@ -49,13 +49,13 @@ class SetupDbStampsAlembicHeadTest(unittest.TestCase):
         # (including, since this session, real personal financial data in
         # the Portfolio Aggregator's tables) just to reset this pipeline's
         # own two tables. Scoped to sme_stocks/ema_signals specifically, the
-        # same fix screener_pipeline.py --reset-db already has.
-        with patch("sme_ema_pipeline.get_engine", return_value=MagicMock()), \
-             patch("sme_ema_pipeline.sme_stocks") as mock_sme_stocks, \
-             patch("sme_ema_pipeline.ema_signals") as mock_ema_signals, \
+        # same fix pipelines/screener_pipeline.py --reset-db already has.
+        with patch("pipelines.sme_ema_pipeline.get_engine", return_value=MagicMock()), \
+             patch("pipelines.sme_ema_pipeline.sme_stocks") as mock_sme_stocks, \
+             patch("pipelines.sme_ema_pipeline.ema_signals") as mock_ema_signals, \
              patch("db.models.stamp_alembic_head") as mock_stamp, \
-             patch("sys.argv", ["sme_ema_pipeline.py", "--reset-db"]), \
-             patch("sme_ema_pipeline.init_error_tracking"):
+             patch("sys.argv", ["pipelines/sme_ema_pipeline.py", "--reset-db"]), \
+             patch("pipelines.sme_ema_pipeline.init_error_tracking"):
             sme_ema_pipeline.main()
         mock_sme_stocks.drop.assert_called_once()
         mock_sme_stocks.create.assert_called_once()
@@ -306,7 +306,7 @@ class UpsertStocksTest(unittest.TestCase):
         # clause only refreshed name/isin/fetched_at, silently leaving a
         # stale exchange/series value in place forever even though every
         # pipeline run re-fetches and passes fresh values for both --
-        # inconsistent with screener_pipeline.py's own sibling
+        # inconsistent with pipelines/screener_pipeline.py's own sibling
         # _upsert_stocks(), which refreshes every column on conflict.
         engine = MagicMock()
         conn = MagicMock()

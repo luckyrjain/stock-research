@@ -13,7 +13,7 @@ errors today (log_event's error-level path), so a second abstraction layer
 on top of that would be speculative.
 
 Uses the stdlib `logging` module directly for its own diagnostics (never
-observability.log_event) — this module is a dependency of observability.py,
+observability.log_event) — this module is a dependency of core/observability.py,
 so routing its own warnings back through log_event would be circular.
 """
 import logging
@@ -37,8 +37,8 @@ _SKIP_CONTEXT_KEYS = frozenset({"error"})
 
 def init_error_tracking() -> None:
     """Idempotent. Call once per process at startup — api.py's app import,
-    and the CLI entrypoints of main.py / sme_ema_pipeline.py /
-    market_picks_pipeline.py / watchlist_alerts.py / screener_pipeline.py.
+    and the CLI entrypoints of main.py / pipelines/sme_ema_pipeline.py /
+    pipelines/market_picks_pipeline.py / pipelines/watchlist_alerts.py / pipelines/screener_pipeline.py.
     A second call is a harmless no-op (sentry_sdk.init() itself is not
     idempotent-safe to call twice with different configs, so this guards it)."""
     global _initialized, _enabled

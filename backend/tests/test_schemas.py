@@ -1,6 +1,6 @@
 import unittest
 
-import schemas
+from core import schemas
 
 
 class NormalizeTest(unittest.TestCase):

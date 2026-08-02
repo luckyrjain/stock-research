@@ -3,7 +3,7 @@ CLAUDE.md repeatedly flags as "not verified against a live response in this
 sandbox" — Screener.in's peer table, Trendlyne's symbol resolution, NSE's
 FII/DII flow, and RBI's rate/inflation table. These are the highest-blast-
 radius of the ~10 standalone scrapers outside ALL_DATA_TASKS' own
-schema_drift.py coverage.
+core/schema_drift.py coverage.
 
 Deliberately **not** part of tests/ — `python -m pytest tests/` (the command
 this repo's CI and CLAUDE.md both document) must never make a live network
@@ -12,7 +12,7 @@ directory is a second, independent test root, run only by a separate
 low-frequency scheduled workflow (.github/workflows/live-contract-check.yml)
 with RUN_LIVE_TESTS=1 set explicitly.
 
-What this closes: `schema_drift.py`/`source_health.py` only catch drift
+What this closes: `core/schema_drift.py`/`source_health.py` only catch drift
 *after* it's already shipped to users, from production traffic. This gives
 an earlier, narrower signal — a handful of real scraper calls, on a schedule,
 independent of whether any user happened to trigger that code path recently.

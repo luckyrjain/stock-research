@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
-import cache
+from core import cache
 from tools.price_history_tools import get_price_series
 
 

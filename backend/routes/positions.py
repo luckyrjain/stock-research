@@ -266,7 +266,7 @@ async def get_portfolio_concentration(request: Request, client_id: str | None = 
     already-cached data only (this table's own rows, GET /api/prices' live
     quote, and the 1h stock_info cache for sector) — never triggers a new
     scrape, and never writes back to market-picks' own scoring/cache."""
-    import cache as _cache
+    from core import cache as _cache
 
     token = api._bearer_token_from_request(request)
 

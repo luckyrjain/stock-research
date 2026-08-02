@@ -1,6 +1,6 @@
 """Lightweight per-source freshness/volume monitoring.
 
-Complements schema_drift.py, which only catches *type* drift on the six
+Complements core/schema_drift.py, which only catches *type* drift on the six
 ALL_DATA_TASKS fields — it has nothing to say about a source that's still
 returning well-shaped data but has silently gone quiet (0 results every
 run), since an empty result isn't a shape mismatch. That failure mode is
@@ -10,7 +10,7 @@ quietly stops contributing.
 
 Deliberately scoped to sources with a genuine "should usually have data"
 expectation: the 20 market-picks SOURCES (aggregate across every symbol,
-run on a fixed weekly/on-demand cadence — see market_picks_pipeline.py's
+run on a fixed weekly/on-demand cadence — see pipelines/market_picks_pipeline.py's
 _phase_scrape) and the two market-wide macro-overlay fetches
 (fii_dii_flow, macro_context — see signals/macro.py). Deliberately NOT
 applied to the three genuinely per-symbol standalone endpoints (peers,
@@ -21,14 +21,14 @@ else in CLAUDE.md, not a source-health anomaly. Applying a volume-anomaly
 heuristic there would just be noise.
 
 State is one record per source under the `source_health` namespace in
-`state_store.py`, holding a rolling window of recent per-CALENDAR-DAY
+`core/state_store.py`, holding a rolling window of recent per-CALENDAR-DAY
 ok/not-ok results.
 
 Two correctness properties that a naive read-modify-write can't provide,
 both addressed below:
 
 - **Concurrency safety**: several callers can race to update the same
-  source's record at once (e.g. market_picks_pipeline.py's _phase_scrape
+  source's record at once (e.g. pipelines/market_picks_pipeline.py's _phase_scrape
   workers, or several ThreadPoolExecutor workers in signals/macro.py all
   missing the "_MACRO" pseudo-symbol cache at once — see CLAUDE.md's
   "Shared state and queues" section for that exact scenario). A plain
@@ -49,8 +49,8 @@ both addressed below:
 """
 from datetime import datetime, timezone
 
-import state_store
-from observability import get_logger, log_event
+from core import state_store
+from core.observability import get_logger, log_event
 
 LOGGER = get_logger("source_health")
 

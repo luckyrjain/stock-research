@@ -2,7 +2,7 @@
 
 import threading
 
-from observability import get_logger, log_event
+from core.observability import get_logger, log_event
 from signals.features import extract_features
 from signals.volume import volume_signal
 from signals.valuation import valuation_signal
@@ -85,8 +85,8 @@ _SECTOR_WEIGHT_OVERRIDES = {
 
 _unmatched_sectors_logged: set[str] = set()
 # run_signal_engine() runs inside ThreadPoolExecutor workers from several
-# concurrent call sites (api.py's SSE handler, market_picks_pipeline.py's
-# _phase_research, watchlist_alerts.py's batch loop) — without this lock, two
+# concurrent call sites (api.py's SSE handler, pipelines/market_picks_pipeline.py's
+# _phase_research, pipelines/watchlist_alerts.py's batch loop) — without this lock, two
 # threads that both first encounter the same never-before-seen sector at the
 # same moment can each pass the membership check below before either calls
 # .add(), producing a duplicate warning log instead of the documented

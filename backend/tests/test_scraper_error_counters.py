@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import scraper_error_counters
-import state_store
+from core import state_store
 from state_store_harness import isolated_state_store, shared_state_store
 
 
@@ -64,7 +64,7 @@ class RecordScraperErrorTest(unittest.TestCase):
         # line is what an operator actually greps for, so a store failure
         # must still emit it (with a null count rather than a guessed one)
         # instead of swallowing the scraper error entirely.
-        with patch("state_store._get_engine", side_effect=RuntimeError("db down")):
+        with patch("core.state_store._get_engine", side_effect=RuntimeError("db down")):
             with patch("scraper_error_counters.log_event") as mock_log:
                 scraper_error_counters.record_scraper_error("peers", symbol="TCS")
 
@@ -75,7 +75,7 @@ class RecordScraperErrorTest(unittest.TestCase):
         self.assertIsNone(kwargs.get("error_count"))
 
     def test_get_error_count_never_raises_when_the_store_is_broken(self) -> None:
-        with patch("state_store._get_engine", side_effect=RuntimeError("db down")):
+        with patch("core.state_store._get_engine", side_effect=RuntimeError("db down")):
             self.assertEqual(scraper_error_counters.get_error_count("peers"), 0)
 
 

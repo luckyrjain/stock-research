@@ -48,14 +48,14 @@ Then edit `.env` and set the provider you want to use.
 | `LLM_CONCURRENCY_LIMIT` | No | Max concurrent analyst/market-picks LLM pipelines across all callers — default `4` (`api.py`). Shared across workers only when `REDIS_URL` is set; per-worker otherwise |
 | `EXECUTOR_MAX_WORKERS` | No | Size of the shared `ThreadPoolExecutor` backing every blocking call in the async request path — default `16` (`api.py`). Deliberately larger than `LLM_CONCURRENCY_LIMIT` so quick requests (validate, prices) aren't starved by in-flight analyses |
 | `DATABASE_URL` | SME signals, Screener, Watchlist, Positions, auth, API keys, Alembic | PostgreSQL DSN, e.g. `postgresql://user:pass@localhost:5432/sme_research` |
-| `REDIS_URL` | No (only past 1 backend worker/replica) | e.g. `redis://localhost:6379/0` — shares rate-limit/concurrency guards, and `cache.py`'s scraped-data cache, across workers/hosts; see [Deployment](deployment.md#scaling-read-this-before-adding-workers-or-replicas) |
+| `REDIS_URL` | No (only past 1 backend worker/replica) | e.g. `redis://localhost:6379/0` — shares rate-limit/concurrency guards, and `core/cache.py`'s scraped-data cache, across workers/hosts; see [Deployment](deployment.md#scaling-read-this-before-adding-workers-or-replicas) |
 | `FRONTEND_URL` | Account/magic-link auth | Canonical frontend origin embedded in the magic-link sign-in email (`{FRONTEND_URL}/auth/verify?token=...`) — that page has to run in the browser on the frontend's own origin to receive the session cookie. Defaults to `http://localhost:3000` |
 | `SMTP_HOST` | No (auth still "works" without it) | SMTP server for sending magic-link and watchlist-alert emails. **Without it, sign-in links/tokens are still created and stored — they just never get emailed** (logged as a warning server-side); `POST /api/auth/request-link` still returns `{"sent": true}` either way, so there's no way for the caller to distinguish the two cases. See "Account & magic-link auth" below |
 | `SMTP_PORT` | No | Default `587` |
 | `SMTP_USER` / `SMTP_PASSWORD` | No | SMTP auth — skipped if either is unset |
 | `SMTP_FROM` | No | Default: `SMTP_USER`, or `noreply@alphapulse.local` |
 | `SMTP_USE_TLS` | No | Default `true` — set `false` only for a local/dev relay without STARTTLS |
-| `SENTRY_DSN` | No | Forwards every error-level `observability.log_event()` call to a Sentry-compatible ingest endpoint (real Sentry, self-hosted Sentry, GlitchTip, ...). `sentry-sdk` is already in `requirements.txt`; without this set, `error_tracking.py` is a complete no-op |
+| `SENTRY_DSN` | No | Forwards every error-level `observability.log_event()` call to a Sentry-compatible ingest endpoint (real Sentry, self-hosted Sentry, GlitchTip, ...). `sentry-sdk` is already in `requirements.txt`; without this set, `core/error_tracking.py` is a complete no-op |
 | `SENTRY_ENVIRONMENT` | No | Default `production` — tag attached to every event sent to Sentry when `SENTRY_DSN` is set |
 | `TRUSTED_PROXY_SECRET` | No | Shared secret (same value on backend + frontend) that lets `api.py` trust a real client IP forwarded by the Next.js proxy routes for per-IP rate limiting, instead of always seeing the Next.js server's own IP. Only matters once a reverse proxy/CDN sits in front of the frontend in production — see [Deployment](deployment.md) |
 | `ALLOWED_ORIGINS` | No | Comma-separated list of origins allowed to call the backend directly (CORS). Defaults to `http://localhost:3000`. Only matters for genuine cross-origin browser calls — the Next.js proxy routes talk to the backend server-to-server, which CORS doesn't apply to |
@@ -214,7 +214,7 @@ alembic revision --autogenerate -m "add some_column to some_table"
 alembic upgrade head
 ```
 
-**The `--setup-db`/`--reset-db` flags on `sme_ema_pipeline.py` and `screener_pipeline.py` call
+**The `--setup-db`/`--reset-db` flags on `pipelines/sme_ema_pipeline.py` and `pipelines/screener_pipeline.py` call
 `db.models.stamp_alembic_head()` automatically** right after their own `metadata.create_all()`,
 so a database provisioned that way still gets a correct `alembic_version` row and a later
 `alembic upgrade head` won't fail trying to re-create existing tables.
@@ -234,25 +234,25 @@ sme_research`), then either run `alembic upgrade head` (see above) or use the pi
 ```bash
 source .venv/bin/activate
 cd backend
-python sme_ema_pipeline.py --setup-db   # create tables (idempotent) + stamp alembic head
-python sme_ema_pipeline.py              # fetch SME stocks, compute EMA20/EMA50 crosses, store
-python sme_ema_pipeline.py --reset-db   # drop + recreate tables (after schema changes; data is regenerable)
-python sme_ema_pipeline.py --force      # bypass the 24 h stock-list cache
-python sme_ema_pipeline.py --lookback 10  # report window for the CLI summary
+python -m pipelines.sme_ema_pipeline --setup-db   # create tables (idempotent) + stamp alembic head
+python -m pipelines.sme_ema_pipeline              # fetch SME stocks, compute EMA20/EMA50 crosses, store
+python -m pipelines.sme_ema_pipeline --reset-db   # drop + recreate tables (after schema changes; data is regenerable)
+python -m pipelines.sme_ema_pipeline --force      # bypass the 24 h stock-list cache
+python -m pipelines.sme_ema_pipeline --lookback 10  # report window for the CLI summary
 ```
 
 **`--reset-db` is scoped to this pipeline's own two tables** (`ema_signals`, `sme_stocks`) — it
 does not touch the shared `MetaData()` as a whole. This used to be a real footgun (an early
 version called `metadata.drop_all()` and wiped every table, including Watchlist/Positions/account
 data); see backend/CLAUDE.md's "SME golden cross flow" section for the fix and the scoping
-convention it established for every pipeline after it (`screener_pipeline.py`,
-`eod_prices_pipeline.py`, `corporate_actions_pipeline.py`).
+convention it established for every pipeline after it (`pipelines/screener_pipeline.py`,
+`pipelines/eod_prices_pipeline.py`, `pipelines/corporate_actions_pipeline.py`).
 
 The screener page's **Refresh Data** button triggers the same pipeline via `POST /api/sme-signals/refresh`.
 The CLI exits non-zero (and the API logs an `sme_refresh_unhealthy` warning) when a run was
 substantially unsuccessful — an empty stock list or too high an OHLCV fetch error rate — rather
 than silently completing with mostly-empty data. See `_MAX_ACCEPTABLE_ERROR_RATE` in
-`sme_ema_pipeline.py`.
+`pipelines/sme_ema_pipeline.py`.
 
 Daily automation runs via `.github/workflows/sme-cron.yml` on GitHub Actions — weekdays at
 13:00 UTC (18:30 IST), shortly after NSE close. Add a `DATABASE_URL` repository secret
@@ -262,7 +262,7 @@ missing. Trigger a one-off run from the Actions tab ("Run workflow"). If you'd r
 this locally/self-hosted instead of on GitHub Actions, a crontab entry works too:
 
 ```cron
-30 18 * * 1-5 cd /path/to/stock-research/backend && ../.venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
+30 18 * * 1-5 cd /path/to/stock-research/backend && ../.venv/bin/python -m pipelines.sme_ema_pipeline >> output/sme_cron.log 2>&1
 ```
 
 ## Market picks pipeline
@@ -273,7 +273,7 @@ run from the CLI, or via the **Fresh scan** / **See This Week's Picks** buttons 
 ```bash
 source .venv/bin/activate
 cd backend
-python market_picks_pipeline.py
+python -m pipelines.market_picks_pipeline
 ```
 
 This saves straight to `backend/output/_market_picks/picks.json`, bypassing `api.py`'s SSE endpoint —
@@ -297,10 +297,10 @@ stocks — see backend/CLAUDE.md's "Custom screener flow" section. Requires `DAT
 ```bash
 source .venv/bin/activate
 cd backend
-python screener_pipeline.py --setup-db   # create the screener_stocks table + stamp alembic head
-python screener_pipeline.py              # fetch NIFTY 500 constituents, quote + technical signal each, store
-python screener_pipeline.py --reset-db   # drop + recreate ONLY screener_stocks (scoped, unlike sme_ema_pipeline.py's --reset-db)
-python screener_pipeline.py --force      # bypass the 24 h constituent-list cache
+python -m pipelines.screener_pipeline --setup-db   # create the screener_stocks table + stamp alembic head
+python -m pipelines.screener_pipeline              # fetch NIFTY 500 constituents, quote + technical signal each, store
+python -m pipelines.screener_pipeline --reset-db   # drop + recreate ONLY screener_stocks (scoped, unlike pipelines/sme_ema_pipeline.py's --reset-db)
+python -m pipelines.screener_pipeline --force      # bypass the 24 h constituent-list cache
 ```
 
 The `/screener` page's **Refresh Data** button triggers the same pipeline via
@@ -340,19 +340,19 @@ See backend/CLAUDE.md's "EOD price store + corporate actions flow" section for t
 ```bash
 source .venv/bin/activate
 cd backend
-python eod_prices_pipeline.py --setup-db     # create securities/prices_daily/mf_nav_daily
-python eod_prices_pipeline.py                # self-healing: ingests any missing day in the last 5
-python eod_prices_pipeline.py --date 2026-08-01
-python eod_prices_pipeline.py --backfill 2024-08-01   # loop from that date to today
+python -m pipelines.eod_prices_pipeline --setup-db     # create securities/prices_daily/mf_nav_daily
+python -m pipelines.eod_prices_pipeline                # self-healing: ingests any missing day in the last 5
+python -m pipelines.eod_prices_pipeline --date 2026-08-01
+python -m pipelines.eod_prices_pipeline --backfill 2024-08-01   # loop from that date to today
 
-python corporate_actions_pipeline.py --setup-db   # create corporate_actions
-python corporate_actions_pipeline.py --backfill 2024-08-01
-python corporate_actions_pipeline.py --recompute-all   # rebuild adj_close for every symbol
+python -m pipelines.corporate_actions_pipeline --setup-db   # create corporate_actions
+python -m pipelines.corporate_actions_pipeline --backfill 2024-08-01
+python -m pipelines.corporate_actions_pipeline --recompute-all   # rebuild adj_close for every symbol
 ```
 
-`eod_prices_pipeline.py --setup-db`/`--reset-db` and `corporate_actions_pipeline.py
+`pipelines/eod_prices_pipeline.py --setup-db`/`--reset-db` and `pipelines/corporate_actions_pipeline.py
 --setup-db`/`--reset-db` are each scoped to only their own tables, not the shared `MetaData()` —
-same scoping discipline as `screener_pipeline.py --reset-db`.
+same scoping discipline as `pipelines/screener_pipeline.py --reset-db`.
 
 Daily automation runs via `.github/workflows/eod-prices-cron.yml` — weekdays at 14:15 UTC
 (19:45 IST), after the bhavcopy's ~19:00 IST publish and after `sme-cron.yml`. Same
@@ -370,7 +370,7 @@ by the same Alembic step as everything else above).
 
 - Manual net-worth tracking works with no further setup: create a profile → account → assets on
   `/portfolio-aggregator`.
-- **Auto-valuation** (`portfolio_valuation.py`) needs the EOD price store above populated —
+- **Auto-valuation** (`portfolio/portfolio_valuation.py`) needs the EOD price store above populated —
   `mf`/`stock` assets are valued from `prices_daily`/`mf_nav_daily`; runs nightly as part of the
   EOD cron, or on-demand via the "Refresh valuations" button (`POST
   /api/portfolio/refresh-valuations`).
@@ -380,7 +380,7 @@ by the same Alembic step as everything else above).
   its password on `/portfolio-aggregator`. New dependency `casparser` (already in
   `requirements.txt`, pulls `pdfminer.six`). Parsed statements are archived (PII-scrubbed) under
   the `cas_archive` namespace in `app_state`, keyed by timestamp, for replay: from `backend/`,
-  `python cas_import.py --replay <key> --account-id N`.
+  `python -m portfolio.cas_import --replay <key> --account-id N`.
 - **Broker CSV import** (`POST /api/portfolio/import-csv/preview` then `.../import-csv`) — upload
   a broker trade export (Zerodha tradebook auto-detected; any other broker via a column-mapping
   UI). New dependency `openpyxl` (already in `requirements.txt`, for `.xlsx` files — `pandas`
@@ -474,7 +474,7 @@ per-source health, scraper error counters, source-quality telemetry — is now i
 the `app_state` table under one namespace each. `backend/output/` holds only regenerable cache.
 See [Database](database.md).
 
-When `REDIS_URL` is set, `cache.py` writes through to Redis in addition to local disk — see
+When `REDIS_URL` is set, `core/cache.py` writes through to Redis in addition to local disk — see
 [Deployment](deployment.md#scaling-read-this-before-adding-workers-or-replicas).
 
 ## Useful commands
@@ -487,21 +487,21 @@ python main.py INFY
 uvicorn api:app --reload --port 8000
 
 # SME signals pipeline
-python sme_ema_pipeline.py
+python -m pipelines.sme_ema_pipeline
 
 # Custom screener pipeline
-python screener_pipeline.py
+python -m pipelines.screener_pipeline
 
 # EOD price store + corporate actions
-python eod_prices_pipeline.py
-python corporate_actions_pipeline.py --recompute-all
+python -m pipelines.eod_prices_pipeline
+python -m pipelines.corporate_actions_pipeline --recompute-all
 
 # Portfolio Aggregator valuation refresh (also runs nightly via the EOD cron)
-python portfolio_valuation.py
+python -m portfolio.portfolio_valuation
 
 # Watchlist alert emails (batch job, normally run daily via cron/GitHub Actions)
-python watchlist_alerts.py
-python watchlist_alerts.py --force   # bypass cache freshness
+python -m pipelines.watchlist_alerts
+python -m pipelines.watchlist_alerts --force   # bypass cache freshness
 
 # Schema migrations
 alembic upgrade head                        # fresh database
@@ -622,7 +622,7 @@ The fallback report is a `HOLD` recommendation with `LOW` confidence and a summa
 
 ### SME / Screener pipeline dies mid-run from a lost Postgres connection
 
-Neither `sme_ema_pipeline.py` nor `screener_pipeline.py` is fully atomic across a whole run — the
+Neither `pipelines/sme_ema_pipeline.py` nor `pipelines/screener_pipeline.py` is fully atomic across a whole run — the
 initial stock/constituent-list upsert is one transaction (an early connection loss there rolls
 back cleanly and nothing is written), but per-stock signal/metric writes commit in batches, each
 its own transaction. A connection loss partway through means the batches that already committed

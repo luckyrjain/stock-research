@@ -1,4 +1,4 @@
-"""Tests for state_store.py — the durable-JSON-state layer that replaced this
+"""Tests for core/state_store.py — the durable-JSON-state layer that replaced this
 codebase's per-family JSON files under output/.
 
 Runs against SQLite in memory (StaticPool so every thread shares one DB), the
@@ -19,7 +19,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
-import state_store
+from core import state_store
 from db.models import app_state, metadata
 
 
@@ -31,7 +31,7 @@ class StateStoreTestBase(unittest.TestCase):
         metadata.create_all(self.engine)
         self._patches = [
             patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}),
-            patch("state_store._get_engine", return_value=self.engine),
+            patch("core.state_store._get_engine", return_value=self.engine),
         ]
         for p in self._patches:
             p.start()
@@ -164,7 +164,7 @@ class MutateConcurrencyTest(unittest.TestCase):
         metadata.create_all(self.engine)
         self._patches = [
             patch.dict(os.environ, {"DATABASE_URL": url}),
-            patch("state_store._get_engine", return_value=self.engine),
+            patch("core.state_store._get_engine", return_value=self.engine),
         ]
         for p in self._patches:
             p.start()
@@ -212,7 +212,7 @@ class BrokenEngineTest(unittest.TestCase):
     def setUp(self) -> None:
         self._patches = [
             patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}),
-            patch("state_store._get_engine", side_effect=RuntimeError("db down")),
+            patch("core.state_store._get_engine", side_effect=RuntimeError("db down")),
         ]
         for p in self._patches:
             p.start()

@@ -4,7 +4,7 @@ Each task's output is stored at output/<SYMBOL>/<task_name>.json with a
 top-level _meta.fetched_at timestamp — the local-disk JSON store this app
 has always used, and still the only store in a single-host deployment.
 
-Optional Redis-backed sharing (`REDIS_URL`, same env var `rate_limiter.py`
+Optional Redis-backed sharing (`REDIS_URL`, same env var `core/rate_limiter.py`
 already reads): a CTO-lens review flagged this file cache as the platform's
 real ceiling on horizontal scale — it's documented elsewhere in this repo
 as "the persistent shared state," but that's only true on one host. Past
@@ -24,7 +24,7 @@ silently reintroduce the per-host fork this feature exists to close.
 Local disk is always written too, Redis or not — the persistent store
 when REDIS_URL is unset, and a fast local mirror / same-instance fallback
 when it's set. Same "missing optional infra degrades rather than breaks"
-convention as `rate_limiter.py`, DATABASE_URL, and SMTP_HOST elsewhere in
+convention as `core/rate_limiter.py`, DATABASE_URL, and SMTP_HOST elsewhere in
 this codebase: a single-host deployment behaves identically with or
 without REDIS_URL set.
 """
@@ -36,7 +36,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from observability import get_logger, log_event
+from core.observability import get_logger, log_event
 
 LOGGER = get_logger("cache")
 
@@ -70,8 +70,8 @@ _redis_client_construction_failed = False
 
 def _get_redis_client():
     """Same lazy-construction, remembered-failure pattern as
-    rate_limiter.py::_get_redis_client() — duplicated rather than imported.
-    cache.py is imported by nearly every other module in this codebase
+    core/rate_limiter.py::_get_redis_client() — duplicated rather than imported.
+    core/cache.py is imported by nearly every other module in this codebase
     (it's the most foundational piece of shared state here), so it
     deliberately doesn't take on a dependency on a sibling module for
     something this small; both modules independently read the same
@@ -101,7 +101,7 @@ def _get_redis_client():
 
 def _warn_redis_failure(event: str, exc: Exception) -> None:
     # Logged every time (not just once) — same reasoning as
-    # rate_limiter.py's own _warn_redis_failure: going quiet after the
+    # core/rate_limiter.py's own _warn_redis_failure: going quiet after the
     # first failure would hide a Redis outage lasting the rest of this
     # process's life, and these should be rare in a healthy deployment.
     log_event(LOGGER, event, level="warning", error=str(exc))
