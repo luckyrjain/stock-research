@@ -141,12 +141,12 @@ stock-research/
 │   │   └── filings_classifier.py       Corporate actions / rating actions / next-results-date extraction
 │   ├── tests/                        unittest-based tests (no live network calls)
 │   ├── tests_live/                   Opt-in (RUN_LIVE_TESTS=1) live scraper contract checks, run weekly
-│   └── output/                       Cache files (gitignored); also where the CLI saves report JSON
+│   ├── state_store.py                Durable JSON state in PostgreSQL (app_state table)
+│   └── output/                       Cache only (gitignored) — every entry regenerable; daily
+│       │                             picks snapshots, LLM spend and telemetry live in app_state
 │       ├── <SYMBOL>/                 Per-symbol task caches
 │       ├── _extract_cache/           LLM extraction cache (6 h TTL)
-│       ├── _history/                 Daily market-picks snapshots (trend tracking, win-rate history)
 │       ├── _market_picks/            Market picks result cache (7-day TTL)
-│       ├── _llm_cost/                Daily running LLM spend total
 │       └── _nse_master.txt           NSE equity symbol master, refreshed every 24 h
 ├── .env.example                  Shared by both stacks; stays at the repo root
 ├── docker-compose.yml
@@ -216,7 +216,7 @@ Once `DATABASE_URL` is set, create the schema via Alembic rather than any pipeli
 
 ```bash
 cd backend
-alembic upgrade head        # fresh database — creates all 21 tables
+alembic upgrade head        # fresh database — creates all 22 tables
 
 # For a database that predates Alembic and has only the original 11 tables, stamp the
 # baseline first, then upgrade. NOT `alembic stamp head` — that would mark the EOD price
@@ -429,7 +429,7 @@ Claude" section.
 - [docs/architecture.md](docs/architecture.md)
 - [docs/deployment.md](docs/deployment.md)
 - [docs/api-reference.md](docs/api-reference.md) — all 57 endpoints: auth, params, status codes, rate limits
-- [docs/database.md](docs/database.md) — all 21 tables: columns, constraints, ownership model, migrations
+- [docs/database.md](docs/database.md) — all 22 tables: columns, constraints, ownership model, migrations
 - [docs/tools.md](docs/tools.md)
 - [docs/output-schema.md](docs/output-schema.md)
 - [docs/design.md](docs/design.md) — AlphaPulse Design System

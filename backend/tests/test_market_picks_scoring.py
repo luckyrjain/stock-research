@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import cache
 import market_picks_pipeline
+from state_store_harness import isolated_state_store
 from market_picks_pipeline import (
     MarketPicksPipeline,
     _apply_sector_balance,
@@ -733,9 +734,9 @@ class PhaseScoreMissingPriceTest(unittest.TestCase):
     entirely rather than surface a non-actionable, misleading pick."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-phase-score-test-")
-        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
-        patch.object(market_picks_pipeline, "_HISTORY_DIR", Path(self._tmpdir)).start()
+        # _phase_score() saves a daily snapshot through state_store — point it
+        # at a throwaway in-memory DB so this test never touches a real one.
+        self.addCleanup(isolated_state_store().close)
         self.addCleanup(patch.stopall)
 
     def test_stock_with_no_price_data_is_excluded_from_final_picks(self) -> None:

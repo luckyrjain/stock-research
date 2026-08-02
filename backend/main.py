@@ -26,7 +26,7 @@ from schemas import normalize as schema_normalize
 from schemas import validate as schema_validate
 from signals.engine import run_signal_engine
 from signals.filings_classifier import classify_filings
-from signals.store import save_signal
+import state_store
 from signals.interpreter import interpret
 from tools.news_tools import get_latest_news
 from tools.nse_tools import get_mf_holdings, get_stock_quote
@@ -37,6 +37,11 @@ from verdict_history import save_snapshot as save_verdict_snapshot
 load_dotenv()
 
 LOGGER = get_logger("main")
+
+# The CLI's own finished report, one record per (SYMBOL, date). Nothing reads
+# it back — it's the CLI equivalent of what api.py streams to the browser, kept
+# so a run's full output survives the terminal scrollback.
+REPORT_NAMESPACE = "cli_report"
 
 
 # ── Tool dispatch ─────────────────────────────────────────────────────────────
@@ -332,7 +337,6 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
 
     signal_result = run_signal_engine(symbol, all_data)
     signal_insight = interpret(signal_result)
-    save_signal(signal_result)
 
     signal_context = {
     "final_score": signal_result.final_score,
@@ -356,12 +360,10 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     mf_holdings_trend = compute_mf_holdings_deltas(symbol)
     report = _build_report(symbol, all_data, analysis, signal_context, mf_holdings_trend)
     save_verdict_snapshot(symbol, analysis, signal_context, all_data.get("stock_info") or {})
-    report_dir = Path("output") / symbol
-    report_dir.mkdir(parents=True, exist_ok=True)
-    report_path = report_dir / f"report_{date.today()}.json"
-    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
-    print(f"\nReport saved to: {report_path}")
-    log_event(LOGGER, "pipeline_completed", run_id=run_id, symbol=symbol, report_path=str(report_path))
+    report_key = f"{symbol.upper()}:{date.today()}"
+    state_store.save(REPORT_NAMESPACE, report_key, report)
+    print(f"\nReport saved as {REPORT_NAMESPACE}/{report_key}")
+    log_event(LOGGER, "pipeline_completed", run_id=run_id, symbol=symbol, report_key=report_key)
 
 
 def _build_report(

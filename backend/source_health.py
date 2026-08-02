@@ -20,26 +20,25 @@ day — this codebase's own documented "expected common case" everywhere
 else in CLAUDE.md, not a source-health anomaly. Applying a volume-anomaly
 heuristic there would just be noise.
 
-State is a small per-source JSON file under output/_source_health/ (same
-"cache" directory convention as everything else in this codebase) holding
-a rolling window of recent per-CALENDAR-DAY ok/not-ok results — no
-database needed for something this lightweight.
+State is one record per source under the `source_health` namespace in
+`state_store.py`, holding a rolling window of recent per-CALENDAR-DAY
+ok/not-ok results.
 
 Two correctness properties that a naive read-modify-write can't provide,
 both addressed below:
 
 - **Concurrency safety**: several callers can race to update the same
-  source's file at once (e.g. market_picks_pipeline.py's _phase_scrape
+  source's record at once (e.g. market_picks_pipeline.py's _phase_scrape
   workers, or several ThreadPoolExecutor workers in signals/macro.py all
   missing the "_MACRO" pseudo-symbol cache at once — see CLAUDE.md's
   "Shared state and queues" section for that exact scenario). A plain
   read-then-write is a classic lost-update race: two callers can both read
   the same prior history, then each write their own updated version, with
-  the second write silently clobbering the first — corrupting the file if
-  the writes interleave, or silently dropping an update (and, worse,
-  resetting the rolling baseline) even when they don't. `_locked()` below
-  makes the whole read-modify-write cycle for one source's file mutually
-  exclusive.
+  the second write silently clobbering the first — silently dropping an
+  update and, worse, resetting the rolling baseline. `state_store.mutate()`
+  makes the whole read-modify-write cycle for one source mutually exclusive
+  under a row lock; this used to be an `fcntl.flock` advisory lock over a
+  JSON file at output/_source_health/, which only ever held within one host.
 - **Time-normalized cadence**: the alert threshold ("N bad runs in a
   row") must mean N bad *days*, not N raw calls — otherwise a burst of
   same-hour force-refresh retries could trip the threshold in minutes,
@@ -48,18 +47,14 @@ both addressed below:
   calendar day collapse into one entry (keeping the latest result for
   that day) rather than each counting as its own data point.
 """
-import json
-import os
-import tempfile
-from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 
+import state_store
 from observability import get_logger, log_event
 
 LOGGER = get_logger("source_health")
 
-_HEALTH_DIR = Path("output/_source_health")
+_NAMESPACE = "source_health"
 _MAX_HISTORY = 20                # distinct days retained per source
 _MIN_HISTORY_FOR_BASELINE = 5    # need this many prior days before alerting —
                                   # a brand-new source with little history
@@ -71,54 +66,10 @@ def _safe_name(source_name: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in source_name).strip("_").lower() or "unknown"
 
 
-def _path(source_name: str) -> Path:
-    return _HEALTH_DIR / f"{_safe_name(source_name)}.json"
-
-
-def _lock_path(source_name: str) -> Path:
-    return _HEALTH_DIR / f".{_safe_name(source_name)}.lock"
-
-
 def _today() -> str:
     """Isolated as its own function purely so tests can patch it to
     simulate distinct calendar days without sleeping in real time."""
     return datetime.now(timezone.utc).date().isoformat()
-
-
-@contextmanager
-def _locked(source_name: str):
-    """Advisory, blocking, cross-process exclusive lock guarding one
-    source's entire read-modify-write cycle. fcntl.flock is POSIX-only —
-    matches this codebase's existing Linux-only deployment assumption
-    (no Windows-specific fallback exists elsewhere in this repo either).
-    Imported lazily so a Windows dev environment can still import this
-    module (e.g. for its pure helpers) without failing at import time."""
-    import fcntl
-
-    _HEALTH_DIR.mkdir(parents=True, exist_ok=True)
-    fd = os.open(_lock_path(source_name), os.O_CREAT | os.O_RDWR)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-
-
-def _atomic_write(path: Path, payload: dict) -> None:
-    """Same tempfile + os.replace convention as cache.py::save() — matters
-    less here than the _locked() wrapper above (which already serializes
-    writers), but keeps a torn/partial write off disk even if something
-    outside this module ever reads the file without taking the lock."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(payload))
-        os.replace(tmp_path, path)
-    except Exception:
-        Path(tmp_path).unlink(missing_ok=True)
-        raise
 
 
 def record_and_check(source_name: str, ok: bool, *, date: str | None = None, **context) -> None:
@@ -137,26 +88,21 @@ def record_and_check(source_name: str, ok: bool, *, date: str | None = None, **c
     threads (one thread's patched return value can leak into another's
     call) in a way an explicit per-call argument isn't."""
     try:
-        with _locked(source_name):
-            path = _path(source_name)
-            prior_days: list[dict] = []
-            prior_ever_healthy = False
-            if path.exists():
-                try:
-                    stored = json.loads(path.read_text())
-                    prior_days = stored.get("days", [])[-_MAX_HISTORY:]
-                    # Missing key (a file written before this field
-                    # existed) falls back to deriving it from whatever
-                    # days are currently stored -- the same signal
-                    # `was_healthy_baseline` used before this fix, just
-                    # persisted from here on instead of re-derived from a
-                    # window that keeps shrinking as old days age out.
-                    prior_ever_healthy = stored.get(
-                        "ever_healthy", any(d.get("ok") for d in prior_days)
-                    )
-                except Exception:
-                    prior_days = []
-                    prior_ever_healthy = False
+        # Stashed by _update() rather than returned, since state_store.mutate()
+        # hands back only the new payload — and the alert decision depends on
+        # the *prior* state, which only _update() ever sees.
+        decision: dict = {}
+
+        def _update(stored: dict) -> dict:
+            prior_days = stored.get("days", [])[-_MAX_HISTORY:]
+            # Missing key (a record written before this field existed) falls
+            # back to deriving it from whatever days are currently stored --
+            # the same signal `was_healthy_baseline` used before this fix,
+            # just persisted from here on instead of re-derived from a window
+            # that keeps shrinking as old days age out.
+            prior_ever_healthy = stored.get(
+                "ever_healthy", any(d.get("ok") for d in prior_days)
+            )
 
             # A source only has an established "should usually have data"
             # baseline once it has enough distinct-day history AND has
@@ -180,22 +126,23 @@ def record_and_check(source_name: str, ok: bool, *, date: str | None = None, **c
                 days = prior_days + [{"date": today, "ok": ok}]
             days = days[-_MAX_HISTORY:]
 
-            ever_healthy = prior_ever_healthy or ok
-
-            _atomic_write(path, {"days": days, "ever_healthy": ever_healthy})
-
             recent = days[-_CONSECUTIVE_FAILURES_TO_ALERT:]
-            should_alert = (
+            decision["alert"] = (
                 was_healthy_baseline
                 and len(recent) == _CONSECUTIVE_FAILURES_TO_ALERT
                 and not any(d.get("ok") for d in recent)
             )
+            return {"days": days, "ever_healthy": prior_ever_healthy or ok}
 
-        # Logging deliberately happens outside the lock — log_event() is
-        # independent I/O (stdout/Sentry) unrelated to this source's file,
-        # and holding the file lock across it would only widen the window
-        # other callers block on for no benefit.
-        if should_alert:
+        state_store.mutate(
+            _NAMESPACE, _safe_name(source_name), _update, {"days": [], "ever_healthy": False},
+        )
+
+        # Logging deliberately happens outside mutate()'s transaction —
+        # log_event() is independent I/O (stdout/Sentry) unrelated to this
+        # source's record, and holding the row lock across it would only
+        # widen the window other callers block on for no benefit.
+        if decision.get("alert"):
             log_event(
                 LOGGER, "source_health_anomaly", level="warning",
                 source=source_name,

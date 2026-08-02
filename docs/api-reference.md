@@ -384,7 +384,7 @@ Two code paths on one handler.
 | **Auth** | None |
 | **Query** | `date` — string, optional, default `null`. Must match `^\d{4}-\d{2}-\d{2}$` |
 | **Rate limit** | `market_picks_history` — 60 / 60 s per IP |
-| **Caching** | Reads `backend/output/_history/*.json` (permanent snapshots). The Nifty benchmark series is cached under the `NSEI` pseudo-symbol, `index_history`, 24 h, coverage-based (a request is served whenever the cached range already *contains* it) |
+| **Caching** | Reads the stored daily snapshots (`app_state`, `market_picks_history` namespace). The Nifty benchmark series is cached under the `NSEI` pseudo-symbol, `index_history`, 24 h, coverage-based (a request is served whenever the cached range already *contains* it) |
 | **Status** | `200` · `404` `"No market-picks snapshot found for <date>"` · `422` malformed `date` · `429` |
 
 **Without `date`** — aggregates every snapshot into `{symbols[], snapshot_count, win_rate,
@@ -458,7 +458,7 @@ Common contract for all five:
 - **Status**: `200` · `422` invalid symbol · `429`. Never 404 — an unknown symbol yields an empty
   payload, not an error.
 - **Failures are never cached.** A `{"error": ...}` from the underlying scraper returns the empty
-  shape and increments a counter in `backend/output/_scraper_error_counters/<name>.json`
+  shape and increments a counter in `app_state`'s `scraper_errors` namespace
   (`scraper_error_counters.record_scraper_error`) with a `warning`-level log line. The next
   request retries.
 - **Multi-section endpoints cache only on full success** (#13, #14) — caching a partial failure

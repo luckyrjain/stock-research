@@ -105,9 +105,9 @@ export default function MarketPicksHistoryPage() {
         <div className="mb-6">
           <h1 className="text-xl font-black tracking-tight text-tx mb-1.5">Pick Track Record</h1>
           <p className="text-muted text-sm max-w-xl leading-relaxed">
-            How past Market Picks have moved since they were first surfaced, built from the daily
-            snapshots in <code className="text-accent/80 text-[11px] bg-accent/8 px-1.5 py-0.5 rounded">output/_history/</code>.
-            Price tracking only started with this snapshot format — older entries show &mdash; until enough new data accumulates.
+            How past Market Picks have moved since they were first surfaced, built from one
+            snapshot per day. Price tracking only started with this snapshot format — older
+            entries show &mdash; until enough new data accumulates.
           </p>
         </div>
 

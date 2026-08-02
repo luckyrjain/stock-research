@@ -3,10 +3,10 @@ CAS PDF Import
 ==============
 Imports a CAMS/KFintech *detailed* CAS PDF into the portfolio tables:
 transactions (meta.source='cas'), holdings (units = closing balance), and
-missing mf assets. Parsed JSON (scrubbed of PII) is archived to
-output/_cas/ for replay:
+missing mf assets. Parsed JSON (scrubbed of PII) is archived under the
+`cas_archive` namespace in state_store.py for replay:
 
-    python cas_import.py --replay output/_cas/<file>.json --account-id N
+    python cas_import.py --replay <key> --account-id N
 """
 
 import copy
@@ -15,6 +15,7 @@ import json
 
 from dotenv import load_dotenv
 
+import state_store
 from observability import get_logger, log_event
 
 load_dotenv()
@@ -186,15 +187,20 @@ def _write_transactions(conn, asset_id: int, folio: str | None,
     return written
 
 
-def archive_parsed(parsed: dict, out_dir: str = "output/_cas") -> str:
-    """Write the scrubbed parse result for later replay. Returns the path."""
-    import os
-    from datetime import datetime
-    os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, datetime.now().strftime("%Y-%m-%d-%H%M%S") + ".json")
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(_scrub(parsed), fh, ensure_ascii=False, indent=1)
-    return path
+ARCHIVE_NAMESPACE = "cas_archive"
+
+
+def archive_parsed(parsed: dict) -> str:
+    """Store the scrubbed parse result for later replay. Returns its key.
+
+    The PDF bytes themselves are never persisted, and `_scrub()` has already
+    stripped PAN/KYC/investor identity — this is the parse output only, kept
+    so an import can be re-run for debugging without re-uploading the
+    statement."""
+    from datetime import datetime, timezone
+    key = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+    state_store.save(ARCHIVE_NAMESPACE, key, _scrub(parsed))
+    return key
 
 
 if __name__ == "__main__":
@@ -202,10 +208,11 @@ if __name__ == "__main__":
     from db.models import get_engine
 
     cli = argparse.ArgumentParser(description="CAS import replay")
-    cli.add_argument("--replay", required=True, metavar="JSON",
-                     help="archived parse JSON from output/_cas/")
+    cli.add_argument("--replay", required=True, metavar="KEY",
+                     help="archived parse key (as returned by archive_parsed)")
     cli.add_argument("--account-id", required=True, type=int)
     args = cli.parse_args()
-    with open(args.replay, encoding="utf-8") as fh:
-        result = import_cas(get_engine(), json.load(fh), args.account_id)
-    print(json.dumps(result, indent=1))
+    archived = state_store.load(ARCHIVE_NAMESPACE, args.replay)
+    if archived is None:
+        raise SystemExit(f"No archived CAS parse found for key {args.replay!r}")
+    print(json.dumps(import_cas(get_engine(), archived, args.account_id), indent=1))

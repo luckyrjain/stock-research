@@ -54,7 +54,7 @@ access to a public `/api/v1/*` surface.
 | [Deployment](deployment.md) | Docker Compose, manual production deployment, scaling caveats |
 | [Architecture](architecture.md) | Request flows, pipeline phases, caching, agent layers, file layout |
 | [API Reference](api-reference.md) | All 57 endpoints — auth, params, request bodies, status codes, rate limits, SSE event streams |
-| [Database](database.md) | All 21 tables — columns, constraints, indexes, ownership model, migrations, retention |
+| [Database](database.md) | All 22 tables — columns, constraints, indexes, ownership model, migrations, retention |
 | [Tools Reference](tools.md) | Data-fetching tools, market picks scrapers, sources, and output shapes |
 | [Output Schema](output-schema.md) | Report JSON structure and response payload shapes (the contract itself lives in the API Reference) |
 | [Design System](design.md) | Colors, typography, spacing, component patterns |
@@ -104,14 +104,10 @@ Open [http://localhost:3000](http://localhost:3000) for stock analysis. The othe
 
 | Path | Contents |
 |---|---|
-| `backend/output/<SYMBOL>/` | Per-symbol task caches and report JSON |
+| `backend/output/<SYMBOL>/` | Per-symbol task caches (plus `<task>_raw.json` debug dumps) |
 | `backend/output/_extract_cache/` | LLM extraction cache for market picks (6 h TTL) |
-| `backend/output/_history/` | Daily pick snapshots for trend tracking |
 | `backend/output/_market_picks/` | Market picks result cache (192 h / 7-day TTL, matching the weekly cron cadence) |
 | `backend/output/_nse_master.txt` | NSE equity symbol master (refreshed every 24 h) |
-| `backend/output/_llm_cost/` | Daily LLM call-cost/token counters |
-| `backend/output/_source_health/`, `backend/output/_scraper_error_counters/` | Scraper freshness/error monitoring |
 | `backend/output/_bhavcopy/` | Raw NSE bhavcopy CSV archive (EOD price store ingestion replay) |
-| `backend/output/_cas/` | Scrubbed CAS-import parse archive (portfolio aggregator, replay) |
-| PostgreSQL (`DATABASE_URL`) | 21 tables — SME signals, screener, watchlist, positions, verdict history, MF-holdings history, accounts/sessions/API keys, EOD price store (securities/prices_daily/mf_nav_daily), corporate actions, and the portfolio aggregator (profiles/accounts/assets/holdings/valuations/transactions) (see [Architecture](architecture.md)) |
+| PostgreSQL (`DATABASE_URL`) | 22 tables — SME signals, screener, watchlist, positions, verdict history, MF-holdings history, accounts/sessions/API keys, EOD price store (securities/prices_daily/mf_nav_daily), corporate actions, the portfolio aggregator (profiles/accounts/assets/holdings/valuations/transactions), and `app_state` (daily pick snapshots, LLM cost counters, source health/quality, scraper error counters, CAS archives, CLI reports) (see [Architecture](architecture.md)) |
 | Redis (`REDIS_URL`, optional) | Shared rate-limit/cache state across multiple backend workers/hosts |

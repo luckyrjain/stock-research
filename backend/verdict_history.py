@@ -6,7 +6,7 @@ already share main._build_report().
 
 Best-effort throughout: a missing DATABASE_URL or a DB hiccup here must never
 break the analysis pipeline itself — failures are logged and swallowed, the
-same convention signals/store.py uses for its own write-only audit trail.
+same convention state_store.py uses for its own telemetry/audit writes.
 """
 import os
 import threading

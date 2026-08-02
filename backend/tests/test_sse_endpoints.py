@@ -78,7 +78,6 @@ class AnalyseSuccessPathTest(unittest.TestCase):
              patch("schemas.normalize", side_effect=lambda name, data: data), \
              patch("schemas.validate", return_value=(True, "")), \
              patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")), \
-             patch("signals.store.save_signal"), \
              patch("crew.run_analysis_with_fallback", return_value=_fake_analysis("TCS")):
             resp = client.get("/api/analyse/TCS")
 
@@ -119,7 +118,6 @@ class AnalyseSuccessPathTest(unittest.TestCase):
              patch("schemas.normalize", side_effect=lambda name, data: data), \
              patch("schemas.validate", return_value=(True, "")), \
              patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")), \
-             patch("signals.store.save_signal"), \
              patch("crew.run_analysis_with_fallback", return_value=_fake_analysis("TCS")), \
              patch("api._release_llm_slot", wraps=api._release_llm_slot) as mock_release:
             resp = client.get("/api/analyse/TCS")
@@ -133,8 +131,7 @@ class AnalyseSuccessPathTest(unittest.TestCase):
              patch("main._fetch_task", return_value={"symbol": "TCS"}), \
              patch("schemas.normalize", side_effect=lambda name, data: data), \
              patch("schemas.validate", return_value=(True, "")), \
-             patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")), \
-             patch("signals.store.save_signal"):
+             patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")):
             resp = client.get("/api/analyse/TCS")
 
         events = _parse_sse(resp.text)
@@ -219,7 +216,6 @@ class AnalysisPersistedDespiteDisconnectTest(unittest.IsolatedAsyncioTestCase):
         patch("schemas.normalize", side_effect=lambda name, data: data).start()
         patch("schemas.validate", return_value=(True, "")).start()
         patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")).start()
-        patch("signals.store.save_signal").start()
         patch("crew.run_analysis_with_fallback", side_effect=_slow_analysis).start()
         patch("verdict_history.save_snapshot").start()
 

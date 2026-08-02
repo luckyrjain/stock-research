@@ -30,8 +30,11 @@ backend/output/TCS/
 ├── financials.json        # 24h — standalone
 ├── insider_activity.json  # 24h — standalone
 ├── street_consensus.json  # 24h — standalone
-└── report_2026-05-06.json
+└── research_raw.json      # pre-normalization debug dump (also shareholding_raw/filings_raw)
 ```
+
+The CLI's finished report is no longer written here — it goes to PostgreSQL, under the
+`cli_report` namespace in `app_state`, keyed `SYMBOL:YYYY-MM-DD` (see the table further down).
 
 `fii_dii_flow` and `macro_context` (both 24h) are cached under a fixed `"_MACRO"` pseudo-symbol
 (market-wide, not per-symbol), and `index_history` (24h) under a `"NSEI"` pseudo-symbol — neither
@@ -49,7 +52,7 @@ Each per-task cache file includes `_meta.fetched_at`:
 }
 ```
 
-The merged `report_<DATE>.json` strips `_meta` from all nested sections, but surfaces each
+The merged report strips `_meta` from all nested sections, but surfaces each
 task's own real fetch timestamp separately via the top-level `data_freshness` field (see below) —
 `generated_at` alone is stamped fresh on every report-assembly call regardless of whether any
 underlying task was actually refetched, so a 7-day-stale `shareholding` table would otherwise
@@ -682,15 +685,22 @@ candidate name) rather than guessing.
 | Path | TTL | Key | Description |
 |---|---|---|---|
 | `backend/output/_extract_cache/<hash>.json` | 6 h | SHA-256 of source name + article titles/URLs | LLM extraction result per source |
-| `backend/output/_history/<YYYY-MM-DD>.json` | Permanent | Date | Daily pick snapshot (symbol, confidence, effective_signal, mention_count, current_price, recommendation) |
 | `backend/output/_nse_master.txt` | 24 h | — | Newline-separated set of valid NSE equity symbols from EQUITY_L.csv |
 | `backend/output/_nifty500_master.json` | 24 h | — | NIFTY 500 constituent list (`{symbol, company_name, industry, isin}[]`) — screener_pipeline.py's universe |
-| `backend/output/_llm_cost/<date>.json` | Daily | Date | Running LLM cost/token counter (`call_count`, `total_cost_usd`, `calls_with_unknown_cost`) |
-| `backend/output/_source_health/<source>.json` | — | Source name | Per-source daily ok/not-ok history for market-picks sources + macro overlay fetches |
-| `backend/output/_scraper_error_counters/<name>.json` | — | Scraper name (`peers`, `financials`, `insider_trades`, `bulk_block_deals`, `trendlyne_articles`, `trendlyne_numeric_consensus`) | Error counter for the standalone per-symbol scrapers |
-| `backend/output/_source_quality/<run_id>.json` | — | Market Picks run id | Per-run source telemetry (yield, syndication-dedup rate, extraction success) for the 20 Market Picks sources |
 | `backend/output/_bhavcopy/<YYYY-MM-DD>.csv` | Permanent | Trade date | Raw NSE bhavcopy archive — EOD price store ingestion replay without re-hitting NSE |
-| `backend/output/_cas/<YYYY-MM-DD-HHMM>.json` | Permanent | Timestamp | PII-scrubbed parsed CAS-statement JSON — replay via (from `backend/`) `python cas_import.py --replay <file> --account-id N` |
+
+Everything under `backend/output/` is regenerable cache. Durable state lives in PostgreSQL, in
+the `app_state` table (`namespace`, `key`, `payload` JSON) — see [Database](database.md):
+
+| Namespace | Key | Payload |
+|---|---|---|
+| `market_picks_history` | `YYYY-MM-DD` | Daily pick snapshot (symbol, confidence, effective_signal, mention_count, current_price, recommendation) |
+| `llm_cost` | UTC date | Running LLM cost/token counter (`call_count`, `total_cost_usd`, `calls_with_unknown_cost`) |
+| `source_health` | Source name | Per-source daily ok/not-ok history for market-picks sources + macro overlay fetches |
+| `scraper_errors` | Scraper name (`peers`, `financials`, `insider_trades`, `bulk_block_deals`, `trendlyne_articles`, `trendlyne_numeric_consensus`) | Error counter for the standalone per-symbol scrapers |
+| `source_quality` | Market Picks run id | Per-run source telemetry (yield, syndication-dedup rate, extraction success) for the 20 Market Picks sources |
+| `cas_archive` | `YYYY-MM-DD-HHMMSS` | PII-scrubbed parsed CAS-statement JSON — replay via (from `backend/`) `python cas_import.py --replay <key> --account-id N` |
+| `cli_report` | `SYMBOL:YYYY-MM-DD` | The CLI's own finished report (`main.py`); nothing reads it back |
 
 ---
 

@@ -264,7 +264,7 @@ something concrete rather than restating them.
 - **`--reset-db` scoping is a convention, not an enforced rule.** Every pipeline now scopes its
   reset to the tables it owns (`sme_ema_pipeline` was the last holdout and has been brought in
   line), but nothing stops a new pipeline from reaching for `metadata.drop_all()` — the shared
-  SQLAlchemy `MetaData()` carries all 21 tables, including six holding non-regenerable personal
+  SQLAlchemy `MetaData()` carries all 22 tables, including six holding non-regenerable personal
   financial data. See `docs/database.md` for the table-ownership map.
 - **`client_id` is a grouping key, not a security boundary** — anyone holding one can read/write
   that browser's anonymous watchlist and positions. The claim endpoints (which reassign rows

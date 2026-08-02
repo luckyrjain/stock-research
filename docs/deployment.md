@@ -10,7 +10,7 @@ running in production rather than `--reload`/`npm run dev`.
 ```bash
 cp .env.example .env   # add at least one LLM provider key
 docker compose up --build
-docker compose exec backend alembic upgrade head   # first run only — creates all 21 tables
+docker compose exec backend alembic upgrade head   # first run only — creates all 22 tables
 ```
 
 This starts four services (`docker-compose.yml`):
@@ -54,9 +54,9 @@ If you need process supervision (auto-restart on crash, log rotation), run it un
 or similar rather than backgrounding it directly. See "Scaling" below before adding `--workers`.
 
 > **The working directory must be `<repo>/backend`, not the repo root.** This is the one thing the
-> backend-directory move can break silently. About seventeen paths — `cache.py`'s
-> `CACHE_DIR = Path("output")`, the LLM cost counters, source-health and scraper-error counters,
-> the NSE/SME/NIFTY-500 master caches, `signals/store.py`'s `signals_data/` — are resolved relative
+> backend-directory move can break silently. A dozen-odd paths — `cache.py`'s
+> `CACHE_DIR = Path("output")`, the market-picks and extraction caches, the bhavcopy archive,
+> the NSE/SME/NIFTY-500 master caches — are resolved relative
 > to the current working directory, not to `__file__`.
 >
 > Start the process from the repo root and it comes up cleanly, serves cleanly, and quietly writes

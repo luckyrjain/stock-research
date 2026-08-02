@@ -44,7 +44,7 @@ Keep to:
 | Redis strictly optional — shared rate-limit/cache state across workers, never a hard dependency | Redis as a queue, cache-of-record, or required infra |
 | `ThreadPoolExecutor` for parallelism | Celery, Kafka, RabbitMQ, SQS, Temporal, any broker |
 | GitHub Actions cron for scheduled jobs | Airflow, Prefect, Dagster |
-| File cache under `backend/output/` — debuggable, inspectable | A caching service |
+| File cache under `backend/output/` — debuggable, inspectable, and **regenerable**; anything durable goes in PostgreSQL (`app_state`) | A caching service; durable state on local disk |
 | Plain deploys (Docker Compose / single host) | Kubernetes, Helm, autoscaling groups |
 | Straightforward CRUD + upserts | Event sourcing, CQRS |
 
@@ -97,6 +97,8 @@ stock-research/
 │   ├── csv_import.py           Broker CSV/XLSX tradebook import (Zerodha preset)
 │   ├── source_quality.py       Per-run Market Picks source-quality telemetry
 │   ├── source_quality_report.py  Aggregation CLI for the above
+│   ├── state_store.py          Durable JSON state (PostgreSQL app_state table) — daily pick
+│   │                           snapshots, telemetry, counters, CAS archives, CLI reports
 │   ├── verdict_history.py      Daily verdict/price snapshots (PostgreSQL) — powers the hero's timeline strip
 │   ├── mf_holdings_history.py  Quarterly MF stake snapshots (PostgreSQL) — powers the stake-delta badges
 │   ├── auth.py                 Magic-link auth: token/session issuance + validation (PostgreSQL)
@@ -134,14 +136,12 @@ stock-research/
 │   ├── signals/                Quantitative signal engine (features → signal scores → verdict)
 │   ├── tests/                  unittest-based tests (no pytest plugins needed)
 │   ├── tests_live/             Opt-in live-network scraper contract checks (see below)
-│   └── output/                 Cache files (gitignored); also where the CLI saves report JSON
-│       ├── <SYMBOL>/           Per-symbol task caches
+│   └── output/                 Cache only — gitignored, and every entry regenerable. Nothing
+│       │                       durable is written here; that all lives in the app_state table
+│       ├── <SYMBOL>/           Per-symbol task caches (+ <task>_raw.json pre-normalization dumps)
 │       ├── _extract_cache/     LLM extraction cache (6 h TTL) — avoids re-calling LLM on re-runs
-│       ├── _history/           Daily pick snapshots (YYYY-MM-DD.json) — powers both the in-pipeline
-│       │                       trend/trend_delta fields and GET /api/market-picks/history (/market-picks/history page)
 │       ├── _market_picks/      Market picks result cache (192 h / 7-day TTL) for the SSE endpoint
 │       ├── _bhavcopy/          Raw NSE bhavcopy archive (EOD price store replay)
-│       ├── _cas/               Scrubbed CAS-import parse archive (PII stripped)
 │       └── _nse_master.txt     NSE equity symbol master, refreshed every 24 h
 ├── .env.example                Shared by both stacks; stays at the repo root (python-dotenv's
 │                               load_dotenv() walks up from backend/ and finds it there)
@@ -196,7 +196,7 @@ whichever one is relevant to the directory you're working in):
 | [`docs/deployment.md`](docs/deployment.md) | Docker Compose, manual deployment, scaling guidance |
 | [`docs/architecture.md`](docs/architecture.md) | System-level request flows and module boundaries |
 | [`docs/api-reference.md`](docs/api-reference.md) | All 57 HTTP endpoints — auth mode, path/query params, request bodies, every status code and its trigger, rate-limit buckets, cache behaviour, SSE event streams |
-| [`docs/database.md`](docs/database.md) | All 21 PostgreSQL tables — columns, constraints, indexes, which code reads/writes each, the dual-ownership model, migrations, retention |
+| [`docs/database.md`](docs/database.md) | All 22 PostgreSQL tables — columns, constraints, indexes, which code reads/writes each, the dual-ownership model, migrations, retention |
 | [`docs/tools.md`](docs/tools.md) | Reference for every data-fetching tool/scraper and its output shape |
 | [`docs/output-schema.md`](docs/output-schema.md) | Response payload shapes and cache-file formats (the request-side contract lives in `api-reference.md`) |
 | [`README.md`](README.md) | Quickstart — install, run, top-level feature summary |

@@ -1,15 +1,14 @@
-"""Aggregates output/_source_quality/*.json into a per-source signal-quality
-report, sorted worst-survival-first.
+"""Aggregates source_quality.py's per-run records into a per-source
+signal-quality report, sorted worst-survival-first.
 
 Usage: python source_quality_report.py --days 14
 """
 
 import argparse
-import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-_DIR = Path("output/_source_quality")
+import state_store
+from source_quality import NAMESPACE
 
 
 def aggregate(days: int, now: datetime | None = None) -> dict[str, dict]:
@@ -17,14 +16,7 @@ def aggregate(days: int, now: datetime | None = None) -> dict[str, dict]:
     cutoff = now - timedelta(days=days)
     totals: dict[str, dict] = {}
 
-    if not _DIR.exists():
-        return totals
-
-    for path in _DIR.glob("*.json"):
-        try:
-            payload = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
+    for _run_id, payload in state_store.items(NAMESPACE):
         try:
             ts = datetime.fromisoformat(payload["timestamp"])
             if ts < cutoff:

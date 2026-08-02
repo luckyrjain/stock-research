@@ -19,97 +19,49 @@ silently maps both "NSE returned nothing today" and "NSE request failed"
 to the same `[]`), which is exactly the "silent layout change degrades
 with no log line to grep for" gap this closes.
 """
-import json
-import os
-import tempfile
-from contextlib import contextmanager
-from pathlib import Path
-
+import state_store
 from observability import get_logger, log_event
 
 LOGGER = get_logger("scraper_error_counters")
 
-_COUNTERS_DIR = Path("output/_scraper_error_counters")
+_NAMESPACE = "scraper_errors"
 
 
 def _safe_name(scraper_name: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in scraper_name).strip("_").lower() or "unknown"
 
 
-def _path(scraper_name: str) -> Path:
-    return _COUNTERS_DIR / f"{_safe_name(scraper_name)}.json"
-
-
-def _lock_path(scraper_name: str) -> Path:
-    return _COUNTERS_DIR / f".{_safe_name(scraper_name)}.lock"
-
-
-@contextmanager
-def _locked(scraper_name: str):
-    """Advisory, blocking, cross-process exclusive lock guarding one
-    scraper's entire read-modify-write cycle — same fcntl.flock-based
-    primitive as source_health.py's own _locked(). An earlier version of
-    this module used only an in-process threading.Lock, reasoning that
-    "per-request-endpoint traffic doesn't need cross-process locking" — a
-    claim about request *volume*, not about whether more than one process
-    actually touches the same counter file. This app's own documented
-    multi-worker/multi-replica deployment topology (see CLAUDE.md's
-    "Shared-state rate limiting" section — the same REDIS_URL-backed
-    scaling story llm_cost.py was patched for after an adversarial-review
-    pass found the identical gap there) means two backend worker processes
-    handling two different requests can race on the *same* scraper's
-    counter file at the same instant, each reading the same prior
-    error_count, both incrementing locally, and the second os.replace()
-    silently clobbering the first — permanently undercounting with no
-    warning logged, undermining the one thing this module exists to get
-    right. fcntl.flock is POSIX-only — matches this codebase's existing
-    Linux-only deployment assumption."""
-    import fcntl
-
-    _COUNTERS_DIR.mkdir(parents=True, exist_ok=True)
-    fd = os.open(_lock_path(scraper_name), os.O_CREAT | os.O_RDWR)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-
-
 def record_scraper_error(scraper_name: str, **context) -> None:
     """Call this at a standalone scraper's call site whenever its result
     carries a top-level "error" key — never for a legitimate empty result.
-    Increments a small persisted counter (call_count/error_count, same
-    tempfile + os.replace atomic-write convention as cache.py::save()) and
-    always logs a warning immediately, unlike source_health.py's "wait for
-    N bad days" threshold — a single error here already means one real
-    user's request degraded, and these are on-demand per-request calls, not
-    a scheduled batch where a single bad run is expected background noise.
-    Never raises — a broken counter file must not break the request it's
-    observing."""
-    try:
-        _COUNTERS_DIR.mkdir(parents=True, exist_ok=True)
-        path = _path(scraper_name)
-        with _locked(scraper_name):
-            data = {"error_count": 0}
-            if path.exists():
-                try:
-                    data = json.loads(path.read_text())
-                except Exception:
-                    data = {"error_count": 0}
-            data["error_count"] = data.get("error_count", 0) + 1
+    Increments a persisted per-scraper counter and always logs a warning
+    immediately, unlike source_health.py's "wait for N bad days" threshold —
+    a single error here already means one real user's request degraded, and
+    these are on-demand per-request calls, not a scheduled batch where a
+    single bad run is expected background noise. Never raises — broken
+    counting must not break the request it's observing.
 
-            fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(json.dumps(data))
-                os.replace(tmp_path, path)
-            except Exception:
-                Path(tmp_path).unlink(missing_ok=True)
-                raise
+    The counter used to be a JSON file guarded by an `fcntl.flock` advisory
+    lock, because two worker processes handling two different requests can
+    race on the *same* scraper's counter, each read the same prior
+    `error_count`, and the second write silently clobber the first —
+    permanently undercounting with no warning logged, undermining the one
+    thing this module exists to get right. `state_store.mutate()` keeps that
+    guarantee with a row lock, which also holds across separate hosts."""
+    try:
+        updated = state_store.mutate(
+            _NAMESPACE, _safe_name(scraper_name),
+            lambda data: {**data, "error_count": data.get("error_count", 0) + 1},
+            {"error_count": 0},
+        )
         log_event(
             LOGGER, "scraper_error", level="warning",
-            scraper=scraper_name, error_count=data["error_count"], **context,
+            scraper=scraper_name,
+            # None when there's no DATABASE_URL to count against — the error
+            # itself still gets its warning line, which is the half of this
+            # that matters most; a guessed count would be worse than none.
+            error_count=(updated or {}).get("error_count"),
+            **context,
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         log_event(LOGGER, "scraper_error_counter_failed", level="warning", scraper=scraper_name, error=str(exc))
@@ -119,10 +71,4 @@ def get_error_count(scraper_name: str) -> int:
     """Non-mutating read — used by tests and available for a future
     ops/status surface. Returns 0 (never guessed) if this scraper has never
     recorded an error."""
-    try:
-        path = _path(scraper_name)
-        if not path.exists():
-            return 0
-        return json.loads(path.read_text()).get("error_count", 0)
-    except Exception:
-        return 0
+    return (state_store.load(_NAMESPACE, _safe_name(scraper_name)) or {}).get("error_count", 0)

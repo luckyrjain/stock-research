@@ -454,6 +454,30 @@ transactions = Table(
 )
 
 
+# Durable JSON state that used to live as one file per record under output/ —
+# market-picks daily snapshots, per-source health/quality telemetry, scraper
+# error and LLM-cost counters, CAS import archives, CLI reports. Every one of
+# those was "a JSON blob at a path", so they share one table keyed by
+# (namespace, key) rather than six near-identical tables. output/ is now
+# strictly a regenerable TTL cache; nothing durable is written there.
+#
+# `JSON`, not `JSONB`, and `CURRENT_TIMESTAMP`, not `NOW()` — same reason the
+# Portfolio Aggregator tables above give: these are exercised against SQLite in
+# tests, and nothing here needs a JSONB-specific operator.
+#
+# The composite primary key also serves every read: `WHERE namespace = ?
+# ORDER BY key` is a prefix scan, so no separate index is needed.
+app_state = Table(
+    "app_state",
+    metadata,
+    Column("namespace",  String(40),  primary_key=True),
+    Column("key",        String(200), primary_key=True),
+    Column("payload",    JSON, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False,
+           server_default=text("CURRENT_TIMESTAMP")),
+)
+
+
 def get_engine(database_url: str | None = None):
     url = database_url or os.environ["DATABASE_URL"]
     return _create_engine(url)

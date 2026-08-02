@@ -1,41 +1,37 @@
-import json
 import multiprocessing
 import shutil
 import tempfile
 import threading
-import time
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import source_health
+import state_store
+from state_store_harness import isolated_state_store, shared_state_store
 
 
-def _mp_record_and_check(health_dir: str, source_name: str, date: str, ok: bool) -> None:
+def _stored(source: str) -> dict:
+    return state_store.load(source_health._NAMESPACE, source_health._safe_name(source)) or {}
+
+
+def _mp_record_and_check(state_dir: str, source_name: str, date: str, ok: bool) -> None:
     """Top-level (picklable) worker for MultiProcessConcurrencySafetyTest —
     see llm_cost's own equivalent worker for why a real OS process, not a
-    thread, is what actually exercises fcntl.flock's cross-process
-    guarantee. Reassigns _HEALTH_DIR directly rather than via
-    unittest.mock.patch for the same reason."""
+    thread, is what actually exercises the cross-process guarantee
+    state_store.mutate()'s row lock provides. Builds its own engine over the
+    parent's SQLite file, since a SQLAlchemy engine is not fork-safe."""
     import source_health as _source_health
 
-    _source_health._HEALTH_DIR = Path(health_dir)
-    _source_health.record_and_check(source_name, ok, date=date)
+    with shared_state_store(state_dir, create=False):
+        _source_health.record_and_check(source_name, ok, date=date)
 
 
 class RecordAndCheckTest(unittest.TestCase):
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-source-health-test-")
-        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
-        self._patch = patch.object(source_health, "_HEALTH_DIR", Path(self._tmpdir))
-        self._patch.start()
-        self.addCleanup(self._patch.stop)
+        self.addCleanup(isolated_state_store().close)
 
     def _history(self, source: str) -> list:
-        path = source_health._path(source)
-        if not path.exists():
-            return []
-        return json.loads(path.read_text())["days"]
+        return _stored(source).get("days", [])
 
     def _oks(self, source: str) -> list:
         return [d["ok"] for d in self._history(source)]
@@ -162,16 +158,15 @@ class RecordAndCheckTest(unittest.TestCase):
         past_window_alerts = [i for i in fired_on if i >= healthy_days + source_health._MAX_HISTORY]
         self.assertTrue(past_window_alerts, f"no alert fired past the rolling window; fired_on={fired_on}")
 
-    def test_ever_healthy_flag_persists_across_reads_of_an_old_format_file(self) -> None:
-        # A file written before the `ever_healthy` field existed must still
+    def test_ever_healthy_flag_persists_across_reads_of_an_old_format_record(self) -> None:
+        # A record written before the `ever_healthy` field existed must still
         # correctly derive it (from whatever days are currently stored) on
         # the first read after this fix ships, rather than treating a
         # genuinely-healthy-before source as if it never had a baseline.
-        path = source_health._path("Legacy Source")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"days": [
-            {"date": f"2026-01-0{i}", "ok": True} for i in range(1, 6)
-        ]}))  # no "ever_healthy" key at all
+        state_store.save(
+            source_health._NAMESPACE, source_health._safe_name("Legacy Source"),
+            {"days": [{"date": f"2026-01-0{i}", "ok": True} for i in range(1, 6)]},  # no "ever_healthy" key
+        )
         with patch("source_health.log_event") as mock_log:
             self._record_on_days("Legacy Source", [(f"2026-01-0{i}", False) for i in range(6, 9)])
         mock_log.assert_called_once()  # still correctly alerts on 3 consecutive failures
@@ -187,18 +182,18 @@ class RecordAndCheckTest(unittest.TestCase):
             source_health.record_and_check("Motilal Oswal / ICICI Direct / Axis Securities", True)
         # No exception is the assertion here.
 
-    def test_corrupt_history_file_is_treated_as_empty_not_fatal(self) -> None:
-        path = source_health._path("Bad File Source")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("not json")
+    def test_record_missing_the_days_key_is_treated_as_empty_not_fatal(self) -> None:
+        # The stored-JSON equivalent of the old "corrupt file" case: a
+        # payload that isn't the shape this module expects must degrade to
+        # "no history yet", not raise.
+        state_store.save(source_health._NAMESPACE, source_health._safe_name("Bad Record Source"), {})
         with patch("source_health.log_event") as mock_log:
-            source_health.record_and_check("Bad File Source", True)
-        self.assertEqual(len(self._oks("Bad File Source")), 1)
+            source_health.record_and_check("Bad Record Source", True)
+        self.assertEqual(len(self._oks("Bad Record Source")), 1)
         mock_log.assert_not_called()
 
-    def test_never_raises_even_if_health_dir_is_unwritable(self) -> None:
-        with patch.object(source_health, "_HEALTH_DIR", Path("/nonexistent/root/that/cannot/be/created/at/all")), \
-             patch("pathlib.Path.mkdir", side_effect=PermissionError("nope")):
+    def test_never_raises_even_if_the_state_store_is_broken(self) -> None:
+        with patch("state_store._get_engine", side_effect=RuntimeError("db down")):
             try:
                 source_health.record_and_check("Any Source", True)
             except Exception as exc:  # pragma: no cover - the assertion IS that this doesn't happen
@@ -207,47 +202,18 @@ class RecordAndCheckTest(unittest.TestCase):
 
 class ConcurrencySafetyTest(unittest.TestCase):
     """Regression coverage for the reproduced concurrent-writer race: two
-    callers racing to update the same source's file must not corrupt the
-    JSON on disk, and must not silently lose one caller's update."""
+    callers racing to update the same source must not corrupt the stored
+    record, and must not silently lose one caller's update.
+
+    File-backed, not in-memory: StaticPool would hand every thread the same
+    DBAPI connection, which can't hold concurrent transactions at all."""
 
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-source-health-lock-test-")
         self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
-        self._patch = patch.object(source_health, "_HEALTH_DIR", Path(self._tmpdir))
-        self._patch.start()
-        self.addCleanup(self._patch.stop)
+        self.addCleanup(shared_state_store(self._tmpdir).close)
 
-    def test_locked_excludes_concurrent_holders(self) -> None:
-        """Two threads racing for the same source's lock must never hold
-        it at the same time — the property the old unlocked
-        read-modify-write violated."""
-        intervals = []
-        lock_guard = threading.Lock()
-
-        def hold_and_record(label: str) -> None:
-            with source_health._locked("Same Source"):
-                start = time.monotonic()
-                time.sleep(0.05)
-                end = time.monotonic()
-            with lock_guard:
-                intervals.append((label, start, end))
-
-        threads = [threading.Thread(target=hold_and_record, args=(f"t{i}",)) for i in range(4)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        self.assertEqual(len(intervals), 4)
-        intervals.sort(key=lambda x: x[1])
-        for (_, _, end_a), (_, start_b, _) in zip(intervals, intervals[1:]):
-            self.assertLessEqual(end_a, start_b)  # no overlap between consecutive holders
-
-    def test_concurrent_record_and_check_never_corrupts_the_file(self) -> None:
-        """Many threads hammering record_and_check for the same source
-        concurrently must always leave valid, parseable JSON on disk —
-        the old unlocked version could interleave two writers' output
-        into invalid JSON."""
+    def test_concurrent_record_and_check_never_corrupts_the_record(self) -> None:
         errors = []
 
         def worker(i: int) -> None:
@@ -263,9 +229,7 @@ class ConcurrencySafetyTest(unittest.TestCase):
             t.join()
 
         self.assertEqual(errors, [])
-        path = source_health._path("Hammered Source")
-        data = json.loads(path.read_text())  # raises if corrupted
-        self.assertIn("days", data)
+        self.assertIn("days", _stored("Hammered Source"))
 
     def test_concurrent_calls_on_distinct_days_lose_no_updates(self) -> None:
         """Simulates several worker threads each recording a DIFFERENT
@@ -283,24 +247,22 @@ class ConcurrencySafetyTest(unittest.TestCase):
         for t in threads:
             t.join()
 
-        path = source_health._path("Backfilled Source")
-        recorded_dates = {d["date"] for d in json.loads(path.read_text())["days"]}
+        recorded_dates = {d["date"] for d in _stored("Backfilled Source")["days"]}
         self.assertEqual(recorded_dates, set(dates))
 
 
 class MultiProcessConcurrencySafetyTest(unittest.TestCase):
-    """The gap ConcurrencySafetyTest's own tests don't cover: they only
-    spawn threads within one process, proving the file-level lock
-    serializes correctly in-process — but the bug _locked() actually
+    """The gap ConcurrencySafetyTest's own tests don't cover: they only spawn
+    threads within one process. The race this module's locking actually
     targets is two separate *processes* (several market_picks_pipeline.py
-    worker processes, or several backend API workers) racing to update the
-    same source's file, which a plain threading.Lock cannot prevent at
-    all. This spawns real OS processes (multiprocessing, fork start
-    method) to exercise fcntl.flock's actual cross-process guarantee."""
+    workers, or several backend API workers) contending for the same source's
+    record, which a plain threading.Lock cannot prevent at all. This spawns
+    real OS processes."""
 
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-source-health-mp-test-")
         self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        self.addCleanup(shared_state_store(self._tmpdir).close)
 
     def test_concurrent_processes_on_distinct_days_lose_no_updates(self) -> None:
         ctx = multiprocessing.get_context("fork")
@@ -312,12 +274,10 @@ class MultiProcessConcurrencySafetyTest(unittest.TestCase):
         for p in procs:
             p.start()
         for p in procs:
-            p.join(timeout=30)
+            p.join(timeout=60)
             self.assertEqual(p.exitcode, 0)
 
-        with patch.object(source_health, "_HEALTH_DIR", Path(self._tmpdir)):
-            path = source_health._path("MP Source")
-        recorded_dates = {d["date"] for d in json.loads(path.read_text())["days"]}
+        recorded_dates = {d["date"] for d in _stored("MP Source")["days"]}
         self.assertEqual(recorded_dates, set(dates))
 
 

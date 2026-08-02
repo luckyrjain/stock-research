@@ -330,7 +330,7 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
             "scheme": "Test Fund", "rta": "CAMS", "transactions": [],
         }]}]}
         with patch("cas_import.parse_cas", return_value=parsed), \
-             patch("cas_import.archive_parsed", return_value="output/_cas/fake.json"):
+             patch("cas_import.archive_parsed", return_value="2026-08-02-120000"):
             resp = client.post(
                 "/api/portfolio/import-cas",
                 files={"file": ("cas.pdf", b"fake", "application/pdf")},

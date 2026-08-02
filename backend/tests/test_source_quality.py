@@ -1,57 +1,44 @@
-import json
 import unittest
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import market_picks_pipeline as mpp
 import source_quality as sq
+import state_store
+from state_store_harness import isolated_state_store
 
 
 class RecordRunTest(unittest.TestCase):
-    def test_writes_expected_json_shape(self) -> None:
-        with TemporaryDirectory() as tmp:
-            orig_dir = sq._DIR
-            sq._DIR = Path(tmp) / "_source_quality"
-            try:
-                sq.record_run(
-                    "abc123",
-                    {
-                        "ET Markets": {"articles_fetched": 12, "picks_extracted": 4, "picks_validated": 3},
-                        "GNews — Financial Express": {"articles_fetched": 8, "picks_extracted": 1, "picks_validated": 0},
-                    },
-                )
-                files = list(sq._DIR.glob("*.json"))
-                self.assertEqual(len(files), 1)
-                self.assertEqual(files[0].name, "abc123.json")
-                data = json.loads(files[0].read_text())
-                self.assertEqual(data["run_id"], "abc123")
-                self.assertIn("timestamp", data)
-                self.assertEqual(
-                    data["sources"]["ET Markets"],
-                    {"articles_fetched": 12, "picks_extracted": 4, "picks_validated": 3},
-                )
-                self.assertEqual(
-                    data["sources"]["GNews — Financial Express"],
-                    {"articles_fetched": 8, "picks_extracted": 1, "picks_validated": 0},
-                )
-            finally:
-                sq._DIR = orig_dir
+    def setUp(self) -> None:
+        self.addCleanup(isolated_state_store().close)
+
+    def test_stores_expected_shape_under_the_run_id(self) -> None:
+        sq.record_run(
+            "abc123",
+            {
+                "ET Markets": {"articles_fetched": 12, "picks_extracted": 4, "picks_validated": 3},
+                "GNews — Financial Express": {"articles_fetched": 8, "picks_extracted": 1, "picks_validated": 0},
+            },
+        )
+        stored = state_store.items(sq.NAMESPACE)
+        self.assertEqual([key for key, _ in stored], ["abc123"])
+        data = stored[0][1]
+        self.assertEqual(data["run_id"], "abc123")
+        self.assertIn("timestamp", data)
+        self.assertEqual(
+            data["sources"]["ET Markets"],
+            {"articles_fetched": 12, "picks_extracted": 4, "picks_validated": 3},
+        )
+        self.assertEqual(
+            data["sources"]["GNews — Financial Express"],
+            {"articles_fetched": 8, "picks_extracted": 1, "picks_validated": 0},
+        )
 
     def test_swallows_write_failure(self) -> None:
-        with TemporaryDirectory() as tmp:
-            # Point _DIR at a path that already exists as a *file*, so
-            # `_DIR.mkdir(parents=True, exist_ok=True)` raises FileExistsError/NotADirectoryError.
-            blocker = Path(tmp) / "blocker"
-            blocker.write_text("not a directory")
-            orig_dir = sq._DIR
-            sq._DIR = blocker / "_source_quality"
+        with patch("state_store._get_engine", side_effect=RuntimeError("db down")):
             try:
                 sq.record_run("xyz789", {"ET Markets": {"articles_fetched": 1, "picks_extracted": 0, "picks_validated": 0}})
             except Exception as exc:  # pragma: no cover - test fails via assertion below, not exception
                 self.fail(f"record_run raised: {exc}")
-            finally:
-                sq._DIR = orig_dir
 
 
 class AggregateSourceStatsTest(unittest.TestCase):

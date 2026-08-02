@@ -9,7 +9,6 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from dotenv import load_dotenv
 from error_tracking import init_error_tracking
@@ -28,9 +27,11 @@ load_dotenv()
 # read/write the exact same cache — re-exported here under the historical
 # names so existing call sites (and test patches targeting api._load_picks_cache
 # / api._save_picks_cache) keep working unchanged.
+from market_picks_pipeline import HISTORY_NAMESPACE as _PICKS_HISTORY_NS
 from market_picks_pipeline import load_picks_cache as _load_picks_cache
 from market_picks_pipeline import save_picks_cache as _save_picks_cache
 import rate_limiter
+import state_store
 # Re-exported under their original names since this file (and its existing
 # tests) call them as api._compute_peer_percentiles / api._compute_valuation_anchor —
 # see peer_analytics.py's own docstring for why the math itself lives there.
@@ -649,7 +650,6 @@ async def analyse(symbol: str, request: Request, force: bool = False):
             from mf_holdings_history import compute_stake_deltas as compute_mf_holdings_deltas
             from schemas import normalize as schema_normalize, validate as schema_validate
             from signals.engine import run_signal_engine
-            from signals.store import save_signal
             from verdict_history import save_snapshot as save_verdict_snapshot
 
             # ── Determine what needs fetching ─────────────────────────────
@@ -708,7 +708,6 @@ async def analyse(symbol: str, request: Request, force: bool = False):
             # technical signal — must not run directly on the event loop.
             signal_result = await loop.run_in_executor(None, run_signal_engine, sym, all_data)
             signal_insight = interpret(signal_result)
-            save_signal(signal_result)
             signal_context = {
                 "final_score": signal_result.final_score,
                 "verdict": signal_result.verdict,
@@ -1056,8 +1055,6 @@ async def get_market_picks_status(request: Request):
     }
 
 
-_PICKS_HISTORY_DIR = Path("output/_history")
-
 
 def _fetch_nifty_closes(start_date: str, end_date: str) -> dict[str, float]:
     """^NSEI daily closes covering [start_date, end_date], keyed by ISO date.
@@ -1140,7 +1137,7 @@ def _nifty_close_on_or_before(closes: dict[str, float], date_str: str) -> float 
 
 @app.get("/api/market-picks/history")
 async def get_market_picks_history(request: Request, date: str | None = Query(None)):
-    """Aggregate output/_history/<date>.json daily snapshots into a per-symbol
+    """Aggregate market_picks_pipeline's stored daily snapshots into a per-symbol
     track record: first/last seen, confidence trend, and price performance
     since first seen, benchmarked against the Nifty50 over the same window.
     Price/recommendation were only added to the snapshot schema recently —
@@ -1161,12 +1158,8 @@ async def get_market_picks_history(request: Request, date: str | None = Query(No
             raise HTTPException(status_code=422, detail="date must be in YYYY-MM-DD format")
 
         def _load_day_sync() -> dict | None:
-            path = _PICKS_HISTORY_DIR / f"{date}.json"
-            if not path.exists():
-                return None
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
+            data = state_store.load(_PICKS_HISTORY_NS, date)
+            if data is None:
                 return None
             return {"date": data.get("date", date), "picks": data.get("picks", [])}
 
@@ -1182,7 +1175,8 @@ async def get_market_picks_history(request: Request, date: str | None = Query(No
             "win_rate": None, "tier_stats": {}, "avg_alpha_pct": None,
             "available_dates": [],
         }
-        if not _PICKS_HISTORY_DIR.exists():
+        snapshots = state_store.items(_PICKS_HISTORY_NS)
+        if not snapshots:
             return empty
 
         by_symbol: dict[str, list[dict]] = {}
@@ -1190,21 +1184,23 @@ async def get_market_picks_history(request: Request, date: str | None = Query(No
         min_date: str | None = None
         max_date: str | None = None
         available_dates: list[str] = []
-        for path in sorted(_PICKS_HISTORY_DIR.glob("*.json")):
+        for key, data in snapshots:
+            # One stored snapshot that isn't the expected shape must not take
+            # down the whole endpoint — same "skip it and carry on" guarantee
+            # the file-based version got from its json.loads try/except, which
+            # a JSON column makes unreachable for its original cause (bad
+            # bytes on disk) but not for a wrong-shaped payload.
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
+                date_str = data.get("date", key)
+                rows = [r for r in data.get("picks", []) if r.get("symbol")]
             except Exception:
                 continue
-            date_str = data.get("date", path.stem)
             snapshot_count += 1
             available_dates.append(date_str)
             min_date = date_str if min_date is None else min(min_date, date_str)
             max_date = date_str if max_date is None else max(max_date, date_str)
-            for row in data.get("picks", []):
-                sym = row.get("symbol")
-                if not sym:
-                    continue
-                by_symbol.setdefault(sym, []).append({**row, "date": date_str})
+            for row in rows:
+                by_symbol.setdefault(row["symbol"], []).append({**row, "date": date_str})
 
         if not by_symbol:
             return {**empty, "snapshot_count": snapshot_count, "available_dates": available_dates}
