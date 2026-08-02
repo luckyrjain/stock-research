@@ -19,3 +19,5 @@ frontend/tsconfig.tsbuildinfo
 # Playwright
 frontend/test-results/
 frontend/playwright-report/
+.superpower*
+graph*/*
