@@ -61,6 +61,17 @@ for a structured verdict — all streamed to the browser over Server-Sent Events
 - **Magic-link accounts** — passwordless sign-in ties watchlist/positions to an account instead of
   an anonymous per-browser id.
 
+## Screenshots
+
+Captured from a running instance — a fresh local install looks like this before any batch
+pipeline has populated data or an LLM key is configured (a HOLD-fallback verdict, disclosed as
+such, stands in for a real analyst call when no provider key is set).
+
+| | |
+|---|---|
+| ![Home](docs/screenshots/home.png) Home — enter a ticker, or jump into Market Picks / SME Signals | ![Market Picks](docs/screenshots/market-picks.png) Market Picks — the built-in sample card shown before the first weekly scan runs |
+| ![Stock analysis in progress](docs/screenshots/analysis-progress.png) Stock Analysis — six data slices streamed live over SSE | ![Screener](docs/screenshots/screener.png) Screener — NIFTY 500, filterable by industry/P-E/market cap/RSI-EMA trend |
+
 ## Architecture
 
 ```text
