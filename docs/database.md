@@ -540,9 +540,11 @@ API endpoint or frontend surface reads these directly; the only in-app consumers
 - Composite PK `(scheme_code, nav_date)`. No secondary indexes.
 - Deliberately **not** a wholesale copy of AMFI's ~40k schemes: `_held_scheme_codes()` restricts
   ingestion to `SELECT DISTINCT symbol FROM assets WHERE type = 'mf' AND archived = FALSE AND symbol
-  IS NOT NULL`. That query degrades to an empty set (logged as `eod_nav_skipped`, never raised) if
-  `assets` is unreachable or simply has no MF assets yet — so NAV ingestion is a no-op on a fresh
-  install and activates by itself once someone adds an MF asset or imports a CAS PDF.
+  IS NOT NULL`. That query degrades to an empty set, never raising, in two distinguishable cases —
+  they log different events, which matters when grepping: `assets` unreachable logs
+  `eod_held_schemes_failed` (`eod_prices_pipeline.py:210`); no MF assets logs `eod_nav_skipped`
+  (`:228`). Either way NAV ingestion is a no-op on a fresh install and activates by itself once
+  someone adds an MF asset or imports a CAS PDF.
 - **Writes:** `eod_prices_pipeline` — `INSERT ... ON CONFLICT (scheme_code, nav_date) DO UPDATE`,
   from AMFI's daily `NAVAll.txt` plus `api.mfapi.in`'s per-scheme history for backfilling a
   newly-tracked scheme.
@@ -832,9 +834,15 @@ never alters or drops) and is what makes `stamp_alembic_head()` correct to call 
 `eod_prices_pipeline.py --setup-db` is scoped to its own three tables.
 
 > Historical note: `sme_ema_pipeline.py --reset-db` originally *did* call `metadata.drop_all()` and
-> silently wiped accounts, sessions, and watchlists along with its own two tables. It has been fixed.
-> The root-level `CLAUDE.md` still carries the old disclosed-limitation text for it — that text is
-> stale; the code is correct.
+> silently wiped accounts, sessions, and watchlists along with its own two tables. Both the code and
+> the docs describing it have been corrected; the rule is now stated as a binding constraint in the
+> root `CLAUDE.md` and in `backend/CLAUDE.md`'s "Important Rules for Claude".
+
+`corporate_actions_pipeline.py --setup-db` creates `corporate_actions` but does **not** call
+`stamp_alembic_head()`, unlike the other three `--setup-db` commands. Harmless in the normal
+order (an earlier pipeline's setup will already have stamped), but it is the same drift vector
+that helper exists to prevent — a database whose *only* setup call was this one ends up with the
+table and no `alembic_version` row.
 
 ---
 
@@ -879,10 +887,12 @@ endpoint whose entire purpose is the database should say so.
 | `/api/watchlist*`, `/api/positions*` | **503** `"DATABASE_URL not configured."` via `routes/_shared.py::run_owned_db_call()`. |
 | `/api/sme-signals*` | **503** `"DATABASE_URL not configured. Run the SME pipeline first."` |
 | `/api/screener*` | **503** `"DATABASE_URL not configured. Run the screener pipeline first."` |
-| `/api/auth/*`, `/api/api-keys*` | **503.** No accounts, no sessions, no API keys. |
-| `/api/portfolio/profiles|accounts|assets|networth|xirr` | **503.** |
+| `POST /api/auth/request-link`, `GET /api/auth/verify` | **503.** These are the only two auth endpoints that return 503. |
+| `GET /api/auth/me`, `/api/api-keys*` | **401** `"Not signed in."` — the DB check is folded into the same guard as the missing-token check (`api.py:2596`, `_require_session_user`), so an unconfigured DB is indistinguishable from being signed out. |
+| `POST /api/auth/logout` | **200** `{"ok": true}`. Deliberate: logout is best-effort, and with no DB there is no session row to delete. |
+| `/api/portfolio/profiles\|accounts\|assets\|networth\|xirr` | **503.** |
 | `/api/portfolio/concentration` | **503** (it reads `positions`). |
-| `/api/v1/consolidated/{symbol}` | **503** — API-key auth needs the DB even though the payload itself does not. |
+| `/api/v1/consolidated/{symbol}` | **401** `"Missing or invalid X-API-Key header."` — not 503. `_require_api_key_user()` checks `DATABASE_URL` in the same condition as the missing-key check (`api.py:2740`), so a caller cannot distinguish an unconfigured server from a bad key. |
 | `sme_ema_pipeline.py` / `screener_pipeline.py` / `eod_prices_pipeline.py` / `watchlist_alerts.py` | **Fail loudly** and exit non-zero. Unattended cron jobs must not "succeed" with nothing written. |
 | Alembic | Unusable — `migrations/env.py` reads the same env var. |
 

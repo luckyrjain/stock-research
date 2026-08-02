@@ -27,8 +27,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <ServiceWorkerRegistration />
         {children}
         {/* Rendered at full `muted` (6.12:1 on bg), not the /50 it used to be
-            (2.41:1). A disclaimer is only worth anything if it is legible —
-            this was the least readable text in the product. */}
+            (2.06:1 with the old #6b7fa8 token). A disclaimer is only worth
+            anything if it is legible — this was the least readable text in
+            the product. */}
         <footer className="max-w-6xl mx-auto px-6 py-6 text-[11px] text-muted text-center">
           AlphaPulse is <strong className="font-semibold">not registered with SEBI</strong> as a
           Research Analyst or Investment Adviser. It generates recommendations with AI models from

@@ -406,7 +406,7 @@ to `null` rather than failing the request.
 | | |
 |---|---|
 | **Auth** | None |
-| **Query** | `symbols` — string, **required**. Comma-separated. Each entry is uppercased and matched against `_TICKER_RE`; **non-matching entries are silently dropped**, and the surviving list is truncated to **50** |
+| **Query** | `symbols` — string, **required**. Comma-separated. Each entry is matched against `_TICKER_RE` **before** being uppercased, then uppercased (`api.py:1328`); **non-matching entries are silently dropped**, and the surviving list is truncated to **50**. Note the ordering: `_TICKER_RE` is `^[A-Z0-9&\-]{1,20}$` and case-sensitive, so **lowercase input is silently dropped here**, unlike every other `_TICKER_RE` call site, which uppercases first (see `routes/watchlist.py:123-127`, which carries a comment about exactly this). `?symbols=tcs` returns nothing for that symbol |
 | **Rate limit** | `prices` — 30 / 60 s per IP (tightest of the read endpoints: up to 50 yfinance calls per request) |
 | **Caching** | None — live `yfinance.fast_info` per symbol, fanned out concurrently |
 | **Status** | `200` · `422` `symbols` omitted entirely · `429` |
@@ -1038,11 +1038,10 @@ Three cross-field rules, all `422`: `units`/`avg_cost` only apply to `mf` and `s
 `units`/`avg_cost` on a non-`mf`/`stock` asset, or `avg_cost` with no existing holding and no
 `units` supplied.
 
-> `archived: false` is unsettable through this endpoint. The filter is `if v is not None`, but
-> `model_dump()` yields `False` for an explicit `archived: false`, which *does* pass that filter
-> — so un-archiving works, while `archived: null`/omitted is the no-change case. Worth stating
-> because the same filter applied to `name`/`symbol` genuinely does block clearing them to
-> `null`.
+> **`archived: false` IS settable** — un-archiving works. The filter is `if v is not None`, and
+> `False is not None`, so an explicit `archived: false` passes it; `archived: null`/omitted is the
+> no-change case. Worth stating because the same filter applied to `name`/`symbol` genuinely does
+> block clearing those to `null`.
 
 **`DELETE /api/portfolio/assets/{asset_id}`** — 50. Path `asset_id: int`. Cascades in one
 transaction: deletes the asset's `valuations`, `holdings`, and `transactions`, then the asset.
@@ -1107,9 +1106,16 @@ file. Read-only — no DB write, despite using the `portfolio_agg_write` rate-li
 | `account_id` | form int | yes |
 | `broker` | form string | yes |
 
-`mapping` must be valid JSON (`422 "mapping must be a JSON object"`) and must supply all five
-required target fields — `date`, `symbol`, `side`, `quantity`, `price` — or `422 "mapping
-missing required field(s): [...]"`. `amount` and `isin` are optional.
+`mapping` must be valid JSON and must supply all five required target fields — `date`, `symbol`,
+`side`, `quantity`, `price` — or `422 "mapping missing required field(s): [...]"`. `amount` and
+`isin` are optional.
+
+> **Known gap:** the `422 "mapping must be a JSON object"` guard only catches
+> `JSONDecodeError`/`TypeError` (`routes/portfolio_aggregator.py:465-468`), i.e. genuinely
+> unparseable input. A *valid* JSON non-object — `mapping=5`, `mapping=[]` — parses cleanly, then
+> `mapping_dict.get(f)` on the next line raises `AttributeError` **outside** the `_sync` wrapper,
+> so it surfaces as an unhandled **500**, not the 422 the message implies. The fix is an
+> `isinstance(mapping_dict, dict)` check alongside the existing except clause.
 
 `200 {"rows", "imported", "duplicates", "skipped", "assets_created", "assets_matched",
 "warnings"}` · `422` unparseable file · `404` unknown `account_id`.

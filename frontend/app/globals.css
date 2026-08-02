@@ -33,11 +33,17 @@ body {
    Components must NOT re-declare their own focus outline — override here.
    An element that needs a different treatment (e.g. an inset ring inside a
    scroll container) should say so explicitly with its own :focus-visible
-   rule, not by disabling this one. */
+   rule, not by disabling this one.
+
+   Deliberately NO `border-radius` here: that styles the *element*, not the
+   outline, and this rule sits after `@tailwind utilities` — so at equal
+   (0,1,0) specificity it wins the source-order tiebreak against every
+   `rounded-*` class and squares off ~217 rounded elements the instant they
+   receive focus. Browsers already draw the outline following the element's
+   own radius, so it buys nothing even where it wouldn't hurt. */
 :focus-visible {
   outline: 2px solid #4d7fff;
   outline-offset: 2px;
-  border-radius: 2px;
 }
 
 /* Scrollbar */

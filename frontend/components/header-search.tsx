@@ -36,7 +36,7 @@ export default function HeaderSearch() {
           spellCheck={false}
           className="w-36 sm:w-56 bg-surface border border-border rounded-lg
                      px-3 py-1.5 text-xs font-mono uppercase tracking-wide
-                     text-tx placeholder:text-muted placeholder:normal-case placeholder:font-sans placeholder:tracking-normal
+                     text-tx placeholder:text-muted/50 placeholder:normal-case placeholder:font-sans placeholder:tracking-normal
                      outline-none focus:border-accent transition-colors"
         />
       </form>

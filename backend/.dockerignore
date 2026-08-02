@@ -1,14 +1,29 @@
-.git/
-.github/
-frontend/
+# Build context is ./backend (see docker-compose.yml), so every path here is
+# relative to backend/ — not the repo root. .git/, .github/, frontend/ and
+# docs/ live above the context and are already excluded by virtue of that;
+# listing them would be dead weight. Likewise .env/.env.example live at the
+# repo root and never enter the image — env arrives at runtime via compose's
+# `env_file:`.
+
+# Runtime cache and local audit trail — regenerable, and output/ alone is
+# ~170 MB. Excluding these is what keeps `COPY . .` fast.
 output/
-docs/
-*.md
-.env
-.env.*
-!.env.example
+signals_data/
+
+# Tests aren't run inside the production image (CI runs them on the runner),
+# and tests_live/ makes real outbound calls — neither belongs in a deployed
+# artifact.
+tests/
+tests_live/
+
+# Local virtualenvs — the image installs from requirements.txt.
 .venv/
 venv/
+
+# Python build artifacts
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Docs that happen to sit inside backend/ (CLAUDE.md)
+*.md

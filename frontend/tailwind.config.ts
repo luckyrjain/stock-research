@@ -27,8 +27,16 @@ const config: Config = {
         // arbitrary value can't read `theme.colors.accent` — the one previous
         // inline use hardcoded #6c71f0, a retired accent, and silently rotted
         // when the palette moved to #4d7fff.
-        accent:      '0 4px 24px #4d7fff40',
-        'accent-lg': '0 6px 28px #4d7fff60',
+        //
+        // Named `accent-glow`, NOT `accent`: a boxShadow key that collides with
+        // a colors key makes Tailwind emit `.shadow-accent` twice — once as the
+        // shadow and once as a `boxShadowColor` utility setting
+        // `--tw-shadow-color`. The second wins, dropping the `40` alpha, so the
+        // glow rendered at full opacity at rest and *dimmed* on hover (37.6%),
+        // inverting the interaction. `-lg` escaped this only because it isn't
+        // also a color name.
+        'accent-glow':    '0 4px 24px #4d7fff40',
+        'accent-glow-lg': '0 6px 28px #4d7fff60',
       },
       fontFamily: {
         sans: ['var(--font-sans)', 'system-ui', 'sans-serif'],

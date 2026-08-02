@@ -2110,7 +2110,8 @@ and no real migration tool is exactly the setup that produced `sme_ema_pipeline.
 own documented mistake (dropping every table via the shared `MetaData()` object, not just its
 own, because nothing enforced a narrower blast radius).
 
-1. `alembic.ini` + `migrations/env.py` are configured at the repo root — `migrations/env.py`
+1. `alembic.ini` + `migrations/` live in `backend/`, and every alembic command runs from there —
+   `migrations/env.py`
    imports `db.models.metadata` directly as `target_metadata` (the same SQLAlchemy Core
    `MetaData()` object every table already declares against), so `alembic revision
    --autogenerate` diffs a live database against the exact same table definitions this app's

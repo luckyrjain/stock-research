@@ -100,7 +100,7 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
             aria-describedby={suggestionsId}
             className={`w-full pr-12 bg-card border-2 rounded-xl
               font-mono font-bold tracking-[2px] uppercase
-              text-tx placeholder:text-muted placeholder:font-normal placeholder:tracking-normal
+              text-tx placeholder:text-muted/50 placeholder:font-normal placeholder:tracking-normal
               outline-none transition-all duration-200
               focus:shadow-[0_0_0_4px]
               disabled:opacity-40 disabled:cursor-not-allowed
@@ -173,8 +173,8 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
           onClick={handleAnalyse}
           disabled={status !== 'valid' || disabled}
           className={`rounded-xl font-semibold tracking-wide
-            bg-accent text-bg shadow-accent
-            hover:opacity-90 hover:shadow-accent-lg
+            bg-accent text-bg shadow-accent-glow
+            hover:opacity-90 hover:shadow-accent-glow-lg
             active:scale-[.98] transition-all duration-150
             disabled:opacity-30 disabled:cursor-not-allowed disabled:shadow-none
             ${compact ? 'mt-1 px-7 py-2.5 text-sm' : 'mt-2 px-10 py-3.5 text-[15px]'}`}

@@ -53,6 +53,30 @@ uvicorn api:app --host 0.0.0.0 --port 8000
 If you need process supervision (auto-restart on crash, log rotation), run it under `systemd`, `supervisor`,
 or similar rather than backgrounding it directly. See "Scaling" below before adding `--workers`.
 
+> **The working directory must be `<repo>/backend`, not the repo root.** This is the one thing the
+> backend-directory move can break silently. About seventeen paths — `cache.py`'s
+> `CACHE_DIR = Path("output")`, the LLM cost counters, source-health and scraper-error counters,
+> the NSE/SME/NIFTY-500 master caches, `signals/store.py`'s `signals_data/` — are resolved relative
+> to the current working directory, not to `__file__`.
+>
+> Start the process from the repo root and it comes up cleanly, serves cleanly, and quietly writes
+> to a brand-new empty `<repo>/output/` that `.gitignore` hides from `git status`. Nothing crashes
+> and nothing is logged. What you get is a permanent total cache miss: every scraper re-fetches
+> against the rate-limit-sensitive NSE and Screener.in endpoints this codebase is otherwise careful
+> with, `/api/market-picks` re-runs the full paid LLM pipeline on every request because
+> `output/_market_picks/picks.json` always reads empty, and the NSE symbol master re-downloads.
+>
+> For a `systemd` unit that means:
+>
+> ```ini
+> [Service]
+> WorkingDirectory=/path/to/stock-research/backend
+> ExecStart=/path/to/stock-research/.venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000
+> ```
+>
+> Docker and CI are both immune — the image sets `WORKDIR /app` and the workflows set
+> `working-directory: backend`. This applies only to a manual/self-hosted deploy.
+
 **Frontend** — build once, then run the production server (not `next dev`):
 
 ```bash

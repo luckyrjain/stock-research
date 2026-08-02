@@ -18,14 +18,19 @@ export function Skeleton({ className }: { className: string }) {
 export function FilterChip<T extends string | number>({
   value, active, onClick, label,
 }: { value: T; active: boolean; onClick: (v: T) => void; label: string }) {
+  // `font-bold` on the active chip, `font-semibold` on the rest: since `muted`
+  // was raised to #8093bd for AA it is now *brighter* than `accent` (luminance
+  // .291 vs .240), so `text-accent` on `bg-accent/15` (4.07:1) reads quieter
+  // than `text-muted` on `bg-surface` (5.77:1) and selection was left carried
+  // by hue alone. Weight restores a second channel without moving either token.
   return (
     <button
       onClick={() => onClick(value)}
       aria-pressed={active}
-      className={`px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-colors
+      className={`px-3 py-1.5 rounded-full text-[11px] border transition-colors
         ${active
-          ? 'bg-accent/15 border-accent/40 text-accent'
-          : 'bg-surface border-border text-muted hover:text-tx hover:border-border-hi'}`}
+          ? 'bg-accent/15 border-accent/40 text-accent font-bold'
+          : 'bg-surface border-border text-muted font-semibold hover:text-tx hover:border-border-hi'}`}
     >
       {label}
     </button>
