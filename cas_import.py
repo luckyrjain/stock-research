@@ -164,11 +164,19 @@ def _write_transactions(conn, asset_id: int, folio: str | None,
             unmapped.add(cas_type)
             continue
         amount = t.get("amount")
+        if amount is None:
+            # transactions.amount is NOT NULL — a CAS row with no parseable
+            # amount can't be inserted at all, and there's no real value to
+            # invent in its place (never guess). Skip it like every other
+            # unwritable row here, rather than letting the insert below
+            # raise IntegrityError mid-transaction.
+            summary["skipped_rows"] += 1
+            continue
         conn.execute(_insert(transactions_t).values(
             asset_id=asset_id,
             date=_date.fromisoformat(str(t["date"])),
             type=our_type,
-            amount=abs(float(amount)) if amount is not None else None,
+            amount=abs(float(amount)),
             units=float(t["units"]) if t.get("units") is not None else None,
             meta={"source": "cas", "folio": folio},
         ))

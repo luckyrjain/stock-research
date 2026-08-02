@@ -9,8 +9,8 @@ Combines three registries into one symbol lookup:
 
 resolve_symbol() lets a broker's internal stock code be matched against a
 real trading symbol via ISIN, exact code (with a known suffix stripped), or
-fuzzy company-name match. Not yet wired into anything — a future broker
-CSV/CAS import is the intended consumer.
+fuzzy company-name match. Consumed by csv_import.py's broker CSV import
+(new-asset resolution) — see that module for the integration.
 """
 
 import json
@@ -179,7 +179,18 @@ def resolve_symbol(engine, code: str, company_name: str | None = None,
                 return {"symbol": s["symbol"], "exchange": s["exchange"],
                         "confidence": "isin", "candidate_name": s.get("name")}
 
-    by_symbol = {s["symbol"]: s for s in master if s.get("symbol")}
+    # Built preferring the FIRST source that claims a given symbol string,
+    # not the last — `master`'s ISIN-based dedup (get_full_securities_master)
+    # already documents "earlier sources (NSE main-board first) win on
+    # collision", but a naive {s["symbol"]: s for s in master} dict
+    # comprehension is last-key-wins, silently reversing that priority for
+    # any exact-symbol-string collision across sources (e.g. an SME scrip
+    # code that happens to match an unrelated NSE main-board ticker).
+    by_symbol: dict[str, dict] = {}
+    for s in master:
+        sym = s.get("symbol")
+        if sym and sym not in by_symbol:
+            by_symbol[sym] = s
     if code in by_symbol:
         s = by_symbol[code]
         return {"symbol": s["symbol"], "exchange": s["exchange"],

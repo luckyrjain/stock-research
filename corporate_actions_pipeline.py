@@ -10,7 +10,10 @@ Usage:
     python corporate_actions_pipeline.py --recompute TCS       # one symbol repair
     python corporate_actions_pipeline.py --recompute-all       # full repair
 
-Also called from eod_prices_pipeline.run() as an isolated final step.
+Also called from eod_prices_pipeline.run() as an isolated step (own
+try/except, never affects the pipeline's exit code) — after bhavcopy
+ingestion but before the actual final step, portfolio_valuation.py's
+refresh_valuations(), so freshly-adjusted closes are what gets valued.
 
 Parser changes require re-running --backfill and --recompute-all: recompute
 triggers only off newly ingested rows.

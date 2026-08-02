@@ -9,13 +9,14 @@ Usage:
     python eod_prices_pipeline.py --date 2026-07-03     # one specific day
     python eod_prices_pipeline.py --backfill 2024-07-01 # every weekday from date to today
 
-Table creation lives in db/prices_setup.py (--setup-db / --reset-db).
+Table creation is this module's own setup_db() (--setup-db / --reset-db).
 
 MF NAV ingestion only stores schemes actually held in a portfolio `assets`
-table (type='mf') — this codebase doesn't have a portfolio system yet, so
-`_held_scheme_codes()` degrades to "no held schemes" (logged, not raised)
-until one exists. See CLAUDE.md's "EOD price store + corporate actions
-flow" section.
+table (type='mf'). `_held_scheme_codes()` degrades to "no held schemes"
+(logged, not raised) whenever no such scheme is currently held — the
+common case even with the Portfolio Aggregator's tables in place, until a
+user actually adds an mf asset. See CLAUDE.md's "EOD price store + corporate
+actions flow" section.
 """
 
 import argparse
@@ -194,10 +195,10 @@ def refresh_securities_master(engine, session) -> None:
 def _held_scheme_codes(engine) -> set[str]:
     """AMFI scheme codes of active MF assets (assets.symbol holds the code).
 
-    Degrades to an empty set (never raises) when the `assets` table doesn't
-    exist yet — this codebase doesn't have a portfolio system as of this
-    pipeline shipping, so NAV ingestion is a documented no-op until one is
-    built."""
+    Degrades to an empty set (never raises) if the `assets` table is
+    unreachable (e.g. a database predating the Portfolio Aggregator
+    migration) or simply has no held mf assets yet — either way, NAV
+    ingestion is a no-op until there's something to value."""
     try:
         with engine.connect() as conn:
             rows = conn.execute(text(

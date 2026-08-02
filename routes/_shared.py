@@ -39,10 +39,13 @@ async def run_owned_db_call(
         # 404 for a missing id) — re-raise as-is rather than falling through
         # to the generic-503 branch below, which would otherwise silently
         # swallow a deliberate, specific status/detail into an opaque
-        # "Database error" response. No existing caller raises HTTPException
-        # from inside sync_fn today (they route "not found" around this
-        # wrapper entirely), so this is a pure addition, not a behavior
-        # change for them.
+        # "Database error" response. Added alongside routes/
+        # portfolio_aggregator.py, whose sync_fn closures are this wrapper's
+        # first real callers that raise HTTPException directly (404/409/422
+        # for missing ids, duplicate names, invalid asset-type combinations)
+        # — every existing caller (watchlist/positions) still routes its own
+        # "not found" cases around this wrapper entirely, so this remains a
+        # pure addition for them, not a behavior change.
         raise
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

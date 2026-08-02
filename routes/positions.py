@@ -6,6 +6,8 @@ module reuses that module's resolve_owner()/owner_column()/WatchlistOwner
 rather than redefining its own copy of identity-resolution logic that isn't
 actually watchlist-specific.
 """
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
@@ -273,21 +275,34 @@ async def get_portfolio_concentration(request: Request, client_id: str | None = 
         positions = _positions_rows_sync(owner)
         symbols = [p["symbol"] for p in positions]
 
+        # Up to _MAX_POSITIONS_PER_CLIENT (200) yfinance calls per request —
+        # the same amplification concern GET /api/prices' own docstring
+        # flags for its 50-symbol cap, just larger here. That endpoint fans
+        # out via asyncio.gather+run_in_executor from the event loop; this
+        # one already runs inside a single run_owned_db_call worker thread,
+        # so a bounded local ThreadPoolExecutor is the equivalent fan-out
+        # from in here (same worker-pool convention peer_analytics.py's
+        # _fetch_valuation_percentile() uses for its own per-stock fan-out).
         live_prices: dict[str, float] = {}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for sym, live in zip(symbols, pool.map(api._fetch_live_price_sync, symbols)):
+                if live.get("price"):
+                    live_prices[sym] = live["price"]
+
+        # Sector comes only from an already-fresh 1h stock_info cache —
+        # never a fresh scrape triggered by this read-only overlay. A
+        # symbol whose cache has gone stale/missing simply doesn't
+        # contribute a sector this request, same "never invent" instinct
+        # as everywhere else this codebase reads an optional field.
         sectors: dict[str, str | None] = {}
         for sym in symbols:
-            live = api._fetch_live_price_sync(sym)
-            if live.get("price"):
-                live_prices[sym] = live["price"]
-            # Sector comes only from an already-fresh 1h stock_info cache —
-            # never a fresh scrape triggered by this read-only overlay. A
-            # symbol whose cache has gone stale/missing simply doesn't
-            # contribute a sector this request, same "never invent" instinct
-            # as everywhere else this codebase reads an optional field.
             stock_info = _cache.load(sym, "stock_info")
             if stock_info:
                 sectors[sym] = stock_info.get("sector")
 
         return compute_sector_concentration(positions, live_prices, sectors)
 
-    return await run_owned_db_call(request, "positions_read", 120, _sync, "positions_read")
+    # Own tighter bucket, not the shared "positions_read" bucket ordinary
+    # lightweight position reads use — this does the same per-symbol
+    # yfinance fan-out as GET /api/prices, at up to 4x its symbol cap.
+    return await run_owned_db_call(request, "portfolio_concentration", 10, _sync, "positions_read")

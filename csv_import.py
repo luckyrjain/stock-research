@@ -9,7 +9,11 @@ appended with content-key dedupe — imports never delete.
 New assets are resolved against tools.securities_master.resolve_symbol()
 before creation: an ISIN/exact-code match substitutes the verified NSE/BSE
 symbol; a fuzzy/unresolved match keeps the broker's raw code as-is (never a
-silent guess) and adds a warning naming the row.
+silent guess) and adds a warning naming the unverified symbol (plus the
+closest fuzzy-match guess, if any) — once per distinct new symbol in the
+file, not once per row, since resolution only runs the first time a given
+symbol is seen (subsequent rows for the same symbol reuse the cached
+asset id).
 """
 
 import csv
@@ -142,17 +146,18 @@ def _normalize_rows(rows: list[list[str]], headers: list[str],
                 else "sell" if side_raw in _SELL_ALIASES else None)
         units = _parse_num(_cell(row, "quantity"))
         price = _parse_num(_cell(row, "price"))
+        amount = _parse_num(_cell(row, "amount"))
         problem = (None if symbol else "missing symbol") \
             or (None if d else "unparseable date") \
             or (None if side else f"unrecognized side '{side_raw}'") \
-            or (None if units else "bad quantity")
+            or (None if units else "bad quantity") \
+            or (None if (amount is not None or price is not None) else "missing price/amount")
         if problem:
             skipped += 1
             warnings.append(f"row {n}: {problem} — skipped")
             continue
-        amount = _parse_num(_cell(row, "amount"))
         if amount is None:
-            amount = units * (price or 0.0)
+            amount = units * price
         txns.append({"symbol": symbol, "isin": _cell(row, "isin") or None,
                      "date": d, "type": side, "units": abs(units),
                      "amount": abs(amount)})
@@ -176,6 +181,15 @@ def import_rows(engine, rows: list[list[str]], headers: list[str],
 
     def _key(d, typ, units, amount):
         return (str(d), typ, round(float(units or 0), 4), round(float(amount or 0), 2))
+
+    # Disclosed limitation, not an oversight: this key has no row-sequence
+    # component, so two genuinely distinct same-day trades that happen to
+    # share identical (date, type, units, amount) — e.g. one order that
+    # fills as two separate same-price/same-quantity legs — collide and the
+    # second is dropped as a "duplicate" even on a first-ever import. The
+    # design deliberately chose content-key dedupe over a sequence number to
+    # make re-imports of a date-ranged partial tradebook idempotent without
+    # needing the file's own row order to stay stable across re-exports.
 
     with engine.begin() as conn:
         if not conn.execute(select(accounts_t.c.id)

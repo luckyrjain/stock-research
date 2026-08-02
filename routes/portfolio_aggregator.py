@@ -242,6 +242,8 @@ async def create_asset(request: Request, body: AssetIn):
         raise HTTPException(status_code=422, detail=f"type must be one of: {sorted(_ASSET_TYPES)}")
     if body.type not in ("mf", "stock") and (body.units is not None or body.avg_cost is not None):
         raise HTTPException(status_code=422, detail="units/avg_cost only apply to mf and stock assets")
+    if body.avg_cost is not None and body.units is None:
+        raise HTTPException(status_code=422, detail="cannot set avg_cost without units")
 
     def _sync() -> dict:
         import api

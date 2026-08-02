@@ -179,7 +179,21 @@ def _screener_fallback_quote(sym: str) -> dict | None:
     """Best-effort price via Screener.in's top-ratios when yfinance has no quote
     on either exchange (common for thinly-traded/illiquid stocks yfinance doesn't
     track). Supplemented with stockanalysis.com's 52-week range/EPS/volume where
-    available. No intraday change% available from this path."""
+    available.
+
+    Disclosed limitation: Screener's top-ratios widget has no intraday
+    change%, so `change_pct` is set to 0.0 here rather than the more
+    correct `None` — matching this same file's pre-existing
+    `_build_quote_payload()`, which has the identical "no previous close ->
+    0.0" fallback for the primary yfinance path (line ~93). Making this
+    field genuinely nullable would mean widening `change_pct` to
+    `number | null` in frontend/types/index.ts and updating several
+    consumer sites (dashboard-primitives.tsx, market-picks-dashboard.tsx,
+    watchlist/page.tsx) that currently treat it as always-a-number — a
+    real fix, but a wider one than this fallback path alone justifies.
+    Tracked here rather than silently left as a "never invent" violation:
+    a stock priced only through this fallback will show as "flat today"
+    even though that's genuinely unknown, not observed."""
     try:
         from tools.screener_tools import _clean, _fetch_soup
         soup = _fetch_soup(sym)

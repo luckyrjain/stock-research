@@ -140,6 +140,19 @@ class ImportCasTest(unittest.TestCase):
             types = [r[0] for r in conn.execute(select(transactions.c.type))]
         self.assertEqual(sorted(types), ["buy", "dividend", "dividend_reinvest", "sell"])
 
+    def test_row_with_no_amount_is_skipped_not_inserted_as_null(self) -> None:
+        # Regression test: transactions.amount is NOT NULL — a CAS row
+        # missing amount previously reached the insert with amount=None,
+        # raising IntegrityError instead of being skipped like any other
+        # unwritable row.
+        parsed = {"folios": [{"folio": "F1", "schemes": [_scheme(txns=[
+            {"date": "2024-01-01", "type": "PURCHASE", "amount": None, "units": 10.0},
+            _txn("2024-02-01", "PURCHASE"),
+        ])]}]}
+        result = import_cas(self.engine, parsed, self.account_id)
+        self.assertEqual(result["transactions"], 1)
+        self.assertEqual(result["skipped_rows"], 1)
+
     def test_matches_existing_asset_by_amfi_and_backfills_isin(self) -> None:
         from sqlalchemy import insert
         with self.engine.begin() as conn:

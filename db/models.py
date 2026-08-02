@@ -437,8 +437,9 @@ valuations = Table(
     Index("idx_valuations_asset", "asset_id"),
 )
 
-# Reserved for the (not-yet-built) valuation-engine/CAS-import sub-projects —
-# no API or UI reads/writes this table yet in the Foundation increment.
+# Written by cas_import.py (CAS-sourced rows, meta.source="cas") and
+# csv_import.py (broker-CSV-sourced rows, meta.source="csv"); read by
+# portfolio_valuation.py's xirr_report() to compute per-asset/portfolio XIRR.
 transactions = Table(
     "transactions",
     metadata,

@@ -44,14 +44,23 @@ class SetupDbStampsAlembicHeadTest(unittest.TestCase):
         mock_stamp.assert_called_once_with()
 
     def test_reset_db_also_stamps_head_after_recreating_tables(self) -> None:
+        # Regression test: --reset-db previously called metadata.drop_all(),
+        # which would take down every table in the app's shared MetaData()
+        # (including, since this session, real personal financial data in
+        # the Portfolio Aggregator's tables) just to reset this pipeline's
+        # own two tables. Scoped to sme_stocks/ema_signals specifically, the
+        # same fix screener_pipeline.py --reset-db already has.
         with patch("sme_ema_pipeline.get_engine", return_value=MagicMock()), \
-             patch("sme_ema_pipeline.metadata") as mock_metadata, \
+             patch("sme_ema_pipeline.sme_stocks") as mock_sme_stocks, \
+             patch("sme_ema_pipeline.ema_signals") as mock_ema_signals, \
              patch("db.models.stamp_alembic_head") as mock_stamp, \
              patch("sys.argv", ["sme_ema_pipeline.py", "--reset-db"]), \
              patch("sme_ema_pipeline.init_error_tracking"):
             sme_ema_pipeline.main()
-        mock_metadata.drop_all.assert_called_once()
-        mock_metadata.create_all.assert_called_once()
+        mock_sme_stocks.drop.assert_called_once()
+        mock_sme_stocks.create.assert_called_once()
+        mock_ema_signals.drop.assert_called_once()
+        mock_ema_signals.create.assert_called_once()
         mock_stamp.assert_called_once_with()
 
 

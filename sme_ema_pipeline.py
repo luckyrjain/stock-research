@@ -27,7 +27,7 @@ import yfinance as yf
 from dotenv import load_dotenv
 from sqlalchemy import text
 
-from db.models import get_engine, metadata
+from db.models import ema_signals, get_engine, metadata, sme_stocks
 from error_tracking import init_error_tracking
 from observability import get_logger, log_event
 from tools.sme_tools import get_all_sme_stocks
@@ -536,9 +536,20 @@ def main() -> None:
         return
 
     if args.reset_db:
+        # Scoped to this pipeline's own two tables, not metadata.drop_all()
+        # — the shared MetaData() in db/models.py now holds every table in
+        # the app, including real personal financial data (the Portfolio
+        # Aggregator's profiles/accounts/assets/holdings/valuations/
+        # transactions) added after this drop_all()-based reset was first
+        # written. This previously matched screener_pipeline.py's own
+        # documented "disclosed limitation" note about this exact command
+        # having a broader-than-intended blast radius; scoped here the same
+        # way screener_pipeline.py --reset-db already is.
         engine = get_engine()
-        metadata.drop_all(engine)
-        metadata.create_all(engine)
+        ema_signals.drop(engine, checkfirst=True)
+        sme_stocks.drop(engine, checkfirst=True)
+        sme_stocks.create(engine, checkfirst=True)
+        ema_signals.create(engine, checkfirst=True)
         from db.models import stamp_alembic_head
         stamp_alembic_head()
         log_event(LOGGER, "sme_db_tables_reset")

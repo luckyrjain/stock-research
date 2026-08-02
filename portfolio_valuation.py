@@ -10,9 +10,10 @@ demand via POST /api/portfolio/refresh-valuations, or standalone:
 
     python portfolio_valuation.py
 
-XIRR returns null for every asset until something writes rows into
-`transactions` — no writer exists yet (CAS PDF / broker CSV import, a
-separate not-yet-built increment). That's expected, not a bug.
+XIRR returns null for an asset with no rows in `transactions` — expected
+for manually-entered assets, or before a CAS PDF (cas_import.py) or broker
+CSV (csv_import.py) import has run for it. Both of those write real
+transaction rows; this function reads whatever they've written so far.
 """
 
 from datetime import date
