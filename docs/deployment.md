@@ -10,7 +10,7 @@ running in production rather than `--reload`/`npm run dev`.
 ```bash
 cp .env.example .env   # add at least one LLM provider key
 docker compose up --build
-docker compose exec backend alembic upgrade head   # first run only — creates all 11 tables
+docker compose exec backend alembic upgrade head   # first run only — creates all 21 tables
 ```
 
 This starts four services (`docker-compose.yml`):
@@ -31,9 +31,12 @@ crons)" below; the compose setup doesn't run any of them automatically.
 **Schema setup uses Alembic, not `metadata.create_all()`** — see [Setup & Configuration](setup.md#database-schema-setup-alembic)
 for the full fresh-DB-vs-existing-DB story. `alembic upgrade head` above is for a genuinely empty
 database (which is what a fresh `docker compose up` gives you). If you're pointing this compose
-setup at a database that already has these tables from before Alembic was introduced, run
-`docker compose exec backend alembic stamp head` instead — `upgrade head` will fail trying to
-re-create tables that already exist.
+setup at a database that already has the original 11 tables from before Alembic was introduced
+(and predates the EOD price store / Portfolio Aggregator tables), run
+`docker compose exec backend alembic stamp 0001_baseline_schema` followed by
+`docker compose exec backend alembic upgrade head` instead — plain `upgrade head` will fail trying
+to re-create the 11 tables that already exist, and a bare `stamp head` would skip creating the 10
+newer tables for real. If the database is already fully caught up, neither is needed.
 
 ## Manual deployment (no Docker)
 
@@ -60,7 +63,8 @@ Put both behind a reverse proxy (nginx, Caddy, a cloud load balancer) for TLS te
 `uvicorn` nor `next start` handles HTTPS itself in this setup.
 
 **Database schema**: run `alembic upgrade head` once against a fresh database, or `alembic stamp
-head` against a database that already has these 11 tables from before this app used Alembic — see
+0001_baseline_schema` followed by `alembic upgrade head` against a database that already has the
+original 11 tables from before this app used Alembic — see
 [Setup & Configuration](setup.md#database-schema-setup-alembic) for the full distinction. From
 here on, schema changes ship as new Alembic revisions (`alembic revision --autogenerate`, then
 `alembic upgrade head` on deploy) rather than hand-edited `db/schema.sql` guards or ad-hoc
@@ -139,7 +143,7 @@ again, the same "missing optional infra degrades rather than breaks" convention 
 
 ## Scheduled jobs (GitHub Actions crons)
 
-Five workflows under `.github/workflows/` run on a schedule (all also support manual
+Six workflows under `.github/workflows/` run on a schedule (all also support manual
 `workflow_dispatch` from the Actions tab), each with its own repository-secret requirements:
 
 | Workflow | Schedule | Requires | What it does |
@@ -147,22 +151,28 @@ Five workflows under `.github/workflows/` run on a schedule (all also support ma
 | `sme-cron.yml` | Weekdays 13:00 UTC (18:30 IST) | `DATABASE_URL` secret | Runs `sme_ema_pipeline.py` directly on the GitHub-hosted runner — writes straight to Postgres, reachable from anywhere |
 | `screener-cron.yml` | Weekdays 14:00 UTC (19:30 IST) | `DATABASE_URL` secret | Runs `screener_pipeline.py` directly on the runner, same shape as the SME cron. Scheduled an hour after `sme-cron.yml` and 30 min after `watchlist-alerts-cron.yml` so the three independent jobs don't contend for the same DB connection pool at once |
 | `watchlist-alerts-cron.yml` | Weekdays 13:30 UTC (19:00 IST) | `DATABASE_URL` secret, an LLM provider key secret (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GROQ_API_KEY`/`GOOGLE_API_KEY`, plus optionally `LLM_PROVIDER`/`ANALYST_MODEL`), and the `SMTP_*` secrets if you want alert emails to actually send | Runs `watchlist_alerts.py` — re-analyses every account-owned watchlist symbol and emails a digest on a recommendation change or a large price move. Unattended, so it can't fall back to "no provider configured" the way the interactive CLI does — it fails the job loudly if no LLM key is set |
+| `eod-prices-cron.yml` | Weekdays 14:15 UTC (19:45 IST) | `DATABASE_URL` secret | Runs `eod_prices_pipeline.py` directly on the runner (self-healing 5-day gap-fill) — ingests the NSE bhavcopy + AMFI NAVs, then corporate actions/adjusted prices and the Portfolio Aggregator's nightly valuation refresh as isolated final steps of the same run. Scheduled after the bhavcopy's ~19:00 IST publish and after `sme-cron.yml` |
 | `market-picks-cron.yml` | Mondays 01:30 UTC (07:00 IST) | `MARKET_PICKS_API_URL` secret (your backend's public URL) | Does **not** run the pipeline on the runner — the picks cache is a local file on the backend host, not Postgres, so a GitHub-hosted run would compute picks nobody's live site would see. Instead it calls `GET {MARKET_PICKS_API_URL}/api/market-picks?force=true` on your already-deployed backend, exactly like a user clicking "Fresh scan" |
 | `live-contract-check.yml` | Weekly, Mondays 06:00 UTC | None (no secrets — hits public third-party sites directly with `RUN_LIVE_TESTS=1`) | Runs `tests_live/test_scraper_contracts.py` against the 4 highest-blast-radius scrapers (Screener.in peer table, Trendlyne resolution, NSE FII/DII flow, RBI rates) as an early-warning signal for a layout/schema change on the live site — separate from and never run by the regular `ci.yml`/`pytest tests/` suite |
 
 If you're self-hosting these instead of using GitHub Actions (e.g. because the picks cache or
 other local-disk state needs to live next to the backend), each pipeline also has a direct CLI
 entrypoint suitable for a crontab entry — see [Setup & Configuration](setup.md) for the
-`sme_ema_pipeline.py`/`screener_pipeline.py`/`market_picks_pipeline.py`/`watchlist_alerts.py`
-crontab examples. Self-hosted crons don't need GitHub Actions repository secrets at all — they
-read the same `.env`/environment the backend process already uses.
+`sme_ema_pipeline.py`/`screener_pipeline.py`/`market_picks_pipeline.py`/`watchlist_alerts.py`/
+`eod_prices_pipeline.py` crontab examples. Self-hosted crons don't need GitHub Actions repository
+secrets at all — they read the same `.env`/environment the backend process already uses.
+
+The Portfolio Aggregator's CAS PDF import and broker CSV import (`cas_import.py`, `csv_import.py`)
+have no scheduled job — they're interactive, upload-triggered flows only (`/portfolio-aggregator`
+in the browser), not something a cron re-runs.
 
 ## Environment variable checklist
 
 Beyond an LLM provider key (see [Setup](setup.md)), production deployments should set:
 
-- `DATABASE_URL` — required for SME signals, the Screener, Watchlist, Positions, and account/API-key
-  auth; Docker Compose sets this automatically
+- `DATABASE_URL` — required for SME signals, the Screener, Watchlist, Positions, account/API-key
+  auth, the EOD price store + corporate actions, and the Portfolio Aggregator (including CAS/CSV
+  import — both write into the same tables); Docker Compose sets this automatically
 - `REDIS_URL` — required only if you scale the backend past one worker/replica, or across more than
   one host (see "Scaling" above); Docker Compose sets this automatically
 - `ALLOWED_ORIGINS` — add your real frontend origin (comma-separated for multiple), or direct browser
@@ -179,12 +189,12 @@ Beyond an LLM provider key (see [Setup](setup.md)), production deployments shoul
   of the frontend (see "Real client IPs for per-IP rate limiting" above); safe to leave unset otherwise
 - `LOG_LEVEL=INFO` (default) — bump to `DEBUG` temporarily when diagnosing an issue, not left on in steady state
 
-Also run `alembic upgrade head` (fresh DB) or `alembic stamp head` (existing DB) as part of your
-deploy process once `DATABASE_URL` is set — see "Database schema" above.
+Also run `alembic upgrade head` (fresh DB) or the stamp-then-upgrade pair (existing pre-Alembic DB)
+as part of your deploy process once `DATABASE_URL` is set — see "Database schema" above.
 
 These aren't app env vars, but **GitHub Actions repository secrets** needed if you use the
 scheduled-cron workflows above rather than self-hosting: `DATABASE_URL` (`sme-cron.yml`,
-`screener-cron.yml`, `watchlist-alerts-cron.yml`), an LLM provider key + `SMTP_*` secrets
-(`watchlist-alerts-cron.yml` only), and `MARKET_PICKS_API_URL` (`market-picks-cron.yml`) — your
-backend's public URL, required for the weekly refresh to have anywhere to send its `?force=true`
-request (see [Setup](setup.md#market-picks-pipeline)).
+`screener-cron.yml`, `watchlist-alerts-cron.yml`, `eod-prices-cron.yml`), an LLM provider key +
+`SMTP_*` secrets (`watchlist-alerts-cron.yml` only), and `MARKET_PICKS_API_URL`
+(`market-picks-cron.yml`) — your backend's public URL, required for the weekly refresh to have
+anywhere to send its `?force=true` request (see [Setup](setup.md#market-picks-pipeline)).

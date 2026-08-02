@@ -1,12 +1,13 @@
 # Tools Reference
 
-The Python data layer is split into five groups:
+The Python data layer is split into six groups:
 
 1. **Stock analysis tools** — the six data slices fetched for every symbol (`ALL_DATA_TASKS`)
 2. **Standalone per-symbol enrichment tools** — peers, multi-year financials, DCF, insider/bulk-block activity, street consensus, price history — fetched on demand outside the six-task pipeline
 3. **Macro overlay tools** — market-wide (not per-symbol) FII/DII flow and RBI rate/inflation context feeding the `macro` signal
 4. **Market picks scrapers** — one per financial source, feeding the multi-agent weekly-picks pipeline
 5. **Universe/stock-list fetchers** — NSE Emerge + BSE SME lists (SME Signals) and NIFTY 500 constituents (Screener)
+6. **EOD price store + Portfolio Aggregator support tools** — NSE bhavcopy/equity-master + AMFI NAV fetchers, NSE corporate-actions fetch/parser, and the NSE+BSE+SME securities-master merge/symbol-resolver consumed by broker CSV import
 
 Every scraper in this codebase follows the same "never raise" convention: on failure, a tool
 returns `{"error": "...", ...}` (or, for the newer non-`@tool` helpers, an all-`None`/empty-list
@@ -53,6 +54,14 @@ Returns quote and company metadata:
 `dividend_yield_pct` is passed through `_percent_from_ambiguous_value()` — yfinance's
 `dividendYield` field is documented to sometimes arrive already as a percent rather than a
 fraction; a result implausible for a real equity (>25%) is dropped to `None` rather than trusted.
+
+**Screener.in fallback**: when yfinance has no usable quote on either `.NS`/`.BO` suffix (common
+for thinly-traded stocks), `_screener_fallback_quote()` scrapes Screener.in's `#top-ratios` widget
+for a price/market-cap/P-E/book-value/dividend-yield instead of hard-failing the whole analysis.
+EPS and price-to-book are derived from price÷P-E and price÷book-value (Screener's widget doesn't
+carry either directly); `_stockanalysis_extra_fields()` additionally scrapes stockanalysis.com for
+a real EPS/52-week-range/volume where reachable, overriding the derived EPS when available. No
+intraday change % is available from this path (`change_pct` is `0.0`).
 
 ---
 
@@ -542,6 +551,48 @@ universe would look correct while quietly missing most of the market. Falls back
 (logged as such) rather than returning `[]` outright when a fresh fetch fails but a prior cache
 exists. **Disclosed limitation**: the exact NSE archive URL and CSV column layout was not
 verified against a live response in this sandbox.
+
+---
+
+## EOD price store + Portfolio Aggregator support tools
+
+Feeds `eod_prices_pipeline.py`, `corporate_actions_pipeline.py`, and (via `resolve_symbol`)
+`csv_import.py`'s broker-CSV import — see CLAUDE.md's "EOD price store + corporate actions flow",
+"Securities master + symbol resolver", and "Portfolio Aggregator" sections for full design detail.
+
+### `tools/eod_sources.py`
+
+| Function | Source | Returns |
+|---|---|---|
+| `download_bhavcopy(trade_date, session)` | NSE `sec_bhavdata_full_DDMMYYYY.csv` archive | Raw CSV text, archived to `output/_bhavcopy/` before parsing (replay without re-hitting NSE) |
+| `parse_bhavcopy(csv_text)` | — | List of per-symbol OHLC/volume/turnover/delivery-% dicts, filtered to `EQ`/`BE`/`BZ` series only |
+| AMFI NAV fetch/parse | AMFI `NAVAll.txt` | Filtered to scheme codes actually held in the Portfolio Aggregator's `assets` table — ~40k total schemes is too many to store wholesale |
+
+A 404 on the bhavcopy URL means holiday/weekend (skip silently); malformed/degenerate response
+bodies are rejected rather than partially ingested. **Note**: this module has its own
+`make_nse_session()` rather than delegating to the shared `tools/_nse_session.py` helper described
+below — a minor inconsistency with the other seven NSE-touching modules' convention, not yet
+reconciled.
+
+### `tools/corporate_actions.py`
+
+| Function | Source | Returns |
+|---|---|---|
+| `fetch_corporate_actions(from_date, to_date, session)` | NSE corporate-actions feed | Raw per-symbol action records |
+| PURPOSE-string parser | — | Structured `{symbol, action_type, ratio, ex_date}`-shaped records for splits/bonuses/dividends/rights — a ratio the free-text PURPOSE field doesn't parse cleanly is skipped, never guessed |
+
+### `tools/securities_master.py`
+
+| Function | Source | Returns |
+|---|---|---|
+| `load_nse_main_board(engine)` | The `securities` table (populated by `eod_prices_pipeline.py` from the bhavcopy) | `{"symbol", "name", "isin", "exchange": "NSE", "series"}` dicts |
+| `fetch_bse_main_board(force=False)` | BSE `ListofScripData` API, looped over main-board groups (A/B/T/Z/X/XT/P/MT/TS) | Same shape, `exchange="BSE"`; 24h file-mtime cache, dedup by scrip code across groups |
+| `get_full_securities_master(engine, force=False)` | Merges the above two + the existing `tools/sme_tools.py::get_all_sme_stocks()` | Combined list, deduped by ISIN (NSE preferred on collision) |
+| `resolve_symbol(engine, code, company_name=None, isin=None)` | — | `{"symbol", "exchange", "confidence": "isin"\|"exact"\|"fuzzy"\|"unresolved", "candidate_name"}` — resolution order: ISIN exact → code exact (with EQ/SM/ST/BE/BZ/IV suffix-stripping) → fuzzy company-name (rapidfuzz, threshold 85, case-insensitive) → unresolved |
+
+`resolve_symbol()`'s only current consumer is `csv_import.py`'s new-asset creation path: an
+`"isin"`/`"exact"` match substitutes the resolved symbol; `"fuzzy"`/`"unresolved"` keeps the
+broker's raw code as-is and adds a warning — never silently substituting a guessed symbol.
 
 ---
 

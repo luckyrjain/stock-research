@@ -125,6 +125,8 @@ npm run dev
 - Compare two stocks: [http://localhost:3000/compare?symbols=TCS,INFY](http://localhost:3000/compare?symbols=TCS,INFY)
 - Market picks: [http://localhost:3000/market-picks](http://localhost:3000/market-picks)
 - Portfolio (aggregate "I bought this" view): [http://localhost:3000/portfolio](http://localhost:3000/portfolio)
+- Portfolio Aggregator (separate net-worth tracker — profiles/accounts/assets, CAS/CSV import,
+  XIRR): [http://localhost:3000/portfolio-aggregator](http://localhost:3000/portfolio-aggregator)
 - SME signals: [http://localhost:3000/sme-signals](http://localhost:3000/sme-signals)
 - Screener (NIFTY 500): [http://localhost:3000/screener](http://localhost:3000/screener)
 - Watchlist: [http://localhost:3000/watchlist](http://localhost:3000/watchlist)
@@ -142,8 +144,9 @@ python main.py RELIANCE --force   # bypass cache
 
 ## Database schema setup (Alembic)
 
-Every PostgreSQL-backed feature (SME Signals, Screener, Watchlist, Positions, auth, API keys —
-11 tables total) shares one SQLAlchemy Core `MetaData()` object (`db/models.py`). Schema changes
+Every PostgreSQL-backed feature (SME Signals, Screener, Watchlist, Positions, auth, API keys, the
+EOD price store, corporate actions, and the Portfolio Aggregator — 21 tables total) shares one
+SQLAlchemy Core `MetaData()` object (`db/models.py`). Schema changes
 are now managed through **Alembic** rather than ad-hoc `create_all()` calls or hand-edited
 `ALTER TABLE` statements in `db/schema.sql` (see CLAUDE.md's "Schema migrations" section for the
 full story — `db/schema.sql` is kept only as a frozen pre-Alembic reference).
@@ -158,19 +161,30 @@ createdb sme_research   # or whatever DATABASE_URL points at
 alembic upgrade head
 ```
 
-This runs `migrations/versions/0001_baseline_schema.py`, which creates all 11 tables, indexes,
-and constraints from scratch.
+This runs all revisions in order — `0001_baseline_schema.py` (the original 11 tables),
+`684c8a31e7e0_add_eod_price_store_and_corporate_.py` (EOD price store + corporate actions, 4
+tables), and `8613aafc2d9d_add_portfolio_aggregator_foundation_.py` (Portfolio Aggregator, 6
+tables) — creating all 21 tables, indexes, and constraints from scratch.
 
-**Existing deployment (tables already exist — created by hand via `db/schema.sql`, or via one of
-the pipelines' `--setup-db` flags before this feature existed):**
+**Existing deployment with only the original 11 tables** (created by hand via `db/schema.sql`, or
+via one of the pipelines' `--setup-db` flags before Alembic existed — i.e. predates the EOD price
+store / corporate actions / Portfolio Aggregator tables):
 
 ```bash
-alembic stamp head
+alembic stamp 0001_baseline_schema
+alembic upgrade head
 ```
 
-This records "this database is already at revision 0001" without executing any DDL. Running
-`alembic upgrade head` instead against a database that already has these tables will fail — the
-`CREATE TABLE` statements in `0001` collide with tables that already exist.
+Stamp `0001` specifically here, **not** `alembic stamp head` — stamping straight to `head` would
+mark the database as already having the EOD/portfolio tables too, when it doesn't, and Alembic
+would then never actually create them. Stamping `0001` records "this database is already at the
+baseline revision" without executing any DDL for those 11 tables (`alembic upgrade head` against
+them would fail — the `CREATE TABLE` statements in `0001` collide with tables that already exist),
+then the subsequent `upgrade head` applies the two later revisions normally, creating the 10 new
+tables for real.
+
+**Existing deployment already fully caught up** (already ran the two commands above, or was
+created after this session's work landed): nothing to do — already at `head`.
 
 **From here on**, schema changes should be authored as new Alembic revisions:
 
@@ -187,9 +201,13 @@ sme_ema_pipeline.py --setup-db` (bypassing Alembic entirely) still ends up with 
 `alembic_version` row, and a later `alembic upgrade head` on that same database won't fail
 trying to re-create tables that already exist. In other words: whichever path you use to first
 create the tables (`alembic upgrade head`, or a pipeline's `--setup-db`), the database ends up
-in the same Alembic-tracked state either way. `alembic stamp head` above is still what you need
-for a database that predates this auto-stamping (i.e. was set up before this feature shipped)
-and hasn't been touched by a pipeline's `--setup-db`/`--reset-db` since.
+in the same Alembic-tracked state either way (though note: this auto-stamp calls `stamp_alembic_head()`,
+i.e. stamps to the current `head` including the EOD/portfolio revisions, so only use a bare
+`sme_ema_pipeline.py --setup-db`/`screener_pipeline.py --setup-db` as your *only* setup step if you
+don't also need the EOD/portfolio tables created — otherwise still run `alembic upgrade head`
+yourself for those). The `alembic stamp 0001_baseline_schema` + `alembic upgrade head` pair above
+is what you need for a database that predates this auto-stamping (i.e. was set up before Alembic
+existed at all) and hasn't been touched by a pipeline's `--setup-db`/`--reset-db` since.
 
 ## SME signals pipeline
 
@@ -276,8 +294,8 @@ connection pool at once. Same `DATABASE_URL`-secret-required, fail-fast pattern 
 
 Requires `DATABASE_URL` in `.env` and a running PostgreSQL — the same database used for SME
 signals/Screener works fine. `watchlist_items` and `positions` are both defined in the same
-`db/models.py` metadata as every other table, so `alembic upgrade head` (fresh DB) or
-`alembic stamp head` (existing DB) — see "Database schema setup" above — creates/recognizes both.
+`db/models.py` metadata as every other table, so `alembic upgrade head` (fresh DB) or the
+stamp-then-upgrade pair (existing DB) — see "Database schema setup" above — creates/recognizes both.
 
 Each row is owned by either an anonymous per-browser `client_id` (a UUID generated client-side
 and stored in `localStorage`) or, once a user signs in via the magic-link auth system below, the
@@ -287,7 +305,64 @@ instead (`POST /api/watchlist/claim` / `POST /api/positions/claim`). See CLAUDE.
 flow" section for the full identity-resolution story.
 
 `GET /api/watchlist` / `GET /api/positions` return 503 if `DATABASE_URL` is unset or Postgres is
-unreachable.
+unreachable. `GET /api/portfolio/concentration` (also in `routes/positions.py`) flags a Market
+Picks recommendation's sector when your tracked positions are already ≥25% concentrated in it —
+same `DATABASE_URL` requirement, no separate setup.
+
+## EOD price store + corporate actions pipeline
+
+Requires `DATABASE_URL`. Ingests NSE's daily bhavcopy (OHLCV + delivery %) and AMFI mutual-fund
+NAVs into `securities`/`prices_daily`/`mf_nav_daily`, then a second step ingests NSE corporate
+actions (splits/bonuses/dividends) into `corporate_actions` and recomputes `prices_daily.adj_close`.
+See CLAUDE.md's "EOD price store + corporate actions flow" section for the full design.
+
+```bash
+source .venv/bin/activate
+python eod_prices_pipeline.py --setup-db     # create securities/prices_daily/mf_nav_daily
+python eod_prices_pipeline.py                # self-healing: ingests any missing day in the last 5
+python eod_prices_pipeline.py --date 2026-08-01
+python eod_prices_pipeline.py --backfill 2024-08-01   # loop from that date to today
+
+python corporate_actions_pipeline.py --setup-db   # create corporate_actions
+python corporate_actions_pipeline.py --backfill 2024-08-01
+python corporate_actions_pipeline.py --recompute-all   # rebuild adj_close for every symbol
+```
+
+`eod_prices_pipeline.py --setup-db`/`--reset-db` and `corporate_actions_pipeline.py
+--setup-db`/`--reset-db` are each scoped to only their own tables, not the shared `MetaData()` —
+same scoping discipline as `screener_pipeline.py --reset-db`.
+
+Daily automation runs via `.github/workflows/eod-prices-cron.yml` — weekdays at 14:15 UTC
+(19:45 IST), after the bhavcopy's ~19:00 IST publish and after `sme-cron.yml`. Same
+`DATABASE_URL`-secret-required, fail-fast pattern as the other cron workflows. This same cron run
+also triggers the Portfolio Aggregator's nightly valuation refresh (below) as an isolated final
+step — no separate schedule needed for that.
+
+## Portfolio Aggregator
+
+A **separate** personal net-worth tracker at `/portfolio-aggregator` — not the same feature as the
+`/portfolio` "I bought this" P&L page above; don't confuse the two when troubleshooting. No auth,
+no `client_id` — a bare profile picker (deliberate, personal-scale-tool decision). Requires
+`DATABASE_URL` for `profiles`/`accounts`/`assets`/`holdings`/`valuations`/`transactions` (created
+by the same Alembic step as everything else above).
+
+- Manual net-worth tracking works with no further setup: create a profile → account → assets on
+  `/portfolio-aggregator`.
+- **Auto-valuation** (`portfolio_valuation.py`) needs the EOD price store above populated —
+  `mf`/`stock` assets are valued from `prices_daily`/`mf_nav_daily`; runs nightly as part of the
+  EOD cron, or on-demand via the "Refresh valuations" button (`POST
+  /api/portfolio/refresh-valuations`).
+- **XIRR** (`GET /api/portfolio/xirr?profile_id=`) is `null` for every asset until real
+  transaction history exists — either import path below populates `transactions`.
+- **CAS import** (`POST /api/portfolio/import-cas`) — upload a CAMS/KFintech detailed CAS PDF +
+  its password on `/portfolio-aggregator`. New dependency `casparser` (already in
+  `requirements.txt`, pulls `pdfminer.six`). Parsed statements are archived (PII-scrubbed) to
+  `output/_cas/` for replay: `python cas_import.py --replay output/_cas/<file>.json --account-id N`.
+- **Broker CSV import** (`POST /api/portfolio/import-csv/preview` then `.../import-csv`) — upload
+  a broker trade export (Zerodha tradebook auto-detected; any other broker via a column-mapping
+  UI). New dependency `openpyxl` (already in `requirements.txt`, for `.xlsx` files — `pandas`
+  already a dependency). New-asset broker codes are resolved to canonical NSE/BSE symbols via
+  `tools/securities_master.py::resolve_symbol()`.
 
 ## Account & magic-link auth
 
@@ -387,14 +462,21 @@ python sme_ema_pipeline.py
 # Custom screener pipeline
 python screener_pipeline.py
 
+# EOD price store + corporate actions
+python eod_prices_pipeline.py
+python corporate_actions_pipeline.py --recompute-all
+
+# Portfolio Aggregator valuation refresh (also runs nightly via the EOD cron)
+python portfolio_valuation.py
+
 # Watchlist alert emails (batch job, normally run daily via cron/GitHub Actions)
 python watchlist_alerts.py
 python watchlist_alerts.py --force   # bypass cache freshness
 
 # Schema migrations
-alembic upgrade head       # fresh database
-alembic stamp head         # existing database that already has the tables
-alembic revision --autogenerate -m "..."   # after editing db/models.py
+alembic upgrade head                        # fresh database
+alembic stamp 0001_baseline_schema && alembic upgrade head   # existing DB with only the original 11 tables
+alembic revision --autogenerate -m "..."    # after editing db/models.py
 
 # Backend tests
 python -m pytest tests/

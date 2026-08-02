@@ -33,6 +33,12 @@ together: a shared star list with corporate-action alerts, "I bought this" posit
 with aggregate P&L, side-by-side report comparison, and a single search box answering "what does
 AlphaPulse already think about X."
 
+**Portfolio Aggregator** — a separate, unauthenticated personal net-worth tracker (distinct from
+the Portfolio/Positions page above): profiles → accounts → assets (stocks, mutual funds, FDs,
+EPF/PPF, cash, loans), fed by an EOD price store (NSE bhavcopy + AMFI NAV), a corporate-actions/
+adjusted-price pipeline, a nightly valuation + XIRR engine, and CAS PDF / broker CSV import
+(reconciled via a securities-master symbol resolver). Reachable at `/portfolio-aggregator`.
+
 **Accounts & API access** — passwordless magic-link sign-in, and API keys for programmatic
 access to a public `/api/v1/*` surface.
 
@@ -77,7 +83,8 @@ cd frontend && npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) for stock analysis. See [Setup](setup.md)
 for the full list of routes (`/market-picks`, `/sme-signals`, `/screener`, `/watchlist`,
-`/portfolio`, `/compare`, `/login`, `/api-keys`, `/pricing`) and which env vars each needs.
+`/portfolio`, `/portfolio-aggregator`, `/compare`, `/login`, `/api-keys`, `/pricing`) and which
+env vars each needs.
 
 ## Output locations
 
@@ -90,5 +97,7 @@ for the full list of routes (`/market-picks`, `/sme-signals`, `/screener`, `/wat
 | `output/_nse_master.txt` | NSE equity symbol master (refreshed every 24 h) |
 | `output/_llm_cost/` | Daily LLM call-cost/token counters |
 | `output/_source_health/`, `output/_scraper_error_counters/` | Scraper freshness/error monitoring |
-| PostgreSQL (`DATABASE_URL`) | 11 tables — SME signals, screener, watchlist, positions, verdict history, MF-holdings history, accounts/sessions/API keys (see [Architecture](architecture.md)) |
+| `output/_bhavcopy/` | Raw NSE bhavcopy CSV archive (EOD price store ingestion replay) |
+| `output/_cas/` | Scrubbed CAS-import parse archive (portfolio aggregator, replay) |
+| PostgreSQL (`DATABASE_URL`) | 21 tables — SME signals, screener, watchlist, positions, verdict history, MF-holdings history, accounts/sessions/API keys, EOD price store (securities/prices_daily/mf_nav_daily), corporate actions, and the portfolio aggregator (profiles/accounts/assets/holdings/valuations/transactions) (see [Architecture](architecture.md)) |
 | Redis (`REDIS_URL`, optional) | Shared rate-limit/cache state across multiple backend workers/hosts |

@@ -567,6 +567,103 @@ whole response.
 
 ---
 
+### `GET /api/portfolio/concentration`
+
+Capital-weighted sector concentration over the caller's tracked `positions` (the "I bought this"
+table) — a display-only overlay Market Picks reads to badge a new pick's sector, unrelated to the
+separate Portfolio Aggregator below despite sharing the `/api/portfolio` prefix.
+
+```json
+{
+  "by_sector": { "IT": 42.5, "Banking": 18.0 },
+  "concentrated_sectors": ["IT"]
+}
+```
+
+`concentrated_sectors` lists every sector at or above the 25% threshold. A position missing
+`shares`, an unresolvable live price, or an unresolvable sector simply doesn't contribute to
+either field — never guessed. `{"by_sector": {}, "concentrated_sectors": []}` when nothing
+contributes (e.g. no positions have a share count yet).
+
+### Portfolio Aggregator (`/api/portfolio/*`)
+
+A separate personal net-worth tracker — `profiles`/`accounts`/`assets` are plain CRUD (standard
+`{..., "id": N}` create/list/patch/delete shapes, no auth). The three notable computed/import
+endpoints:
+
+**`POST /api/portfolio/refresh-valuations`** — auto-values every non-archived `mf`/`stock` asset
+with a `holdings` row, from `prices_daily`/`mf_nav_daily` (live yfinance quote as a stock fallback):
+
+```json
+{
+  "valued": 7,
+  "skipped": 1,
+  "details": [
+    {"asset_id": 12, "name": "TCS", "type": "stock", "symbol": "TCS",
+     "status": "valued", "price": 3450.5, "price_date": "2026-08-01", "value": 172525.0},
+    {"asset_id": 13, "name": "Some Closed Scheme", "type": "mf", "symbol": "123456",
+     "status": "skipped", "reason": "no NAV for scheme code"}
+  ]
+}
+```
+
+**`GET /api/portfolio/xirr?profile_id=`** — per-asset and pooled portfolio XIRR from `transactions`
++ each asset's latest valuation as the terminal cashflow; `null` wherever an asset has no
+transaction history yet:
+
+```json
+{
+  "portfolio_xirr": 0.142,
+  "assets": [
+    {"asset_id": 12, "name": "TCS", "xirr": 0.181},
+    {"asset_id": 14, "name": "Manual FD", "xirr": null}
+  ]
+}
+```
+
+**`POST /api/portfolio/import-cas`** (multipart: `file`, `password`, `account_id`) — imports a
+CAMS/KFintech detailed CAS PDF:
+
+```json
+{
+  "schemes": 5, "assets_created": 3, "assets_matched": 2,
+  "transactions": 148, "skipped_rows": 0, "warnings": []
+}
+```
+
+`{"error": "..."}` (422) on a wrong password, unparseable PDF, or a non-detailed (summary-only)
+statement; `{"error": "account not found"}` (404) for an unknown `account_id`.
+
+**`POST /api/portfolio/import-csv/preview`** (multipart: `file`) — returns headers, a mapping
+suggestion, and Zerodha auto-detection:
+
+```json
+{
+  "headers": ["Symbol", "ISIN", "Trade Date", "Trade Type", "Quantity", "Price"],
+  "sample_rows": [["TCS", "INE467B01029", "2026-01-15", "buy", "10", "3200.5"]],
+  "suggested_mapping": {"date": "Trade Date", "symbol": "Symbol", "side": "Trade Type",
+                          "quantity": "Quantity", "price": "Price", "amount": null, "isin": "ISIN"},
+  "detected": "zerodha"
+}
+```
+
+**`POST /api/portfolio/import-csv`** (multipart `file` + form fields `mapping` (JSON string),
+`account_id`, `broker`) — imports the mapped rows, append + content-key dedupe:
+
+```json
+{
+  "rows": 42, "imported": 40, "duplicates": 2, "skipped": 0,
+  "assets_created": 1, "assets_matched": 3, "warnings": []
+}
+```
+
+New-asset broker codes are resolved to a canonical NSE/BSE symbol via
+`tools/securities_master.py::resolve_symbol()` before an asset is created — an unresolved/fuzzy
+match keeps the raw broker code and adds a warning naming the row (and, for a fuzzy match, the
+candidate name) rather than guessing.
+
+---
+
 ## Pipeline-internal cache files
 
 | Path | TTL | Key | Description |
@@ -578,6 +675,9 @@ whole response.
 | `output/_llm_cost/<date>.json` | Daily | Date | Running LLM cost/token counter (`call_count`, `total_cost_usd`, `calls_with_unknown_cost`) |
 | `output/_source_health/<source>.json` | — | Source name | Per-source daily ok/not-ok history for market-picks sources + macro overlay fetches |
 | `output/_scraper_error_counters/<name>.json` | — | Scraper name (`peers`, `financials`, `insider_trades`, `bulk_block_deals`, `trendlyne_articles`, `trendlyne_numeric_consensus`) | Error counter for the standalone per-symbol scrapers |
+| `output/_source_quality/<run_id>.json` | — | Market Picks run id | Per-run source telemetry (yield, syndication-dedup rate, extraction success) for the 20 Market Picks sources |
+| `output/_bhavcopy/<YYYY-MM-DD>.csv` | Permanent | Trade date | Raw NSE bhavcopy archive — EOD price store ingestion replay without re-hitting NSE |
+| `output/_cas/<YYYY-MM-DD-HHMM>.json` | Permanent | Timestamp | PII-scrubbed parsed CAS-statement JSON — replay via `python cas_import.py --replay <file> --account-id N` |
 
 ---
 

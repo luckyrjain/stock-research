@@ -26,10 +26,18 @@ research modes, a cross-mode watchlist/positions layer, and a minimal account sy
   by industry, P/E, market cap, and RSI/EMA trend.
 - **Watchlist** — a PostgreSQL-backed cross-mode watchlist (star a stock from any of the three
   screeners above); a **Portfolio** page tracks "I bought this" positions with entry/target/
-  stop-loss and aggregate P&L. Both are owned by an anonymous per-browser `client_id` or, once
-  signed in, an account — with an opt-in "claim my data" flow to move anonymous rows onto an
-  account after sign-in. A daily batch job emails signed-in users when a watched stock's
-  recommendation changes or its price moves sharply.
+  stop-loss and aggregate P&L, plus a sector-concentration badge on Market Picks rows when a
+  pick's sector is already over-represented in your tracked positions. Both are owned by an
+  anonymous per-browser `client_id` or, once signed in, an account — with an opt-in "claim my
+  data" flow to move anonymous rows onto an account after sign-in. A daily batch job emails
+  signed-in users when a watched stock's recommendation changes or its price moves sharply.
+- **Portfolio Aggregator** — a separate, unauthenticated personal net-worth tracker (distinct
+  from the "I bought this" Portfolio page above): profiles → accounts → assets (stocks, mutual
+  funds, FDs, EPF/PPF, cash, loans), valued nightly from a PostgreSQL EOD price store (NSE
+  bhavcopy + AMFI NAV, with a corporate-actions/adjusted-price pipeline) and an XIRR engine that
+  lights up once real transaction history exists — imported from a CAMS/KFintech CAS PDF
+  statement or a broker trade CSV (Zerodha preset), reconciled against a securities-master symbol
+  resolver. Lives at `/portfolio-aggregator`.
 - **Compare** — two full stock-analysis reports side by side, with a head-to-head diff table.
 - **Consolidated search** — a shared search box in every page's nav bar that aggregates whatever
   the other modes have already cached/computed for a symbol, with zero new fetching or LLM calls.
@@ -43,13 +51,17 @@ research modes, a cross-mode watchlist/positions layer, and a minimal account sy
   agent orchestration — see `CLAUDE.md`), litellm, a custom quantitative signals engine
 - **Frontend**: Next.js 15 (App Router), React 19, TypeScript (strict), Tailwind CSS v3, installable
   as a PWA
-- **Data sources**: Yahoo Finance, Screener.in, Google News (via `gnews`), RSS feeds, NSE API/
-  archives, BSE API, Trendlyne, RBI
+- **Data sources**: Yahoo Finance, Screener.in, stockanalysis.com (quote fallback), Google News
+  (via `gnews`), RSS feeds, NSE API/archives (incl. daily bhavcopy + corporate actions), BSE API,
+  AMFI (mutual fund NAVs), Trendlyne, RBI, plus user-supplied CAS PDF statements / broker CSVs
+  (parsed via `casparser` / `openpyxl`)
 - **LLM providers**: Anthropic, OpenAI, Groq, Google, OpenRouter, Ollama (auto-detected from env,
   with cross-provider failover and per-call cost instrumentation)
 - **Storage**: PostgreSQL is now the primary store for shared/durable state — watchlist, positions,
-  accounts/sessions, API keys, verdict history, MF-holdings history, SME signals, and the NIFTY 500
-  screener all live there, managed with **Alembic** migrations. A file-based TTL cache under
+  accounts/sessions, API keys, verdict history, MF-holdings history, SME signals, the NIFTY 500
+  screener, the EOD price store (securities/daily prices/MF NAVs + corporate actions), and the
+  Portfolio Aggregator (profiles/accounts/assets/holdings/valuations/transactions) all live there,
+  managed with **Alembic** migrations. A file-based TTL cache under
   `output/` still backs the six per-symbol scrape tasks and a handful of standalone endpoints
   (peers, financials, insider activity, street consensus). **Redis** is optional, opt-in via
   `REDIS_URL` — it backs shared rate limiting/concurrency guards and mirrors the file cache so both
@@ -82,13 +94,21 @@ stock-research/
 ├── mf_holdings_history.py       Quarterly MF stake snapshots (PostgreSQL) — powers stake-delta badges
 ├── watchlist_alerts.py          Daily batch job: emails users on a watched stock's rec/price change
 ├── market_picks_pipeline.py    Multi-agent weekly picks pipeline (6 phases)
+├── source_quality.py            Per-run source-quality telemetry (market picks)
+├── source_quality_report.py     Aggregation CLI for source_quality.py's stored runs
 ├── sme_ema_pipeline.py          SME golden/death cross batch pipeline (PostgreSQL)
 ├── screener_pipeline.py         NIFTY 500 custom screener batch pipeline (PostgreSQL)
+├── eod_prices_pipeline.py       EOD price store: NSE bhavcopy + AMFI NAV ingestion (PostgreSQL)
+├── corporate_actions_pipeline.py  NSE corporate actions ingestion + adj_close recompute
+├── portfolio_valuation.py       Portfolio Aggregator nightly valuation + XIRR engine
+├── cas_import.py                CAMS/KFintech CAS PDF import → transactions/holdings
+├── csv_import.py                Broker trade CSV import (Zerodha preset) → transactions/holdings
 ├── db/                          SQLAlchemy Core tables (models.py) + schema.sql reference
 ├── routes/                      Per-domain FastAPI routers extracted from api.py
 │   ├── watchlist.py             Watchlist CRUD, calendar, claim-anonymous-rows
-│   ├── positions.py             Positions CRUD, claim-anonymous-rows
-│   └── _shared.py                Shared rate-limit/DB/executor wrapper both routers use
+│   ├── positions.py             Positions CRUD, claim-anonymous-rows, sector-concentration
+│   ├── portfolio_aggregator.py  Portfolio Aggregator CRUD, net worth, XIRR, CAS/CSV import
+│   └── _shared.py                Shared rate-limit/DB/executor wrapper all routers use
 ├── alembic.ini / migrations/    Schema migrations (SQLAlchemy Core metadata is the single source of truth)
 ├── observability.py             Structured JSON logging via log_event()
 ├── requirements.txt
@@ -105,6 +125,9 @@ stock-research/
 │   ├── nse_insider_trades.py / nse_bulk_block_deals.py   Insider & institutional activity
 │   ├── nse_fii_dii_tools.py / macro_context_tools.py     FII/DII flow + RBI rate/inflation
 │   ├── price_history_tools.py     Shared daily-close OHLCV fetch (sparklines, technical signal)
+│   ├── eod_sources.py              NSE bhavcopy + equity master + AMFI NAV fetch/parse
+│   ├── corporate_actions.py        NSE corporate-actions fetch + purpose-string parser
+│   ├── securities_master.py        NSE+BSE main-board/SME merge + resolve_symbol() fuzzy resolver
 │   ├── _nse_session.py             Shared NSE session-priming helper used by every NSE-touching module
 │   └── ...                         Other data-fetching functions (yfinance, gnews, NSE filings)
 ├── signals/                     Quantitative signal engine (features → signal scores → verdict)
@@ -121,6 +144,7 @@ stock-research/
 │   ├── app/screener/page.tsx           NIFTY 500 custom screener
 │   ├── app/watchlist/page.tsx          Cross-mode watchlist page
 │   ├── app/portfolio/page.tsx          Aggregate return summary over tracked positions
+│   ├── app/portfolio-aggregator/page.tsx  Personal net-worth tracker (separate from app/portfolio)
 │   ├── app/compare/page.tsx            Two stock analysis reports side by side (?symbols=TCS,INFY)
 │   ├── app/login/ , app/auth/verify/   Magic-link sign-in + verification
 │   ├── app/api-keys/page.tsx           API key management + usage dashboard
@@ -153,7 +177,8 @@ See `CLAUDE.md` for the complete, exhaustive repo structure and per-feature desi
 - Internet access
 - One configured LLM provider: Anthropic, OpenAI, Groq, Google, OpenRouter, or local Ollama
 - PostgreSQL — optional for pure single-stock analysis, but required for SME Signals, Screener,
-  Watchlist, Positions, accounts/API keys, verdict history, and MF-holdings trend
+  Watchlist, Positions, accounts/API keys, verdict history, MF-holdings trend, the EOD price
+  store, and the Portfolio Aggregator
 - Redis — optional, only needed once you run more than one backend worker/replica
 
 ## Backend setup
@@ -217,7 +242,8 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000). The nav bar links to every mode: Market Picks,
-SME Signals, Screener, Watchlist, Portfolio, Compare, and API Keys/Pricing.
+SME Signals, Screener, Watchlist, Portfolio, Net Worth (Portfolio Aggregator), Compare, and API
+Keys/Pricing.
 
 ### Or with Docker
 
@@ -253,6 +279,14 @@ python screener_pipeline.py --reset-db  # scoped to just the screener_stocks tab
 # Daily watchlist alert digest (account-owned watchlist rows only)
 python watchlist_alerts.py
 python watchlist_alerts.py --force
+
+# EOD price store (bhavcopy + AMFI NAV; self-healing 5-day gap-fill)
+python eod_prices_pipeline.py
+python eod_prices_pipeline.py --date YYYY-MM-DD    # single day
+python eod_prices_pipeline.py --backfill YYYY-MM-DD  # backfill from that date to today
+
+# Corporate actions + adjusted prices (splits/bonuses/dividends, adj_close recompute)
+python corporate_actions_pipeline.py
 ```
 
 Each pipeline can also be triggered on-demand from its own page's "Refresh" button, subject to
@@ -284,7 +318,7 @@ handful of scraper targets on a weekly schedule — it is never part of the defa
 
 ## API endpoints
 
-The backend exposes 40+ routes across all modes; the table below covers the major ones per mode.
+The backend exposes 55+ routes across all modes; the table below covers the major ones per mode.
 **See `CLAUDE.md` for the complete, current list** (or run
 `grep -n "@app\.\(get\|post\|delete\|patch\)" api.py` and
 `grep -rn "@router\.\(get\|post\|delete\|patch\)" routes/`). The Next.js app proxies all of these
@@ -308,6 +342,10 @@ through `frontend/app/api/`.
 | `GET /api/screener` | NIFTY 500 screener — industry/P-E/market-cap/RSI/EMA filters; `POST .../refresh` |
 | `GET /api/watchlist`, `POST/DELETE`, `GET .../calendar`, `POST .../claim` | Cross-mode watchlist CRUD + corporate-action calendar + account-claim |
 | `GET/POST/PATCH/DELETE /api/positions`, `POST .../claim` | "I bought this" positions CRUD + account-claim |
+| `GET /api/portfolio/concentration` | Sector-concentration check against tracked positions (Market Picks badge) |
+| `GET/POST/PATCH/DELETE /api/portfolio/profiles`, `.../accounts`, `.../assets`, `.../networth` | Portfolio Aggregator — separate net-worth tracker CRUD |
+| `POST /api/portfolio/refresh-valuations`, `GET /api/portfolio/xirr` | Portfolio Aggregator valuation engine + XIRR |
+| `POST /api/portfolio/import-cas`, `POST /api/portfolio/import-csv[/preview]` | Portfolio Aggregator CAS PDF / broker CSV import |
 | `POST /api/auth/request-link`, `GET /api/auth/verify`, `GET /api/auth/me`, `POST /api/auth/logout` | Magic-link account auth |
 | `POST/GET/DELETE /api/api-keys` | API key management + tier/usage dashboard |
 | `GET /api/v1/consolidated/{symbol}` | Tier-rate-limited external API surface (`X-API-Key` header) |

@@ -41,6 +41,7 @@ degrades to an empty field rather than a wrong one).
 | **Momentum/technical trader (SME segment)** | A systematic golden-cross/death-cross screener over the NSE Emerge + BSE SME universe, which mainstream tools don't cover well. |
 | **Active portfolio tracker** | A place to star stocks, log actual buys, and see aggregate P&L — without needing a real brokerage integration. |
 | **Power user / builder** | Programmatic API access (API keys, `/api/v1/*`) to pull AlphaPulse's own aggregated view into their own tooling. |
+| **Personal finance tracker** | A single net-worth view across brokers, mutual funds, FDs, EPF/PPF, and cash — imported from CAS statements or broker CSVs rather than re-typed by hand. |
 
 AlphaPulse is explicitly **not** trying to be a trade-execution platform, a brokerage, or a
 real-time tick-data terminal — see §6 for what's deliberately out of scope and why.
@@ -66,10 +67,19 @@ Given an NSE/BSE ticker (or ISIN, or company name), AlphaPulse:
    recommendation directionally contradicts the quant signal (both a SELL against strongly
    positive signals *and* a BUY against strongly negative signals are rejected — this is a
    bidirectional cross-check, not a one-sided sanity check) and whose stated confidence is
-   implausible given a near-neutral score. A guardrail failure triggers one corrective retry,
+   implausible given a near-neutral score. A **numeric-misread guardrail** additionally compares
+   every number the analyst cites in prose (dividend yield, P/E, ROE, ROCE, book value, growth,
+   EBITDA margin, market cap, and sector-average comparisons) against the real source data,
+   catching transcription errors like a 0.46 dividend yield written as "47%" — a 2x-tolerance
+   mismatch triggers the same corrective retry. A guardrail failure triggers one corrective retry,
    then a labeled, visibly-degraded HOLD fallback — never a confident-looking guess.
 5. Streams progress and the final report to the browser via Server-Sent Events, then persists a
    dated snapshot (`verdict_history`) so future visits can show "how has this call tracked since."
+
+Quote reliability: when yfinance has no live quote on either NSE or BSE (common for thinly-traded
+stocks), the price/quote fetch falls back to Screener.in's own top-ratios widget (supplemented
+with a stockanalysis.com scrape for EPS/52-week-range/volume) rather than failing the whole
+analysis.
 
 Layered on top of the core report: peer comparison + absolute valuation-anchor (own P/E history),
 multi-year financial statements + a deterministic DCF estimate, concalls (management commentary
@@ -92,7 +102,10 @@ stocks per run), and produces a confidence-ranked, sector-balanced watchlist wit
 BUY/WATCHLIST/HOLD/SELL rating and deterministic entry/target/stop-loss levels (never
 LLM-generated prices). Auto-refreshes weekly via GitHub Actions; a track-record page shows
 historical accuracy against actual subsequent price moves, alpha vs. Nifty, and per-tier win
-rates.
+rates. Per-run **source-quality telemetry** (yield, syndication-dedup rate, extraction success
+per source) complements the existing day-level source-health/error-counter monitoring. If the
+user has tracked "I bought this" positions, a **sector-concentration badge** flags a pick whose
+sector is already ≥25% of their tracked position value.
 
 *Depth: `CLAUDE.md` §"Market picks flow", §"LLM cost instrumentation..." point on peer/valuation
 wiring, §"Peer/valuation-anchor wired into scoring".*
@@ -156,7 +169,33 @@ Pricing page rather than faked, see §6.3).
 
 *Depth: `CLAUDE.md` §"Account & magic-link auth flow", §"Programmatic API access flow".*
 
-### 3.10 Platform Quality Investments (not user-facing features, but load-bearing)
+### 3.10 Portfolio Aggregator (personal net-worth tracker)
+A separate, deliberately unauthenticated personal-finance tool — genuinely distinct from §3.6
+Portfolio/Positions (that's a "I bought this" P&L tracker seeded from Market Picks; this is a
+broader net-worth aggregator across every account type). Profiles → accounts → assets (stock,
+mutual fund, FD, EPF, PPF, cash, loan, manual), with valuation history and a net-worth summary
+(assets minus loans, broken down by type/account). Fed by:
+- An **EOD price store** (`securities`/`prices_daily`/`mf_nav_daily`) ingesting NSE's daily
+  bhavcopy and AMFI mutual-fund NAVs, plus a **corporate-actions** pipeline that recomputes
+  split/bonus/dividend-adjusted close prices.
+- A **valuation engine** that auto-values every stock/MF holding nightly from the price store
+  (yfinance live-quote fallback for stocks), and an **XIRR** engine (per-asset and portfolio-
+  level) that returns null until real transaction history exists.
+- **CAS PDF ingestion** (CAMS/KFintech mutual-fund statements) and **broker CSV import**
+  (generic column-mapping with a Zerodha preset) — both reconcile against a **securities master +
+  symbol resolver** (NSE main-board + BSE main-board + NSE Emerge/BSE SME lists, ISIN → exact
+  code → fuzzy name matching) to turn a broker's own stock code into a canonical NSE/BSE symbol,
+  then write real transactions/holdings, lighting up XIRR for the first time.
+
+No authentication by design — a personal-scale tool (profiles are a picker, not an account
+system), explicitly separate from the account-gated features in §3.9. Reachable at
+`/portfolio-aggregator` (not `/portfolio`, which stays the existing Positions page).
+
+*Depth: `CLAUDE.md` §"Portfolio Aggregator" onward through its valuation-engine, CAS-ingestion,
+and broker-CSV-import subsections; §"EOD price store + corporate actions flow"; §"Securities
+master + symbol resolver".*
+
+### 3.11 Platform Quality Investments (not user-facing features, but load-bearing)
 - **Data integrity:** schema-drift detection on the six core data slices, source-freshness/volume
   monitoring across the 28 market-picks sources + macro feeds, per-scraper error counters that
   distinguish a real failure from a legitimately-empty result (surfaced to the user as
@@ -185,11 +224,11 @@ through "Schema migrations".*
 
 | Metric | Value |
 |---|---|
-| HTTP endpoints (`api.py` + `routes/`) | ~38 |
-| Frontend pages | 10 top-level routes (+ nested auth/verify, market-picks/history) |
-| PostgreSQL tables | 11 |
+| HTTP endpoints (`api.py` + `routes/`) | ~55 |
+| Frontend pages | 11 top-level routes (+ nested auth/verify, market-picks/history) |
+| PostgreSQL tables | 21 |
 | Market Picks source scrapers | 28 (RSS + GNews + structured), capped at 35 researched stocks/run |
-| Backend automated tests | 1,165+ passing (`python -m pytest tests/`) |
+| Backend automated tests | 1,480+ passing (`python -m pytest tests/`) |
 | E2E (Playwright) specs | 35+ passing |
 | LLM providers supported | Anthropic, OpenAI, Groq, Google, OpenRouter, Ollama |
 
@@ -203,9 +242,9 @@ dropped — pulled together here as the forward-looking half of this PRD, distin
 org/legal/business items in §6 that require a human decision rather than more engineering.
 
 **Near-term (small-to-medium engineering lift):**
-- `api.py` still holds ~28 of the app's ~38 endpoints inline (only Watchlist/Positions were
-  extracted into `routes/`) — real maintainability debt on the two largest handlers (`analyse`,
-  `validate_symbol`).
+- `api.py` still holds most of the app's endpoints inline (only Watchlist, Positions, and the
+  Portfolio Aggregator have been extracted into `routes/`) — real maintainability debt on the two
+  largest handlers (`analyse`, `validate_symbol`).
 - `market_picks_pipeline.py` (the single largest Python module in the repo) has never been
   decomposed, unlike `api.py`/`results-dashboard.tsx`.
 - No central, typed env-var configuration module — ~20 backend env vars are still read via

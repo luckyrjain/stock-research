@@ -1203,6 +1203,257 @@ links to every sibling section (same full set every other page's nav bar carries
 one entry point (plus `PositionsStrip`'s link) is enough for discoverability without adding a seventh
 item to every other page's already-long nav bar.
 
+**Sector-concentration badge**: `GET /api/portfolio/concentration` answers "am I already
+overweight this sector" using only the lightweight `positions` table above — not a full
+portfolio/holdings system, which this app doesn't have. `routes/positions.py::compute_sector_concentration()`
+is a pure, capital-weighted aggregation (`shares × live price` per position, summed by sector,
+as a % of total tracked value) — same "only over what's actually known, never guessed" instinct
+as `/portfolio`'s own capital-weighted stats: a position missing `shares`, a live price (`GET
+/api/prices`), or a sector is excluded from the calculation entirely rather than assumed. Sector
+comes only from an already-fresh 1h `stock_info` cache entry (`cache.load(symbol, "stock_info")`)
+— this is a read-only overlay computed at request time, so it never triggers a fresh scrape and
+never touches Market Picks' own scoring/cache. A sector at or above `_CONCENTRATION_THRESHOLD_PCT`
+(25%, matching the sector-balance cap's own spirit elsewhere in this pipeline) is "concentrated."
+`market-picks-dashboard.tsx` fetches this once per completed scan (not polled, unlike live
+prices — a user's position mix rarely changes mid-session) and renders a small "Concentrated"
+badge next to `SignalBadge`/`HorizonBadge` on any pick whose `sector` is in the concentrated
+list — reusing the `accent` design token rather than inventing a new one, since this codebase
+has no dedicated "warning" token (same gap SME Signals' own illiquid badge already works around).
+**Disclosed limitation**: inherits the same `stock_info.sector` GICS-vs-Indian-market-taxonomy
+caveat already documented under "Sector-aware signal weights" above — an unmatched sector value
+simply can't contribute to this calculation either.
+
+### Portfolio aggregator (`/portfolio-aggregator`)
+
+A **separate** personal net-worth tracker (profiles → accounts → assets, with a valuation
+history per asset) — genuinely unrelated to `/portfolio` above, which is an aggregate P&L view
+over Market Picks "I bought this" positions. The two features happen to share the word
+"portfolio" and the `/api/portfolio/*` URL prefix (the sector-concentration endpoint above lives
+at `/api/portfolio/concentration`; this feature's endpoints are the sibling sub-paths
+`/api/portfolio/profiles`, `/accounts`, `/assets`, `/networth`) but have no other connection —
+different tables, different router, different frontend page (`/portfolio-aggregator`, distinct
+nav-bar label "Net Worth" so the two aren't confused for the same feature).
+
+1. **Schema** (`db/models.py`) — `profiles` (bare name, no credentials — see point 4), `accounts`
+   (`bank`/`broker`/`amc`/`epfo`/`other`), `assets` (`mf`/`stock`/`fd`/`epf`/`ppf`/`cash`/
+   `manual`/`loan`, with a per-type free-form `meta` JSON column — e.g. an FD's rate/maturity
+   date), `holdings` (units/avg_cost, only ever populated for `mf`/`stock` assets — modeled as
+   its own table rather than nullable columns on `assets`, so every other asset type's row isn't
+   NULL-heavy for fields that never apply to it), `valuations` (one row per `(asset_id, as_of)`,
+   history from day one — editing an asset's value inserts a new day's row rather than
+   overwriting the last one, unless it's the same day, which upserts), and `transactions`
+   (schema-only in this increment — reserved for the not-yet-built valuation-engine/CAS-import
+   sub-projects, no API or UI reads/writes it yet). `assets.meta`/`transactions.meta` use
+   SQLAlchemy's generic `JSON` type, not Postgres's `JSONB` — this codebase's tests run these
+   tables against SQLite (`create_engine("sqlite://")`, house rule: no live DB in tests), which
+   has no JSONB equivalent; `JSON` behaves identically on both backends and nothing here needs a
+   JSONB-specific operator (containment, path queries) anyway. Same reasoning drove
+   `profiles`/`accounts`/`assets.created_at` to use `server_default=text("CURRENT_TIMESTAMP")`
+   rather than this codebase's usual `NOW()` (Postgres-only) — every other table here is only
+   ever tested through a mocked engine/connection, never a real `metadata.create_all()` against
+   SQLite, so `NOW()` never had to be portable before this feature.
+2. **API** (`routes/portfolio_aggregator.py`, mounted at `/api/portfolio` alongside the
+   concentration endpoint) — CRUD for profiles/accounts/assets, a valuation-upsert endpoint
+   (rejects a future `as_of` — 422, never silently clamped), and `GET /api/portfolio/networth`
+   (sums each account's assets' latest valuation, loans subtracted since they're stored positive
+   — a pure function, `compute_networth()`, unit-tested with fabricated rows rather than a live
+   DB). Reuses `routes/_shared.py::run_owned_db_call()` for the rate-limit → DB-configured-check →
+   run_in_executor → sanitize-error wrapper every other route module already shares, even though
+   this feature has no ownership concept to speak of (see point 4) — the wrapper's shape doesn't
+   actually require one. **Fixed a latent gap in that shared wrapper while wiring this up**: it
+   had no `except HTTPException: raise` before its generic `except Exception` catch, so a 404
+   raised from inside a route's own `sync_fn` (e.g. "asset not found") would have been silently
+   swallowed into an opaque 503 — invisible until now because `routes/watchlist.py`/
+   `routes/positions.py` both happen to route their own "not found" cases around the wrapper
+   entirely (via a `ValueError`/pre-check, never a raw `HTTPException` inside `sync_fn`). Fixed at
+   the shared-wrapper level rather than avoided in this module, since any future caller would hit
+   the same silent-swallow trap; zero behavior change for the two existing callers.
+   Two of the read queries (`list_assets`, `get_networth`) need each asset's *latest* valuation —
+   written as a correlated scalar subquery, not a `LEFT JOIN LATERAL`, since SQLite (this
+   codebase's test backend for these tables) doesn't parse the `LATERAL` keyword at all. At this
+   feature's real scale (a personal, single-household tool — see point 4) the extra correlated
+   lookup per asset is not a meaningful cost next to Postgres's own query planner.
+3. **Frontend** (`frontend/app/portfolio-aggregator/page.tsx`) — a profile picker (selection
+   persisted in `localStorage`, distinct key from anything the positions/watchlist features use)
+   gates a per-profile view: a net-worth header card (total + per-type breakdown), and an
+   account/asset list with inline add-account/add-asset forms and an inline "edit value" control
+   per asset (posts a new valuation row, never edits history in place). Proxy route
+   (`frontend/app/api/portfolio/[...path]/route.ts`) is a catch-all forwarding every sub-path to
+   the backend — Next.js resolves the sibling static route
+   `frontend/app/api/portfolio/concentration/route.ts` first for its own exact path, so the two
+   coexist without conflict.
+4. **No auth, by design** — inherited unchanged from this feature's original design intent: a
+   personal, localhost/Tailscale-only tool for a household or small circle, not a multi-tenant
+   product. `profiles` is a bare picker (no credentials, no password), not this app's real
+   account system (`users`/`sessions`/magic-link auth, see "Account & magic-link auth flow"
+   above) — the two are unconnected on purpose. This is a disclosed, deliberate scope call, the
+   same instinct as this codebase's other "explicitly out of scope for now" notes elsewhere in
+   this doc, not an oversight: adding real auth here is a bigger, separate decision (who are the
+   users, what does a signed-in session even mean for a household-shared net-worth view) that
+   this increment doesn't make on its own.
+5. **Explicitly out of scope for this increment** (tracked as later, dependent work): charts and
+   reports. Automatic pricing/valuation refresh and XIRR are no longer deferred — see "Portfolio
+   valuation engine" below — and neither is `transactions` writers: CAS PDF import and broker
+   CSV/XLSX import (further below) both write into it now, so XIRR returns real numbers once
+   either import path has run for an asset.
+
+### Portfolio valuation engine (`portfolio_valuation.py`)
+
+Closes two of the five gaps point 5 above used to list: the Portfolio Aggregator's `valuations`
+were entirely manual, and `transactions`/XIRR had no reader at all. This sub-project auto-values
+`mf`/`stock` holdings from the EOD price store (above) and adds an XIRR engine that returns real
+numbers as soon as something writes into `transactions` — not yet true today (CAS/broker import,
+the actual writer, remains the one deferred piece from point 5).
+
+1. `refresh_valuations(engine)` — for every non-archived `mf`/`stock` asset with a `holdings`
+   row: a `stock` asset is valued off `prices_daily.close` for its `symbol` (the same EOD price
+   store the "EOD price store + corporate actions flow" section above populates), falling back to
+   a direct live yfinance quote (`.NS` then `.BO`) when the symbol has no `prices_daily` row yet
+   (a brand-new listing the nightly bhavcopy hasn't ingested, or a symbol typo'd against the
+   equity master); a `mf` asset is valued off `mf_nav_daily.nav` for its AMFI scheme code. `value
+   = units × price`, upserted into the existing `valuations` table (`asset_id`, `as_of=today`) —
+   no new table, same "history from day one, same-day upsert" semantics the foundation section
+   above already established. A per-asset miss (no price anywhere) is skipped with a logged
+   warning; the asset's prior valuation stands untouched rather than being zeroed or guessed.
+   Returns `{"valued": n, "skipped": n, "details": [...]}`.
+2. Wired into `eod_prices_pipeline.py::run()` as a fourth, isolated final step — after the
+   bhavcopy ingestion, NAV ingestion, and corporate-actions steps — so a fresh EOD close/NAV
+   feeds same-day valuations on the very next scheduled run. Same isolation convention as the NAV
+   and corporate-actions steps already use: its own `try/except` with its own `log_event()` call,
+   so a valuation-engine failure can never affect the pipeline's own exit code. Also runnable
+   standalone (`python portfolio_valuation.py`) or on demand via the endpoint below.
+3. `xirr(cashflows: list[tuple[date, float]]) -> float | None` — Newton's method with a bisection
+   fallback, rate bounded to `[-0.99, 10.0]`; `None` (never a guessed/zero rate) for fewer than 2
+   flows, all-same-sign flows, or non-convergence. A pure function with no I/O, so it's fully
+   unit-testable without a DB. `xirr_report(engine, profile_id)` builds each asset's cashflows from
+   `transactions` (`buy` → −amount, `sell`/`dividend` → +amount, everything else ignored — matching
+   the sign convention the not-yet-built CAS/CSV importer will write), appends the asset's latest
+   `valuations` row as the terminal flow, and returns both a per-asset and a pooled portfolio-level
+   XIRR. An asset with no transactions is `null` and excluded from the pooled calculation — it
+   contributes nothing to a rate-of-return figure it has no return history for.
+4. `POST /api/portfolio/refresh-valuations` and `GET /api/portfolio/xirr?profile_id=` in
+   `routes/portfolio_aggregator.py`, following that module's existing conventions exactly (same
+   `run_owned_db_call()` wrapper, same rate-limit tiers as its sibling read/write endpoints).
+   `frontend/app/portfolio-aggregator/page.tsx` gained a "Refresh valuations" button next to
+   "Switch profile" that POSTs to the refresh endpoint and shows "Valued n, skipped n." before
+   reloading the page's own account/asset/net-worth data. No XIRR display and no chart yet —
+   deliberately deferred to a future dashboard increment, the same "don't build a UI for numbers
+   that are still null for everyone" instinct as not building a CAS importer before this engine
+   existed to consume its output.
+
+### CAS PDF import (`cas_import.py`)
+
+The first real writer into `transactions` — closes the gap the valuation engine section above
+flags: XIRR had a formula but nothing to compute it from. Imports a CAMS/KFintech **detailed**
+CAS PDF (every MF transaction since inception, plus folios and closing balances) — NSDL/CDSL
+depository CAS and summary CAS are explicitly out of scope, since neither carries the
+transaction-level history XIRR needs.
+
+1. `parse_cas(pdf_bytes, password)` wraps the `casparser` library (new `requirements.txt`
+   dependency, pulls `pdfminer.six`) — never raises, returns `{"error": ...}` on a wrong password,
+   an unparseable PDF, or a summary-only statement (rejected with a message telling the user to
+   request the detailed statement instead). The password lives in memory only for the duration of
+   this call — never logged, never stored.
+2. `import_cas(engine, parsed, account_id)` does all writes in **one transaction** — reconciles
+   each CAS scheme against existing `mf` assets by AMFI scheme code, then ISIN fallback; unmatched
+   schemes become new `mf` assets under the given account (`meta = {isin, folio, rta}`). A closed
+   folio (zero closing balance) with real transaction history is still created — XIRR needs the
+   full history — but `archived=true` so it's excluded from net worth; a closed folio with *no*
+   transactions is skipped entirely (nothing worth keeping). `holdings.units` is upserted to the
+   CAS closing balance for every open scheme. Transaction mapping (casparser type →
+   `transactions.type`): `PURCHASE`/`PURCHASE_SIP`/`SWITCH_IN(_MERGER)` → `buy`;
+   `REDEMPTION`/`SWITCH_OUT(_MERGER)` → `sell`; `DIVIDEND_PAYOUT` → `dividend`;
+   `DIVIDEND_REINVEST` → `dividend_reinvest` (stored, but `portfolio_valuation.xirr_report`'s
+   `_FLOW_SIGNS` map doesn't recognize it, so it carries no cashflow — a reinvested dividend isn't
+   money leaving or entering the portfolio); `STT_TAX`/`STAMP_DUTY_TAX`/`TDS_TAX`/`MISC` and any
+   unmapped type are skipped and counted, not silently dropped. Every row gets
+   `meta = {"source": "cas", "folio": ...}`.
+3. **Re-import is idempotent by replacement, not by dedup**: unlike the CSV importer below (which
+   appends and dedupes because tradebooks are date-ranged partials), a fresh CAS PDF is always the
+   *complete* statement for that folio, so `_write_transactions()` deletes every existing
+   `meta.source='cas'` row for the matched/created asset first, then inserts the statement's rows
+   fresh. A manual transaction or a CSV-sourced one for the same asset is untouched — the delete is
+   scoped to `meta.source='cas'` specifically, filtered via SQLAlchemy's JSON comparator
+   (`transactions_t.c.meta["source"].as_string()`, portable across the Postgres/SQLite backends
+   this codebase's tests and production both use).
+4. `archive_parsed()` writes the parsed JSON, scrubbed of PAN/KYC/investor identity, to
+   `output/_cas/YYYY-MM-DD-HHMMSS.json` — mirrors the `output/_bhavcopy/` raw-archive convention
+   the EOD price store already established, so an import can be replayed for debugging without
+   re-uploading the PDF: `python cas_import.py --replay <file> --account-id N`. The PDF bytes
+   themselves are never written to disk.
+5. `POST /api/portfolio/import-cas` (multipart: `file`, `password`, `account_id`) in
+   `routes/portfolio_aggregator.py` — 422 on a parse error, 404 on an unknown account. On success
+   it archives the parse and calls `refresh_valuations()` (from `portfolio_valuation.py`) before
+   returning, so newly-imported/matched schemes with an existing NAV get an immediate valuation
+   rather than waiting for the next nightly pipeline run. Frontend: an "Import CAS" button on
+   `/portfolio-aggregator` (file/password/account-select inline form) shows a one-line summary
+   plus any warnings.
+6. **Multipart passthrough**: `frontend/app/api/portfolio/[...path]/route.ts`'s catch-all proxy
+   previously always forwarded a JSON-text body with a hardcoded `Content-Type: application/json`
+   — the right behavior for every other portfolio-aggregator endpoint, but wrong for a file
+   upload. It now detects a `multipart/form-data` request (this import endpoint and both CSV
+   endpoints below) and forwards the raw body plus the original `Content-Type` (which carries the
+   multipart boundary FastAPI needs to parse it) instead.
+
+### Broker CSV/XLSX import (`csv_import.py`)
+
+CAS covers mutual funds only — demat stock buy/sell transactions live in broker exports, and
+export formats vary with no reliable per-broker sample set available, so this is a **generic
+column-mapping importer** (Zerodha's well-known tradebook auto-detected) rather than one hardcoded
+parser per broker.
+
+1. `parse_broker_file(file_bytes, filename)` — `.xlsx` via `pandas.read_excel` (new
+   `requirements.txt` dependency `openpyxl`, the engine `read_excel` needs; `pandas` itself was
+   already a dependency), everything else via stdlib `csv.reader` with `csv.Sniffer` delimiter
+   detection (comma/semicolon/tab, falling back to comma). Never raises; `{"error": ...}` on an
+   empty file or a genuinely unreadable spreadsheet.
+2. `suggest_mapping(headers)` — detects a Zerodha tradebook by its exact header signature
+   (`isin`/`trade_date`/`trade_type`/`quantity`/`price` plus `symbol` or `tradingsymbol`, all
+   case-insensitive) and returns the full mapping with `detected: "zerodha"`; otherwise guesses
+   each of the 5 required fields (`date`/`symbol`/`side`/`quantity`/`price`) plus 2 optional ones
+   (`amount`/`isin`) by normalized header-name containment (e.g. any header containing "qty" or
+   "quantity" → quantity).
+3. `import_rows(engine, rows, headers, mapping, account_id, broker)` — normalizes each row (date:
+   first match among 5 accepted formats; side: `buy`/`b`/`bought`/`purchase` or
+   `sell`/`s`/`sold`, case-insensitive; quantity/price/amount: strips commas and ₹/Rs. before
+   `float()`) and skips + warns (with the 1-indexed row number) on anything unparseable rather than
+   aborting the whole file. **Appends, never deletes** — a broker tradebook export is a
+   date-ranged partial, not a full restatement like a CAS PDF, so a row is counted as a duplicate
+   (not written) only when an existing `meta.source='csv'` transaction for the same asset already
+   has an identical `(date, type, units, amount)` — re-uploading the same file, or an overlapping
+   date range from a fresh export, is safe to re-run.
+4. **New-asset resolution wired through `tools.securities_master.resolve_symbol()`** (built, but
+   unwired, by the securities-master-resolver task — this is its intended integration point): when
+   a row's symbol doesn't match an existing `stock` asset by symbol or ISIN, the broker's raw code
+   is resolved against the merged NSE-main-board/BSE-main-board/SME securities master before a new
+   asset is created. An `"isin"` or `"exact"` confidence tier substitutes the verified NSE/BSE
+   symbol (storing `{isin, broker, resolved_exchange}` in `meta`); `"fuzzy"` or `"unresolved"`
+   keeps the broker's raw code as-is — never a silent guess — and adds a warning naming the
+   symbol and, for a fuzzy hit, the closest-match company name for a human to eyeball. The
+   securities master is loaded once per `import_rows()` call (not once per row) and threaded
+   through every `resolve_symbol()` call via its `master=` parameter, since a full securities-table
+   scan plus fuzzy-candidate rebuild per row would be wasteful for a multi-row tradebook.
+5. **Derived units, not stated units**: broker tradebooks show individual trades, not a running
+   position, so after every import `holdings.units` is recomputed as `Σ buy units − Σ sell units`
+   across *all* of that asset's transactions (any source, not just this upload) — a negative
+   result (an incomplete tradebook missing earlier buys) is floored to 0 with a warning rather than
+   stored negative. A standing warning on every import notes that derived units exclude
+   bonus/split shares (tradebooks never show them) and should be verified against the broker's own
+   app — correctable via the existing asset `PATCH` endpoint.
+6. `POST /api/portfolio/import-csv/preview` (multipart: `file`) returns headers, the first 5 rows,
+   the suggested mapping, and the detected broker (if any) — no DB write. `POST
+   /api/portfolio/import-csv` (multipart: `file`, `mapping` as a JSON string, `account_id`,
+   `broker`) validates the 5 required mapping fields are present (422 otherwise), imports, then
+   calls `refresh_valuations()` on success, same as the CAS endpoint above.
+7. Frontend: an "Import CSV" button on `/portfolio-aggregator` — picking a file previews it
+   immediately (headers/suggested mapping/Zerodha detection), rendering a mapping grid (one
+   `<select>` of the file's own headers per target field). A confirmed mapping is cached in
+   `localStorage` keyed by the lowercased-headers-joined-by-`|` signature and auto-applied on the
+   next upload with the same header shape — the same "remember what the user confirmed" instinct
+   as this codebase's other `localStorage`-cached preferences (e.g. `watchlist.ts`'s `client_id`).
+   Import posts and shows a one-line summary (`imported n, duplicates n, skipped n`) plus any
+   warnings.
+
 ### Shared-state rate limiting (`rate_limiter.py`)
 
 Three pieces of backend guard state were previously **single-process, in-memory, by design** —
@@ -1515,6 +1766,40 @@ doesn't error, it just quietly stops contributing to every future pick's score.
    established baseline yet to regress from, and a source that's simply always been empty (e.g.
    genuinely thin coverage) shouldn't page anyone either.
 
+### Source-quality telemetry (`source_quality.py`)
+
+`source_health.py` (day-level freshness/volume) and `scraper_error_counters.py` (error counting
+for the 4 standalone per-symbol endpoints) both answer "is this source broken" — neither gives a
+per-*run* view of "how many articles did source X yield this run, how many did the LLM extract a
+pick from, how many of those survived NSE-symbol validation into a real consolidated pick." A
+source that's technically "healthy" (returns articles every run) but whose picks never survive
+validation is invisible to both of those modules.
+
+1. `source_quality.record_run(run_id, source_stats)` writes one JSON file per pipeline run to
+   `output/_source_quality/<run_id>.json` (tempfile + `os.replace` atomic write, same convention
+   as `cache.py`/`source_health.py` — no lock needed since each run writes its own uniquely-named
+   file, unlike those modules' shared per-source file). Never raises — a telemetry write failure
+   must never affect a real pipeline run.
+2. `market_picks_pipeline.py::_aggregate_source_stats(raw_sources, raw_picks, consolidated)`
+   tallies three counts per source, keyed off `tools.market_picks_tools.SOURCES` (every registered
+   source always present, even at zero activity — a source name that doesn't match the registry,
+   e.g. stale data, is ignored rather than creating an untracked key): `articles_fetched` (phase 1
+   output), `picks_extracted` (how many of `raw_picks` cite that source), `picks_validated` (how
+   many of `consolidated`'s surviving groups cite that source — every item in `consolidated`
+   passed NSE-symbol validation by definition, so this is "did this source's extraction actually
+   produce a real, tradeable pick," not just "did the LLM produce *something*").
+3. `MarketPicksPipeline.run()` calls `_aggregate_source_stats()` and `source_quality.record_run()`
+   right after `_phase_score` completes — same placement as `source_health.record_and_check()`'s
+   own call site inside `_phase_scrape`, but here it needs the fully-scored pipeline output to
+   know which picks actually survived validation, so it can't fire any earlier. Skipped on the
+   empty-pipeline early-return path, same as `source_health`'s own per-phase calls.
+4. `source_quality_report.py` is a standalone aggregation CLI (`python source_quality_report.py
+   --days 14`) — sums the three counts across every run file within the lookback window, computes
+   a yield rate (extracted/fetched) and survival rate (validated/extracted) per source, and prints
+   a table sorted worst-survival-first (a source with no extractions yet sorts last, not first,
+   since there's nothing to be worst *at*). Same "grep-able counter files plus a report script,
+   not a metrics dashboard" scope as `scraper_error_counters.py`'s own disclosed scope.
+
 ### Standalone scraper error counters (`scraper_error_counters.py`)
 
 Point 4 above deliberately excludes `peers`/`insider-activity`/`street-consensus` from
@@ -1748,6 +2033,150 @@ mirroring `sme_ema_pipeline.py`'s shape, served at `/screener` via `GET /api/scr
    `screener_stocks` table (`screener_stocks.drop()`/`.create()`, not `metadata.drop_all()`),
    unlike `sme_ema_pipeline.py --reset-db`, which operates on the shared `MetaData()` and so
    drops every table in the app — see that command's own disclosed limitation above.
+
+### EOD price store + corporate actions flow
+
+The platform's six data slices and the SME/screener pipelines all fetch price data live
+(yfinance, NSE API) at request/run time — there's no persistent, PostgreSQL-backed daily
+price history anywhere in this codebase. `eod_prices_pipeline.py` + `corporate_actions_pipeline.py`
+are the first step of a longer-term "PostgreSQL as source of truth, scrapers demoted to
+ingestion jobs" direction: a standalone, NSE-bhavcopy-fed daily price store, plus split/bonus
+price adjustment on top of it. Nothing else in this codebase reads from it yet — this is
+ingestion-only, the same "ships standalone, no consumer wiring yet" scope call this repo
+already makes elsewhere (e.g. `schema_drift.py`'s six-task-only scope, disclosed in its own
+section above).
+
+1. **Sources**: `tools/eod_sources.py` fetches NSE's full daily bhavcopy
+   (`sec_bhavdata_full_DDMMYYYY.csv` from `nsearchives.nseindia.com` — OHLC, previous close,
+   average price, volume, turnover, trades, delivery quantity/%), the `EQUITY_L.csv` equity
+   master (company name/ISIN/listing date/face value), and AMFI's `NAVAll.txt` (daily NAV for
+   ~40k schemes) + `api.mfapi.in`'s per-scheme history mirror (for backfilling a newly-tracked
+   scheme's history). All follow the same never-raise, `{"status": "ok"|"missing"|"error", ...}`
+   convention as every other `tools/*.py` module — a 404 on the bhavcopy URL means holiday/not-
+   yet-published (`"missing"`, not an error); a 200 response whose body doesn't look like a real
+   bhavcopy (HTML bot-block page, or a degenerate non-CSV body) is detected via content-sniffing
+   (`_has_bhavcopy_header`/`_looks_like_html`) and retried once with a fresh session before being
+   treated as a genuine error — never silently ingested as if it were real price data.
+2. **Schema** (`db/models.py`): `securities` (symbol PK, isin, company_name, series,
+   listing_date, face_value, `last_seen` — the last date this symbol appeared in a bhavcopy,
+   detecting a delisting/suspension without a separate status field), `prices_daily` (symbol +
+   trade_date composite PK; only `EQ`/`BE`/`BZ`/`SM`/`ST` series are stored, debt/rights series
+   filtered out at parse time), `mf_nav_daily` (scheme_code + nav_date composite PK — only
+   schemes actually held in a portfolio `assets` table are stored, since ~40k schemes is too
+   many to store wholesale; this codebase doesn't have a portfolio system yet, so NAV ingestion
+   is a documented no-op — see point 5 below), and `corporate_actions` (id PK, symbol, ex_date,
+   `type` — split/bonus/dividend/rights/buyback/other, `purpose_raw` — NSE's verbatim PURPOSE
+   string, `price_factor` — the multiplier applied to prices strictly before ex_date, NULL for
+   non-adjusting types, `amount` — dividend Rs/share, NULL otherwise). Added via Alembic revision
+   `684c8a31e7e0` (see "Schema migrations (Alembic)" above) — not a hand-edited `db/schema.sql`
+   guard, since that hand-synced convention was already superseded by Alembic before this shipped.
+3. **`prices_daily.adj_close`** is a stored, precomputed column (approach: one writer, dumb
+   readers — not an on-the-fly join at every read site) — split/bonus-adjusted only; dividends,
+   rights, and buybacks are recorded as data but never affect it (no total-return series). Seeded
+   to `close` on insert; `corporate_actions_pipeline.py`'s recompute job is the only writer after
+   that — `_upsert_prices`'s `ON CONFLICT` clause deliberately never touches `adj_close`, so
+   re-ingesting a day (an archive replay, a `--date` repair) can't clobber an already-adjusted
+   value back to raw.
+4. **Corporate-action parsing never guesses a ratio**: `tools/corporate_actions.py::parse_purpose()`
+   classifies NSE's free-text PURPOSE string via regex (bonus `A:B` → factor `B/(A+B)`; split
+   `old_fv→new_fv` → factor `new_fv/old_fv`) — anything that doesn't cleanly match becomes
+   `type="other"` with a NULL `price_factor`, never a wrong-but-plausible-looking number. A
+   `type="other"` row whose text still contains a bonus/split keyword
+   (`_missed_factor_suspects()`) gets its own distinct warning log
+   (`ca_missed_factor_suspect`) rather than drowning in ordinary AGM/EGM noise, so a genuinely
+   missed ratio parse is actually visible to whoever reads the cron log. NSE occasionally revises
+   an action's purpose text, creating a near-duplicate row under the same
+   `(symbol, ex_date, purpose_raw)` unique key with a different factor — `adjusting_actions()`
+   groups by `(ex_date, type)` and, when a group has more than one distinct factor, applies only
+   the highest-id (most recently ingested) row's factor, logging `ca_factor_conflict` — a symbol
+   cannot legitimately have two splits or two bonuses on one ex-date, so this is always a
+   revision, never two real actions to multiply together.
+5. **MF NAV ingestion is a documented no-op today**: `_held_scheme_codes()` queries a portfolio
+   `assets` table (`type='mf'`) this codebase doesn't have yet — the query fails, is caught, and
+   degrades to an empty set (`eod_nav_skipped` logged), never raising. The moment a portfolio
+   system adds that table, NAV ingestion activates automatically with no code change here — this
+   mirrors the "never invent, degrade to the documented no-op" convention used everywhere else in
+   this codebase for an optional dependency that doesn't exist yet (e.g. `DATABASE_URL`/
+   `SMTP_HOST` unset elsewhere in this doc).
+6. **Self-healing default run**: `eod_prices_pipeline.py`'s default mode (no `--date`/`--backfill`)
+   ingests any of the last 5 weekdays missing a `prices_daily` row — not just today — so a cron
+   run that fired before NSE published the file, or a transient failure, is caught by the very
+   next run without manual intervention. `--date YYYY-MM-DD` (one specific day) and
+   `--backfill YYYY-MM-DD` (every weekday from that date to today) exist for manual repair/backfill.
+   The NAV step and the corporate-actions step (`run_ca_step`, called as `eod_prices_pipeline.run()`'s
+   final step) are both isolated in their own try/except — a failure in either never affects the
+   equity-ingestion exit code, the same "one bad optional step doesn't fail the whole run"
+   convention `main._build_report()`'s own signal/verdict-snapshot writes already follow.
+7. **`--setup-db`/`--reset-db`**: each pipeline owns only its own tables — `eod_prices_pipeline.py
+   --setup-db`/`--reset-db` creates/resets `securities`+`prices_daily`+`mf_nav_daily`;
+   `corporate_actions_pipeline.py --setup-db`/`--reset-db` creates/resets `corporate_actions`
+   alone — same scoped-table convention `screener_pipeline.py --reset-db` already established
+   (see "SME golden cross flow" above for the `sme_ema_pipeline.py --reset-db` mistake this
+   convention exists to avoid repeating).
+8. **Daily auto-run**: `.github/workflows/eod-prices-cron.yml` runs at 14:15 UTC (19:45 IST) on
+   weekdays — the bhavcopy with delivery data is published around 19:00 IST, and this runs after
+   `sme-cron.yml` (13:00 UTC) with no overlap. Same `DATABASE_URL`-secret-required, fail-fast
+   pattern as every other cron workflow in this repo. `corporate_actions_pipeline.py` has no
+   separate cron entry — `eod_prices_pipeline.run()` already calls its daily step
+   (`run_ca_step`) as part of the same run; the module stays independently runnable via its own
+   CLI (`--backfill`/`--recompute SYMBOL`/`--recompute-all`) for manual repair.
+9. **Disclosed limitation**: like every other NSE/BSE/AMFI scraper in this codebase, the exact
+   bhavcopy CSV column layout, `EQUITY_L.csv` column layout, AMFI `NAVAll.txt` line format, and
+   NSE corporate-actions API response shape were not verified against a live response in this
+   sandbox (no outbound internet — same disclosure pattern as every other scraper in this file).
+   A real-world mismatch degrades to a logged error/skip for that day's ingestion, never a
+   fabricated row.
+10. **Out of scope for this pass**: BSE bhavcopy, real-time/delayed intraday quotes, rights/buyback
+    price adjustment, total-return (dividend-adjusted) series, adjusted volume, any API endpoint
+    or frontend surface reading from this store, and migrating `sme_ema_pipeline.py`'s own
+    yfinance-sourced OHLCV to read from `prices_daily` instead — all deliberately deferred rather
+    than silently assumed done, the same disclosed-scope-boundary convention this document uses
+    throughout (e.g. the Market Picks pipeline's own "deliberately not decomposed" note above).
+
+### Securities master + symbol resolver (`tools/securities_master.py`)
+
+A broker's internal stock code (e.g. `BAJAJHFLEQ`, `ORICAREQ`) routinely doesn't match the
+canonical NSE/BSE trading symbol (`BAJAJHFL`, `OCCL`) — verifying holdings imported from a
+brokerage statement by hand means repeated manual NSE-master/Screener.in/BSE lookups.
+`tools/securities_master.py` closes that gap by combining every stock registry this codebase
+already has (or now has, via the EOD price store above) into one resolver. **Not yet wired into
+anything** — this ships the module and its tests only; the intended consumer is a future
+broker-statement/CSV import, tracked separately.
+
+1. **Four registries, one merge.** `load_nse_main_board(engine)` queries the `securities` table
+   (populated nightly by `eod_prices_pipeline.py` from NSE's `EQUITY_L.csv` — no separate fetch
+   needed, this is a free read off data the EOD store above already maintains), filtered to rows
+   with a real `company_name` (an unenriched row is a pre-`EQUITY_L.csv`-join miss, not useful for
+   name-fuzzy matching). `fetch_bse_main_board(force=False)` is a new fetch — BSE's own
+   `ListofScripData` API (the same endpoint `tools/sme_tools.py` already uses for BSE SME Groups
+   M/MS), looped over the main-board groups (`A`, `B`, `T`, `Z`, `X`, `XT`, `P`, `MT`, `TS`),
+   deduped by `SCRIP_CD` across groups, cached 24h under `output/_bse_main_master.json`
+   (atomic tempfile+`os.replace` write, same convention as `cache.py`/`tools/sme_tools.py`), never
+   raising — a failing group is skipped, not fatal to the others, and a total fetch failure falls
+   back to a stale cache, then to `[]`. `tools/sme_tools.py::get_all_sme_stocks()` (NSE Emerge +
+   BSE SME, existing, untouched) is the fourth. `get_full_securities_master(engine, force=False)`
+   merges all four, deduped by ISIN with NSE main-board preferred on collision (a DB failure on the
+   NSE side degrades to that source contributing nothing, not a raised exception — the other three
+   still merge).
+2. **`resolve_symbol(engine, code, company_name=None, isin=None, master=None)`** resolves a
+   broker's code to `{"symbol", "exchange", "confidence": "isin"|"exact"|"fuzzy"|"unresolved",
+   "candidate_name"}`, in that tier order: an ISIN match (highest confidence — broker ISINs are
+   authoritative) beats an exact code match (tried both as-is and with one trailing suffix
+   stripped — `EQ`/`SM`/`ST`/`BE`/`BZ`/`IV` — a broker's own series suffix on an otherwise-correct
+   symbol), which beats a fuzzy company-name match (`rapidfuzz.process.extractOne`,
+   `token_set_ratio`, `processor=rapidfuzz.utils.default_process` for case/punctuation-insensitive
+   scoring, `score_cutoff=85`). Below that threshold — or with no `company_name` at all — the
+   result is `"unresolved"`, never a guessed symbol; `candidate_name` still carries the best fuzzy
+   hit if any, so a caller can log/display "closest guess: X" without treating it as verified. A
+   caller resolving many codes in a loop should build `master` once via
+   `get_full_securities_master(engine)` and pass it in — each self-load re-scans the full merged
+   registry, which is wasteful per-row.
+3. **Disclosed limitation**: like every other NSE/BSE scraper in this codebase, BSE's exact field
+   names for the main-board `ListofScripData` response (`scrip_id` for the alpha ticker, falling
+   back to the numeric `SCRIP_CD` when blank) were not verified against a live response in this
+   sandbox — same disclosure pattern as the BSE SME fetch this module's BSE fetch mirrors. A
+   real-world field-name mismatch degrades that group's rows to a numeric-only symbol (still
+   usable, just less readable) rather than a fabricated one.
 
 ### Route module extraction (`routes/`)
 
