@@ -252,6 +252,21 @@ def _print_status(symbol: str) -> None:
     print()
 
 
+def _save_report(symbol: str, report_key: str, report: dict) -> None:
+    """Persists the CLI's finished report — Postgres when available, else the
+    disk write the core CLI flow always did before state_store.py existed.
+    DATABASE_URL is not required for `python main.py TCS` (see backend/CLAUDE.md's
+    env var table), so a missing one must not silently drop the report."""
+    if state_store.save(REPORT_NAMESPACE, report_key, report):
+        print(f"\nReport saved as {REPORT_NAMESPACE}/{report_key}")
+        return
+    report_dir = Path("output") / symbol.upper()
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / f"report_{date.today()}.json"
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
+    print(f"\nReport saved to: {report_path}")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():  # pylint: disable=too-many-locals,too-many-statements
@@ -361,10 +376,7 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     report = _build_report(symbol, all_data, analysis, signal_context, mf_holdings_trend)
     save_verdict_snapshot(symbol, analysis, signal_context, all_data.get("stock_info") or {})
     report_key = f"{symbol.upper()}:{date.today()}"
-    if state_store.save(REPORT_NAMESPACE, report_key, report):
-        print(f"\nReport saved as {REPORT_NAMESPACE}/{report_key}")
-    else:
-        print("\nReport NOT saved — DATABASE_URL is unset (nothing persists it).")
+    _save_report(symbol, report_key, report)
     log_event(LOGGER, "pipeline_completed", run_id=run_id, symbol=symbol, report_key=report_key)
 
 

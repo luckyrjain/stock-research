@@ -802,7 +802,8 @@ coroutine, and raises `TypeError` at runtime. Every SSE endpoint in this codebas
 From `backend/`: `python main.py <SYMBOL>` (`--force` to bypass cache) runs the identical fetch → normalize →
 signal-engine → analyst flow the web app's SSE endpoint runs, sharing `main._fetch_task()` and
 `main._build_report()` with `api.py` — the two entry points cannot drift on report shape. Also
-saves its finished report to `app_state` under `cli_report`, keyed `SYMBOL:YYYY-MM-DD`. Batch pipelines each have their own CLI
+saves its finished report to `app_state` under `cli_report`, keyed `SYMBOL:YYYY-MM-DD` (or to
+`output/<SYMBOL>/report_<date>.json` when `DATABASE_URL` is unset). Batch pipelines each have their own CLI
 too: `sme_ema_pipeline.py`, `screener_pipeline.py`, `market_picks_pipeline.py` (`main()`, for a
 self-hosted crontab alternative to the GitHub Actions cron), `watchlist_alerts.py` (`--force`),
 `eod_prices_pipeline.py` (`--setup-db`/`--reset-db`/`--date`/`--backfill`),

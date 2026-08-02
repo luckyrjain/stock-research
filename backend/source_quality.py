@@ -14,6 +14,7 @@ import state_store
 from observability import get_logger, log_event
 
 NAMESPACE = "source_quality"
+_RETENTION_DAYS = 90  # well beyond source_quality_report.py's default 14-day lookback
 _logger = get_logger("source_quality")
 
 
@@ -27,5 +28,6 @@ def record_run(run_id: str, source_stats: dict[str, dict]) -> None:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "sources": source_stats,
         })
+        state_store.delete_older_than(NAMESPACE, _RETENTION_DAYS)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         log_event(_logger, "source_quality_write_failed", level="warning", run_id=run_id, error=str(exc))

@@ -118,6 +118,33 @@ def items(namespace: str, limit: int | None = None, newest_first: bool = False) 
         return []
 
 
+def delete_older_than(namespace: str, days: int) -> int:
+    """Delete every record in `namespace` whose `updated_at` is older than
+    `days` ago. Returns the number of rows deleted (0 on any failure, never
+    raises) — the one disk-directory convenience `output/_*` gave operators
+    (`rm output/_source_quality/*.json`) that a shared Postgres table doesn't,
+    for namespaces with per-run/unbounded growth (e.g. `source_quality`)."""
+    if not _enabled():
+        return 0
+    try:
+        from datetime import timedelta
+
+        from db.models import app_state
+
+        cutoff = _now() - timedelta(days=days)
+        engine = _get_engine()
+        with engine.begin() as conn:
+            result = conn.execute(
+                app_state.delete().where(
+                    app_state.c.namespace == namespace, app_state.c.updated_at < cutoff
+                )
+            )
+            return result.rowcount or 0
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        log_event(LOGGER, "state_delete_failed", level="warning", namespace=namespace, error=str(exc))
+        return 0
+
+
 def save(namespace: str, key: str, payload: dict) -> bool:
     """Upsert one record. Last write wins — used only where a single writer
     owns the key (one snapshot per date, one telemetry file per run id, one

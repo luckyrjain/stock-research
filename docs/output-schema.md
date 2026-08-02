@@ -33,8 +33,10 @@ backend/output/TCS/
 └── research_raw.json      # pre-normalization debug dump (also shareholding_raw/filings_raw)
 ```
 
-The CLI's finished report is no longer written here — it goes to PostgreSQL, under the
-`cli_report` namespace in `app_state`, keyed `SYMBOL:YYYY-MM-DD` (see the table further down).
+The CLI's finished report goes to PostgreSQL, under the `cli_report` namespace in `app_state`,
+keyed `SYMBOL:YYYY-MM-DD` (see the table further down) — or, when `DATABASE_URL` is unset (not
+required for the core `python main.py <SYMBOL>` flow), falls back to `output/<SYMBOL>/report_<date>.json`,
+the same disk write this codebase always did before `state_store.py` existed.
 
 `fii_dii_flow` and `macro_context` (both 24h) are cached under a fixed `"_MACRO"` pseudo-symbol
 (market-wide, not per-symbol), and `index_history` (24h) under a `"NSEI"` pseudo-symbol — neither
@@ -700,7 +702,7 @@ the `app_state` table (`namespace`, `key`, `payload` JSON) — see [Database](da
 | `scraper_errors` | Scraper name (`peers`, `financials`, `insider_trades`, `bulk_block_deals`, `trendlyne_articles`, `trendlyne_numeric_consensus`) | Error counter for the standalone per-symbol scrapers |
 | `source_quality` | Market Picks run id | Per-run source telemetry (yield, syndication-dedup rate, extraction success) for the 20 Market Picks sources |
 | `cas_archive` | `YYYY-MM-DD-HHMMSS` | PII-scrubbed parsed CAS-statement JSON — replay via (from `backend/`) `python cas_import.py --replay <key> --account-id N` |
-| `cli_report` | `SYMBOL:YYYY-MM-DD` | The CLI's own finished report (`main.py`); nothing reads it back |
+| `cli_report` | `SYMBOL:YYYY-MM-DD` | The CLI's own finished report (`main.py`); nothing reads it back; falls back to a disk write under `output/` when `DATABASE_URL` is unset |
 
 ---
 

@@ -2652,9 +2652,12 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
 - **`output/` is cache only. Durable state goes to PostgreSQL.** Every file under `output/` must
   be regenerable by re-running something; if losing it would lose real information, it belongs in
   the database. Anything shaped like "a JSON blob under a key" goes through `state_store.py`
-  (`load`/`save`/`items`/`mutate` over the `app_state` table) under its own namespace, rather than
-  a new directory of files or a new near-identical table — that module replaced six such
-  directories. Use `mutate()`, never `load()`-then-`save()`, wherever more than one worker can
+  (`load`/`save`/`items`/`mutate`/`delete_older_than` over the `app_state` table) under its own
+  namespace, rather than a new directory of files or a new near-identical table — that module
+  replaced six such directories. A namespace with unbounded per-run growth (e.g. `source_quality`)
+  should call `delete_older_than()` after each write, the way `source_quality.py::record_run()`
+  does — the disk directories this module replaced were at least `rm`-able by hand; a Postgres
+  table isn't, without this. Use `mutate()`, never `load()`-then-`save()`, wherever more than one worker can
   touch the same key: it holds a row lock for the whole read-modify-write, which is what the three
   hand-rolled `fcntl.flock` helpers it replaced existed to do (and it works across hosts, which
   they did not). Every entry point degrades to a logged no-op without `DATABASE_URL`, so callers

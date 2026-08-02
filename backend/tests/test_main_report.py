@@ -1,13 +1,44 @@
+import json
 import os
 import shutil
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import cache
 import main
-from main import _build_report, _fetch_task, _strip_meta
+from main import _build_report, _fetch_task, _save_report, _strip_meta
+
+
+class SaveReportTest(unittest.TestCase):
+    """Regression tests for a review finding: main.py's CLI report used to
+    always write to disk with zero setup; the state_store.py migration made
+    it silently require DATABASE_URL. _save_report() must fall back to the
+    disk write when state_store.save() reports it didn't persist."""
+
+    def setUp(self) -> None:
+        self._orig_cwd = os.getcwd()
+        self._tmpdir = tempfile.mkdtemp(prefix="stock-research-save-report-test-")
+        os.chdir(self._tmpdir)
+        self.addCleanup(os.chdir, self._orig_cwd)
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+
+    def test_uses_state_store_when_it_persists(self) -> None:
+        with patch("main.state_store.save", return_value=True) as mock_save:
+            _save_report("TCS", "TCS:2026-08-02", {"a": 1})
+
+        mock_save.assert_called_once_with(main.REPORT_NAMESPACE, "TCS:2026-08-02", {"a": 1})
+        self.assertFalse((Path(self._tmpdir) / "output").exists())
+
+    def test_falls_back_to_disk_when_state_store_does_not_persist(self) -> None:
+        with patch("main.state_store.save", return_value=False):
+            _save_report("TCS", "TCS:2026-08-02", {"a": 1})
+
+        report_path = Path(self._tmpdir) / "output" / "TCS" / f"report_{date.today()}.json"
+        self.assertTrue(report_path.exists())
+        self.assertEqual(json.loads(report_path.read_text()), {"a": 1})
 
 
 class StripMetaTest(unittest.TestCase):

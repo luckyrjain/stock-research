@@ -65,6 +65,42 @@ class LoadSaveTest(StateStoreTestBase):
         self.assertEqual(state_store.load("b", "k"), {"from": "b"})
 
 
+class DeleteOlderThanTest(StateStoreTestBase):
+    def test_deletes_only_rows_older_than_cutoff(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        state_store.save("ns", "old", {"v": 1})
+        state_store.save("ns", "new", {"v": 2})
+        old_time = datetime.now(timezone.utc) - timedelta(days=100)
+        with self.engine.begin() as conn:
+            conn.execute(app_state.update().where(app_state.c.key == "old").values(updated_at=old_time))
+
+        deleted = state_store.delete_older_than("ns", 90)
+
+        self.assertEqual(deleted, 1)
+        self.assertIsNone(state_store.load("ns", "old"))
+        self.assertEqual(state_store.load("ns", "new"), {"v": 2})
+
+    def test_scoped_to_namespace(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        state_store.save("a", "k", {"from": "a"})
+        state_store.save("b", "k", {"from": "b"})
+        old_time = datetime.now(timezone.utc) - timedelta(days=100)
+        with self.engine.begin() as conn:
+            conn.execute(app_state.update().values(updated_at=old_time))
+
+        deleted = state_store.delete_older_than("a", 90)
+
+        self.assertEqual(deleted, 1)
+        self.assertIsNone(state_store.load("a", "k"))
+        self.assertEqual(state_store.load("b", "k"), {"from": "b"})  # untouched — different namespace
+
+    def test_disabled_returns_zero(self) -> None:
+        with patch.dict(os.environ, {"DATABASE_URL": ""}):
+            self.assertEqual(state_store.delete_older_than("ns", 1), 0)
+
+
 class ItemsTest(StateStoreTestBase):
     def setUp(self) -> None:
         super().setUp()

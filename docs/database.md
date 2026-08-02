@@ -753,7 +753,8 @@ first adding one.
   Aggregator tables: these are exercised against SQLite in tests, and nothing here needs a
   JSONB-specific operator.
 - **Written and read only through `backend/state_store.py`** (`load` / `save` / `items` /
-  `mutate`). Every entry point degrades to a logged no-op without `DATABASE_URL`, so its callers
+  `mutate` / `delete_older_than`). Every entry point degrades to a logged no-op without
+  `DATABASE_URL`, so its callers
   — all telemetry or audit paths — stay best-effort and can never break the request or pipeline
   run they observe.
 - `mutate(namespace, key, fn, default)` is the read-modify-write path. It upserts with
@@ -772,7 +773,7 @@ first adding one.
 | `scraper_errors` | Sanitized scraper name | `scraper_error_counters.record_scraper_error` | `error_count`. |
 | `source_quality` | Market Picks run id | `source_quality.record_run` | Per-source articles-fetched / picks-extracted / picks-validated for that run. |
 | `cas_archive` | `YYYY-MM-DD-HHMMSS` | `cas_import.archive_parsed` | PII-scrubbed parsed CAS statement, for replay. |
-| `cli_report` | `SYMBOL:YYYY-MM-DD` | `main.py` | The CLI's finished report. Nothing reads it back. |
+| `cli_report` | `SYMBOL:YYYY-MM-DD` | `main.py` | The CLI's finished report. Nothing reads it back. Falls back to disk (`output/<SYMBOL>/report_<date>.json`) when `DATABASE_URL` is unset. |
 
 
 ---
