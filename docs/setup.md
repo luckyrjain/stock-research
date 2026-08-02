@@ -18,10 +18,12 @@
 From the repo root:
 
 ```bash
-/opt/homebrew/bin/python3.13 -m venv .venv
+/opt/homebrew/bin/python3.13 -m venv .venv   # venv lives at the repo root, shared by the whole backend
 source .venv/bin/activate
+cd backend
 pip install -r requirements.txt
-cp .env.example .env
+cd ..
+cp .env.example .env   # .env stays at the repo root — shared by both stacks
 ```
 
 Then edit `.env` and set the provider you want to use.
@@ -90,6 +92,7 @@ exposed to the browser) and, like the backend's copy, is optional — see the ta
 
 ```bash
 source .venv/bin/activate
+cd backend
 uvicorn api:app --reload --port 8000
 ```
 
@@ -138,6 +141,7 @@ npm run dev
 
 ```bash
 source .venv/bin/activate
+cd backend
 python main.py TCS
 python main.py RELIANCE --force   # bypass cache
 ```
@@ -157,6 +161,7 @@ There are two paths, depending on whether the database already has these tables:
 
 ```bash
 source .venv/bin/activate
+cd backend
 createdb sme_research   # or whatever DATABASE_URL points at
 alembic upgrade head
 ```
@@ -171,6 +176,7 @@ via one of the pipelines' `--setup-db` flags before Alembic existed — i.e. pre
 store / corporate actions / Portfolio Aggregator tables):
 
 ```bash
+cd backend
 alembic stamp 0001_baseline_schema
 alembic upgrade head
 ```
@@ -189,6 +195,7 @@ created after this session's work landed): nothing to do — already at `head`.
 **From here on**, schema changes should be authored as new Alembic revisions:
 
 ```bash
+cd backend
 # after editing db/models.py
 alembic revision --autogenerate -m "add some_column to some_table"
 alembic upgrade head
@@ -217,6 +224,7 @@ sme_research`), then either run `alembic upgrade head` (see above) or use the pi
 
 ```bash
 source .venv/bin/activate
+cd backend
 python sme_ema_pipeline.py --setup-db   # create tables (idempotent) + stamp alembic head
 python sme_ema_pipeline.py              # fetch SME stocks, compute EMA20/EMA50 crosses, store
 python sme_ema_pipeline.py --reset-db   # drop + recreate tables (after schema changes; data is regenerable)
@@ -243,7 +251,7 @@ missing. Trigger a one-off run from the Actions tab ("Run workflow"). If you'd r
 this locally/self-hosted instead of on GitHub Actions, a crontab entry works too:
 
 ```cron
-30 18 * * 1-5 cd /path/to/stock-research && .venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
+30 18 * * 1-5 cd /path/to/stock-research/backend && ../.venv/bin/python sme_ema_pipeline.py >> output/sme_cron.log 2>&1
 ```
 
 ## Market picks pipeline
@@ -253,6 +261,7 @@ run from the CLI, or via the **Fresh scan** / **See This Week's Picks** buttons 
 
 ```bash
 source .venv/bin/activate
+cd backend
 python market_picks_pipeline.py
 ```
 
@@ -276,6 +285,7 @@ stocks — see CLAUDE.md's "Custom screener flow" section. Requires `DATABASE_UR
 
 ```bash
 source .venv/bin/activate
+cd backend
 python screener_pipeline.py --setup-db   # create the screener_stocks table + stamp alembic head
 python screener_pipeline.py              # fetch NIFTY 500 constituents, quote + technical signal each, store
 python screener_pipeline.py --reset-db   # drop + recreate ONLY screener_stocks (scoped, unlike sme_ema_pipeline.py's --reset-db)
@@ -318,6 +328,7 @@ See CLAUDE.md's "EOD price store + corporate actions flow" section for the full 
 
 ```bash
 source .venv/bin/activate
+cd backend
 python eod_prices_pipeline.py --setup-db     # create securities/prices_daily/mf_nav_daily
 python eod_prices_pipeline.py                # self-healing: ingests any missing day in the last 5
 python eod_prices_pipeline.py --date 2026-08-01
@@ -357,7 +368,7 @@ by the same Alembic step as everything else above).
 - **CAS import** (`POST /api/portfolio/import-cas`) — upload a CAMS/KFintech detailed CAS PDF +
   its password on `/portfolio-aggregator`. New dependency `casparser` (already in
   `requirements.txt`, pulls `pdfminer.six`). Parsed statements are archived (PII-scrubbed) to
-  `output/_cas/` for replay: `python cas_import.py --replay output/_cas/<file>.json --account-id N`.
+  `output/_cas/` for replay: from `backend/`, `python cas_import.py --replay output/_cas/<file>.json --account-id N`.
 - **Broker CSV import** (`POST /api/portfolio/import-csv/preview` then `.../import-csv`) — upload
   a broker trade export (Zerodha tradebook auto-detected; any other broker via a column-mapping
   UI). New dependency `openpyxl` (already in `requirements.txt`, for `.xlsx` files — `pandas`
@@ -453,6 +464,7 @@ When `REDIS_URL` is set, `cache.py` writes through to Redis in addition to local
 ```bash
 # Backend
 source .venv/bin/activate
+cd backend
 python main.py INFY
 uvicorn api:app --reload --port 8000
 

@@ -18,8 +18,9 @@ This starts four services (`docker-compose.yml`):
 - **postgres** — Postgres 16, with a named volume so data survives `docker compose down` (not `down -v`)
 - **redis** — `redis:7-alpine`, persisted via a named volume; wired into the `backend` service's
   `REDIS_URL` automatically (see "Scaling" below)
-- **backend** — `Dockerfile` at the repo root, single `uvicorn` worker (see "Scaling" below), reads `.env`
-  for provider keys and gets `DATABASE_URL`/`REDIS_URL`/`ALLOWED_ORIGINS` set automatically by compose
+- **backend** — `backend/Dockerfile` (build context `./backend` in `docker-compose.yml`), single
+  `uvicorn` worker (see "Scaling" below), reads `.env` (repo root) for provider keys and gets
+  `DATABASE_URL`/`REDIS_URL`/`ALLOWED_ORIGINS` set automatically by compose
 - **frontend** — `frontend/Dockerfile`, a multi-stage build using Next.js's `output: 'standalone'`
   (`next.config.ts`), gets `API_URL` pointed at the `backend` service automatically
 
@@ -45,6 +46,7 @@ which you don't want under real traffic). For production:
 
 ```bash
 source .venv/bin/activate
+cd backend
 uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 

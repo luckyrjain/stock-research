@@ -73,70 +73,83 @@ research modes, a cross-mode watchlist/positions layer, and a minimal account sy
 
 ## Project structure
 
+`backend/` and `frontend/` are two independent stacks living side by side in one repo — no import
+paths changed when the backend moved into its own directory, only the top-level layout did.
+
 ```text
 stock-research/
-├── api.py                    FastAPI server — SSE endpoints, symbol validation, most /api/* routes
-├── main.py                   CLI entry point; also contains _fetch_task, _build_report (shared with api.py)
-├── crew.py                   Analyst guardrails, run_analysis_with_fallback (cross-provider failover)
-├── llm_cost.py                Per-call LLM cost instrumentation + running daily total
-├── cache.py                   File-based TTL cache (output/<SYMBOL>/<task>.json), optionally Redis-mirrored
-├── rate_limiter.py             Shared sliding-window rate limits / concurrency slots / locks (Redis-backed, opt-in)
-├── error_tracking.py           Optional Sentry-compatible error hook, wired into observability.log_event()
-├── schema_drift.py             Type-drift detection for the six scraped data slices
-├── source_health.py            Freshness/volume monitoring for market-picks sources + macro overlay
-├── scraper_error_counters.py   Error counters for the standalone per-symbol scrapers (peers, financials, ...)
-├── schemas.py                  Normalization contracts: raw tool output → canonical dicts
-├── peer_analytics.py           Peer-percentile + absolute valuation-anchor math
-├── dcf_valuation.py             Deterministic two-stage DCF estimate off cash-flow history
-├── auth.py                     Magic-link auth: token/session/API-key issuance + validation (PostgreSQL)
-├── email_sender.py              Sends magic-link sign-in + watchlist-alert emails over generic SMTP
-├── verdict_history.py           Daily verdict/price snapshots (PostgreSQL) — powers the verdict timeline
-├── mf_holdings_history.py       Quarterly MF stake snapshots (PostgreSQL) — powers stake-delta badges
-├── watchlist_alerts.py          Daily batch job: emails users on a watched stock's rec/price change
-├── market_picks_pipeline.py    Multi-agent weekly picks pipeline (6 phases)
-├── source_quality.py            Per-run source-quality telemetry (market picks)
-├── source_quality_report.py     Aggregation CLI for source_quality.py's stored runs
-├── sme_ema_pipeline.py          SME golden/death cross batch pipeline (PostgreSQL)
-├── screener_pipeline.py         NIFTY 500 custom screener batch pipeline (PostgreSQL)
-├── eod_prices_pipeline.py       EOD price store: NSE bhavcopy + AMFI NAV ingestion (PostgreSQL)
-├── corporate_actions_pipeline.py  NSE corporate actions ingestion + adj_close recompute
-├── portfolio_valuation.py       Portfolio Aggregator nightly valuation + XIRR engine
-├── cas_import.py                CAMS/KFintech CAS PDF import → transactions/holdings
-├── csv_import.py                Broker trade CSV import (Zerodha preset) → transactions/holdings
-├── db/                          SQLAlchemy Core tables (models.py) + schema.sql reference
-├── routes/                      Per-domain FastAPI routers extracted from api.py
-│   ├── watchlist.py             Watchlist CRUD, calendar, claim-anonymous-rows
-│   ├── positions.py             Positions CRUD, claim-anonymous-rows, sector-concentration
-│   ├── portfolio_aggregator.py  Portfolio Aggregator CRUD, net worth, XIRR, CAS/CSV import
-│   └── _shared.py                Shared rate-limit/DB/executor wrapper all routers use
-├── alembic.ini / migrations/    Schema migrations (SQLAlchemy Core metadata is the single source of truth)
-├── observability.py             Structured JSON logging via log_event()
-├── requirements.txt
-├── .env.example
-├── config/
-│   ├── analyst.json             Analyst role/goal/backstory + section labels
-│   └── crew_tasks.py             Builds the analyst prompt string from analyst.json
-├── tools/
-│   ├── market_picks_tools.py     RSS + GNews scrapers for 20 sources; exports SOURCES + SCRAPER_FNS
-│   ├── sme_tools.py               NSE Emerge + BSE SME stock-list fetchers
-│   ├── nifty500_tools.py          NIFTY 500 constituent list fetcher (screener_pipeline.py's universe)
-│   ├── screener_tools.py          Screener.in fundamentals, peers, financial statements, concalls
-│   ├── trendlyne_scraper.py       Trendlyne numeric consensus (rating/analyst count/target price)
-│   ├── nse_insider_trades.py / nse_bulk_block_deals.py   Insider & institutional activity
-│   ├── nse_fii_dii_tools.py / macro_context_tools.py     FII/DII flow + RBI rate/inflation
-│   ├── price_history_tools.py     Shared daily-close OHLCV fetch (sparklines, technical signal)
-│   ├── eod_sources.py              NSE bhavcopy + equity master + AMFI NAV fetch/parse
-│   ├── corporate_actions.py        NSE corporate-actions fetch + purpose-string parser
-│   ├── securities_master.py        NSE+BSE main-board/SME merge + resolve_symbol() fuzzy resolver
-│   ├── _nse_session.py             Shared NSE session-priming helper used by every NSE-touching module
-│   └── ...                         Other data-fetching functions (yfinance, gnews, NSE filings)
-├── signals/                     Quantitative signal engine (features → signal scores → verdict)
-│   ├── engine.py                  Weighted blend + sector-aware weight tilts
-│   ├── technical.py                RSI(14) + EMA20/50 posture signal
-│   ├── macro.py                    FII/DII flow + RBI rate/inflation overlay signal
-│   └── filings_classifier.py       Corporate actions / rating actions / next-results-date extraction
-├── tests/                        unittest-based tests (no live network calls)
-├── tests_live/                   Opt-in (RUN_LIVE_TESTS=1) live scraper contract checks, run weekly
+├── backend/
+│   ├── api.py                    FastAPI server — SSE endpoints, symbol validation, most /api/* routes
+│   ├── main.py                   CLI entry point; also contains _fetch_task, _build_report (shared with api.py)
+│   ├── crew.py                   Analyst guardrails, run_analysis_with_fallback (cross-provider failover)
+│   ├── llm_cost.py                Per-call LLM cost instrumentation + running daily total
+│   ├── cache.py                   File-based TTL cache (output/<SYMBOL>/<task>.json), optionally Redis-mirrored
+│   ├── rate_limiter.py             Shared sliding-window rate limits / concurrency slots / locks (Redis-backed, opt-in)
+│   ├── error_tracking.py           Optional Sentry-compatible error hook, wired into observability.log_event()
+│   ├── schema_drift.py             Type-drift detection for the six scraped data slices
+│   ├── source_health.py            Freshness/volume monitoring for market-picks sources + macro overlay
+│   ├── scraper_error_counters.py   Error counters for the standalone per-symbol scrapers (peers, financials, ...)
+│   ├── schemas.py                  Normalization contracts: raw tool output → canonical dicts
+│   ├── peer_analytics.py           Peer-percentile + absolute valuation-anchor math
+│   ├── dcf_valuation.py             Deterministic two-stage DCF estimate off cash-flow history
+│   ├── auth.py                     Magic-link auth: token/session/API-key issuance + validation (PostgreSQL)
+│   ├── email_sender.py              Sends magic-link sign-in + watchlist-alert emails over generic SMTP
+│   ├── verdict_history.py           Daily verdict/price snapshots (PostgreSQL) — powers the verdict timeline
+│   ├── mf_holdings_history.py       Quarterly MF stake snapshots (PostgreSQL) — powers stake-delta badges
+│   ├── watchlist_alerts.py          Daily batch job: emails users on a watched stock's rec/price change
+│   ├── market_picks_pipeline.py    Multi-agent weekly picks pipeline (6 phases)
+│   ├── source_quality.py            Per-run source-quality telemetry (market picks)
+│   ├── source_quality_report.py     Aggregation CLI for source_quality.py's stored runs
+│   ├── sme_ema_pipeline.py          SME golden/death cross batch pipeline (PostgreSQL)
+│   ├── screener_pipeline.py         NIFTY 500 custom screener batch pipeline (PostgreSQL)
+│   ├── eod_prices_pipeline.py       EOD price store: NSE bhavcopy + AMFI NAV ingestion (PostgreSQL)
+│   ├── corporate_actions_pipeline.py  NSE corporate actions ingestion + adj_close recompute
+│   ├── portfolio_valuation.py       Portfolio Aggregator nightly valuation + XIRR engine
+│   ├── cas_import.py                CAMS/KFintech CAS PDF import → transactions/holdings
+│   ├── csv_import.py                Broker trade CSV import (Zerodha preset) → transactions/holdings
+│   ├── db/                          SQLAlchemy Core tables (models.py) + schema.sql reference
+│   ├── routes/                      Per-domain FastAPI routers extracted from api.py
+│   │   ├── watchlist.py             Watchlist CRUD, calendar, claim-anonymous-rows
+│   │   ├── positions.py             Positions CRUD, claim-anonymous-rows, sector-concentration
+│   │   ├── portfolio_aggregator.py  Portfolio Aggregator CRUD, net worth, XIRR, CAS/CSV import
+│   │   └── _shared.py                Shared rate-limit/DB/executor wrapper all routers use
+│   ├── alembic.ini / migrations/    Schema migrations (SQLAlchemy Core metadata is the single source of truth)
+│   ├── observability.py             Structured JSON logging via log_event()
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   ├── config/
+│   │   ├── analyst.json             Analyst role/goal/backstory + section labels
+│   │   └── crew_tasks.py             Builds the analyst prompt string from analyst.json
+│   ├── tools/
+│   │   ├── market_picks_tools.py     RSS + GNews scrapers for 20 sources; exports SOURCES + SCRAPER_FNS
+│   │   ├── sme_tools.py               NSE Emerge + BSE SME stock-list fetchers
+│   │   ├── nifty500_tools.py          NIFTY 500 constituent list fetcher (screener_pipeline.py's universe)
+│   │   ├── screener_tools.py          Screener.in fundamentals, peers, financial statements, concalls
+│   │   ├── trendlyne_scraper.py       Trendlyne numeric consensus (rating/analyst count/target price)
+│   │   ├── nse_insider_trades.py / nse_bulk_block_deals.py   Insider & institutional activity
+│   │   ├── nse_fii_dii_tools.py / macro_context_tools.py     FII/DII flow + RBI rate/inflation
+│   │   ├── price_history_tools.py     Shared daily-close OHLCV fetch (sparklines, technical signal)
+│   │   ├── eod_sources.py              NSE bhavcopy + equity master + AMFI NAV fetch/parse
+│   │   ├── corporate_actions.py        NSE corporate-actions fetch + purpose-string parser
+│   │   ├── securities_master.py        NSE+BSE main-board/SME merge + resolve_symbol() fuzzy resolver
+│   │   ├── _nse_session.py             Shared NSE session-priming helper used by every NSE-touching module
+│   │   └── ...                         Other data-fetching functions (yfinance, gnews, NSE filings)
+│   ├── signals/                     Quantitative signal engine (features → signal scores → verdict)
+│   │   ├── engine.py                  Weighted blend + sector-aware weight tilts
+│   │   ├── technical.py                RSI(14) + EMA20/50 posture signal
+│   │   ├── macro.py                    FII/DII flow + RBI rate/inflation overlay signal
+│   │   └── filings_classifier.py       Corporate actions / rating actions / next-results-date extraction
+│   ├── tests/                        unittest-based tests (no live network calls)
+│   ├── tests_live/                   Opt-in (RUN_LIVE_TESTS=1) live scraper contract checks, run weekly
+│   └── output/                       Cache files (gitignored); also where the CLI saves report JSON
+│       ├── <SYMBOL>/                 Per-symbol task caches
+│       ├── _extract_cache/           LLM extraction cache (6 h TTL)
+│       ├── _history/                 Daily market-picks snapshots (trend tracking, win-rate history)
+│       ├── _market_picks/            Market picks result cache (7-day TTL)
+│       ├── _llm_cost/                Daily running LLM spend total
+│       └── _nse_master.txt           NSE equity symbol master, refreshed every 24 h
+├── .env.example                  Shared by both stacks; stays at the repo root
+├── docker-compose.yml
 ├── frontend/                     Next.js 15 app (TypeScript, Tailwind CSS)
 │   ├── app/page.tsx                    Stock analysis page (supports ?symbol= deep links)
 │   ├── app/market-picks/page.tsx       Weekly picks page
@@ -158,13 +171,8 @@ stock-research/
 │   ├── lib/watchlist.ts / positions.ts / auth.ts   Shared-cache hooks (DB-backed)
 │   ├── e2e/                             Playwright E2E specs — every backend response is mocked
 │   └── types/index.ts                   Canonical TS types for all SSE messages and reports
-└── output/                       Cache files (gitignored); also where the CLI saves report JSON
-    ├── <SYMBOL>/                 Per-symbol task caches
-    ├── _extract_cache/           LLM extraction cache (6 h TTL)
-    ├── _history/                 Daily market-picks snapshots (trend tracking, win-rate history)
-    ├── _market_picks/            Market picks result cache (7-day TTL)
-    ├── _llm_cost/                Daily running LLM spend total
-    └── _nse_master.txt           NSE equity symbol master, refreshed every 24 h
+├── docs/                         Setup/deployment/architecture/tools/output-schema/design/PRD docs
+└── CLAUDE.md, README.md          Root-level docs (this file among them)
 ```
 
 See `CLAUDE.md` for the complete, exhaustive repo structure and per-feature design notes.
@@ -184,10 +192,12 @@ See `CLAUDE.md` for the complete, exhaustive repo structure and per-feature desi
 ## Backend setup
 
 ```bash
-python3.13 -m venv .venv
+python3.13 -m venv .venv          # venv lives at the repo root, shared by the whole backend
 source .venv/bin/activate
+cd backend
 pip install -r requirements.txt
-cp .env.example .env
+cd ..
+cp .env.example .env               # .env stays at the repo root — shared by both stacks
 ```
 
 Edit `.env` with your provider credentials — set exactly one LLM provider key (Anthropic, OpenAI,
@@ -202,6 +212,7 @@ Once `DATABASE_URL` is set, create the schema via Alembic rather than any pipeli
 `--setup-db` flag — this is now the single source of truth for schema changes:
 
 ```bash
+cd backend
 alembic upgrade head        # fresh database — creates all tables
 # or, for a database that already has the tables (e.g. created by an older
 # --setup-db flag before Alembic existed):
@@ -231,6 +242,7 @@ API_URL=http://localhost:8000
 
 ```bash
 source .venv/bin/activate
+cd backend
 uvicorn api:app --reload --port 8000
 ```
 
@@ -248,7 +260,7 @@ Keys/Pricing.
 ### Or with Docker
 
 ```bash
-cp .env.example .env   # add at least one LLM provider key
+cp .env.example .env   # add at least one LLM provider key — run from the repo root
 docker compose up --build
 docker compose exec backend alembic upgrade head   # first run only — creates all tables
 ```
@@ -265,6 +277,7 @@ Each of these is a standalone script with its own CLI, normally run on a schedul
 
 ```bash
 source .venv/bin/activate
+cd backend
 
 # SME Signals (golden/death cross)
 python sme_ema_pipeline.py              # fetch, compute crosses, store
@@ -296,6 +309,7 @@ rate limiting.
 
 ```bash
 source .venv/bin/activate
+cd backend
 python main.py TCS
 python main.py RELIANCE --force   # bypass cache
 ```
@@ -303,10 +317,11 @@ python main.py RELIANCE --force   # bypass cache
 ## Tests
 
 ```bash
+cd backend
 python -m pytest tests/                                       # backend — no live network calls
 python -m pytest tests/test_analysis_guardrails.py -v          # single file
 
-cd frontend
+cd ../frontend
 npx tsc --noEmit                 # type-check (no lint config)
 npm run build                    # also catches CSS issues tsc alone won't
 npx playwright install --with-deps chromium   # once
@@ -319,7 +334,7 @@ handful of scraper targets on a weekly schedule — it is never part of the defa
 ## API endpoints
 
 The backend exposes 55+ routes across all modes; the table below covers the major ones per mode.
-**See `CLAUDE.md` for the complete, current list** (or run
+**See `CLAUDE.md` for the complete, current list** (or, from `backend/`, run
 `grep -n "@app\.\(get\|post\|delete\|patch\)" api.py` and
 `grep -rn "@router\.\(get\|post\|delete\|patch\)" routes/`). The Next.js app proxies all of these
 through `frontend/app/api/`.
@@ -398,11 +413,15 @@ Claude" section.
 
 ## Documentation
 
-- [CLAUDE.md](CLAUDE.md) — the exhaustive, ground-truth engineering reference for this repo
+- [CLAUDE.md](CLAUDE.md) — root-level overview + pointers
+- [backend/CLAUDE.md](backend/CLAUDE.md) — exhaustive backend engineering reference
+- [frontend/CLAUDE.md](frontend/CLAUDE.md) — frontend engineering conventions
 - [docs/index.md](docs/index.md)
 - [docs/setup.md](docs/setup.md)
 - [docs/architecture.md](docs/architecture.md)
 - [docs/deployment.md](docs/deployment.md)
 - [docs/tools.md](docs/tools.md)
 - [docs/output-schema.md](docs/output-schema.md)
-- [PRD.md](PRD.md)
+- [docs/design.md](docs/design.md) — AlphaPulse Design System
+- [docs/PRD.md](docs/PRD.md) — product strategy (vision, goals, priority, roadmap)
+- [docs/feature-catalog.md](docs/feature-catalog.md) — detailed feature inventory

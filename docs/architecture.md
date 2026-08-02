@@ -620,7 +620,7 @@ coroutine, and raises `TypeError` at runtime. Every SSE endpoint in this codebas
 
 ## CLI
 
-`python main.py <SYMBOL>` (`--force` to bypass cache) runs the identical fetch → normalize →
+From `backend/`: `python main.py <SYMBOL>` (`--force` to bypass cache) runs the identical fetch → normalize →
 signal-engine → analyst flow the web app's SSE endpoint runs, sharing `main._fetch_task()` and
 `main._build_report()` with `api.py` — the two entry points cannot drift on report shape. Also
 saves a dated `report_<date>.json` to `output/<SYMBOL>/`. Batch pipelines each have their own CLI
@@ -636,88 +636,108 @@ a CAS import from a previously-archived parse, for debugging/recovery without re
 
 ## File layout
 
+All backend paths below are relative to `backend/` (a sibling of `frontend/` at the repo root) —
+the same split documented in `CLAUDE.md`'s "Repo Structure" section. No import paths changed when
+the backend moved into its own directory, only the top-level nesting did.
+
 ```text
 stock-research/
-├── api.py                     FastAPI server — ~28 routes, SSE endpoints, symbol validation,
-│                               shared helpers routes/ and _shared.py depend on
-├── main.py                    CLI entry point; _fetch_task/_build_report shared with api.py
-├── crew.py                    Analyst guardrails, cross-provider failover, run_analysis_with_fallback
-├── llm_cost.py                Per-call LLM cost instrumentation + running daily total
-├── cache.py                   File-based TTL cache, optional Redis write-through/read-first
-├── rate_limiter.py            Shared-state (Redis or in-memory) rate limits, slots, locks
-├── schemas.py                 Normalization contracts: raw tool output → canonical dicts
-├── schema_drift.py            Type-drift detection for the six ALL_DATA_TASKS slices
-├── source_health.py           Freshness/volume monitoring for Market Picks' 20 sources + macro
-├── scraper_error_counters.py  Error counters for the 4 standalone per-symbol scrapers
-├── observability.py           Structured JSON logging (log_event())
-├── error_tracking.py          Optional Sentry-compatible hook, wired into log_event()
-├── peer_analytics.py          Peer-percentile + absolute valuation-anchor math (shared by
-│                               api.py's /api/peers and market_picks_pipeline.py's _phase_research)
-├── dcf_valuation.py           Deterministic two-stage DCF off cash-flow statement data
-├── verdict_history.py         Daily verdict/price snapshots (Postgres) — verdict timeline strip
-├── mf_holdings_history.py     Quarterly MF stake snapshots (Postgres) — stake-delta badges
-├── auth.py                    Magic-link auth: token/session/API-key issuance + validation
-├── email_sender.py            Magic-link + watchlist-alert emails over generic SMTP
-├── watchlist_alerts.py        Daily batch job: emails users on a watched stock's rec change
-├── market_picks_pipeline.py   6-phase multi-agent weekly picks pipeline
-├── sme_ema_pipeline.py        SME golden/death cross batch pipeline (Postgres)
-├── screener_pipeline.py       NIFTY 500 custom screener batch pipeline (Postgres)
-├── eod_prices_pipeline.py     NSE bhavcopy + AMFI NAV ingestion; also runs corporate-actions
-│                               and portfolio-valuation as isolated final steps
-├── corporate_actions_pipeline.py  NSE corporate-actions ingestion + adj_close recompute
-├── source_quality.py          Per-run Market Picks source telemetry (yield, dedup, extraction rate)
-├── source_quality_report.py   CLI aggregating source_quality.py's per-run JSON files
-├── portfolio_valuation.py     Portfolio Aggregator: refresh_valuations(), xirr(), xirr_report()
-├── cas_import.py              CAMS/KFintech CAS PDF import → Portfolio Aggregator transactions
-├── csv_import.py              Generic broker-CSV import (Zerodha preset) → transactions
-├── requirements.txt
-├── alembic.ini                Schema-migration config
-├── migrations/                env.py + versions/ (0001_baseline_schema,
-│                               684c8a31e7e0_add_eod_price_store_and_corporate_,
-│                               8613aafc2d9d_add_portfolio_aggregator_foundation_)
-├── db/
-│   ├── models.py               SQLAlchemy Core tables (one shared MetaData(), 21 tables)
-│   └── schema.sql               Frozen pre-Alembic reference; still tested for 2 tables' guards
-├── routes/                    Extracted APIRouter modules — see "Route module extraction" above
-│   ├── _shared.py
-│   ├── watchlist.py
-│   ├── positions.py            Also /api/portfolio/concentration (sector-concentration overlay)
-│   └── portfolio_aggregator.py Portfolio Aggregator CRUD + valuation/XIRR + CAS/CSV import
-├── config/
-│   ├── analyst.json            Analyst role/goal/backstory + output_schema + section labels
-│   └── crew_tasks.py            Builds the analyst prompt from analyst.json
-├── signals/                   Quantitative signal engine
-│   ├── engine.py                run_signal_engine(), sector-aware weight tilts
-│   ├── features.py              Feature extraction from normalized data
-│   ├── valuation.py / growth.py / volume.py / filings.py   Signals reading `features` only
-│   ├── technical.py             RSI14 + EMA20/50 posture — own I/O (price_history cache)
-│   ├── macro.py                 FII/DII flow + RBI rate/CPI — own I/O ("_MACRO" pseudo-symbol cache)
-│   ├── filings_classifier.py    Corporate actions / rating action / next-results-date text classifier
-│   ├── interpreter.py           SignalResult → plain-English string
-│   └── store.py                 Write-only 90-day audit trail (signals_data/<SYMBOL>/<date>.json)
-├── tools/                     Data-fetching functions (never raise — return {"error": ...})
-│   ├── nse_tools.py              yfinance quote + NSE API + best-effort XBRL EPS fallback
-│   ├── screener_tools.py         Fundamentals, peers, valuation band, statements, concalls
-│   ├── news_tools.py             gnews wrapper
-│   ├── nse_filings_tools.py      Corporate announcements
-│   ├── market_picks_tools.py     RSS + GNews scrapers (merges in hdfc_sec_agent.py's sources)
-│   ├── hdfc_sec_agent.py         HDFC Securities scrapers
-│   ├── sme_tools.py              NSE Emerge + BSE SME stock-list fetchers
-│   ├── nifty500_tools.py         NIFTY 500 constituent list (screener_pipeline.py's universe)
-│   ├── nse_insider_trades.py / nse_bulk_block_deals.py   PIT + bulk/block deal feeds
-│   ├── nse_fii_dii_tools.py      Daily FII/DII net equity flow
-│   ├── macro_context_tools.py    RBI repo rate + CPI inflation
-│   ├── trendlyne_agent.py        GNews search for Trendlyne-cited coverage
-│   ├── trendlyne_scraper.py      Direct trendlyne.com numeric consensus scrape
-│   ├── price_history_tools.py    Shared daily-close OHLCV fetch (sparklines, technical signal)
-│   ├── screener_scanner.py       (peer/valuation-band table parsing helpers)
-│   ├── eod_sources.py            NSE bhavcopy + equity-master fetch/parse, AMFI NAV fetch/parse
-│   ├── corporate_actions.py      NSE corporate-actions fetch + PURPOSE-string parser
-│   ├── securities_master.py      NSE+BSE main-board + SME merge, resolve_symbol() (broker-code
-│   │                               → canonical symbol; consumed by csv_import.py)
-│   └── _nse_session.py           Shared NSE session-priming helper every NSE module delegates to
-├── tests/                     unittest-based, no live network calls
-├── tests_live/                Opt-in (RUN_LIVE_TESTS=1), weekly-cron-only live contract checks
+├── backend/
+│   ├── api.py                     FastAPI server — ~28 routes, SSE endpoints, symbol validation,
+│   │                               shared helpers routes/ and _shared.py depend on
+│   ├── main.py                    CLI entry point; _fetch_task/_build_report shared with api.py
+│   ├── crew.py                    Analyst guardrails, cross-provider failover, run_analysis_with_fallback
+│   ├── llm_cost.py                Per-call LLM cost instrumentation + running daily total
+│   ├── cache.py                   File-based TTL cache, optional Redis write-through/read-first
+│   ├── rate_limiter.py            Shared-state (Redis or in-memory) rate limits, slots, locks
+│   ├── schemas.py                 Normalization contracts: raw tool output → canonical dicts
+│   ├── schema_drift.py            Type-drift detection for the six ALL_DATA_TASKS slices
+│   ├── source_health.py           Freshness/volume monitoring for Market Picks' 20 sources + macro
+│   ├── scraper_error_counters.py  Error counters for the 4 standalone per-symbol scrapers
+│   ├── observability.py           Structured JSON logging (log_event())
+│   ├── error_tracking.py          Optional Sentry-compatible hook, wired into log_event()
+│   ├── peer_analytics.py          Peer-percentile + absolute valuation-anchor math (shared by
+│   │                               api.py's /api/peers and market_picks_pipeline.py's _phase_research)
+│   ├── dcf_valuation.py           Deterministic two-stage DCF off cash-flow statement data
+│   ├── verdict_history.py         Daily verdict/price snapshots (Postgres) — verdict timeline strip
+│   ├── mf_holdings_history.py     Quarterly MF stake snapshots (Postgres) — stake-delta badges
+│   ├── auth.py                    Magic-link auth: token/session/API-key issuance + validation
+│   ├── email_sender.py            Magic-link + watchlist-alert emails over generic SMTP
+│   ├── watchlist_alerts.py        Daily batch job: emails users on a watched stock's rec change
+│   ├── market_picks_pipeline.py   6-phase multi-agent weekly picks pipeline
+│   ├── sme_ema_pipeline.py        SME golden/death cross batch pipeline (Postgres)
+│   ├── screener_pipeline.py       NIFTY 500 custom screener batch pipeline (Postgres)
+│   ├── eod_prices_pipeline.py     NSE bhavcopy + AMFI NAV ingestion; also runs corporate-actions
+│   │                               and portfolio-valuation as isolated final steps
+│   ├── corporate_actions_pipeline.py  NSE corporate-actions ingestion + adj_close recompute
+│   ├── source_quality.py          Per-run Market Picks source telemetry (yield, dedup, extraction rate)
+│   ├── source_quality_report.py   CLI aggregating source_quality.py's per-run JSON files
+│   ├── portfolio_valuation.py     Portfolio Aggregator: refresh_valuations(), xirr(), xirr_report()
+│   ├── cas_import.py              CAMS/KFintech CAS PDF import → Portfolio Aggregator transactions
+│   ├── csv_import.py              Generic broker-CSV import (Zerodha preset) → transactions
+│   ├── requirements.txt
+│   ├── alembic.ini                Schema-migration config
+│   ├── Dockerfile
+│   ├── migrations/                env.py + versions/ (0001_baseline_schema,
+│   │                               684c8a31e7e0_add_eod_price_store_and_corporate_,
+│   │                               8613aafc2d9d_add_portfolio_aggregator_foundation_)
+│   ├── db/
+│   │   ├── models.py               SQLAlchemy Core tables (one shared MetaData(), 21 tables)
+│   │   └── schema.sql               Frozen pre-Alembic reference; still tested for 2 tables' guards
+│   ├── routes/                    Extracted APIRouter modules — see "Route module extraction" above
+│   │   ├── _shared.py
+│   │   ├── watchlist.py
+│   │   ├── positions.py            Also /api/portfolio/concentration (sector-concentration overlay)
+│   │   └── portfolio_aggregator.py Portfolio Aggregator CRUD + valuation/XIRR + CAS/CSV import
+│   ├── config/
+│   │   ├── analyst.json            Analyst role/goal/backstory + output_schema + section labels
+│   │   └── crew_tasks.py            Builds the analyst prompt from analyst.json
+│   ├── signals/                   Quantitative signal engine
+│   │   ├── engine.py                run_signal_engine(), sector-aware weight tilts
+│   │   ├── features.py              Feature extraction from normalized data
+│   │   ├── valuation.py / growth.py / volume.py / filings.py   Signals reading `features` only
+│   │   ├── technical.py             RSI14 + EMA20/50 posture — own I/O (price_history cache)
+│   │   ├── macro.py                 FII/DII flow + RBI rate/CPI — own I/O ("_MACRO" pseudo-symbol cache)
+│   │   ├── filings_classifier.py    Corporate actions / rating action / next-results-date text classifier
+│   │   ├── interpreter.py           SignalResult → plain-English string
+│   │   └── store.py                 Write-only 90-day audit trail (signals_data/<SYMBOL>/<date>.json)
+│   ├── tools/                     Data-fetching functions (never raise — return {"error": ...})
+│   │   ├── nse_tools.py              yfinance quote + NSE API + best-effort XBRL EPS fallback
+│   │   ├── screener_tools.py         Fundamentals, peers, valuation band, statements, concalls
+│   │   ├── news_tools.py             gnews wrapper
+│   │   ├── nse_filings_tools.py      Corporate announcements
+│   │   ├── market_picks_tools.py     RSS + GNews scrapers (merges in hdfc_sec_agent.py's sources)
+│   │   ├── hdfc_sec_agent.py         HDFC Securities scrapers
+│   │   ├── sme_tools.py              NSE Emerge + BSE SME stock-list fetchers
+│   │   ├── nifty500_tools.py         NIFTY 500 constituent list (screener_pipeline.py's universe)
+│   │   ├── nse_insider_trades.py / nse_bulk_block_deals.py   PIT + bulk/block deal feeds
+│   │   ├── nse_fii_dii_tools.py      Daily FII/DII net equity flow
+│   │   ├── macro_context_tools.py    RBI repo rate + CPI inflation
+│   │   ├── trendlyne_agent.py        GNews search for Trendlyne-cited coverage
+│   │   ├── trendlyne_scraper.py      Direct trendlyne.com numeric consensus scrape
+│   │   ├── price_history_tools.py    Shared daily-close OHLCV fetch (sparklines, technical signal)
+│   │   ├── screener_scanner.py       (peer/valuation-band table parsing helpers)
+│   │   ├── eod_sources.py            NSE bhavcopy + equity-master fetch/parse, AMFI NAV fetch/parse
+│   │   ├── corporate_actions.py      NSE corporate-actions fetch + PURPOSE-string parser
+│   │   ├── securities_master.py      NSE+BSE main-board + SME merge, resolve_symbol() (broker-code
+│   │   │                               → canonical symbol; consumed by csv_import.py)
+│   │   └── _nse_session.py           Shared NSE session-priming helper every NSE module delegates to
+│   ├── tests/                     unittest-based, no live network calls
+│   ├── tests_live/                Opt-in (RUN_LIVE_TESTS=1), weekly-cron-only live contract checks
+│   └── output/                    Cache files (gitignored) + CLI report JSON
+│       ├── <SYMBOL>/                 Per-symbol task caches
+│       ├── _extract_cache/           LLM extraction cache (6h TTL)
+│       ├── _history/                 Daily Market Picks snapshots
+│       ├── _market_picks/            Market picks result cache (7-day TTL)
+│       ├── _llm_cost/                Daily running LLM-cost totals
+│       ├── _source_health/           Per-source daily ok/not-ok history
+│       ├── _scraper_error_counters/  Per-scraper error counts
+│       ├── _source_quality/          Per-run Market Picks source telemetry JSON
+│       ├── _bhavcopy/                Raw NSE bhavcopy CSV archive (EOD price store replay)
+│       ├── _cas/                     PII-scrubbed parsed CAS-import JSON archive (replay)
+│       └── _nse_master.txt           NSE equity symbol master (24h refresh)
+├── .env.example                Shared by both stacks; stays at the repo root
+├── docker-compose.yml
 ├── .github/workflows/         market-picks-cron, sme-cron, screener-cron, watchlist-alerts-cron,
 │                               eod-prices-cron, live-contract-check
 ├── frontend/                  Next.js 15 (TypeScript, Tailwind, App Router)
@@ -748,18 +768,7 @@ stock-research/
 │   │                               useStockAnalysis.ts, proxy-headers.ts
 │   ├── e2e/                       Playwright specs — every backend response mocked at page.route()
 │   └── types/index.ts             Canonical TS types for every SSE message + report field
-└── output/                    Cache files (gitignored) + CLI report JSON
-    ├── <SYMBOL>/                 Per-symbol task caches
-    ├── _extract_cache/           LLM extraction cache (6h TTL)
-    ├── _history/                 Daily Market Picks snapshots
-    ├── _market_picks/            Market picks result cache (7-day TTL)
-    ├── _llm_cost/                Daily running LLM-cost totals
-    ├── _source_health/           Per-source daily ok/not-ok history
-    ├── _scraper_error_counters/  Per-scraper error counts
-    ├── _source_quality/          Per-run Market Picks source telemetry JSON
-    ├── _bhavcopy/                Raw NSE bhavcopy CSV archive (EOD price store replay)
-    ├── _cas/                     PII-scrubbed parsed CAS-import JSON archive (replay)
-    └── _nse_master.txt           NSE equity symbol master (24h refresh)
+└── docs/                     Setup/deployment/architecture/tools/output-schema reference docs
 ```
 
 ---

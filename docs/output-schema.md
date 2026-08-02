@@ -677,7 +677,7 @@ candidate name) rather than guessing.
 | `output/_scraper_error_counters/<name>.json` | — | Scraper name (`peers`, `financials`, `insider_trades`, `bulk_block_deals`, `trendlyne_articles`, `trendlyne_numeric_consensus`) | Error counter for the standalone per-symbol scrapers |
 | `output/_source_quality/<run_id>.json` | — | Market Picks run id | Per-run source telemetry (yield, syndication-dedup rate, extraction success) for the 20 Market Picks sources |
 | `output/_bhavcopy/<YYYY-MM-DD>.csv` | Permanent | Trade date | Raw NSE bhavcopy archive — EOD price store ingestion replay without re-hitting NSE |
-| `output/_cas/<YYYY-MM-DD-HHMM>.json` | Permanent | Timestamp | PII-scrubbed parsed CAS-statement JSON — replay via `python cas_import.py --replay <file> --account-id N` |
+| `output/_cas/<YYYY-MM-DD-HHMM>.json` | Permanent | Timestamp | PII-scrubbed parsed CAS-statement JSON — replay via (from `backend/`) `python cas_import.py --replay <file> --account-id N` |
 
 ---
 
