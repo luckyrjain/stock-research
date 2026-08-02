@@ -1,6 +1,6 @@
 import unittest
 
-from peer_analytics import build_peer_result, compute_peer_percentiles, compute_valuation_anchor
+from analytics.peer_analytics import build_peer_result, compute_peer_percentiles, compute_valuation_anchor
 
 
 class ComputePeerPercentilesTest(unittest.TestCase):

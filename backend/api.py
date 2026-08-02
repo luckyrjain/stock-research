@@ -34,10 +34,10 @@ from core import rate_limiter
 from core import state_store
 # Re-exported under their original names since this file (and its existing
 # tests) call them as api._compute_peer_percentiles / api._compute_valuation_anchor —
-# see peer_analytics.py's own docstring for why the math itself lives there.
-from peer_analytics import compute_peer_percentiles as _compute_peer_percentiles
-from peer_analytics import compute_valuation_anchor as _compute_valuation_anchor
-from peer_analytics import build_peer_result as _build_peer_result
+# see analytics/peer_analytics.py's own docstring for why the math itself lives there.
+from analytics.peer_analytics import compute_peer_percentiles as _compute_peer_percentiles
+from analytics.peer_analytics import compute_valuation_anchor as _compute_valuation_anchor
+from analytics.peer_analytics import build_peer_result as _build_peer_result
 
 
 # ── Global LLM concurrency ceiling ───────────────────────────────────────────
@@ -167,7 +167,7 @@ def _log_startup_config_warnings() -> None:
     analysis finding this closes). Logged once at process startup so an
     operator has a fighting chance of catching them before a user does.
     """
-    from crew import _configured_providers
+    from analyst.crew import _configured_providers
 
     providers = _configured_providers()
     if not providers:
@@ -645,12 +645,12 @@ async def analyse(symbol: str, request: Request, force: bool = False):
         llm_slot_acquired = False
         try:
             from core import cache
-            from crew import ALL_DATA_TASKS
+            from analyst.crew import ALL_DATA_TASKS
             from main import _fetch_task, _build_report
-            from mf_holdings_history import compute_stake_deltas as compute_mf_holdings_deltas
+            from analytics.mf_holdings_history import compute_stake_deltas as compute_mf_holdings_deltas
             from core.schemas import normalize as schema_normalize, validate as schema_validate
             from signals.engine import run_signal_engine
-            from verdict_history import save_snapshot as save_verdict_snapshot
+            from analytics.verdict_history import save_snapshot as save_verdict_snapshot
 
             # ── Determine what needs fetching ─────────────────────────────
             stale = [n for n in ALL_DATA_TASKS if force or not cache.is_fresh(sym, n)]
@@ -732,7 +732,7 @@ async def analyse(symbol: str, request: Request, force: bool = False):
                 yield _sse({"event": "analysing"})
 
                 def _run_analyst():
-                    from crew import run_analysis_with_fallback
+                    from analyst.crew import run_analysis_with_fallback
                     return run_analysis_with_fallback(
                         sym, all_data, signal_context=signal_context, run_id=run_id
                     )
@@ -1883,7 +1883,7 @@ async def get_verdict_history(request: Request, symbol: str):
     if not _TICKER_RE.match(sym):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
 
-    from verdict_history import load_history
+    from analytics.verdict_history import load_history
 
     loop = asyncio.get_running_loop()
     history = await loop.run_in_executor(None, load_history, sym)
@@ -2501,7 +2501,7 @@ async def get_consolidated(request: Request, symbol: str):
 
 
 # ── Account & magic-link auth ────────────────────────────────────────────────
-# Minimal, passwordless auth (see auth.py + email_sender.py). A session token
+# Minimal, passwordless auth (see auth.py + core/email_sender.py). A session token
 # is a bearer credential the frontend's Next.js proxy routes hold in an
 # httpOnly cookie and send here as `Authorization: Bearer <token>` — this
 # file never sees a cookie. Existing watchlist_items/positions stay keyed by
@@ -2543,7 +2543,7 @@ async def request_magic_link(request: Request, body: AuthRequestLinkRequest):
 
     def _sync() -> bool:
         import auth as _auth
-        from email_sender import send_magic_link_email
+        from core.email_sender import send_magic_link_email
 
         token = _auth.create_magic_link(email)
         login_url = f"{_FRONTEND_URL}/auth/verify?token={token}"

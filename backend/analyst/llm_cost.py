@@ -7,7 +7,7 @@ real cost line against a product that currently monetizes nobody, with no
 per-analysis cost instrumentation and no margin model anywhere.
 
 `record_call_cost()` is called once per `litellm.completion()` call from
-`crew.py` (every attempt, not just the one that ultimately validates —
+`analyst/crew.py` (every attempt, not just the one that ultimately validates —
 a guardrail-retry or a failed failover attempt still cost real tokens).
 It logs the call's own cost immediately via `observability.log_event()`
 (queryable right away through whatever this deployment already does with

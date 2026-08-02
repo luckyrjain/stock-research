@@ -189,7 +189,7 @@ class MutateConcurrencyTest(unittest.TestCase):
 
 class NoDatabaseUrlTest(unittest.TestCase):
     """Every entry point degrades to a documented no-op rather than raising —
-    same convention as verdict_history.py."""
+    same convention as analytics/verdict_history.py."""
 
     def setUp(self) -> None:
         self._patch = patch.dict(os.environ, {}, clear=True)

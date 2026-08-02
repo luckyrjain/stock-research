@@ -69,7 +69,7 @@ report has loaded, so none of them can delay or fail the SSE stream:
 
 | Endpoint | Adds | Cache TTL |
 |---|---|---|
-| `GET /api/peers/{symbol}` | Peer percentile ranking + `absolute_anchor` (own P/E vs. own 3-5y history) — `peer_analytics.py` | 24h |
+| `GET /api/peers/{symbol}` | Peer percentile ranking + `absolute_anchor` (own P/E vs. own 3-5y history) — `analytics/peer_analytics.py` | 24h |
 | `GET /api/financials/{symbol}` | Multi-year Income Statement/Balance Sheet/Cash Flow + `dcf` (deterministic two-stage DCF, `portfolio/dcf_valuation.py`) + `concalls` | 24h |
 | `GET /api/shareholding-detail/{symbol}` | Individually-named shareholders (promoters + every other category) from NSE's quarterly shareholding XBRL — the granular counterpart to the aggregate `shareholding` slice | 168h |
 | `GET /api/insider-activity/{symbol}` | Promoter/director PIT disclosures + bulk/block deals, scoped to one symbol (90-day window) | 24h |
@@ -88,7 +88,7 @@ recent rating action, and the next results date. `main._build_report()` adds thi
 `filings_summary`; `signals/filings.py::filings_signal()` separately calls
 `classify_rating_action()` to nudge the filings *signal's* score.
 
-**MF holdings trend**: `mf_holdings_history.py` (Postgres) snapshots the `mf_holdings` task's
+**MF holdings trend**: `analytics/mf_holdings_history.py` (Postgres) snapshots the `mf_holdings` task's
 shareholding disclosure on every fetch and computes quarter-over-quarter stake deltas
 (`compute_stake_deltas()`). Kept out of `_build_report()` itself (it's a DB call, and
 `_build_report()` runs directly on the event loop) — each caller (`api.py` via `run_in_executor`,
@@ -324,7 +324,7 @@ the prior verdict; needs both rows to exist, so a first-time symbol never alerts
 move** ≥ `_PRICE_MOVE_THRESHOLD_PCT` (10%) — a stock can move double digits and still close as a
 HOLD, which the recommendation check alone would miss. `_MAX_ALERT_SYMBOLS` (50) caps distinct
 symbols per run, since each one is a real paid LLM call; symbols past the cap are logged, not
-silently dropped. `email_sender.py` sends **one digest per user per run**, not one email per
+silently dropped. `core/email_sender.py` sends **one digest per user per run**, not one email per
 symbol; it shares `_send_via_smtp()` with the magic-link sender and is best-effort — returns
 `True`/`False`, never raises, and a missing `SMTP_HOST` just means nothing arrives.
 
@@ -477,7 +477,7 @@ confidence formula.
 
 ## LLM analyst layer
 
-`crew.py::run_analysis_with_fallback()` — no CrewAI orchestration, a direct `litellm.completion`
+`analyst/crew.py::run_analysis_with_fallback()` — no CrewAI orchestration, a direct `litellm.completion`
 call (CrewAI's `@tool` decorator is the only remaining CrewAI usage anywhere in this repo, purely
 for the data-fetching tools' `.run()` calling convention).
 
@@ -537,7 +537,7 @@ itself (outside `analysis`, so it isn't subject to the four-file analyst-schema 
 see "Important Rules" below). `results-dashboard.tsx` renders a "⚠ Analysis degraded" banner when
 true, clarifying the scraped market data elsewhere in the report is still real.
 
-**Cost instrumentation** (`llm_cost.py`): every `litellm.completion()` call (guardrail retries and
+**Cost instrumentation** (`analyst/llm_cost.py`): every `litellm.completion()` call (guardrail retries and
 failed failover attempts included, not just the one that ultimately validates) is logged
 (`llm_call_cost` event) and accumulated into `app_state`'s `llm_cost` namespace, one record per
 UTC day (`call_count`/`total_cost_usd`/`calls_with_unknown_cost`), serialized by
@@ -774,7 +774,7 @@ on a 429, preserving "409 already-running takes priority over 429 too-many-reque
   only the former — no "N bad days" threshold, since these are on-demand endpoints where a single
   error already means one real user's request degraded. A grep-able counter file plus a warning
   log line, not a metrics platform.
-- **`llm_cost.py`** — see "LLM analyst layer" above.
+- **`analyst/llm_cost.py`** — see "LLM analyst layer" above.
 - **`tests_live/`** — a second, opt-in test root (`RUN_LIVE_TESTS=1`, weekly cron) that checks four
   high-blast-radius scrapers against live responses, so a contract break surfaces before production
   traffic finds it. It probes each host with a bare `requests.head()` **first**: tools never raise,
@@ -826,8 +826,8 @@ stock-research/
 │   ├── api.py                     FastAPI server — 29 of the 57 routes, both SSE endpoints,
 │   │                               symbol validation, shared helpers routes/ depends on
 │   ├── main.py                    CLI entry point; _fetch_task/_build_report shared with api.py
-│   ├── crew.py                    Analyst guardrails, cross-provider failover, run_analysis_with_fallback
-│   ├── llm_cost.py                Per-call LLM cost instrumentation + running daily total
+│   ├── analyst/crew.py                    Analyst guardrails, cross-provider failover, run_analysis_with_fallback
+│   ├── analyst/llm_cost.py                Per-call LLM cost instrumentation + running daily total
 │   ├── core/cache.py                   File-based TTL cache, optional Redis write-through/read-first
 │   ├── core/rate_limiter.py            Shared-state (Redis or in-memory) rate limits, slots, locks
 │   ├── core/schemas.py                 Normalization contracts: raw tool output → canonical dicts
@@ -836,13 +836,13 @@ stock-research/
 │   ├── telemetry/scraper_error_counters.py  Error counters for the 4 standalone per-symbol scrapers
 │   ├── core/observability.py           Structured JSON logging (log_event())
 │   ├── core/error_tracking.py          Optional Sentry-compatible hook, wired into log_event()
-│   ├── peer_analytics.py          Peer-percentile + absolute valuation-anchor math (shared by
+│   ├── analytics/peer_analytics.py          Peer-percentile + absolute valuation-anchor math (shared by
 │   │                               api.py's /api/peers and pipelines/market_picks_pipeline.py's _phase_research)
 │   ├── portfolio/dcf_valuation.py           Deterministic two-stage DCF off cash-flow statement data
-│   ├── verdict_history.py         Daily verdict/price snapshots (Postgres) — verdict timeline strip
-│   ├── mf_holdings_history.py     Quarterly MF stake snapshots (Postgres) — stake-delta badges
+│   ├── analytics/verdict_history.py         Daily verdict/price snapshots (Postgres) — verdict timeline strip
+│   ├── analytics/mf_holdings_history.py     Quarterly MF stake snapshots (Postgres) — stake-delta badges
 │   ├── auth.py                    Magic-link auth: token/session/API-key issuance + validation
-│   ├── email_sender.py            Magic-link + watchlist-alert emails over generic SMTP
+│   ├── core/email_sender.py            Magic-link + watchlist-alert emails over generic SMTP
 │   ├── pipelines/watchlist_alerts.py        Daily batch job: emails users on a watched stock's rec change
 │   ├── pipelines/market_picks_pipeline.py   6-phase multi-agent weekly picks pipeline
 │   ├── pipelines/sme_ema_pipeline.py        SME golden/death cross batch pipeline (Postgres)

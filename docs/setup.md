@@ -613,7 +613,7 @@ the `--reset-db` caveats above about scope) and re-run `alembic upgrade head`.
 
 ### LLM provider outage or rate limit mid-analysis
 
-The analyst step never hangs or crashes an analysis run — `run_analysis_with_fallback()` in `crew.py` degrades gracefully:
+The analyst step never hangs or crashes an analysis run — `run_analysis_with_fallback()` in `analyst/crew.py` degrades gracefully:
 
 - **Rate limit** (429 or similar from the provider): retried once after a computed backoff. If it's still rate-limited on the retry, or if any other exception occurs (connection refused, provider 5xx, invalid/expired API key, timeout), the analyst step returns a labeled fallback immediately — no further retries.
 - **Guardrail validation failure** (the model returned malformed or ungrounded JSON): one corrective retry with the validation error appended to the prompt, then the same fallback if it still fails.

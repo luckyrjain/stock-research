@@ -17,10 +17,10 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core import cache
-import verdict_history
-from crew import ALL_DATA_TASKS, run_analysis_with_fallback
+from analytics import verdict_history
+from analyst.crew import ALL_DATA_TASKS, run_analysis_with_fallback
 from db.models import get_engine
-from email_sender import send_watchlist_alert_email
+from core.email_sender import send_watchlist_alert_email
 from main import _fetch_task
 from core.error_tracking import init_error_tracking
 from core.observability import get_logger, log_event

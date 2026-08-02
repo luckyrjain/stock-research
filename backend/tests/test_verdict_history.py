@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-import verdict_history
+from analytics import verdict_history
 
 
 class _FakeConn:
@@ -35,13 +35,13 @@ class SaveSnapshotTest(unittest.TestCase):
         verdict_history._ENGINE = None
 
     def test_noop_without_database_url(self) -> None:
-        with patch("verdict_history._get_engine") as get_engine:
+        with patch("analytics.verdict_history._get_engine") as get_engine:
             verdict_history.save_snapshot("TCS", {"recommendation": "BUY"}, {"final_score": 5.0}, {"current_price": 100.0})
         get_engine.assert_not_called()
 
     def test_noop_without_recommendation(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        with patch("verdict_history._get_engine") as get_engine:
+        with patch("analytics.verdict_history._get_engine") as get_engine:
             verdict_history.save_snapshot("TCS", {}, None, {})
         get_engine.assert_not_called()
 
@@ -51,7 +51,7 @@ class SaveSnapshotTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.begin.return_value = conn
 
-        with patch("verdict_history._get_engine", return_value=fake_engine):
+        with patch("analytics.verdict_history._get_engine", return_value=fake_engine):
             verdict_history.save_snapshot(
                 "tcs",
                 {"recommendation": "BUY", "confidence": "HIGH"},
@@ -89,7 +89,7 @@ class SaveSnapshotTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.begin.return_value = conn
 
-        with patch("verdict_history._get_engine", return_value=fake_engine):
+        with patch("analytics.verdict_history._get_engine", return_value=fake_engine):
             verdict_history.save_snapshot("TCS", {"recommendation": "BUY"}, None, {"current_price": 100.0})
 
         args, _kwargs = conn.calls[0]
@@ -99,7 +99,7 @@ class SaveSnapshotTest(unittest.TestCase):
 
     def test_swallows_db_errors(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        with patch("verdict_history._get_engine", side_effect=RuntimeError("connection refused: password exposed")):
+        with patch("analytics.verdict_history._get_engine", side_effect=RuntimeError("connection refused: password exposed")):
             # Must not raise.
             verdict_history.save_snapshot("TCS", {"recommendation": "BUY"}, None, {})
 
@@ -129,7 +129,7 @@ class LoadHistoryTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.connect.return_value = conn
 
-        with patch("verdict_history._get_engine", return_value=fake_engine):
+        with patch("analytics.verdict_history._get_engine", return_value=fake_engine):
             history = verdict_history.load_history("tcs", limit=10)
 
         self.assertEqual(len(history), 2)
@@ -138,7 +138,7 @@ class LoadHistoryTest(unittest.TestCase):
 
     def test_swallows_db_errors_and_returns_empty(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        with patch("verdict_history._get_engine", side_effect=RuntimeError("connection refused: password exposed")):
+        with patch("analytics.verdict_history._get_engine", side_effect=RuntimeError("connection refused: password exposed")):
             self.assertEqual(verdict_history.load_history("TCS"), [])
 
 
@@ -148,7 +148,7 @@ class DetectRecentChangesTest(unittest.TestCase):
     deciding what counts as a notable change."""
 
     def test_both_none_with_fewer_than_two_snapshots(self) -> None:
-        with patch("verdict_history.load_history", return_value=[{"recommendation": "BUY"}]):
+        with patch("analytics.verdict_history.load_history", return_value=[{"recommendation": "BUY"}]):
             result = verdict_history.detect_recent_changes("TCS")
         self.assertEqual(result, {"recommendation_change": None, "price_move": None})
 
@@ -157,7 +157,7 @@ class DetectRecentChangesTest(unittest.TestCase):
             {"recommendation": "HOLD", "confidence": "MEDIUM", "current_price": 100.0},
             {"recommendation": "BUY", "confidence": "HIGH", "current_price": 101.0},
         ]
-        with patch("verdict_history.load_history", return_value=history):
+        with patch("analytics.verdict_history.load_history", return_value=history):
             result = verdict_history.detect_recent_changes("TCS")
         self.assertEqual(result["recommendation_change"], {
             "old_recommendation": "HOLD", "new_recommendation": "BUY", "confidence": "HIGH",
@@ -171,7 +171,7 @@ class DetectRecentChangesTest(unittest.TestCase):
             {"recommendation": "HOLD", "confidence": "MEDIUM", "current_price": 100.0},
             {"recommendation": "HOLD", "confidence": "MEDIUM", "current_price": 115.0},
         ]
-        with patch("verdict_history.load_history", return_value=history):
+        with patch("analytics.verdict_history.load_history", return_value=history):
             result = verdict_history.detect_recent_changes("TCS")
         self.assertIsNone(result["recommendation_change"])
         self.assertEqual(result["price_move"], {"old_price": 100.0, "new_price": 115.0, "change_pct": 15.0})
@@ -181,7 +181,7 @@ class DetectRecentChangesTest(unittest.TestCase):
             {"recommendation": "HOLD", "current_price": 100.0},
             {"recommendation": "HOLD", "current_price": 105.0},
         ]
-        with patch("verdict_history.load_history", return_value=history):
+        with patch("analytics.verdict_history.load_history", return_value=history):
             under_default = verdict_history.detect_recent_changes("TCS")
             over_custom = verdict_history.detect_recent_changes("TCS", price_move_threshold_pct=3.0)
         self.assertIsNone(under_default["price_move"])
@@ -192,7 +192,7 @@ class DetectRecentChangesTest(unittest.TestCase):
             {"recommendation": "HOLD", "confidence": "MEDIUM", "current_price": 100.0},
             {"recommendation": "SELL", "confidence": "HIGH", "current_price": 80.0},
         ]
-        with patch("verdict_history.load_history", return_value=history):
+        with patch("analytics.verdict_history.load_history", return_value=history):
             result = verdict_history.detect_recent_changes("TCS")
         self.assertIsNotNone(result["recommendation_change"])
         self.assertIsNotNone(result["price_move"])
@@ -200,7 +200,7 @@ class DetectRecentChangesTest(unittest.TestCase):
     def test_price_move_none_when_prior_price_missing_or_zero(self) -> None:
         for prior_price in (None, 0.0):
             history = [{"recommendation": "HOLD", "current_price": prior_price}, {"recommendation": "HOLD", "current_price": 200.0}]
-            with patch("verdict_history.load_history", return_value=history):
+            with patch("analytics.verdict_history.load_history", return_value=history):
                 result = verdict_history.detect_recent_changes("TCS")
             self.assertIsNone(result["price_move"])
 

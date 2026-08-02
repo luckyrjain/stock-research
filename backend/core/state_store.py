@@ -9,7 +9,7 @@ six near-identical tables. `output/` is now strictly a regenerable TTL cache.
 
 Two things this buys beyond "nothing durable is written to the folder":
 
-- **The `fcntl.flock` locks are gone.** `llm_cost.py`, `telemetry/source_health.py` and
+- **The `fcntl.flock` locks are gone.** `analyst/llm_cost.py`, `telemetry/source_health.py` and
   `telemetry/scraper_error_counters.py` each carried their own advisory-lock helper to
   make a read-modify-write cycle safe across worker *processes*. `mutate()`
   below does the same job with a row lock, which — unlike `flock` — also holds
@@ -17,7 +17,7 @@ Two things this buys beyond "nothing durable is written to the folder":
   already documents as supported.
 - **No POSIX dependency.** Those locks were POSIX-only by their own admission.
 
-Best-effort throughout, the same convention as `verdict_history.py`: an unset
+Best-effort throughout, the same convention as `analytics/verdict_history.py`: an unset
 `DATABASE_URL` or a DB hiccup is logged and swallowed, never raised. Callers
 are telemetry/audit paths that must not be able to break the request or
 pipeline run they are observing. The consequence is disclosed rather than
@@ -38,7 +38,7 @@ _ENGINE_LOCK = threading.Lock()
 
 def _get_engine():
     """Lazily-built, process-wide engine — same double-checked pattern as
-    `verdict_history.py::_get_engine()`, and the same patch target tests use
+    `analytics/verdict_history.py::_get_engine()`, and the same patch target tests use
     (`patch("core.state_store._get_engine", ...)`)."""
     global _ENGINE
     if _ENGINE is None:

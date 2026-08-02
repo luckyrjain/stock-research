@@ -95,7 +95,7 @@ convention, see backend/CLAUDE.md's "Important Rules for Claude").
 | `generated_at` | string | Run date in `YYYY-MM-DD` format — stamped fresh on every assembly, not a per-task freshness signal (see `data_freshness`) |
 | `data_freshness` | object | `{stock_info, research, news, shareholding, mf_holdings, filings}` — each task's own real `_meta.fetched_at` ISO timestamp (or `null`), captured before `_meta` is stripped |
 | `analysis` | object | Final LLM analyst output (see below) |
-| `degraded` | boolean | `true` when every configured LLM provider failed (or failed guardrails past its retry) and `analysis` is `crew.py`'s generic safe-fallback HOLD, not a real analyst call. A sibling of `analysis` (not nested inside it) so it isn't subject to the four-file analyst-schema lockstep rule — the LLM never produces this field. See backend/CLAUDE.md's "LLM cost instrumentation + cross-provider failover" point 3 |
+| `degraded` | boolean | `true` when every configured LLM provider failed (or failed guardrails past its retry) and `analysis` is `analyst/crew.py`'s generic safe-fallback HOLD, not a real analyst call. A sibling of `analysis` (not nested inside it) so it isn't subject to the four-file analyst-schema lockstep rule — the LLM never produces this field. See backend/CLAUDE.md's "LLM cost instrumentation + cross-provider failover" point 3 |
 | `signals` | object | Quantitative signal engine output (see below) |
 | `stock_info` | object | Quote and company information |
 | `research` | object | Fundamental ratios, about text, quarterly trend |
@@ -308,7 +308,7 @@ when nothing in the fetch window matches a known pattern.
 
 ### `mf_holdings_trend`
 
-Per-fund stake deltas vs. the prior stored quarterly snapshot — see `mf_holdings_history.py`
+Per-fund stake deltas vs. the prior stored quarterly snapshot — see `analytics/mf_holdings_history.py`
 (PostgreSQL-backed; empty array when `DATABASE_URL` isn't set or no prior snapshot exists).
 
 ```json
@@ -555,7 +555,7 @@ own try/except, so one failing doesn't blank out the other.
 ```
 
 One row per day the analysis pipeline actually ran (both CLI and web, same-day re-runs upsert
-rather than duplicate) — see `verdict_history.py`. `return_since_pct`/`outcome` grade each entry
+rather than duplicate) — see `analytics/verdict_history.py`. `return_since_pct`/`outcome` grade each entry
 against **today's** live price; `outcome` is only ever `'win'`/`'loss'` for `BUY`/`SELL` calls (a
 `HOLD` makes no directional claim, so it's never graded) and `null` when ungraded or the live
 price fetch failed. An unset `DATABASE_URL` or a failed query degrades to the same shape with an

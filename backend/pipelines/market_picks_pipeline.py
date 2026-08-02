@@ -1424,7 +1424,7 @@ Return ONLY this JSON (no markdown, no extra text):
                 import json as _json
 
                 from core import cache
-                from peer_analytics import build_peer_result
+                from analytics.peer_analytics import build_peer_result
                 from tools.screener_tools import get_peer_comparison
 
                 cached = cache.load(symbol, "peers")

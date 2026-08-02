@@ -78,7 +78,7 @@ class AnalyseSuccessPathTest(unittest.TestCase):
              patch("core.schemas.normalize", side_effect=lambda name, data: data), \
              patch("core.schemas.validate", return_value=(True, "")), \
              patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")), \
-             patch("crew.run_analysis_with_fallback", return_value=_fake_analysis("TCS")):
+             patch("analyst.crew.run_analysis_with_fallback", return_value=_fake_analysis("TCS")):
             resp = client.get("/api/analyse/TCS")
 
         self.assertEqual(resp.status_code, 200)
@@ -118,7 +118,7 @@ class AnalyseSuccessPathTest(unittest.TestCase):
              patch("core.schemas.normalize", side_effect=lambda name, data: data), \
              patch("core.schemas.validate", return_value=(True, "")), \
              patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")), \
-             patch("crew.run_analysis_with_fallback", return_value=_fake_analysis("TCS")), \
+             patch("analyst.crew.run_analysis_with_fallback", return_value=_fake_analysis("TCS")), \
              patch("api._release_llm_slot", wraps=api._release_llm_slot) as mock_release:
             resp = client.get("/api/analyse/TCS")
 
@@ -216,8 +216,8 @@ class AnalysisPersistedDespiteDisconnectTest(unittest.IsolatedAsyncioTestCase):
         patch("core.schemas.normalize", side_effect=lambda name, data: data).start()
         patch("core.schemas.validate", return_value=(True, "")).start()
         patch("signals.engine.run_signal_engine", return_value=_fake_signal_result("TCS")).start()
-        patch("crew.run_analysis_with_fallback", side_effect=_slow_analysis).start()
-        patch("verdict_history.save_snapshot").start()
+        patch("analyst.crew.run_analysis_with_fallback", side_effect=_slow_analysis).start()
+        patch("analytics.verdict_history.save_snapshot").start()
 
         scope = {"type": "http", "method": "GET", "headers": [], "client": ("testclient", 12345)}
         request = Request(scope)

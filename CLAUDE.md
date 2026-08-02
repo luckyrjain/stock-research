@@ -67,7 +67,7 @@ things with more than one real caller.
 
 ## Repo Structure
 
-**All backend paths in this document — every bare filename or path like `crew.py`,
+**All backend paths in this document — every bare filename or path like `analyst/crew.py`,
 `tools/nse_tools.py`, `routes/positions.py` — are relative to `backend/`, not the repo root.**
 `frontend/` stays a sibling of `backend/` at the repo root, unchanged. This split exists purely to
 make the top-level repo listing readable (two clearly-separated stacks); it changes no import
@@ -81,18 +81,19 @@ stock-research/
 ├── backend/
 │   ├── api.py                  FastAPI server — SSE endpoints and symbol validation
 │   ├── main.py                 CLI entry point; also contains _fetch_task, _build_report (shared with api.py)
-│   ├── crew.py                 Analyst guardrails, run_analysis_with_fallback (direct litellm call,
-│   │                           cross-provider failover)
-│   ├── llm_cost.py             Per-call LLM cost instrumentation + running daily total
-│   ├── verdict_history.py      Daily verdict/price snapshots (PostgreSQL) — powers the hero's timeline strip
-│   ├── mf_holdings_history.py  Quarterly MF stake snapshots (PostgreSQL) — powers the stake-delta badges
 │   ├── auth.py                 Magic-link auth: token/session issuance + validation (PostgreSQL)
-│   ├── email_sender.py         Sends the magic-link sign-in + watchlist-alert emails over generic SMTP
-│   ├── peer_analytics.py       Peer-percentile + absolute valuation-anchor math (api.py + pipelines/market_picks_pipeline.py)
 │   ├── requirements.txt
 │   ├── alembic.ini             Schema-migration config (see "Schema migrations" below)
 │   ├── migrations/             Alembic migration scripts — env.py + versions/*.py
 │   ├── Dockerfile              Backend image (see docker-compose.yml at the repo root)
+│   ├── analyst/                 The LLM-calling analyst step and its cost tracking
+│   │   ├── crew.py                 Analyst guardrails, run_analysis_with_fallback (direct litellm call,
+│   │   │                           cross-provider failover)
+│   │   └── llm_cost.py             Per-call LLM cost instrumentation + running daily total
+│   ├── analytics/                Per-symbol report-enrichment modules, no shared code between them
+│   │   ├── verdict_history.py      Daily verdict/price snapshots (PostgreSQL) — powers the hero's timeline strip
+│   │   ├── mf_holdings_history.py  Quarterly MF stake snapshots (PostgreSQL) — powers the stake-delta badges
+│   │   └── peer_analytics.py       Peer-percentile + absolute valuation-anchor math (api.py + pipelines/market_picks_pipeline.py)
 │   ├── core/                   Shared infra utilities, no per-feature business logic
 │   │   ├── cache.py                File-based TTL cache (output/<SYMBOL>/<task>.json)
 │   │   ├── schemas.py              Normalization contracts: raw tool output → canonical dicts
@@ -101,7 +102,8 @@ stock-research/
 │   │   ├── rate_limiter.py         Shared sliding-window rate limit / concurrency-slot / lock primitives
 │   │   ├── observability.py        Structured JSON logging via log_event()
 │   │   ├── error_tracking.py       Optional Sentry-style hook, wired into log_event()'s error-level path
-│   │   └── schema_drift.py         Type-drift detection for the six scraped data slices
+│   │   ├── schema_drift.py         Type-drift detection for the six scraped data slices
+│   │   └── email_sender.py         Sends the magic-link sign-in + watchlist-alert emails over generic SMTP
 │   ├── pipelines/               Standalone batch jobs, each with its own CLI entry point
 │   │   ├── market_picks_pipeline.py  Multi-agent weekly picks pipeline (6 phases)
 │   │   ├── sme_ema_pipeline.py     SME golden/death cross batch pipeline (PostgreSQL)

@@ -281,7 +281,7 @@ async def get_portfolio_concentration(request: Request, client_id: str | None = 
         # out via asyncio.gather+run_in_executor from the event loop; this
         # one already runs inside a single run_owned_db_call worker thread,
         # so a bounded local ThreadPoolExecutor is the equivalent fan-out
-        # from in here (same worker-pool convention peer_analytics.py's
+        # from in here (same worker-pool convention analytics/peer_analytics.py's
         # _fetch_valuation_percentile() uses for its own per-stock fan-out).
         live_prices: dict[str, float] = {}
         with ThreadPoolExecutor(max_workers=8) as pool:

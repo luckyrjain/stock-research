@@ -78,9 +78,9 @@ deliberately excluded from every other test invocation in this repo.
 
 `research` also carries a `quarterly_trend` (Sales/EPS mini-trend, oldest-first, from Screener's Quarterly Results table — the same company page `get_fundamentals` already fetches, so it's free) and `shareholding` carries `pledge_pct` (promoter pledge %, parsed from the same shareholding table `get_holdings` already fetches, as its own field rather than folded into `shareholding_pattern`). Both are absent/empty rather than guessed when Screener doesn't have a clean, fully-numeric window for them (e.g. a recent IPO with fewer quarters on record) — same "never invent" convention as everywhere else in this pipeline. `quarterly_trend` also carries an independently-optional `operating_margin` (Screener's own OPM % row, never derived/computed here) — several sectors (banks, NBFCs) routinely omit that row even when Sales/EPS are present, so it's dropped from the payload entirely rather than backfilled, distinct from the whole-object-absent case above. `results-dashboard.tsx` renders them as a "Quarterly Trend" card (two or three `Sparkline`s depending on whether `operating_margin` is present) and a "Promoter Pledge" line atop the Shareholding Pattern card (warning-styled when > 0%).
 
-These tool functions are decorated with `@tool` from `crewai.tools` purely for a consistent `.run(**kwargs)` calling convention (see `main._fetch_task`) — that's the only thing this codebase still uses CrewAI for. There used to be a second, parallel orchestration path (`build_crew()` in `crew.py`, wiring per-task `Agent`/`Task`/`Crew` objects from `config/agents.json` + `config/tasks.json`) but it had zero callers and zero test coverage — data collection has always gone through `_fetch_task()` in production — so it was removed rather than left as unverified dead code. If you're looking for `LLM_MODEL` / the "data-agent tier" model config from an older version of this doc: it only ever fed that removed path and has been dropped too — `ANALYST_MODEL` (below) is the only model-selection env var that does anything.
+These tool functions are decorated with `@tool` from `crewai.tools` purely for a consistent `.run(**kwargs)` calling convention (see `main._fetch_task`) — that's the only thing this codebase still uses CrewAI for. There used to be a second, parallel orchestration path (`build_crew()` in `analyst/crew.py`, wiring per-task `Agent`/`Task`/`Crew` objects from `config/agents.json` + `config/tasks.json`) but it had zero callers and zero test coverage — data collection has always gone through `_fetch_task()` in production — so it was removed rather than left as unverified dead code. If you're looking for `LLM_MODEL` / the "data-agent tier" model config from an older version of this doc: it only ever fed that removed path and has been dropped too — `ANALYST_MODEL` (below) is the only model-selection env var that does anything.
 
-**Analyst (direct LLM call)**: `run_analysis_with_fallback()` in `crew.py` calls `litellm.completion` directly — no CrewAI involved. It receives all six data slices plus signal engine context, and must return a specific JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structural rules and grounded-claims checks; a guardrail failure triggers one corrective LLM retry with the validation error appended. Only if that *also* fails — and a second configured provider, if any, also fails the same way — does it return a safe HOLD fallback via `_safe_analysis_fallback()`. See "LLM cost instrumentation + cross-provider failover" below.
+**Analyst (direct LLM call)**: `run_analysis_with_fallback()` in `analyst/crew.py` calls `litellm.completion` directly — no CrewAI involved. It receives all six data slices plus signal engine context, and must return a specific JSON schema defined in `config/analyst.json`. Guardrails in `_validate_analysis_payload()` enforce structural rules and grounded-claims checks; a guardrail failure triggers one corrective LLM retry with the validation error appended. Only if that *also* fails — and a second configured provider, if any, also fails the same way — does it return a safe HOLD fallback via `_safe_analysis_fallback()`. See "LLM cost instrumentation + cross-provider failover" below.
 
 **Market picks pipeline** (`pipelines/market_picks_pipeline.py`): Six sequential phases, all blocking work offloaded to `ThreadPoolExecutor`. Communicates back to the SSE stream via `on_event` callbacks bridged through `asyncio.Queue` with `loop.call_soon_threadsafe`.
 
@@ -113,7 +113,7 @@ against a product that currently monetizes nobody), and "a full provider outage 
 analysis, platform-wide, to the same generic HOLD, indistinguishable from a real call, with no
 user-facing 'degraded' signal and no attempt at a second configured provider."
 
-1. **Cost instrumentation** (`llm_cost.py`) — `crew.py::_attempt_provider()` calls
+1. **Cost instrumentation** (`analyst/llm_cost.py`) — `analyst/crew.py::_attempt_provider()` calls
    `llm_cost.record_call_cost()` after *every* `litellm.completion()` call, not just the one that
    ultimately validates: a guardrail-retry or a failed failover attempt still spent real tokens.
    `estimate_cost_usd()` wraps `litellm.completion_cost()` — never raises, never guesses: litellm
@@ -135,7 +135,7 @@ user-facing 'degraded' signal and no attempt at a second configured provider."
    an `fcntl.flock` advisory lock over a JSON file at `output/_llm_cost/<date>.json`; the row lock
    that replaced it holds across separate *hosts* too, which `flock` never did. Covered by a
    `ConcurrencySafetyTest` in `tests/test_llm_cost.py`, mirroring `telemetry/source_health.py`'s own.
-2. **Cross-provider failover** (`crew.py`) — `run_analysis_with_fallback()`'s single-provider LLM
+2. **Cross-provider failover** (`analyst/crew.py`) — `run_analysis_with_fallback()`'s single-provider LLM
    call is extracted into `_attempt_provider()` (its own guardrail retry once, rate-limit retry
    once — unchanged from before this existed), so a second, differently-configured provider can
    get exactly one full attempt before falling through to the safe HOLD fallback.
@@ -181,7 +181,7 @@ user-facing 'degraded' signal and no attempt at a second configured provider."
 **Peer/valuation-anchor wired into scoring**: `GET /api/peers/{symbol}`'s `absolute_anchor` (where a
 stock's current P/E sits within its own last 3-5 years of Screener-published P/E — see "Absolute
 valuation anchor" below) previously only reached the single-stock analysis flow; Market Picks
-scoring had no valuation-quality input at all. `peer_analytics.py` (repo root) holds the pure
+scoring had no valuation-quality input at all. `analytics/peer_analytics.py` (repo root) holds the pure
 percentile/anchor math (`compute_peer_percentiles`, `compute_valuation_anchor`) extracted out of
 `api.py`, plus `build_peer_result(symbol, raw)` — the single source of truth for the response/cache
 *shape* both call sites read and write (`{symbol, self, peers, sector_median, percentiles,
@@ -222,7 +222,7 @@ subtracts 3, mid-range and `None` are both no-ops — bounded by the existing fi
 ### Python
 
 - **No formatter configured** (no black/ruff/autopep8 in requirements or config). Match surrounding code style.
-- **pylint** is referenced via `# pylint: disable=` comments in `crew.py` and `main.py` but is not enforced in CI.
+- **pylint** is referenced via `# pylint: disable=` comments in `analyst/crew.py` and `main.py` but is not enforced in CI.
 - **Type hints** are used on public function signatures throughout (`-> dict`, `-> str | None`, `list[dict]`). Use Python 3.10+ union syntax (`X | Y`, not `Optional[X]`).
 - Private helpers are prefixed with `_`. All internal functions in `api.py` are `_*_sync` to signal they are blocking.
 - Return `dict` from tools and pipeline functions. Never raise exceptions from tool functions — return `{"error": "...", "symbol": sym}` instead.
@@ -812,7 +812,7 @@ This is pure text classification over the already-fetched `filings` list — no 
    the rating action color-coded buy/sell/hold by direction, the next results date) above the
    existing filing list, and renders nothing extra when `filings_summary` has nothing to show.
 
-### MF holdings trend (`mf_holdings_history.py`)
+### MF holdings trend (`analytics/mf_holdings_history.py`)
 
 The `mf_holdings` task's shareholding disclosure was already fetched every ~7 days (its own
 `shareholding`-tier cache TTL) but only ever shown as a single live snapshot — there was no way
@@ -2341,7 +2341,7 @@ anonymous `client_id` row has no email to notify and is excluded at the query le
    `pipelines/market_picks_pipeline.py`'s `_MAX_STOCKS`. `_MAX_ALERT_SYMBOLS` (50) caps how many distinct
    symbols one run analyses; symbols beyond the cap are skipped for that day (logged, not
    silently dropped — no-silent-caps convention) rather than letting the bound grow unbounded.
-5. `email_sender.py` gained a second message builder/sender pair —
+5. `core/email_sender.py` gained a second message builder/sender pair —
    `send_watchlist_alert_email(to_email, alerts)` — alongside the existing magic-link one; both
    now share one `_send_via_smtp()` helper (extracted, not duplicated) for the connect/STARTTLS/
    login/send sequence. One digest email per user per run lists every alert (recommendation
@@ -2413,7 +2413,7 @@ Picks pipeline docs), so there's nothing for an account to link there.
    logged in. `refreshAuth()` re-fetches after `/auth/verify` succeeds so the nav updates
    without a full page reload.
 5. **Logout** — `POST /api/auth/logout` best-effort deletes the session row
-   (`auth.delete_session()`, swallow-and-log like `verdict_history.py`'s read path); the
+   (`auth.delete_session()`, swallow-and-log like `analytics/verdict_history.py`'s read path); the
    Next.js route clears the cookie regardless of whether that delete succeeded, so the
    browser is signed out either way.
 6. `GET /api/auth/me` is the one endpoint every authenticated page implicitly depends on —
@@ -2542,7 +2542,7 @@ same "never invent a judgment" instinct as the rest of this codebase.
 in the web app — the CLI wrote a dated `report_<date>.json` per run (`main.py`), but that
 file never left disk, and `api.py`'s SSE endpoint didn't write anything comparable at all.
 
-1. `verdict_history.py` (repo root) is a small persistence module with
+1. `analytics/verdict_history.py` (repo root) is a small persistence module with
    two functions: `save_snapshot(symbol, analysis, signal_context, stock_info)` upserts one
    row per `(symbol, verdict_date)` into the `verdict_history` Postgres table (recommendation,
    confidence, current_price, signal_score); `load_history(symbol, limit=60)` reads them back

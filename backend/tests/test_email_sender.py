@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-import email_sender
+from core import email_sender
 
 
 class SendMagicLinkEmailTest(unittest.TestCase):

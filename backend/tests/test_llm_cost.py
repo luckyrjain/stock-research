@@ -5,7 +5,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-import llm_cost
+from analyst import llm_cost
 from state_store_harness import isolated_state_store, shared_state_store
 
 
@@ -18,7 +18,7 @@ def _mp_record_call(state_dir: str, date: str) -> None:
     Builds its own engine over the parent's SQLite file rather than
     inheriting one: a SQLAlchemy engine is not fork-safe, since its pooled
     connections are file descriptors the parent also holds."""
-    import llm_cost as _llm_cost
+    from analyst import llm_cost as _llm_cost
 
     with shared_state_store(state_dir, create=False):
         with patch.object(_llm_cost, "_today", return_value=date):
@@ -56,7 +56,7 @@ class LlmCostTest(unittest.TestCase):
         self.assertEqual(totals, {"call_count": 0, "total_cost_usd": 0.0, "calls_with_unknown_cost": 0})
 
     def test_record_call_cost_logs_a_structured_event(self) -> None:
-        with patch("llm_cost.log_event") as mock_log:
+        with patch("analyst.llm_cost.log_event") as mock_log:
             llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50, run_id="run-1")
 
         mock_log.assert_called_once()
@@ -78,13 +78,13 @@ class LlmCostTest(unittest.TestCase):
         # log_event call inside the except block still succeed, so this
         # test isolates the FIRST call's own coverage rather than the
         # already-covered write-failure path.
-        with patch("llm_cost.log_event", side_effect=[Exception("boom"), None]):
+        with patch("analyst.llm_cost.log_event", side_effect=[Exception("boom"), None]):
             llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)  # must not raise
 
     def test_multiple_days_are_tracked_independently(self) -> None:
-        with patch("llm_cost._today", return_value="2026-01-01"):
+        with patch("analyst.llm_cost._today", return_value="2026-01-01"):
             llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)
-        with patch("llm_cost._today", return_value="2026-01-02"):
+        with patch("analyst.llm_cost._today", return_value="2026-01-02"):
             llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.05, 100, 50)
 
         self.assertEqual(llm_cost.get_daily_totals("2026-01-01")["total_cost_usd"], 0.01)
@@ -127,7 +127,7 @@ class ConcurrencySafetyTest(unittest.TestCase):
         self.addCleanup(shared_state_store(self._tmpdir).close)
 
     def test_concurrent_record_call_cost_loses_no_calls(self) -> None:
-        with patch("llm_cost._today", return_value="2026-03-01"):
+        with patch("analyst.llm_cost._today", return_value="2026-03-01"):
             def worker() -> None:
                 llm_cost.record_call_cost("TCS", "claude-sonnet-4-6", "anthropic", 0.01, 100, 50)
 

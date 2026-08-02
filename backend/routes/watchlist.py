@@ -132,7 +132,7 @@ async def get_watchlist_calendar(request: Request, symbols: str = Query(...)):
 
     def _one(sym: str) -> dict | None:
         from core import cache
-        import verdict_history
+        from analytics import verdict_history
         from signals.filings_classifier import classify_filings
 
         cached = cache.load(sym, "filings")

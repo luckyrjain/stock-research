@@ -94,21 +94,21 @@ class StartupConfigWarningsTest(unittest.TestCase):
     for the deep gap analysis finding this closes."""
 
     def test_warns_when_no_llm_provider_is_configured(self) -> None:
-        with patch("crew._configured_providers", return_value=[]), \
+        with patch("analyst.crew._configured_providers", return_value=[]), \
              patch("api.log_event") as mock_log:
             api._log_startup_config_warnings()
         events = [c.args[1] for c in mock_log.call_args_list]
         self.assertIn("startup_no_llm_provider_configured", events)
 
     def test_no_warning_when_a_provider_is_configured(self) -> None:
-        with patch("crew._configured_providers", return_value=["anthropic"]), \
+        with patch("analyst.crew._configured_providers", return_value=["anthropic"]), \
              patch("api.log_event") as mock_log:
             api._log_startup_config_warnings()
         events = [c.args[1] for c in mock_log.call_args_list]
         self.assertNotIn("startup_no_llm_provider_configured", events)
 
     def test_warns_when_non_default_origin_has_no_proxy_secret(self) -> None:
-        with patch("crew._configured_providers", return_value=["anthropic"]), \
+        with patch("analyst.crew._configured_providers", return_value=["anthropic"]), \
              patch("api._ALLOWED_ORIGINS", ["https://alphapulse.example.com"]), \
              patch("api._TRUSTED_PROXY_SECRET", None), \
              patch("api.log_event") as mock_log:
@@ -117,7 +117,7 @@ class StartupConfigWarningsTest(unittest.TestCase):
         self.assertIn("startup_trusted_proxy_secret_unset", events)
 
     def test_no_warning_when_proxy_secret_is_set(self) -> None:
-        with patch("crew._configured_providers", return_value=["anthropic"]), \
+        with patch("analyst.crew._configured_providers", return_value=["anthropic"]), \
              patch("api._ALLOWED_ORIGINS", ["https://alphapulse.example.com"]), \
              patch("api._TRUSTED_PROXY_SECRET", "shared-secret"), \
              patch("api.log_event") as mock_log:
@@ -128,7 +128,7 @@ class StartupConfigWarningsTest(unittest.TestCase):
     def test_no_warning_for_default_localhost_origin_even_without_secret(self) -> None:
         # The default single-host local-dev setup never needed the secret —
         # only flag deployments that look non-default.
-        with patch("crew._configured_providers", return_value=["anthropic"]), \
+        with patch("analyst.crew._configured_providers", return_value=["anthropic"]), \
              patch("api._ALLOWED_ORIGINS", ["http://localhost:3000"]), \
              patch("api._TRUSTED_PROXY_SECRET", None), \
              patch("api.log_event") as mock_log:
@@ -2584,7 +2584,7 @@ class WatchlistCalendarEndpointTest(unittest.TestCase):
 
     def test_symbol_with_notable_price_move_is_included_without_filings(self) -> None:
         move = {"old_price": 100.0, "new_price": 115.0, "change_pct": 15.0}
-        with patch("verdict_history.detect_recent_changes", return_value={"recommendation_change": None, "price_move": move}):
+        with patch("analytics.verdict_history.detect_recent_changes", return_value={"recommendation_change": None, "price_move": move}):
             resp = client.get("/api/watchlist/calendar?symbols=TCS")
         self.assertEqual(resp.status_code, 200)
         entries = resp.json()["entries"]
@@ -2595,7 +2595,7 @@ class WatchlistCalendarEndpointTest(unittest.TestCase):
 
     def test_symbol_with_recommendation_change_is_included_without_filings(self) -> None:
         change = {"old_recommendation": "HOLD", "new_recommendation": "SELL", "confidence": "HIGH"}
-        with patch("verdict_history.detect_recent_changes", return_value={"recommendation_change": change, "price_move": None}):
+        with patch("analytics.verdict_history.detect_recent_changes", return_value={"recommendation_change": change, "price_move": None}):
             resp = client.get("/api/watchlist/calendar?symbols=TCS")
         self.assertEqual(resp.status_code, 200)
         entries = resp.json()["entries"]
@@ -2613,7 +2613,7 @@ class WatchlistCalendarEndpointTest(unittest.TestCase):
         def fake_changes(sym, *_a, **_kw):
             return {"recommendation_change": None, "price_move": move if sym == "ZZZ" else None}
 
-        with patch("verdict_history.detect_recent_changes", side_effect=fake_changes):
+        with patch("analytics.verdict_history.detect_recent_changes", side_effect=fake_changes):
             resp = client.get("/api/watchlist/calendar?symbols=AAA,ZZZ")
         entries = resp.json()["entries"]
         self.assertEqual([e["symbol"] for e in entries], ["ZZZ", "AAA"])
@@ -2642,7 +2642,7 @@ class WatchlistCalendarEndpointTest(unittest.TestCase):
         def fake_changes(sym, *_a, **_kw):
             return {"recommendation_change": None, "price_move": move if sym == "TCS" else None}
 
-        with patch("verdict_history.detect_recent_changes", side_effect=fake_changes):
+        with patch("analytics.verdict_history.detect_recent_changes", side_effect=fake_changes):
             resp = client.get("/api/watchlist/calendar?symbols=tcs")
         entries = resp.json()["entries"]
         self.assertEqual([e["symbol"] for e in entries], ["TCS"])
@@ -3487,7 +3487,7 @@ class VerdictHistoryEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 429)
 
     def test_returns_empty_history_when_nothing_stored(self) -> None:
-        with patch("verdict_history.load_history", return_value=[]), \
+        with patch("analytics.verdict_history.load_history", return_value=[]), \
              patch.object(api, "_fetch_live_price_sync", return_value={}):
             resp = client.get("/api/verdict-history/TCS")
         self.assertEqual(resp.status_code, 200)
@@ -3504,7 +3504,7 @@ class VerdictHistoryEndpointTest(unittest.TestCase):
         ]
         # Live price is up from every stored snapshot: BUY should score a win,
         # SELL a loss, HOLD stays unscored (no directional claim to grade).
-        with patch("verdict_history.load_history", return_value=fake_history), \
+        with patch("analytics.verdict_history.load_history", return_value=fake_history), \
              patch.object(api, "_fetch_live_price_sync", return_value={"price": 121.0, "change_pct": 0.5}):
             resp = client.get("/api/verdict-history/tcs")
         self.assertEqual(resp.status_code, 200)
@@ -3528,7 +3528,7 @@ class VerdictHistoryEndpointTest(unittest.TestCase):
         fake_history = [
             {"date": "2026-07-24", "recommendation": "BUY", "confidence": "HIGH", "current_price": 110.5, "signal_score": 6.0},
         ]
-        with patch("verdict_history.load_history", return_value=fake_history), \
+        with patch("analytics.verdict_history.load_history", return_value=fake_history), \
              patch.object(api, "_fetch_live_price_sync") as fetch_live:
             resp = client.get("/api/verdict-history/TCS")
         body = resp.json()
@@ -3543,7 +3543,7 @@ class VerdictHistoryEndpointTest(unittest.TestCase):
             {"date": "2026-07-01", "recommendation": "HOLD", "confidence": "MEDIUM", "current_price": 100.0, "signal_score": 2.0},
             {"date": "2026-07-24", "recommendation": "BUY", "confidence": "HIGH", "current_price": 110.5, "signal_score": 6.0},
         ]
-        with patch("verdict_history.load_history", return_value=fake_history), \
+        with patch("analytics.verdict_history.load_history", return_value=fake_history), \
              patch.object(api, "_fetch_live_price_sync", return_value={}) as fetch_live:
             resp = client.get("/api/verdict-history/TCS")
         body = resp.json()
@@ -3742,7 +3742,7 @@ class AuthRequestLinkEndpointTest(unittest.TestCase):
     def test_valid_email_creates_link_and_sends_email(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         with patch("auth.create_magic_link", return_value="raw-token") as create_link, \
-             patch("email_sender.send_magic_link_email", return_value=True) as send_email:
+             patch("core.email_sender.send_magic_link_email", return_value=True) as send_email:
             resp = client.post("/api/auth/request-link", json={"email": "User@Example.com"})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {"sent": True})
@@ -3757,7 +3757,7 @@ class AuthRequestLinkEndpointTest(unittest.TestCase):
         # still created either way.
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         with patch("auth.create_magic_link", return_value="raw-token"), \
-             patch("email_sender.send_magic_link_email", return_value=False):
+             patch("core.email_sender.send_magic_link_email", return_value=False):
             resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {"sent": True})
@@ -3788,7 +3788,7 @@ class AuthRequestLinkEndpointTest(unittest.TestCase):
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         rate_limiter._memory_calls["auth_request_link_email:someone-else@example.com"] = [api.time.monotonic()] * 5
         with patch("auth.create_magic_link", return_value="raw-token"), \
-             patch("email_sender.send_magic_link_email", return_value=True):
+             patch("core.email_sender.send_magic_link_email", return_value=True):
             resp = client.post("/api/auth/request-link", json={"email": "user@example.com"})
         self.assertEqual(resp.status_code, 200)
 

@@ -720,8 +720,8 @@ def _attempt_provider(
             # that ultimately validates — a guardrail-retry or a failover
             # attempt that later fails still spent real tokens. Never lets
             # a broken cost tracker affect the analysis itself (see
-            # llm_cost.py's own "never raise" convention).
-            import llm_cost
+            # analyst/llm_cost.py's own "never raise" convention).
+            from analyst import llm_cost
             usage = getattr(response, "usage", None)
             llm_cost.record_call_cost(
                 symbol=symbol, model=model, provider=provider,
