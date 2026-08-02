@@ -65,16 +65,14 @@ Backend on `http://localhost:8000`, frontend on `http://localhost:3000`.
 PostgreSQL is optional for single-stock analysis but required for every other mode.
 
 ```bash
-# Backend
-python3.13 -m venv .venv && source .venv/bin/activate
-cd backend && pip install -r requirements.txt && cd ..
-cp .env.example .env   # edit with your provider key + DATABASE_URL
+make setup   # creates .venv, installs backend+frontend deps, copies .env.example -> .env
+make check   # verifies Python/Node/npm/.env/DB/Redis are all in place
+```
 
-# Database (once DATABASE_URL is set)
+Edit `.env` with your provider key. If `DATABASE_URL` is set, run the migration once:
+
+```bash
 cd backend && alembic upgrade head && cd ..
-
-# Frontend
-cd frontend && npm install && cd ..
 ```
 
 Run it:
@@ -96,6 +94,13 @@ path.
 </details>
 
 ## Tests
+
+```bash
+make test        # backend pytest + frontend tsc --noEmit
+make test-e2e     # frontend Playwright e2e (installs Chromium on first run)
+```
+
+Equivalent, run directly:
 
 ```bash
 cd backend && python -m pytest tests/       # no live network calls
