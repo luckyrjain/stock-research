@@ -12,8 +12,18 @@ config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
+# disable_existing_loggers=False: fileConfig()'s default (True) permanently
+# disables every already-created logger not named in alembic.ini's [loggers]
+# section (root/sqlalchemy/alembic only) — including every tools.*/signals.*
+# module logger the app itself already set up before this ever runs, with no
+# way to re-enable them afterward. Confirmed via test bisection: running
+# Alembic migrations in-process (tests/test_alembic_migrations.py) silently
+# broke assertLogs-based tests in unrelated modules for the rest of the
+# pytest session. Same risk applies outside tests — any script that imports
+# this app's modules before calling into Alembic would have its logging
+# silently killed app-wide.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # db.models.metadata is the single source of truth for every table this app
 # already hand-declares (SQLAlchemy Core, not an ORM Base) — reusing it here
