@@ -37,8 +37,9 @@ AlphaPulse already think about X."
 **Portfolio Aggregator** — a separate, unauthenticated personal net-worth tracker (distinct from
 the Portfolio/Positions page above): profiles → accounts → assets (stocks, mutual funds, FDs,
 EPF/PPF, cash, loans), fed by an EOD price store (NSE bhavcopy + AMFI NAV), a corporate-actions/
-adjusted-price pipeline, a nightly valuation + XIRR engine, and CAS PDF / broker CSV import
-(reconciled via a securities-master symbol resolver). Reachable at `/portfolio-aggregator`.
+adjusted-price pipeline, a nightly valuation + XIRR engine, and CAS PDF / broker CSV import or a
+direct broker API sync (Zerodha, HDFC Securities, Paytm Money — reconciled via a
+securities-master symbol resolver). Reachable at `/portfolio-aggregator`.
 
 **Accounts & API access** — passwordless magic-link sign-in, and API keys for programmatic
 access to a public `/api/v1/*` surface.
@@ -53,8 +54,8 @@ access to a public `/api/v1/*` surface.
 | [Setup & Configuration](setup.md) | Backend/frontend install, environment variables, local development |
 | [Deployment](deployment.md) | Docker Compose, manual production deployment, scaling caveats |
 | [Architecture](architecture.md) | Request flows, pipeline phases, caching, agent layers, file layout |
-| [API Reference](api-reference.md) | All 57 endpoints — auth, params, request bodies, status codes, rate limits, SSE event streams |
-| [Database](database.md) | All 22 tables — columns, constraints, indexes, ownership model, migrations, retention |
+| [API Reference](api-reference.md) | All 61 endpoints — auth, params, request bodies, status codes, rate limits, SSE event streams |
+| [Database](database.md) | All 23 tables — columns, constraints, indexes, ownership model, migrations, retention |
 | [Tools Reference](tools.md) | Data-fetching tools, market picks scrapers, sources, and output shapes |
 | [Output Schema](output-schema.md) | Report JSON structure and response payload shapes (the contract itself lives in the API Reference) |
 | [Design System](design.md) | Colors, typography, spacing, component patterns |
@@ -109,5 +110,5 @@ Open [http://localhost:3000](http://localhost:3000) for stock analysis. The othe
 | `backend/output/_market_picks/` | Market picks result cache (192 h / 7-day TTL, matching the weekly cron cadence) |
 | `backend/output/_nse_master.txt` | NSE equity symbol master (refreshed every 24 h) |
 | `backend/output/_bhavcopy/` | Raw NSE bhavcopy CSV archive (EOD price store ingestion replay) |
-| PostgreSQL (`DATABASE_URL`) | 22 tables — SME signals, screener, watchlist, positions, verdict history, MF-holdings history, accounts/sessions/API keys, EOD price store (securities/prices_daily/mf_nav_daily), corporate actions, the portfolio aggregator (profiles/accounts/assets/holdings/valuations/transactions), and `app_state` (daily pick snapshots, LLM cost counters, source health/quality, scraper error counters, CAS archives, CLI reports) (see [Architecture](architecture.md)) |
+| PostgreSQL (`DATABASE_URL`) | 23 tables — SME signals, screener, watchlist, positions, verdict history, MF-holdings history, accounts/sessions/API keys, EOD price store (securities/prices_daily/mf_nav_daily), corporate actions, the portfolio aggregator (profiles/accounts/assets/holdings/valuations/transactions), broker API sync (`broker_connections`), and `app_state` (daily pick snapshots, LLM cost counters, source health/quality, scraper error counters, CAS archives, CLI reports) (see [Architecture](architecture.md)) |
 | Redis (`REDIS_URL`, optional) | Shared rate-limit/cache state across multiple backend workers/hosts |

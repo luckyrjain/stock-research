@@ -57,6 +57,7 @@ Then edit `.env` and set the provider you want to use.
 | `SMTP_USE_TLS` | No | Default `true` — set `false` only for a local/dev relay without STARTTLS |
 | `SENTRY_DSN` | No | Forwards every error-level `observability.log_event()` call to a Sentry-compatible ingest endpoint (real Sentry, self-hosted Sentry, GlitchTip, ...). `sentry-sdk` is already in `requirements.txt`; without this set, `core/error_tracking.py` is a complete no-op |
 | `SENTRY_ENVIRONMENT` | No | Default `production` — tag attached to every event sent to Sentry when `SENTRY_DSN` is set |
+| `PORTFOLIO_ENCRYPTION_KEY` | Portfolio Aggregator broker API sync | Fernet key encrypting `broker_connections.api_secret_enc`/`access_token_enc` (`core/crypto.py`). No per-broker key here — each account enters its own broker `api_key`/`api_secret` in the UI. Without this set, connecting any broker account fails closed with `503`. Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` — see "Portfolio Aggregator" below |
 | `TRUSTED_PROXY_SECRET` | No | Shared secret (same value on backend + frontend) that lets `api.py` trust a real client IP forwarded by the Next.js proxy routes for per-IP rate limiting, instead of always seeing the Next.js server's own IP. Only matters once a reverse proxy/CDN sits in front of the frontend in production — see [Deployment](deployment.md) |
 | `ALLOWED_ORIGINS` | No | Comma-separated list of origins allowed to call the backend directly (CORS). Defaults to `http://localhost:3000`. Only matters for genuine cross-origin browser calls — the Next.js proxy routes talk to the backend server-to-server, which CORS doesn't apply to |
 
@@ -120,7 +121,7 @@ section for the full narrative on each flow.
 | Screener | `GET /api/screener`, `POST /api/screener/refresh` | NIFTY 500 custom screener (PostgreSQL-backed) |
 | Watchlist | `GET/POST /api/watchlist`, `DELETE /api/watchlist/{symbol}`, `GET /api/watchlist/calendar`, `POST /api/watchlist/claim` | Cross-mode watchlist; corporate-action calendar roll-up; claim-anonymous-rows-onto-account |
 | Positions | `GET/POST /api/positions`, `PATCH/DELETE /api/positions/{symbol}`, `POST /api/positions/claim`, `GET /api/portfolio/concentration` | "I bought this" tracking, same ownership shape as Watchlist; the concentration check lives in `routes/positions.py` despite its `/api/portfolio` prefix |
-| Portfolio Aggregator | `GET/POST /api/portfolio/profiles`, `GET/POST/PATCH/DELETE /api/portfolio/accounts[/{id}]`, `.../assets[/{id}]`, `POST .../assets/{id}/valuations`, `GET .../networth`, `POST .../refresh-valuations`, `GET .../xirr`, `POST .../import-cas`, `POST .../import-csv[/preview]` | 17 routes in `routes/portfolio_aggregator.py` — the separate net-worth tracker, no auth. See "Portfolio Aggregator" below |
+| Portfolio Aggregator | `GET/POST /api/portfolio/profiles`, `GET/POST/PATCH/DELETE /api/portfolio/accounts[/{id}]`, `.../assets[/{id}]`, `POST .../assets/{id}/valuations`, `GET .../networth`, `POST .../refresh-valuations`, `GET .../xirr`, `POST .../import-cas`, `POST .../import-csv[/preview]`, `POST .../broker/{broker}/login-url`, `POST .../broker/{broker}/connect`, `POST .../broker/{broker}/sync`, `GET .../broker/connections` | 21 routes in `routes/portfolio_aggregator.py` — the separate net-worth tracker, no auth. See "Portfolio Aggregator" below |
 | Consolidated | `GET /api/consolidated/{symbol}` | Pure aggregation of the three modes' caches — no new fetching |
 | Auth | `POST /api/auth/request-link`, `GET /api/auth/verify`, `GET /api/auth/me`, `POST /api/auth/logout` | Magic-link account system |
 | API keys | `GET/POST /api/api-keys`, `DELETE /api/api-keys/{id}`, `GET /api/v1/consolidated/{symbol}` | Key management + usage dashboard; the one `/api/v1/*` externally-callable route |
@@ -159,7 +160,7 @@ python main.py RELIANCE --force   # bypass cache
 ## Database schema setup (Alembic)
 
 Every PostgreSQL-backed feature (SME Signals, Screener, Watchlist, Positions, auth, API keys, the
-EOD price store, corporate actions, and the Portfolio Aggregator — 22 tables total) shares one
+EOD price store, corporate actions, and the Portfolio Aggregator — 23 tables total) shares one
 SQLAlchemy Core `MetaData()` object (`db/models.py`). Schema changes
 are now managed through **Alembic** rather than ad-hoc `create_all()` calls or hand-edited
 `ALTER TABLE` statements in `db/schema.sql` (see backend/CLAUDE.md's "Schema migrations" section for the
@@ -179,8 +180,14 @@ alembic upgrade head
 This runs all revisions in order — `0001_baseline_schema.py` (the original 11 tables),
 `684c8a31e7e0_add_eod_price_store_and_corporate_.py` (EOD price store + corporate actions, 4
 tables), `8613aafc2d9d_add_portfolio_aggregator_foundation_.py` (Portfolio Aggregator, 6
-tables), and `a7f2c1d09b34_add_app_state_durable_json_state.py` (`app_state`, 1 table) — creating
-all 22 tables, indexes, and constraints from scratch.
+tables), `a7f2c1d09b34_add_app_state_durable_json_state.py` (`app_state`, 1 table),
+`df6b59581b8b_add_broker_connections_table.py` (`broker_connections`, 1 table),
+`6c43f4a2d489_add_broker_connections_per_account_api_.py` (that table's per-connection
+`api_key`/`api_secret_enc` columns, no new table),
+`b7cf5b79ce66_add_transactions_external_ref_for_.py` (`transactions.external_ref` + its unique
+constraint, no new table), and `35f10ea4dac3_add_broker_connections_background_sync_.py`
+(`broker_connections.sync_status`/`.last_sync_summary`/`.last_sync_error`, no new table) —
+creating all 23 tables, indexes, and constraints from scratch.
 
 **Existing deployment with only the original 11 tables** (created by hand via `db/schema.sql`, or
 via one of the pipelines' `--setup-db` flags before Alembic existed — i.e. predates the EOD price
@@ -386,6 +393,27 @@ by the same Alembic step as everything else above).
   UI). New dependency `openpyxl` (already in `requirements.txt`, for `.xlsx` files — `pandas`
   already a dependency). New-asset broker codes are resolved to canonical NSE/BSE symbols via
   `tools/securities_master.py::resolve_symbol()`.
+- **Broker API sync** (Zerodha Kite Connect, HDFC Securities InvestRight, Paytm Money Open
+  API) — a live alternative to the two file-based imports above, connecting a broker account
+  directly. Needs `PORTFOLIO_ENCRYPTION_KEY` set (below); without it, connecting any broker
+  account fails closed with a `503`, never falling back to plaintext storage:
+  ```env
+  # .env
+  PORTFOLIO_ENCRYPTION_KEY=...
+  ```
+  Generate a key with:
+  ```bash
+  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+  ```
+  **There is no per-broker env var to set.** Each broker "app" (`api_key`/`api_secret`) is
+  registered under one specific broker login (developers.kite.trade for Zerodha,
+  developer.hdfcsec.com for HDFC Securities, developer.paytmmoney.com for Paytm Money) — a
+  deployment-wide env var would only ever work for one person's one broker account. Instead,
+  every account enters its own `api_key`/`api_secret` directly in the `/portfolio-aggregator` UI
+  when connecting that broker; both are stored per-connection in `broker_connections`
+  (`api_secret` and the resulting access token are Fernet-encrypted, `api_key` is plaintext —
+  see `docs/database.md`). Re-registering a broker account's credentials clears any previously
+  obtained access token, so a stale connection never silently reports itself as still live.
 
 ## Account & magic-link auth
 
@@ -597,13 +625,14 @@ stamp you need depends on **which** tables it already has:
   cd backend
   alembic stamp 0001 && alembic upgrade head
   ```
-  Stamp the baseline revision specifically, **not** `alembic stamp head`. There are three
-  revisions now, and a bare `stamp head` marks the two later ones as applied when they aren't —
-  Alembic then never creates the 10 tables they add (`securities`, `prices_daily`,
+  Stamp the baseline revision specifically, **not** `alembic stamp head`. There are six
+  revisions now, and a bare `stamp head` marks every later one as applied when it isn't —
+  Alembic then never creates the tables/columns they add (`securities`, `prices_daily`,
   `mf_nav_daily`, `corporate_actions`, `profiles`, `accounts`, `assets`, `holdings`,
-  `valuations`, `transactions`), and the EOD price store and Portfolio Aggregator fail at
-  runtime with nothing having gone wrong at migration time.
-- **All 22 tables already present** (fully caught up — e.g. created by a recent pipeline
+  `valuations`, `transactions`, `app_state`, `broker_connections`), and the EOD price store,
+  Portfolio Aggregator, and broker API sync all fail at runtime with nothing having gone wrong at
+  migration time.
+- **All 23 tables already present** (fully caught up — e.g. created by a recent pipeline
   `--setup-db`, which auto-stamps): `alembic stamp head` is the correct command here, and the
   only case where it is.
 

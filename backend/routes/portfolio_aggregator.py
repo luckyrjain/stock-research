@@ -9,7 +9,9 @@ handful of users, not a multi-tenant product. `profiles` is a bare picker
 (no credentials), which keeps the door open for real auth later without
 forcing it into this increment.
 """
+import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date as _date
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -21,6 +23,62 @@ router = APIRouter(prefix="/api/portfolio")
 
 _ACCOUNT_TYPES = {"bank", "broker", "amc", "epfo", "other"}
 _ASSET_TYPES = {"mf", "stock", "fd", "epf", "ppf", "cash", "manual", "loan"}
+
+# Broker-API integrations (docs/PRD-gmail-portfolio-intelligence.md's Phase 1) —
+# a closed allowlist, not user-supplied text, since each broker needs its own
+# sync module wired in below. See broker_connections' own comment in
+# db/models.py for why the table itself is already broker-agnostic.
+_SUPPORTED_BROKERS = {"zerodha", "hdfc_securities", "paytm_money"}
+
+# Generous upper bound on one account's holdings+trades sync — same
+# "TTL survives a crashed worker" reasoning as api.py's SME/screener/
+# market-picks refresh locks, just scoped much smaller (one connection,
+# not a whole market/pipeline run).
+_BROKER_SYNC_LOCK_TTL_SECONDS = 300
+
+# Caps how often a single (account, broker) pair may even *attempt* a sync,
+# independent of the concurrency lock above — the lock only stops two syncs
+# from overlapping, not a user (or a stuck frontend poll loop) repeatedly
+# kicking off back-to-back syncs against the broker's own API. A generous
+# ceiling for this tool's real scale (a handful of personal accounts, not a
+# multi-tenant product) — well above any plausible legitimate use, low
+# enough to matter as an actual backstop.
+_BROKER_SYNC_RATE_LIMIT_MAX_CALLS = 12
+_BROKER_SYNC_RATE_LIMIT_WINDOW_SECONDS = 3600.0
+
+# A sync now runs on this dedicated background executor rather than inside
+# the HTTP request/response cycle (see broker_sync() below) — a full
+# holdings+trades round trip against a live broker API can take several
+# seconds, long enough that holding a request thread open for it is poor
+# UX and, at any real scale, a waste of a request-handling thread.
+# ThreadPoolExecutor, not a job queue — see CLAUDE.md's Architectural
+# Constraints; this repo's stated scale (tens of users) never needs
+# anything heavier, and a handful of background sync jobs at a time is
+# comfortably within a small fixed pool. Deliberately separate from
+# api.py's own default executor (which every other route already runs on
+# via run_owned_db_call) so a burst of broker syncs can never starve
+# ordinary request handling of worker threads. Not wired into api.py's
+# lifespan shutdown: an in-flight sync being killed on process exit is no
+# different from today's crash-mid-sync case, which the lock's TTL above
+# already exists to recover from.
+_BROKER_SYNC_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="broker-sync-bg")
+
+
+def _broker_sync_module(broker: str):
+    """Returns the portfolio.<broker>_sync module for a supported broker.
+    A plain if/elif over three known names rather than importlib string
+    assembly — the broker string reaching here already passed
+    _require_supported_broker()'s allowlist check, but an explicit branch
+    keeps `broker` from ever being interpolated into an import path."""
+    if broker == "zerodha":
+        import portfolio.kite_sync as mod
+    elif broker == "hdfc_securities":
+        import portfolio.hdfc_sync as mod
+    elif broker == "paytm_money":
+        import portfolio.paytm_sync as mod
+    else:  # pragma: no cover — unreachable once _require_supported_broker() ran first
+        raise HTTPException(status_code=422, detail=f"broker must be one of: {sorted(_SUPPORTED_BROKERS)}")
+    return mod
 
 
 def compute_networth(rows: list[dict]) -> dict:
@@ -87,6 +145,29 @@ class AssetPatch(BaseModel):
 class ValuationIn(BaseModel):
     value: float = Field(ge=0)
     as_of: _date | None = None
+
+
+class BrokerLoginUrlIn(BaseModel):
+    account_id: int
+    # This account's own app credentials, registered by whoever owns this
+    # broker login (e.g. developers.kite.trade) — never a deployment-wide
+    # env var, since a Kite Connect/HDFC/Paytm Money "app" is created under
+    # one specific broker account, not issued once per AlphaPulse instance.
+    # Both optional: omit both to reuse whatever was registered on a prior
+    # call (resuming/retrying an OAuth handshake shouldn't force re-typing
+    # a secret every time) — first-time setup for this (account, broker)
+    # must supply both, and either alone is a 422.
+    api_key: str | None = Field(default=None, min_length=1, max_length=255)
+    api_secret: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class BrokerConnectIn(BaseModel):
+    account_id: int
+    request_token: str
+
+
+class BrokerSyncIn(BaseModel):
+    account_id: int
 
 
 @router.get("/profiles")
@@ -488,3 +569,340 @@ async def import_csv_endpoint(
         return result
 
     return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
+
+
+def _require_supported_broker(broker: str) -> None:
+    if broker not in _SUPPORTED_BROKERS:
+        raise HTTPException(status_code=422, detail=f"broker must be one of: {sorted(_SUPPORTED_BROKERS)}")
+
+
+@router.post("/broker/{broker}/login-url")
+async def broker_login_url(request: Request, broker: str, body: BrokerLoginUrlIn):
+    """Returns the login URL to start (or resume) connecting `broker` for
+    this account. A POST, not a GET, since a first-time call's api_secret
+    must never ride along in a query string (server access logs, browser
+    history).
+
+    Two modes, both handled here since they share almost everything:
+    - **First-time setup** — body carries both api_key and api_secret (see
+      BrokerLoginUrlIn — never a shared env var, each account brings its
+      own app credentials). Registers/replaces them on the broker_connections
+      row and clears any previously-obtained access token, since it was
+      minted for whatever credentials were on file before and can't
+      possibly still be valid for a changed api_key.
+    - **Resume/retry** — body omits both. Reuses whatever was already
+      registered (a request_token expiring, or the user closing the tab
+      mid-handshake, shouldn't force re-typing a secret every retry) —
+      404 if nothing was ever registered for this (account, broker)."""
+    _require_supported_broker(broker)
+    if bool(body.api_key) != bool(body.api_secret):
+        raise HTTPException(status_code=422, detail="provide both api_key and api_secret, or neither to reuse saved credentials")
+
+    def _sync() -> dict:
+        import api
+        from core.crypto import EncryptionNotConfigured, encrypt
+        from db.models import accounts, broker_connections
+        from sqlalchemy import insert, select, update
+
+        mod = _broker_sync_module(broker)
+
+        with api._get_db_engine().begin() as conn:
+            account = conn.execute(
+                select(accounts.c.id, accounts.c.profile_id, accounts.c.type)
+                .where(accounts.c.id == body.account_id)
+            ).first()
+            if account is None:
+                raise HTTPException(status_code=404, detail="account not found")
+            if account.type != "broker":
+                raise HTTPException(status_code=422, detail="account.type must be 'broker' to connect a broker API")
+
+            existing = conn.execute(
+                select(broker_connections.c.id, broker_connections.c.api_key).where(
+                    broker_connections.c.account_id == body.account_id,
+                    broker_connections.c.broker == broker,
+                )
+            ).first()
+
+            if not body.api_key:
+                if existing is None or not existing.api_key:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"no {broker} app credentials registered for this account yet — provide api_key/api_secret",
+                    )
+                return {"login_url": mod.get_login_url(existing.api_key)}
+
+            try:
+                api_secret_enc = encrypt(body.api_secret)
+            except EncryptionNotConfigured as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+
+            if existing:
+                conn.execute(
+                    update(broker_connections)
+                    .where(broker_connections.c.id == existing.id)
+                    .values(
+                        api_key=body.api_key, api_secret_enc=api_secret_enc,
+                        access_token_enc=None, token_obtained_at=None,
+                        # A prior sync's outcome was fetched under credentials
+                        # that no longer exist — leaving "success" and its
+                        # summary on display would misleadingly imply the new
+                        # credentials have already synced something.
+                        sync_status="idle", last_sync_summary=None, last_sync_error=None,
+                    )
+                )
+            else:
+                conn.execute(
+                    insert(broker_connections).values(
+                        profile_id=account.profile_id,
+                        account_id=body.account_id,
+                        broker=broker,
+                        api_key=body.api_key,
+                        api_secret_enc=api_secret_enc,
+                    )
+                )
+            return {"login_url": mod.get_login_url(body.api_key)}
+
+    return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
+
+
+@router.post("/broker/{broker}/connect")
+async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
+    _require_supported_broker(broker)
+
+    def _sync() -> dict:
+        import datetime as _dt
+
+        import api
+        from core.crypto import EncryptionNotConfigured, decrypt, encrypt
+        from db.models import broker_connections
+        from sqlalchemy import select, update
+
+        mod = _broker_sync_module(broker)
+
+        with api._get_db_engine().begin() as conn:
+            conn_row = conn.execute(
+                select(broker_connections.c.id, broker_connections.c.api_key, broker_connections.c.api_secret_enc)
+                .where(
+                    broker_connections.c.account_id == body.account_id,
+                    broker_connections.c.broker == broker,
+                )
+            ).first()
+            if conn_row is None or not conn_row.api_key or not conn_row.api_secret_enc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"no {broker} app credentials registered for this account — call login-url first",
+                )
+
+            try:
+                api_secret = decrypt(conn_row.api_secret_enc)
+            except EncryptionNotConfigured as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+            except Exception:
+                raise HTTPException(
+                    status_code=422,
+                    detail="stored app secret could not be decrypted — re-register this broker's API key/secret",
+                )
+
+            session = mod.exchange_request_token(conn_row.api_key, api_secret, body.request_token)
+            if "error" in session or "access_token" not in session:
+                raise HTTPException(status_code=422, detail=session.get("error", "broker login failed"))
+
+            try:
+                token_enc = encrypt(session["access_token"])
+            except EncryptionNotConfigured as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+
+            now = _dt.datetime.now(_dt.timezone.utc)
+            conn.execute(
+                update(broker_connections)
+                .where(broker_connections.c.id == conn_row.id)
+                .values(access_token_enc=token_enc, token_obtained_at=now)
+            )
+        return {"connected": True, "account_id": body.account_id, "broker": broker}
+
+    return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
+
+
+@router.post("/broker/{broker}/sync", status_code=202)
+async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
+    """Kicks off a background sync and returns immediately — see
+    _BROKER_SYNC_EXECUTOR's own comment for why this doesn't run inline in
+    the request/response cycle. `GET /broker/connections` is how the
+    frontend learns the outcome: `sync_status` moves syncing -> success
+    (with `last_sync_summary` populated) or syncing -> error (with
+    `last_sync_error` populated), for the frontend to poll.
+
+    Two independent guards run before anything is scheduled:
+    - A sliding-window rate limit on this (account, broker) pair (429 if
+      exceeded) — protects the broker's own API from a runaway poll loop
+      or repeated clicks, independent of whether a sync is *currently*
+      running.
+    - The existing per-connection lock (409 if already held) — a
+      double-click, two open tabs, or a retried request while a sync is
+      still running could otherwise race two sync_account() calls for the
+      same connection against each other. Both would pass
+      broker_sync_common.py's own trade-id pre-check before either
+      commits, producing duplicate trades were it not for `transactions`'s
+      own `uq_transactions_asset_external_ref` DB constraint (belt) plus
+      this lock (suspenders, and the one that actually prevents a
+      concurrent attempt from starting at all — same `try_acquire_lock`/
+      `release_lock` pattern api.py's SME/screener/market-picks refresh
+      endpoints already use). The lock is now held for the background
+      job's lifetime, not just the HTTP request's, and is always released
+      by the background job itself (_run_and_release's `finally`), never
+      by this handler."""
+    _require_supported_broker(broker)
+    account_id = body.account_id
+    lock_name = f"broker_sync:{account_id}:{broker}"
+    rate_key = f"broker_sync_rl:{account_id}:{broker}"
+
+    def _prepare() -> dict:
+        import api
+        from core import rate_limiter
+        from core.crypto import EncryptionNotConfigured, decrypt
+        from db.models import broker_connections
+        from sqlalchemy import select, update
+
+        if not rate_limiter.is_allowed(
+            rate_key, _BROKER_SYNC_RATE_LIMIT_MAX_CALLS, _BROKER_SYNC_RATE_LIMIT_WINDOW_SECONDS,
+        ):
+            raise HTTPException(
+                status_code=429,
+                detail=f"too many {broker} sync attempts for this account — wait before retrying",
+            )
+        if not rate_limiter.try_acquire_lock(lock_name, _BROKER_SYNC_LOCK_TTL_SECONDS):
+            raise HTTPException(status_code=409, detail=f"a sync for this {broker} connection is already running")
+
+        try:
+            with api._get_db_engine().begin() as conn:
+                conn_row = conn.execute(
+                    select(broker_connections.c.api_key, broker_connections.c.access_token_enc).where(
+                        broker_connections.c.account_id == account_id,
+                        broker_connections.c.broker == broker,
+                    )
+                ).first()
+                if conn_row is None or not conn_row.access_token_enc:
+                    raise HTTPException(status_code=404, detail=f"no connected {broker} account for this account_id")
+
+                try:
+                    access_token = decrypt(conn_row.access_token_enc)
+                except EncryptionNotConfigured as exc:
+                    raise HTTPException(status_code=503, detail=str(exc))
+                except Exception:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="stored credential could not be decrypted — reconnect this broker account",
+                    )
+
+                conn.execute(
+                    update(broker_connections)
+                    .where(
+                        broker_connections.c.account_id == account_id,
+                        broker_connections.c.broker == broker,
+                    )
+                    .values(sync_status="syncing", last_sync_error=None)
+                )
+            return {"access_token": access_token, "api_key": conn_row.api_key}
+        except Exception:
+            rate_limiter.release_lock(lock_name)
+            raise
+
+    prepared = await run_owned_db_call(request, "portfolio_agg_write", 60, _prepare, "portfolio_agg_write")
+
+    def _run_and_release() -> None:
+        import api
+        from core import rate_limiter
+        from db.models import broker_connections
+        from portfolio.portfolio_valuation import refresh_valuations
+        from sqlalchemy import update
+
+        # Three independently-guarded steps, not one big try/except: a
+        # failure recording the outcome (the second step) must never stop
+        # the lock release (the third) from running, and refresh_valuations()
+        # runs on its own connection/transaction rather than nested inside
+        # the one used for the final status update — the original
+        # synchronous version of this endpoint never held a transaction open
+        # across that call either, and there is no reason for this one to.
+        result, error = None, None
+        try:
+            mod = _broker_sync_module(broker)
+            result = mod.sync_account(
+                api._get_db_engine(), account_id, prepared["access_token"], api_key=prepared["api_key"],
+            )
+            if "error" in result:
+                error = result["error"]
+            else:
+                refresh_valuations(api._get_db_engine())
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # No HTTP request is left to surface this to — record it on the
+            # connection row instead, same "never let a background failure
+            # be silent" instinct as pipelines/watchlist_alerts.py.
+            api.log_event(api.LOGGER, "broker_sync_background_failed", level="error",
+                           account_id=account_id, broker=broker, error=str(exc))
+            error = str(exc)
+
+        try:
+            with api._get_db_engine().begin() as conn:
+                if error is not None:
+                    conn.execute(
+                        update(broker_connections)
+                        .where(
+                            broker_connections.c.account_id == account_id,
+                            broker_connections.c.broker == broker,
+                        )
+                        .values(sync_status="error", last_sync_error=error)
+                    )
+                else:
+                    conn.execute(
+                        update(broker_connections)
+                        .where(
+                            broker_connections.c.account_id == account_id,
+                            broker_connections.c.broker == broker,
+                        )
+                        .values(sync_status="success", last_sync_summary=result, last_sync_error=None)
+                    )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # A failure writing the outcome itself (e.g. a transient DB
+            # blip) must not prevent the lock release below — a stuck
+            # sync_status="syncing" with the lock released is recoverable
+            # (the next sync attempt just overwrites it); a stuck lock
+            # would not be, short of its TTL expiring.
+            api.log_event(api.LOGGER, "broker_sync_status_write_failed", level="error",
+                           account_id=account_id, broker=broker, error=str(exc))
+        finally:
+            rate_limiter.release_lock(lock_name)
+
+    asyncio.get_running_loop().run_in_executor(_BROKER_SYNC_EXECUTOR, _run_and_release)
+    return {"status": "syncing", "account_id": account_id, "broker": broker}
+
+
+@router.get("/broker/connections")
+async def list_broker_connections(request: Request, profile_id: int):
+    def _sync() -> dict:
+        import api
+        from db.models import broker_connections
+        from sqlalchemy import select
+
+        with api._get_db_engine().connect() as conn:
+            rows = conn.execute(
+                select(
+                    broker_connections.c.id,
+                    broker_connections.c.account_id,
+                    broker_connections.c.broker,
+                    broker_connections.c.token_obtained_at,
+                    broker_connections.c.last_synced_at,
+                    broker_connections.c.sync_status,
+                    broker_connections.c.last_sync_summary,
+                    broker_connections.c.last_sync_error,
+                )
+                .where(broker_connections.c.profile_id == profile_id)
+                .order_by(broker_connections.c.id)
+            ).mappings().fetchall()
+        # Never returns api_key/api_secret_enc/access_token_enc — connection
+        # status/metadata only. `connected` distinguishes "app credentials
+        # registered, OAuth handshake not yet completed" (token_obtained_at
+        # is null — login-url ran, connect hasn't) from a fully live
+        # connection, since a row now exists after the credentials-only step.
+        return {"connections": [{**dict(r), "connected": r["token_obtained_at"] is not None} for r in rows]}
+
+    return await run_owned_db_call(request, "portfolio_agg_read", 120, _sync, "portfolio_agg_read")

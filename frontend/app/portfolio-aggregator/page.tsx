@@ -6,6 +6,7 @@ import type {
   PortfolioProfile, PortfolioAccount, PortfolioAccountType,
   PortfolioAsset, PortfolioAssetType, PortfolioNetWorth,
   CasImportResult, CsvPreviewResult, CsvImportResult,
+  BrokerConnection, BrokerSyncAck,
 } from '@/types';
 
 const CSV_MAPPING_KEY_PREFIX = 'portfolio_csv_mapping:';
@@ -13,6 +14,26 @@ const CSV_REQUIRED_FIELDS = ['date', 'symbol', 'side', 'quantity', 'price'] as c
 const CSV_ALL_FIELDS = [...CSV_REQUIRED_FIELDS, 'amount', 'isin'] as const;
 
 const PROFILE_KEY = 'portfolio_aggregator_profile_id';
+
+// Brokers supported today (routes/portfolio_aggregator.py's
+// _SUPPORTED_BROKERS) — each broker's own login redirect has no way to
+// echo custom state back, so the account + broker being connected are
+// stashed here right before the browser leaves for the broker's login
+// page, and read back by the shared broker-callback page.
+//
+// HDFC Securities and Paytm Money are marked experimental: their exact REST
+// shape (endpoints, field names, checksum scheme) was inferred from public
+// docs/SDK snippets, not verified against a live response (see
+// backend/portfolio/hdfc_sync.py's and paytm_sync.py's own module
+// docstrings) — unlike Zerodha, confirmed against the installed
+// kiteconnect package's real API surface. Remove once each has completed
+// one successful live sync against a real account (docs/backlog.md).
+const SUPPORTED_BROKERS: { id: string; label: string; experimental?: boolean }[] = [
+  { id: 'zerodha', label: 'Zerodha' },
+  { id: 'hdfc_securities', label: 'HDFC Securities', experimental: true },
+  { id: 'paytm_money', label: 'Paytm Money', experimental: true },
+];
+const PENDING_BROKER_CONNECT_KEY = 'portfolio_pending_broker_connect';
 
 const ACCOUNT_TYPES: PortfolioAccountType[] = ['bank', 'broker', 'amc', 'epfo', 'other'];
 const ASSET_TYPES: PortfolioAssetType[] = ['mf', 'stock', 'fd', 'epf', 'ppf', 'cash', 'manual', 'loan'];
@@ -230,8 +251,173 @@ function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () =
   );
 }
 
-function AccountBlock({ account, assets, onChanged }: {
-  account: PortfolioAccount; assets: PortfolioAsset[]; onChanged: () => void;
+function BrokerRow({ account, broker, connection, onSynced }: {
+  account: PortfolioAccount; broker: { id: string; label: string; experimental?: boolean };
+  connection: BrokerConnection | undefined; onSynced: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  // Credential form starts open until an app has been registered for this
+  // (account, broker) — after that, "Connect"/"Reconnect" reuses the saved
+  // key/secret (see BrokerLoginUrlRequest) and this stays collapsed behind
+  // an explicit "change API key" link, so a normal resume/retry never
+  // forces re-typing a secret.
+  const [showCreds, setShowCreds] = useState(!connection);
+  const [apiKey, setApiKey] = useState('');
+  const [apiSecret, setApiSecret] = useState('');
+
+  async function connect() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const body: { account_id: number; api_key?: string; api_secret?: string } = { account_id: account.id };
+      if (showCreds) {
+        if (!apiKey.trim() || !apiSecret.trim()) {
+          setMsg('Enter both API key and API secret.');
+          setBusy(false);
+          return;
+        }
+        body.api_key = apiKey.trim();
+        body.api_secret = apiSecret.trim();
+      }
+      const { login_url } = await api<{ login_url: string }>(`broker/${broker.id}/login-url`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      localStorage.setItem(PENDING_BROKER_CONNECT_KEY, JSON.stringify({ account_id: account.id, broker: broker.id }));
+      window.location.href = login_url;
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : `Could not start ${broker.label} login`);
+      setBusy(false);
+    }
+  }
+
+  async function sync() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api<BrokerSyncAck>(`broker/${broker.id}/sync`, {
+        method: 'POST',
+        body: JSON.stringify({ account_id: account.id }),
+      });
+      // The sync itself runs in the background (202 Accepted). `busy`
+      // deliberately stays true here rather than clearing in a `finally`
+      // below — the connections list hasn't been refetched yet at this
+      // point, so `connection.sync_status` is still whatever it was
+      // *before* this click, not yet "syncing". Clearing `busy` here would
+      // briefly re-enable "Sync now" until the next poll catches up. The
+      // status-resolution effect below clears it once the outcome is known.
+      setMsg('Syncing…');
+      onSynced();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'Sync failed');
+      setBusy(false);
+    }
+  }
+
+  // Polls the parent's connections list (via onSynced, the same refetch
+  // every other mutation here already triggers) while a background sync is
+  // in flight, so "Syncing…" actually clears once the job finishes —
+  // stops itself the moment sync_status leaves "syncing".
+  useEffect(() => {
+    if (connection?.sync_status !== 'syncing') return;
+    const id = setInterval(onSynced, 2000);
+    return () => clearInterval(id);
+  }, [connection?.sync_status, onSynced]);
+
+  useEffect(() => {
+    if (connection?.sync_status === 'success' && connection.last_sync_summary) {
+      const r = connection.last_sync_summary;
+      const archived = r.holdings_archived ? `, ${r.holdings_archived} archived` : '';
+      setMsg(`Synced ${r.holdings_synced} holdings, ${r.trades_synced} trades${archived}.`);
+      setBusy(false);
+    } else if (connection?.sync_status === 'error' && connection.last_sync_error) {
+      setMsg(connection.last_sync_error);
+      setBusy(false);
+    }
+  }, [connection?.sync_status, connection?.last_sync_summary, connection?.last_sync_error]);
+
+  const syncing = busy || connection?.sync_status === 'syncing';
+
+  return (
+    <span className="flex flex-col gap-1">
+      <span className="flex items-center gap-2 flex-wrap">
+        {broker.experimental && (
+          <span className="text-xs text-hold font-semibold" title="Not yet verified against a live account — see docs/backlog.md">
+            beta
+          </span>
+        )}
+        {connection?.connected && (
+          <span className="text-xs text-muted">
+            {broker.label} connected{connection.last_synced_at ? ` · last synced ${new Date(connection.last_synced_at).toLocaleString('en-IN')}` : ' · never synced'}
+          </span>
+        )}
+        {connection && !connection.connected && (
+          <span className="text-xs text-muted">{broker.label}: API key saved, not yet connected</span>
+        )}
+        {connection?.connected && (
+          <button onClick={sync} disabled={syncing} className="text-xs text-accent font-semibold disabled:opacity-50">
+            {syncing ? 'Syncing…' : 'Sync now'}
+          </button>
+        )}
+        {(!connection || !connection.connected || showCreds) && (
+          <button onClick={connect} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
+            {busy ? 'Redirecting…' : connection?.connected ? `Reconnect ${broker.label}` : `Connect ${broker.label}`}
+          </button>
+        )}
+        {connection && !showCreds && (
+          <button onClick={() => setShowCreds(true)} className="text-xs text-muted hover:text-tx">
+            change API key
+          </button>
+        )}
+        {msg && <span className="text-xs text-muted">{msg}</span>}
+      </span>
+      {showCreds && (
+        <span className="flex items-center gap-2">
+          <input
+            value={apiKey}
+            onChange={e => setApiKey(e.target.value)}
+            placeholder={`${broker.label} API key`}
+            className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-40"
+          />
+          <input
+            value={apiSecret}
+            onChange={e => setApiSecret(e.target.value)}
+            placeholder="API secret"
+            type="password"
+            className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-40"
+          />
+          {connection && (
+            <button onClick={() => setShowCreds(false)} className="text-xs text-muted hover:text-tx">
+              cancel
+            </button>
+          )}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function BrokerConnectControls({ account, connections, onSynced }: {
+  account: PortfolioAccount; connections: BrokerConnection[]; onSynced: () => void;
+}) {
+  return (
+    <span className="flex items-center gap-3 flex-wrap">
+      {SUPPORTED_BROKERS.map(broker => (
+        <BrokerRow
+          key={broker.id}
+          account={account}
+          broker={broker}
+          connection={connections.find(c => c.broker === broker.id)}
+          onSynced={onSynced}
+        />
+      ))}
+    </span>
+  );
+}
+
+function AccountBlock({ account, assets, connections, onChanged }: {
+  account: PortfolioAccount; assets: PortfolioAsset[]; connections: BrokerConnection[]; onChanged: () => void;
 }) {
   const [showAdd, setShowAdd] = useState(false);
 
@@ -254,6 +440,9 @@ function AccountBlock({ account, assets, onChanged }: {
           {account.name} <span className="text-muted font-normal">· {account.type}{account.institution ? ` · ${account.institution}` : ''}</span>
         </p>
         <div className="flex items-center gap-3">
+          {account.type === 'broker' && (
+            <BrokerConnectControls account={account} connections={connections} onSynced={onChanged} />
+          )}
           <button onClick={() => setShowAdd(s => !s)} className="text-xs text-accent font-semibold">
             {showAdd ? 'Cancel' : '+ Asset'}
           </button>
@@ -442,6 +631,7 @@ function ImportCsvForm({ accounts, onImported }: { accounts: PortfolioAccount[];
 function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitch: () => void }) {
   const [accounts, setAccounts] = useState<PortfolioAccount[]>([]);
   const [assetsByAccount, setAssetsByAccount] = useState<Record<number, PortfolioAsset[]>>({});
+  const [connections, setConnections] = useState<BrokerConnection[]>([]);
   const [networth, setNetworth] = useState<PortfolioNetWorth | null>(null);
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
@@ -458,6 +648,9 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
       setAssetsByAccount(Object.fromEntries(entries));
     });
     api<PortfolioNetWorth>(`networth?profile_id=${profile.id}`).then(setNetworth);
+    api<{ connections: BrokerConnection[] }>(`broker/connections?profile_id=${profile.id}`)
+      .then(d => setConnections(d.connections))
+      .catch(() => setConnections([]));
   }, [profile.id]);
 
   useEffect(refresh, [refresh]);
@@ -536,7 +729,13 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
 
       <div className="flex flex-col gap-3">
         {accounts.map(acc => (
-          <AccountBlock key={acc.id} account={acc} assets={assetsByAccount[acc.id] ?? []} onChanged={refresh} />
+          <AccountBlock
+            key={acc.id}
+            account={acc}
+            assets={assetsByAccount[acc.id] ?? []}
+            connections={connections.filter(c => c.account_id === acc.id)}
+            onChanged={refresh}
+          />
         ))}
         {accounts.length === 0 && <p className="text-sm text-muted">No accounts yet — add one above.</p>}
       </div>

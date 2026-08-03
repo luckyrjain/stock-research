@@ -10,7 +10,7 @@ running in production rather than `--reload`/`npm run dev`.
 ```bash
 cp .env.example .env   # add at least one LLM provider key
 docker compose up --build
-docker compose exec backend alembic upgrade head   # first run only — creates all 22 tables
+docker compose exec backend alembic upgrade head   # first run only — creates all 23 tables
 ```
 
 This starts four services (`docker-compose.yml`):

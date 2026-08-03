@@ -2,7 +2,7 @@ import os
 
 from sqlalchemy import (
     JSON, BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, ForeignKey, Index,
-    Integer, MetaData, Numeric, String, Table, UniqueConstraint, text,
+    Integer, MetaData, Numeric, String, Table, Text, UniqueConstraint, text,
 )
 from sqlalchemy import create_engine as _create_engine
 
@@ -450,7 +450,97 @@ transactions = Table(
     Column("amount",   Numeric(16, 2), nullable=False),
     Column("units",    Numeric(18, 4)),
     Column("meta",     JSON, nullable=False, server_default="{}"),
+    # NULL for cas_import/csv_import rows (their own idempotency is content-
+    # based, documented in docs/database.md's own known-gaps list) — set only
+    # by portfolio/broker_sync_common.py, as f"{meta_source}:{trade_id}", so a
+    # broker's own trade id is a real, DB-enforced unique key per asset rather
+    # than a Python-only pre-check a concurrent sync could race past. A plain
+    # column + UniqueConstraint, not a functional/partial index on meta's own
+    # JSON fields, so this holds identically on both Postgres (production) and
+    # SQLite (this table's test backend) with no dialect-specific expression.
+    Column("external_ref", String(80)),
     Index("idx_transactions_asset", "asset_id"),
+    UniqueConstraint("asset_id", "external_ref", name="uq_transactions_asset_external_ref"),
+)
+
+
+# Broker API connections — Zerodha Kite Connect, HDFC Securities InvestRight,
+# and Paytm Money Open API today, one row per (account, broker) pair via
+# UniqueConstraint below — `broker` is a plain string, not an enum, checked
+# against a closed allowlist at the route layer (routes/portfolio_aggregator.py's
+# `_SUPPORTED_BROKERS`/`_broker_sync_module()`) instead, so a fourth broker
+# needs no schema change here, just a new portfolio/<broker>_sync.py module
+# implementing the same get_login_url/exchange_request_token/sync_account
+# interface (see portfolio/broker_sync_common.py for the shared DB-write half
+# every broker module builds on). See
+# docs/PRD-gmail-portfolio-intelligence.md's Decision 9/Phase 1 for why
+# broker APIs are preferred over Gmail-parsed transactions where available —
+# structured, authoritative, no extraction error.
+#
+# Deliberately keyed to `profiles`/`accounts`, not a `user_id` — this reuses
+# the Portfolio Aggregator's existing no-auth, localhost-only model rather
+# than requiring the separate `users`/`sessions` magic-link system. A known,
+# disclosed deviation from that doc's own Decision 6 (which calls for
+# `user_id`-scoped ownership before this is ever exposed to more than one
+# operator) — acceptable for personal/local use, not for a real multi-tenant
+# deployment.
+#
+# `api_key`/`api_secret_enc` are per-CONNECTION, not a deployment-wide env
+# var — every broker in this list requires each caller to register their own
+# "app" (Kite Connect, HDFC's Individual API, Paytm Money's Open API all work
+# this way: you create an app under your own broker login and get back a
+# key/secret scoped to that app), so a single global KITE_API_KEY-style env
+# var would only ever work for one person's one broker login, not "whoever
+# connects an account." Each account supplies its own pair at connect time
+# (frontend: BrokerRow's inline form in portfolio-aggregator/page.tsx).
+# `api_key` mirrors Kite Connect's own security model — it's embedded
+# directly in the browser-visible login-redirect URL, so it's closer to a
+# public client id than a secret — stored plaintext; `api_secret_enc` is the
+# genuine secret and is Fernet-encrypted, same as `access_token_enc`. Both
+# are set together by the login-url step (which needs api_key to build the
+# redirect and stores api_secret for the connect step that follows); NULL
+# only for a row that predates this column (never true for a fresh
+# deployment) or via a direct DB edit.
+broker_connections = Table(
+    "broker_connections",
+    metadata,
+    Column("id",                Integer, primary_key=True, autoincrement=True),
+    Column("profile_id",        Integer, ForeignKey("profiles.id"), nullable=False),
+    Column("account_id",        Integer, ForeignKey("accounts.id"), nullable=False),
+    Column("broker",            String(20), nullable=False),
+    Column("api_key",           String(255)),
+    Column("api_secret_enc",    Text),
+    # NULL until the OAuth-style login flow completes at least once.
+    Column("access_token_enc",  Text),
+    # Kite (and most broker APIs) issue a session token that expires daily
+    # (Kite: ~06:00 IST the next day) — this is when it was *obtained*, not
+    # when it expires, since brokers don't publish a fixed TTL to compute
+    # from; a sync call that gets an auth error is the actual signal that
+    # re-login is needed.
+    Column("token_obtained_at", DateTime(timezone=True)),
+    Column("last_synced_at",    DateTime(timezone=True)),
+    # Background-sync bookkeeping (see routes/portfolio_aggregator.py's
+    # POST /broker/{broker}/sync): a sync now runs on a background
+    # executor rather than inside the HTTP request, so the connections list
+    # is how the frontend polls for the outcome instead of getting it back
+    # synchronously in the POST response. One of "idle" | "syncing" |
+    # "success" | "error" — "idle" is both the pre-first-sync state and
+    # what a never-run connection has right after this column was added.
+    Column("sync_status",       String(20), nullable=False, server_default=text("'idle'")),
+    # The same summary dict sync_account() always returned synchronously
+    # before (holdings_synced/skipped/archived, trades_synced/skipped/
+    # duplicate) — populated on the most recent *successful* sync only;
+    # left as-is (not cleared) on a later failed sync, so the frontend can
+    # still show "last known good sync" alongside the fresh error.
+    Column("last_sync_summary", JSON),
+    # Set only on a failed sync (network/auth/broker-API error); cleared
+    # back to NULL at the start of the next sync attempt, not on success —
+    # so a transient failure's message doesn't linger once a later sync
+    # actually succeeds (last_sync_summary already signals that).
+    Column("last_sync_error",   Text),
+    Column("created_at",        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")),
+    UniqueConstraint("account_id", "broker", name="uq_broker_connections_account_broker"),
+    Index("idx_broker_connections_profile", "profile_id"),
 )
 
 

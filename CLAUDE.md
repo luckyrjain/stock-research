@@ -103,7 +103,9 @@ stock-research/
 │   │   ├── observability.py        Structured JSON logging via log_event()
 │   │   ├── error_tracking.py       Optional Sentry-style hook, wired into log_event()'s error-level path
 │   │   ├── schema_drift.py         Type-drift detection for the six scraped data slices
-│   │   └── email_sender.py         Sends the magic-link sign-in + watchlist-alert emails over generic SMTP
+│   │   ├── email_sender.py         Sends the magic-link sign-in + watchlist-alert emails over generic SMTP
+│   │   └── crypto.py               Fernet encrypt/decrypt (PORTFOLIO_ENCRYPTION_KEY) — broker app
+│   │                               secrets + access tokens in broker_connections
 │   ├── pipelines/               Standalone batch jobs, each with its own CLI entry point
 │   │   ├── market_picks_pipeline.py  Multi-agent weekly picks pipeline (6 phases)
 │   │   ├── sme_ema_pipeline.py     SME golden/death cross batch pipeline (PostgreSQL)
@@ -112,11 +114,16 @@ stock-research/
 │   │   │                           store + corporate actions flow" below
 │   │   ├── corporate_actions_pipeline.py  Split/bonus/dividend-adjusted close recompute
 │   │   └── watchlist_alerts.py     Daily batch job: emails signed-in users on a watched stock's recommendation change
-│   ├── portfolio/               Portfolio Aggregator's valuation + statement-import modules
+│   ├── portfolio/               Portfolio Aggregator's valuation + statement-import + broker-sync modules
 │   │   ├── portfolio_valuation.py  Nightly auto-valuation + XIRR engine
 │   │   ├── cas_import.py           CAS PDF (CAMS/KFintech) mutual-fund statement import
 │   │   ├── csv_import.py           Broker CSV/XLSX tradebook import (Zerodha preset)
-│   │   └── dcf_valuation.py        Deterministic two-stage DCF off the cash-flow statement
+│   │   ├── dcf_valuation.py        Deterministic two-stage DCF off the cash-flow statement
+│   │   ├── broker_sync_common.py   Shared assets/holdings/valuations/transactions upsert logic
+│   │   │                           every portfolio/<broker>_sync.py module builds on
+│   │   ├── kite_sync.py            Zerodha Kite Connect holdings/trades sync
+│   │   ├── hdfc_sync.py            HDFC Securities InvestRight Open API holdings/trades sync
+│   │   └── paytm_sync.py           Paytm Money Open API holdings/trades sync
 │   ├── telemetry/               Scraper/Market-Picks source observability — freshness, per-run yield, error counts
 │   │   ├── source_health.py        Freshness/volume monitoring for market-picks sources + macro overlay
 │   │   ├── source_quality.py       Per-run Market Picks source-quality telemetry
@@ -203,7 +210,7 @@ whichever one is relevant to the directory you're working in):
 | [`docs/setup.md`](docs/setup.md) | Full environment variable reference, local dev setup, troubleshooting |
 | [`docs/deployment.md`](docs/deployment.md) | Docker Compose, manual deployment, scaling guidance |
 | [`docs/architecture.md`](docs/architecture.md) | System-level request flows and module boundaries |
-| [`docs/api-reference.md`](docs/api-reference.md) | All 57 HTTP endpoints — auth mode, path/query params, request bodies, every status code and its trigger, rate-limit buckets, cache behaviour, SSE event streams |
+| [`docs/api-reference.md`](docs/api-reference.md) | All 61 HTTP endpoints — auth mode, path/query params, request bodies, every status code and its trigger, rate-limit buckets, cache behaviour, SSE event streams |
 | [`docs/database.md`](docs/database.md) | All 22 PostgreSQL tables — columns, constraints, indexes, which code reads/writes each, the dual-ownership model, migrations, retention |
 | [`docs/tools.md`](docs/tools.md) | Reference for every data-fetching tool/scraper and its output shape |
 | [`docs/output-schema.md`](docs/output-schema.md) | Response payload shapes and cache-file formats (the request-side contract lives in `api-reference.md`) |

@@ -28,7 +28,7 @@ for a structured verdict — all streamed to the browser over Server-Sent Events
 - **Active portfolio trackers** who want starred stocks and logged buys rolled up into aggregate
   P&L without a brokerage integration.
 - **Personal finance trackers** who want one net-worth view across stocks, mutual funds, FDs, and
-  EPF/PPF, built from imported statements rather than re-typed by hand.
+  EPF/PPF, built from imported statements or a direct broker API sync rather than re-typed by hand.
 
 *(This isn't a brokerage — there's no order placement or live trading. See
 [Security & scope](#security--scope) below.)*
@@ -53,7 +53,8 @@ for a structured verdict — all streamed to the browser over Server-Sent Events
 - **Watchlist** — cross-mode watchlist shared across Stock Analysis, Market Picks, and Screener.
 - **"I bought this" positions** — logged buys tracked against live prices.
 - **Portfolio Aggregator** — separate personal net-worth tracker (stocks, MFs, FDs, EPF/PPF) with
-  an XIRR engine, fed by CAS PDF / broker CSV import.
+  an XIRR engine, fed by CAS PDF / broker CSV import, or a direct API sync against Zerodha, HDFC
+  Securities, or Paytm Money (read-only holdings + trades, per-account encrypted credentials).
 
 **Automation**
 - **Daily email alerts** — a batch job re-analyses every signed-in user's watchlist symbol and
@@ -217,10 +218,15 @@ cd frontend && npx tsc --noEmit && npm run test:e2e   # Playwright, backend full
 
 ## Security & scope
 
-- **No live trading or brokerage execution.** This is a research and tracking tool — it never
-  places an order.
-- **No brokerage credentials are stored or requested.** Portfolio data comes from CAS PDF
-  (CAMS/KFintech) or broker CSV/XLSX statement imports, which are read-only.
+- **No live trading or brokerage execution.** This is a research and tracking tool — the Portfolio
+  Aggregator's broker sync only ever reads holdings/trades; it never places an order.
+- **Brokerage credentials are opt-in, per-account, and encrypted at rest.** Portfolio data can
+  come from a CAS PDF (CAMS/KFintech) or broker CSV/XLSX statement import (no credentials
+  involved), or — if you choose to connect one — a direct read-only API sync against Zerodha Kite
+  Connect, HDFC Securities, or Paytm Money. Each broker "app" key/secret is entered per account (
+  never a shared deployment-wide credential) and its secret plus the resulting access token are
+  Fernet-encrypted (`PORTFOLIO_ENCRYPTION_KEY`) — see `docs/database.md`'s `broker_connections`
+  section for the exact storage model.
 - **Indian markets only** (NSE/BSE), currently.
 - The project has **not** had a legal/compliance review of its scraping surface, and its
   regulatory status for issuing BUY/SELL calls to Indian retail investors is unassessed — see
