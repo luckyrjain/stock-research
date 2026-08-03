@@ -65,7 +65,10 @@ for a structured verdict — all streamed to the browser over Server-Sent Events
 
 Captured from a running instance — a fresh local install looks like this before any batch
 pipeline has populated data or an LLM key is configured (a HOLD-fallback verdict, disclosed as
-such, stands in for a real analyst call when no provider key is set).
+such, stands in for a real analyst call when no provider key is set). Run `make dev` then
+`make screenshots` to recapture these from your own instance — with `make seed` run first and a
+configured LLM key, it'll pick up real Screener/SME data and a genuine BUY/HOLD/SELL verdict
+instead of the empty/fallback states below.
 
 | | |
 |---|---|
