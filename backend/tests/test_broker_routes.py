@@ -43,6 +43,14 @@ class BrokerRoutesTest(unittest.TestCase):
         self._old_kite_secret = os.environ.get("KITE_API_SECRET")
         os.environ["KITE_API_KEY"] = "test-api-key"
         os.environ["KITE_API_SECRET"] = "test-api-secret"
+        self._old_hdfc_key = os.environ.get("HDFC_SEC_API_KEY")
+        self._old_hdfc_secret = os.environ.get("HDFC_SEC_API_SECRET")
+        os.environ["HDFC_SEC_API_KEY"] = "test-hdfc-key"
+        os.environ["HDFC_SEC_API_SECRET"] = "test-hdfc-secret"
+        self._old_paytm_key = os.environ.get("PAYTM_MONEY_API_KEY")
+        self._old_paytm_secret = os.environ.get("PAYTM_MONEY_API_SECRET")
+        os.environ["PAYTM_MONEY_API_KEY"] = "test-paytm-key"
+        os.environ["PAYTM_MONEY_API_SECRET"] = "test-paytm-secret"
 
         rate_limiter._memory_calls.clear()
 
@@ -53,6 +61,10 @@ class BrokerRoutesTest(unittest.TestCase):
             ("PORTFOLIO_ENCRYPTION_KEY", self._old_enc_key),
             ("KITE_API_KEY", self._old_kite_key),
             ("KITE_API_SECRET", self._old_kite_secret),
+            ("HDFC_SEC_API_KEY", self._old_hdfc_key),
+            ("HDFC_SEC_API_SECRET", self._old_hdfc_secret),
+            ("PAYTM_MONEY_API_KEY", self._old_paytm_key),
+            ("PAYTM_MONEY_API_SECRET", self._old_paytm_secret),
         ]:
             if old is None:
                 os.environ.pop(var, None)
@@ -194,6 +206,78 @@ class BrokerRoutesTest(unittest.TestCase):
 
         resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
         self.assertEqual(resp.status_code, 422)
+
+    # ── multi-broker dispatch (HDFC Securities, Paytm Money) ────────────────
+    # Not a full repeat of every zerodha case above — just enough per broker
+    # to prove _broker_sync_module()/_BROKER_ENV_KEYS actually dispatch to
+    # the right sync module and env vars, since that's the only thing that
+    # changed by adding a second/third broker.
+
+    @patch("portfolio.hdfc_sync.get_login_url")
+    def test_login_url_success_hdfc_securities(self, mock_login_url) -> None:
+        mock_login_url.return_value = "https://developer.hdfcsec.com/login?api_key=test-hdfc-key"
+        resp = client.get("/api/portfolio/broker/hdfc_securities/login-url")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("hdfcsec.com", resp.json()["login_url"])
+        mock_login_url.assert_called_once_with("test-hdfc-key")
+
+    @patch("portfolio.hdfc_sync.exchange_request_token")
+    def test_connect_success_hdfc_securities(self, mock_exchange) -> None:
+        mock_exchange.return_value = {"access_token": "hdfc-access-token"}
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        resp = client.post("/api/portfolio/broker/hdfc_securities/connect", json={
+            "account_id": acc, "request_token": "rt",
+        })
+        self.assertEqual(resp.status_code, 200, resp.text)
+        mock_exchange.assert_called_once_with("test-hdfc-key", "test-hdfc-secret", "rt")
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(broker_connections).where(broker_connections.c.account_id == acc)
+            ).mappings().first()
+            self.assertEqual(row["broker"], "hdfc_securities")
+            self.assertNotIn("hdfc-access-token", row["access_token_enc"])
+
+    @patch("portfolio.paytm_sync.get_login_url")
+    def test_login_url_success_paytm_money(self, mock_login_url) -> None:
+        mock_login_url.return_value = "https://login.paytmmoney.com/merchant-login?apiKey=test-paytm-key"
+        resp = client.get("/api/portfolio/broker/paytm_money/login-url")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("paytmmoney.com", resp.json()["login_url"])
+        mock_login_url.assert_called_once_with("test-paytm-key")
+
+    @patch("portfolio.paytm_sync.exchange_request_token")
+    def test_connect_success_paytm_money(self, mock_exchange) -> None:
+        mock_exchange.return_value = {"access_token": "paytm-access-token"}
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        resp = client.post("/api/portfolio/broker/paytm_money/connect", json={
+            "account_id": acc, "request_token": "rt",
+        })
+        self.assertEqual(resp.status_code, 200, resp.text)
+        mock_exchange.assert_called_once_with("test-paytm-key", "test-paytm-secret", "rt")
+
+    @patch("portfolio.portfolio_valuation.refresh_valuations")
+    @patch("portfolio.paytm_sync.sync_account")
+    @patch("portfolio.paytm_sync.exchange_request_token")
+    def test_sync_success_paytm_money_dispatches_to_paytm_module(
+        self, mock_exchange, mock_sync, _mock_refresh,
+    ) -> None:
+        mock_exchange.return_value = {"access_token": "token-1"}
+        mock_sync.return_value = {"holdings_synced": 2, "trades_synced": 0}
+
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        client.post("/api/portfolio/broker/paytm_money/connect",
+                     json={"account_id": acc, "request_token": "rt"})
+
+        resp = client.post("/api/portfolio/broker/paytm_money/sync", json={"account_id": acc})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json(), {"holdings_synced": 2, "trades_synced": 0})
+        mock_sync.assert_called_once()
+        # Confirms the sync call used Paytm Money's own api_key env var, not Kite's.
+        self.assertEqual(mock_sync.call_args.kwargs.get("api_key"), "test-paytm-key")
 
     # ── connections list ─────────────────────────────────────────────────────
 

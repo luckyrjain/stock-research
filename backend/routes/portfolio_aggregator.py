@@ -24,11 +24,37 @@ _ASSET_TYPES = {"mf", "stock", "fd", "epf", "ppf", "cash", "manual", "loan"}
 
 # Broker-API integrations (docs/PRD-gmail-portfolio-intelligence.md's Phase 1) —
 # a closed allowlist, not user-supplied text, since each broker needs its own
-# sync module wired in below. Extending to HDFC Securities/Paytm Money is
-# "add another entry here + a portfolio/<broker>_sync.py module", not a
-# schema or route-shape change — see broker_connections' own comment in
+# sync module wired in below. See broker_connections' own comment in
 # db/models.py for why the table itself is already broker-agnostic.
-_SUPPORTED_BROKERS = {"zerodha"}
+_SUPPORTED_BROKERS = {"zerodha", "hdfc_securities", "paytm_money"}
+
+# Each broker's own API key/secret env var names (see .env.example) — every
+# module in this map exposes the identical get_login_url/exchange_request_token/
+# sync_account interface (portfolio/kite_sync.py's own shape), so the routes
+# below dispatch on `broker` without a broker-specific branch beyond this
+# table and _broker_sync_module()'s import.
+_BROKER_ENV_KEYS = {
+    "zerodha": ("KITE_API_KEY", "KITE_API_SECRET"),
+    "hdfc_securities": ("HDFC_SEC_API_KEY", "HDFC_SEC_API_SECRET"),
+    "paytm_money": ("PAYTM_MONEY_API_KEY", "PAYTM_MONEY_API_SECRET"),
+}
+
+
+def _broker_sync_module(broker: str):
+    """Returns the portfolio.<broker>_sync module for a supported broker.
+    A plain if/elif over three known names rather than importlib string
+    assembly — the broker string reaching here already passed
+    _require_supported_broker()'s allowlist check, but an explicit branch
+    keeps `broker` from ever being interpolated into an import path."""
+    if broker == "zerodha":
+        import portfolio.kite_sync as mod
+    elif broker == "hdfc_securities":
+        import portfolio.hdfc_sync as mod
+    elif broker == "paytm_money":
+        import portfolio.paytm_sync as mod
+    else:  # pragma: no cover — unreachable once _require_supported_broker() ran first
+        raise HTTPException(status_code=422, detail=f"broker must be one of: {sorted(_SUPPORTED_BROKERS)}")
+    return mod
 
 
 def compute_networth(rows: list[dict]) -> dict:
@@ -519,12 +545,12 @@ async def broker_login_url(request: Request, broker: str):
     def _sync() -> dict:
         import os
 
-        from portfolio.kite_sync import get_login_url
-
-        api_key = os.environ.get("KITE_API_KEY", "")
+        mod = _broker_sync_module(broker)
+        api_key_env, _ = _BROKER_ENV_KEYS[broker]
+        api_key = os.environ.get(api_key_env, "")
         if not api_key:
-            raise HTTPException(status_code=503, detail="KITE_API_KEY not configured.")
-        return {"login_url": get_login_url(api_key)}
+            raise HTTPException(status_code=503, detail=f"{api_key_env} not configured.")
+        return {"login_url": mod.get_login_url(api_key)}
 
     return await run_owned_db_call(request, "portfolio_agg_read", 120, _sync, "portfolio_agg_read")
 
@@ -539,13 +565,14 @@ async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
         import api
         from core.crypto import EncryptionNotConfigured, encrypt
         from db.models import accounts, broker_connections
-        from portfolio.kite_sync import exchange_request_token
         from sqlalchemy import insert, select, update
 
-        api_key = os.environ.get("KITE_API_KEY", "")
-        api_secret = os.environ.get("KITE_API_SECRET", "")
+        mod = _broker_sync_module(broker)
+        api_key_env, api_secret_env = _BROKER_ENV_KEYS[broker]
+        api_key = os.environ.get(api_key_env, "")
+        api_secret = os.environ.get(api_secret_env, "")
         if not api_key or not api_secret:
-            raise HTTPException(status_code=503, detail="KITE_API_KEY/KITE_API_SECRET not configured.")
+            raise HTTPException(status_code=503, detail=f"{api_key_env}/{api_secret_env} not configured.")
 
         with api._get_db_engine().begin() as conn:
             account = conn.execute(
@@ -557,7 +584,7 @@ async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
             if account.type != "broker":
                 raise HTTPException(status_code=422, detail="account.type must be 'broker' to connect a broker API")
 
-            session = exchange_request_token(api_key, api_secret, body.request_token)
+            session = mod.exchange_request_token(api_key, api_secret, body.request_token)
             if "error" in session or "access_token" not in session:
                 raise HTTPException(status_code=422, detail=session.get("error", "Kite login failed"))
 
@@ -606,9 +633,11 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
         import api
         from core.crypto import EncryptionNotConfigured, decrypt
         from db.models import broker_connections
-        from portfolio.kite_sync import sync_account
         from portfolio.portfolio_valuation import refresh_valuations
         from sqlalchemy import select
+
+        mod = _broker_sync_module(broker)
+        api_key_env, _ = _BROKER_ENV_KEYS[broker]
 
         with api._get_db_engine().connect() as conn:
             conn_row = conn.execute(
@@ -630,8 +659,8 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
                 detail="stored credential could not be decrypted — reconnect this broker account",
             )
 
-        api_key = os.environ.get("KITE_API_KEY", "")
-        result = sync_account(api._get_db_engine(), account_id, access_token, api_key=api_key)
+        api_key = os.environ.get(api_key_env, "")
+        result = mod.sync_account(api._get_db_engine(), account_id, access_token, api_key=api_key)
         if "error" in result:
             raise HTTPException(status_code=422, detail=result["error"])
         refresh_valuations(api._get_db_engine())

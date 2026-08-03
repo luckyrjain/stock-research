@@ -454,10 +454,15 @@ transactions = Table(
 )
 
 
-# Broker API connections — Zerodha Kite Connect today, extensible to other
-# free-tier brokers (HDFC Securities InvestRight, Paytm Money) without a
-# schema change: `broker` is a plain string, not an enum, checked against a
-# closed allowlist at the route layer instead. See
+# Broker API connections — Zerodha Kite Connect, HDFC Securities InvestRight,
+# and Paytm Money Open API today, one row per (account, broker) pair via
+# UniqueConstraint below — `broker` is a plain string, not an enum, checked
+# against a closed allowlist at the route layer (routes/portfolio_aggregator.py's
+# `_SUPPORTED_BROKERS`/`_broker_sync_module()`) instead, so a fourth broker
+# needs no schema change here, just a new portfolio/<broker>_sync.py module
+# implementing the same get_login_url/exchange_request_token/sync_account
+# interface (see portfolio/broker_sync_common.py for the shared DB-write half
+# every broker module builds on). See
 # docs/PRD-gmail-portfolio-intelligence.md's Decision 9/Phase 1 for why
 # broker APIs are preferred over Gmail-parsed transactions where available —
 # structured, authoritative, no extraction error.

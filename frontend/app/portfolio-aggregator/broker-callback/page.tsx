@@ -4,19 +4,26 @@ import Link from 'next/link';
 import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 
-const PENDING_KITE_ACCOUNT_KEY = 'portfolio_pending_kite_account_id';
-const ZERODHA_BROKER = 'zerodha';
+const PENDING_BROKER_CONNECT_KEY = 'portfolio_pending_broker_connect';
 
-// Kite Connect's own login flow redirects here with `request_token` (and
-// `status=success`/`error`) in the query string — it has no way to echo
-// back custom state, so the account being connected was stashed in
-// localStorage right before the browser left for kite.trade (see
-// BrokerConnectControls.connect() in ../page.tsx), read back here.
-function KiteCallbackInner() {
+const BROKER_LABELS: Record<string, string> = {
+  zerodha: 'Zerodha',
+  hdfc_securities: 'HDFC Securities',
+  paytm_money: 'Paytm Money',
+};
+
+// Shared callback destination for every supported broker's own login
+// redirect (Zerodha/HDFC Securities/Paytm Money all register this same URL
+// as their app's redirect URI) — none of them has a way to echo back custom
+// state, so the account + broker being connected were stashed in
+// localStorage right before the browser left for that broker's login page
+// (see BrokerRow.connect() in ../page.tsx), read back here.
+function BrokerCallbackInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [status, setStatus] = useState<'connecting' | 'done' | 'error'>('connecting');
   const [error, setError] = useState('');
+  const [brokerLabel, setBrokerLabel] = useState('your broker');
   const ranRef = useRef(false);
 
   useEffect(() => {
@@ -24,25 +31,38 @@ function KiteCallbackInner() {
     ranRef.current = true;
 
     const requestToken = searchParams.get('request_token');
-    const kiteStatus = searchParams.get('status');
-    const accountId = localStorage.getItem(PENDING_KITE_ACCOUNT_KEY);
-    localStorage.removeItem(PENDING_KITE_ACCOUNT_KEY);
+    // Kite Connect's own convention (`status=success`/`error` alongside
+    // request_token) — HDFC Securities/Paytm Money's exact redirect query
+    // shape wasn't verified live (see portfolio/hdfc_sync.py's/paytm_sync.py's
+    // own disclosed-limitation docstrings), so this check only ever fires
+    // for a broker that actually sends it; its absence isn't itself an error.
+    const loginStatus = searchParams.get('status');
+    const pendingRaw = localStorage.getItem(PENDING_BROKER_CONNECT_KEY);
+    localStorage.removeItem(PENDING_BROKER_CONNECT_KEY);
 
-    if (kiteStatus && kiteStatus !== 'success') {
+    let pending: { account_id: number; broker: string } | null = null;
+    try {
+      pending = pendingRaw ? JSON.parse(pendingRaw) : null;
+    } catch {
+      pending = null;
+    }
+    if (pending?.broker) setBrokerLabel(BROKER_LABELS[pending.broker] ?? pending.broker);
+
+    if (loginStatus && loginStatus !== 'success') {
       setStatus('error');
-      setError('Zerodha login was cancelled or failed.');
+      setError('Broker login was cancelled or failed.');
       return;
     }
-    if (!requestToken || !accountId) {
+    if (!requestToken || !pending) {
       setStatus('error');
       setError('Missing login details — please try connecting again.');
       return;
     }
 
-    fetch(`/api/portfolio/broker/${ZERODHA_BROKER}/connect`, {
+    fetch(`/api/portfolio/broker/${pending.broker}/connect`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ account_id: Number(accountId), request_token: requestToken }),
+      body: JSON.stringify({ account_id: pending.account_id, request_token: requestToken }),
     })
       .then(async res => {
         const body = await res.json();
@@ -52,7 +72,7 @@ function KiteCallbackInner() {
       })
       .catch(e => {
         setStatus('error');
-        setError(e instanceof Error ? e.message : 'Could not complete the Zerodha connection.');
+        setError(e instanceof Error ? e.message : 'Could not complete the broker connection.');
       });
   }, [searchParams, router]);
 
@@ -65,13 +85,13 @@ function KiteCallbackInner() {
         <div className="px-5 py-4 rounded-xl bg-card border border-border text-sm">
           {status === 'connecting' && (
             <>
-              <p className="text-tx font-semibold mb-1">Connecting your Zerodha account…</p>
+              <p className="text-tx font-semibold mb-1">Connecting your {brokerLabel} account…</p>
               <p className="text-muted">Just a moment.</p>
             </>
           )}
           {status === 'done' && (
             <>
-              <p className="text-tx font-semibold mb-1">Zerodha connected</p>
+              <p className="text-tx font-semibold mb-1">{brokerLabel} connected</p>
               <p className="text-muted">Taking you back to Net Worth…</p>
             </>
           )}
@@ -90,10 +110,10 @@ function KiteCallbackInner() {
   );
 }
 
-export default function KiteCallbackPage() {
+export default function BrokerCallbackPage() {
   return (
     <Suspense fallback={null}>
-      <KiteCallbackInner />
+      <BrokerCallbackInner />
     </Suspense>
   );
 }

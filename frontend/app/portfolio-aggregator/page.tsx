@@ -15,12 +15,17 @@ const CSV_ALL_FIELDS = [...CSV_REQUIRED_FIELDS, 'amount', 'isin'] as const;
 
 const PROFILE_KEY = 'portfolio_aggregator_profile_id';
 
-// Only broker supported today (routes/portfolio_aggregator.py's
-// _SUPPORTED_BROKERS). Kite's own login redirect has no way to echo custom
-// state back, so the account being connected is stashed here right before
-// the browser leaves for kite.trade, and read back by the callback page.
-const ZERODHA_BROKER = 'zerodha';
-const PENDING_KITE_ACCOUNT_KEY = 'portfolio_pending_kite_account_id';
+// Brokers supported today (routes/portfolio_aggregator.py's
+// _SUPPORTED_BROKERS) — each broker's own login redirect has no way to
+// echo custom state back, so the account + broker being connected are
+// stashed here right before the browser leaves for the broker's login
+// page, and read back by the shared broker-callback page.
+const SUPPORTED_BROKERS: { id: string; label: string }[] = [
+  { id: 'zerodha', label: 'Zerodha' },
+  { id: 'hdfc_securities', label: 'HDFC Securities' },
+  { id: 'paytm_money', label: 'Paytm Money' },
+];
+const PENDING_BROKER_CONNECT_KEY = 'portfolio_pending_broker_connect';
 
 const ACCOUNT_TYPES: PortfolioAccountType[] = ['bank', 'broker', 'amc', 'epfo', 'other'];
 const ASSET_TYPES: PortfolioAssetType[] = ['mf', 'stock', 'fd', 'epf', 'ppf', 'cash', 'manual', 'loan'];
@@ -238,8 +243,9 @@ function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () =
   );
 }
 
-function BrokerConnectControls({ account, connection, onSynced }: {
-  account: PortfolioAccount; connection: BrokerConnection | undefined; onSynced: () => void;
+function BrokerRow({ account, broker, connection, onSynced }: {
+  account: PortfolioAccount; broker: { id: string; label: string };
+  connection: BrokerConnection | undefined; onSynced: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -248,11 +254,11 @@ function BrokerConnectControls({ account, connection, onSynced }: {
     setBusy(true);
     setMsg(null);
     try {
-      const { login_url } = await api<{ login_url: string }>(`broker/${ZERODHA_BROKER}/login-url`);
-      localStorage.setItem(PENDING_KITE_ACCOUNT_KEY, String(account.id));
+      const { login_url } = await api<{ login_url: string }>(`broker/${broker.id}/login-url`);
+      localStorage.setItem(PENDING_BROKER_CONNECT_KEY, JSON.stringify({ account_id: account.id, broker: broker.id }));
       window.location.href = login_url;
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : 'Could not start Zerodha login');
+      setMsg(e instanceof Error ? e.message : `Could not start ${broker.label} login`);
       setBusy(false);
     }
   }
@@ -261,7 +267,7 @@ function BrokerConnectControls({ account, connection, onSynced }: {
     setBusy(true);
     setMsg(null);
     try {
-      const res = await api<BrokerSyncResult>(`broker/${ZERODHA_BROKER}/sync`, {
+      const res = await api<BrokerSyncResult>(`broker/${broker.id}/sync`, {
         method: 'POST',
         body: JSON.stringify({ account_id: account.id }),
       });
@@ -279,7 +285,7 @@ function BrokerConnectControls({ account, connection, onSynced }: {
       {connection ? (
         <>
           <span className="text-xs text-muted">
-            Zerodha connected{connection.last_synced_at ? ` · last synced ${new Date(connection.last_synced_at).toLocaleString('en-IN')}` : ' · never synced'}
+            {broker.label} connected{connection.last_synced_at ? ` · last synced ${new Date(connection.last_synced_at).toLocaleString('en-IN')}` : ' · never synced'}
           </span>
           <button onClick={sync} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
             {busy ? 'Syncing…' : 'Sync now'}
@@ -287,7 +293,7 @@ function BrokerConnectControls({ account, connection, onSynced }: {
         </>
       ) : (
         <button onClick={connect} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
-          {busy ? 'Redirecting…' : 'Connect Zerodha'}
+          {busy ? 'Redirecting…' : `Connect ${broker.label}`}
         </button>
       )}
       {msg && <span className="text-xs text-muted">{msg}</span>}
@@ -295,8 +301,26 @@ function BrokerConnectControls({ account, connection, onSynced }: {
   );
 }
 
-function AccountBlock({ account, assets, connection, onChanged }: {
-  account: PortfolioAccount; assets: PortfolioAsset[]; connection: BrokerConnection | undefined; onChanged: () => void;
+function BrokerConnectControls({ account, connections, onSynced }: {
+  account: PortfolioAccount; connections: BrokerConnection[]; onSynced: () => void;
+}) {
+  return (
+    <span className="flex items-center gap-3 flex-wrap">
+      {SUPPORTED_BROKERS.map(broker => (
+        <BrokerRow
+          key={broker.id}
+          account={account}
+          broker={broker}
+          connection={connections.find(c => c.broker === broker.id)}
+          onSynced={onSynced}
+        />
+      ))}
+    </span>
+  );
+}
+
+function AccountBlock({ account, assets, connections, onChanged }: {
+  account: PortfolioAccount; assets: PortfolioAsset[]; connections: BrokerConnection[]; onChanged: () => void;
 }) {
   const [showAdd, setShowAdd] = useState(false);
 
@@ -320,7 +344,7 @@ function AccountBlock({ account, assets, connection, onChanged }: {
         </p>
         <div className="flex items-center gap-3">
           {account.type === 'broker' && (
-            <BrokerConnectControls account={account} connection={connection} onSynced={onChanged} />
+            <BrokerConnectControls account={account} connections={connections} onSynced={onChanged} />
           )}
           <button onClick={() => setShowAdd(s => !s)} className="text-xs text-accent font-semibold">
             {showAdd ? 'Cancel' : '+ Asset'}
@@ -612,7 +636,7 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
             key={acc.id}
             account={acc}
             assets={assetsByAccount[acc.id] ?? []}
-            connection={connections.find(c => c.account_id === acc.id && c.broker === ZERODHA_BROKER)}
+            connections={connections.filter(c => c.account_id === acc.id)}
             onChanged={refresh}
           />
         ))}
