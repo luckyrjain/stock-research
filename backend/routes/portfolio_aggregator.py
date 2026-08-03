@@ -9,7 +9,9 @@ handful of users, not a multi-tenant product. `profiles` is a bare picker
 (no credentials), which keeps the door open for real auth later without
 forcing it into this increment.
 """
+import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date as _date
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -33,6 +35,33 @@ _SUPPORTED_BROKERS = {"zerodha", "hdfc_securities", "paytm_money"}
 # market-picks refresh locks, just scoped much smaller (one connection,
 # not a whole market/pipeline run).
 _BROKER_SYNC_LOCK_TTL_SECONDS = 300
+
+# Caps how often a single (account, broker) pair may even *attempt* a sync,
+# independent of the concurrency lock above — the lock only stops two syncs
+# from overlapping, not a user (or a stuck frontend poll loop) repeatedly
+# kicking off back-to-back syncs against the broker's own API. A generous
+# ceiling for this tool's real scale (a handful of personal accounts, not a
+# multi-tenant product) — well above any plausible legitimate use, low
+# enough to matter as an actual backstop.
+_BROKER_SYNC_RATE_LIMIT_MAX_CALLS = 12
+_BROKER_SYNC_RATE_LIMIT_WINDOW_SECONDS = 3600.0
+
+# A sync now runs on this dedicated background executor rather than inside
+# the HTTP request/response cycle (see broker_sync() below) — a full
+# holdings+trades round trip against a live broker API can take several
+# seconds, long enough that holding a request thread open for it is poor
+# UX and, at any real scale, a waste of a request-handling thread.
+# ThreadPoolExecutor, not a job queue — see CLAUDE.md's Architectural
+# Constraints; this repo's stated scale (tens of users) never needs
+# anything heavier, and a handful of background sync jobs at a time is
+# comfortably within a small fixed pool. Deliberately separate from
+# api.py's own default executor (which every other route already runs on
+# via run_owned_db_call) so a burst of broker syncs can never starve
+# ordinary request handling of worker threads. Not wired into api.py's
+# lifespan shutdown: an in-flight sync being killed on process exit is no
+# different from today's crash-mid-sync case, which the lock's TTL above
+# already exists to recover from.
+_BROKER_SYNC_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="broker-sync-bg")
 
 
 def _broker_sync_module(broker: str):
@@ -689,65 +718,144 @@ async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
     return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
 
 
-@router.post("/broker/{broker}/sync")
+@router.post("/broker/{broker}/sync", status_code=202)
 async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
-    """A double-click, two open tabs, or a retried request while a sync is
-    still running could otherwise race two sync_account() calls for the
-    same connection against each other — both would pass
-    broker_sync_common.py's own trade-id pre-check before either commits,
-    producing duplicate trades were it not for `transactions`'s own
-    `uq_transactions_asset_external_ref` DB constraint (belt) plus this
-    per-connection lock (suspenders, and the one that actually prevents a
-    concurrent attempt from starting at all — same `try_acquire_lock`/
-    `release_lock` pattern api.py's SME/screener/market-picks refresh
-    endpoints already use for the identical "don't let two runs overlap"
-    problem)."""
+    """Kicks off a background sync and returns immediately — see
+    _BROKER_SYNC_EXECUTOR's own comment for why this doesn't run inline in
+    the request/response cycle. `GET /broker/connections` is how the
+    frontend learns the outcome: `sync_status` moves syncing -> success
+    (with `last_sync_summary` populated) or syncing -> error (with
+    `last_sync_error` populated), for the frontend to poll.
+
+    Two independent guards run before anything is scheduled:
+    - A sliding-window rate limit on this (account, broker) pair (429 if
+      exceeded) — protects the broker's own API from a runaway poll loop
+      or repeated clicks, independent of whether a sync is *currently*
+      running.
+    - The existing per-connection lock (409 if already held) — a
+      double-click, two open tabs, or a retried request while a sync is
+      still running could otherwise race two sync_account() calls for the
+      same connection against each other. Both would pass
+      broker_sync_common.py's own trade-id pre-check before either
+      commits, producing duplicate trades were it not for `transactions`'s
+      own `uq_transactions_asset_external_ref` DB constraint (belt) plus
+      this lock (suspenders, and the one that actually prevents a
+      concurrent attempt from starting at all — same `try_acquire_lock`/
+      `release_lock` pattern api.py's SME/screener/market-picks refresh
+      endpoints already use). The lock is now held for the background
+      job's lifetime, not just the HTTP request's, and is always released
+      by the background job itself (_run_and_release's `finally`), never
+      by this handler."""
     _require_supported_broker(broker)
     account_id = body.account_id
     lock_name = f"broker_sync:{account_id}:{broker}"
+    rate_key = f"broker_sync_rl:{account_id}:{broker}"
 
-    def _sync() -> dict:
+    def _prepare() -> dict:
         import api
         from core import rate_limiter
         from core.crypto import EncryptionNotConfigured, decrypt
         from db.models import broker_connections
-        from portfolio.portfolio_valuation import refresh_valuations
-        from sqlalchemy import select
+        from sqlalchemy import select, update
 
-        mod = _broker_sync_module(broker)
-
+        if not rate_limiter.is_allowed(
+            rate_key, _BROKER_SYNC_RATE_LIMIT_MAX_CALLS, _BROKER_SYNC_RATE_LIMIT_WINDOW_SECONDS,
+        ):
+            raise HTTPException(
+                status_code=429,
+                detail=f"too many {broker} sync attempts for this account — wait before retrying",
+            )
         if not rate_limiter.try_acquire_lock(lock_name, _BROKER_SYNC_LOCK_TTL_SECONDS):
             raise HTTPException(status_code=409, detail=f"a sync for this {broker} connection is already running")
+
         try:
-            with api._get_db_engine().connect() as conn:
+            with api._get_db_engine().begin() as conn:
                 conn_row = conn.execute(
                     select(broker_connections.c.api_key, broker_connections.c.access_token_enc).where(
                         broker_connections.c.account_id == account_id,
                         broker_connections.c.broker == broker,
                     )
                 ).first()
-            if conn_row is None or not conn_row.access_token_enc:
-                raise HTTPException(status_code=404, detail=f"no connected {broker} account for this account_id")
+                if conn_row is None or not conn_row.access_token_enc:
+                    raise HTTPException(status_code=404, detail=f"no connected {broker} account for this account_id")
 
-            try:
-                access_token = decrypt(conn_row.access_token_enc)
-            except EncryptionNotConfigured as exc:
-                raise HTTPException(status_code=503, detail=str(exc))
-            except Exception:
-                raise HTTPException(
-                    status_code=422,
-                    detail="stored credential could not be decrypted — reconnect this broker account",
+                try:
+                    access_token = decrypt(conn_row.access_token_enc)
+                except EncryptionNotConfigured as exc:
+                    raise HTTPException(status_code=503, detail=str(exc))
+                except Exception:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="stored credential could not be decrypted — reconnect this broker account",
+                    )
+
+                conn.execute(
+                    update(broker_connections)
+                    .where(
+                        broker_connections.c.account_id == account_id,
+                        broker_connections.c.broker == broker,
+                    )
+                    .values(sync_status="syncing", last_sync_error=None)
                 )
+            return {"access_token": access_token, "api_key": conn_row.api_key}
+        except Exception:
+            rate_limiter.release_lock(lock_name)
+            raise
 
-            result = mod.sync_account(api._get_db_engine(), account_id, access_token, api_key=conn_row.api_key)
-            if "error" in result:
-                raise HTTPException(status_code=422, detail=result["error"])
-            refresh_valuations(api._get_db_engine())
-            return result
+    prepared = await run_owned_db_call(request, "portfolio_agg_write", 60, _prepare, "portfolio_agg_write")
+
+    def _run_and_release() -> None:
+        import api
+        from core import rate_limiter
+        from db.models import broker_connections
+        from portfolio.portfolio_valuation import refresh_valuations
+        from sqlalchemy import update
+
+        mod = _broker_sync_module(broker)
+        try:
+            result = mod.sync_account(
+                api._get_db_engine(), account_id, prepared["access_token"], api_key=prepared["api_key"],
+            )
+            with api._get_db_engine().begin() as conn:
+                if "error" in result:
+                    conn.execute(
+                        update(broker_connections)
+                        .where(
+                            broker_connections.c.account_id == account_id,
+                            broker_connections.c.broker == broker,
+                        )
+                        .values(sync_status="error", last_sync_error=result["error"])
+                    )
+                else:
+                    refresh_valuations(api._get_db_engine())
+                    conn.execute(
+                        update(broker_connections)
+                        .where(
+                            broker_connections.c.account_id == account_id,
+                            broker_connections.c.broker == broker,
+                        )
+                        .values(sync_status="success", last_sync_summary=result, last_sync_error=None)
+                    )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # No HTTP request is left to surface this to — record it on the
+            # connection row instead, same "never let a background failure
+            # be silent" instinct as pipelines/watchlist_alerts.py.
+            api.log_event(api.LOGGER, "broker_sync_background_failed", level="error",
+                           account_id=account_id, broker=broker, error=str(exc))
+            with api._get_db_engine().begin() as conn:
+                conn.execute(
+                    update(broker_connections)
+                    .where(
+                        broker_connections.c.account_id == account_id,
+                        broker_connections.c.broker == broker,
+                    )
+                    .values(sync_status="error", last_sync_error=str(exc))
+                )
         finally:
             rate_limiter.release_lock(lock_name)
 
-    return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
+    asyncio.get_running_loop().run_in_executor(_BROKER_SYNC_EXECUTOR, _run_and_release)
+    return {"status": "syncing", "account_id": account_id, "broker": broker}
 
 
 @router.get("/broker/connections")
@@ -765,6 +873,9 @@ async def list_broker_connections(request: Request, profile_id: int):
                     broker_connections.c.broker,
                     broker_connections.c.token_obtained_at,
                     broker_connections.c.last_synced_at,
+                    broker_connections.c.sync_status,
+                    broker_connections.c.last_sync_summary,
+                    broker_connections.c.last_sync_error,
                 )
                 .where(broker_connections.c.profile_id == profile_id)
                 .order_by(broker_connections.c.id)

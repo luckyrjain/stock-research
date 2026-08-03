@@ -117,8 +117,8 @@ def sync_account(engine, account_id: int, access_token: str, api_key: str) -> di
     for why a single global KITE_API_KEY wouldn't work across different accounts."""
     try:
         kite = _get_kite_client(api_key, access_token=access_token)
-        raw_holdings = kite.holdings()
-        raw_trades = kite.trades()
+        raw_holdings = broker_sync_common.call_with_backoff(kite.holdings, broker=BROKER_NAME)
+        raw_trades = broker_sync_common.call_with_backoff(kite.trades, broker=BROKER_NAME)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         log_event(LOGGER, "kite_sync_fetch_failed", level="warning",
                    account_id=account_id, error=str(exc))

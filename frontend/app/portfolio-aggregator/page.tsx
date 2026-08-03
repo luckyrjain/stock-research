@@ -6,7 +6,7 @@ import type {
   PortfolioProfile, PortfolioAccount, PortfolioAccountType,
   PortfolioAsset, PortfolioAssetType, PortfolioNetWorth,
   CasImportResult, CsvPreviewResult, CsvImportResult,
-  BrokerConnection, BrokerSyncResult,
+  BrokerConnection, BrokerSyncAck,
 } from '@/types';
 
 const CSV_MAPPING_KEY_PREFIX = 'portfolio_csv_mapping:';
@@ -288,11 +288,14 @@ function BrokerRow({ account, broker, connection, onSynced }: {
     setBusy(true);
     setMsg(null);
     try {
-      const res = await api<BrokerSyncResult>(`broker/${broker.id}/sync`, {
+      await api<BrokerSyncAck>(`broker/${broker.id}/sync`, {
         method: 'POST',
         body: JSON.stringify({ account_id: account.id }),
       });
-      setMsg(`Synced ${res.holdings_synced} holdings, ${res.trades_synced} trades.`);
+      // The sync itself runs in the background (202 Accepted) — the
+      // polling effect below picks up sync_status flipping to
+      // success/error via connection, which onSynced() re-fetches.
+      setMsg('Syncing…');
       onSynced();
     } catch (e) {
       setMsg(e instanceof Error ? e.message : 'Sync failed');
@@ -300,6 +303,27 @@ function BrokerRow({ account, broker, connection, onSynced }: {
       setBusy(false);
     }
   }
+
+  // Polls the parent's connections list (via onSynced, the same refetch
+  // every other mutation here already triggers) while a background sync is
+  // in flight, so "Syncing…" actually clears once the job finishes —
+  // stops itself the moment sync_status leaves "syncing".
+  useEffect(() => {
+    if (connection?.sync_status !== 'syncing') return;
+    const id = setInterval(onSynced, 2000);
+    return () => clearInterval(id);
+  }, [connection?.sync_status, onSynced]);
+
+  useEffect(() => {
+    if (connection?.sync_status === 'success' && connection.last_sync_summary) {
+      const r = connection.last_sync_summary;
+      setMsg(`Synced ${r.holdings_synced} holdings, ${r.trades_synced} trades.`);
+    } else if (connection?.sync_status === 'error' && connection.last_sync_error) {
+      setMsg(connection.last_sync_error);
+    }
+  }, [connection?.sync_status, connection?.last_sync_summary, connection?.last_sync_error]);
+
+  const syncing = busy || connection?.sync_status === 'syncing';
 
   return (
     <span className="flex flex-col gap-1">
@@ -313,8 +337,8 @@ function BrokerRow({ account, broker, connection, onSynced }: {
           <span className="text-xs text-muted">{broker.label}: API key saved, not yet connected</span>
         )}
         {connection?.connected && (
-          <button onClick={sync} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
-            {busy ? 'Syncing…' : 'Sync now'}
+          <button onClick={sync} disabled={syncing} className="text-xs text-accent font-semibold disabled:opacity-50">
+            {syncing ? 'Syncing…' : 'Sync now'}
           </button>
         )}
         {(!connection || !connection.connected || showCreds) && (

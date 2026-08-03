@@ -223,7 +223,7 @@ Auth column: `—` none · `session` session bearer · `owner` session-or-`clien
 | 57 | POST | `/api/portfolio/import-csv` | — | Import mapped broker rows |
 | 58 | POST | `/api/portfolio/broker/{broker}/login-url` | — | Register (or reuse) app credentials, get the broker's login URL |
 | 59 | POST | `/api/portfolio/broker/{broker}/connect` | — | Exchange a `request_token` for an access token |
-| 60 | POST | `/api/portfolio/broker/{broker}/sync` | — | Pull holdings/trades from the connected broker account |
+| 60 | POST | `/api/portfolio/broker/{broker}/sync` | — | Kick off a background pull of holdings/trades from the connected broker account (202, poll #61) |
 | 61 | GET | `/api/portfolio/broker/connections` | — | List broker connections for a profile (never credentials) |
 
 Endpoints 41–57 have **no authentication and no ownership scoping** — any caller may read or
@@ -1172,23 +1172,36 @@ account/broker (call `login-url` first) · `422` the broker rejected the exchang
 `request_token`), or the stored secret couldn't be decrypted (re-register via `login-url`) ·
 `503` `PORTFOLIO_ENCRYPTION_KEY` unset.
 
-**`POST /api/portfolio/broker/{broker}/sync`** — 60. JSON body: `{"account_id": int}`. Fetches
-holdings + trades from the broker (via that broker's `sync_account()`) and writes them into
-`assets`/`holdings`/`valuations`/`transactions`, deduped by trade id — never places an order,
-read-only against the broker. Calls `refresh_valuations()` on success, same as the CAS/CSV import
-endpoints.
+**`POST /api/portfolio/broker/{broker}/sync`** — 60. JSON body: `{"account_id": int}`. Kicks off a
+background sync and returns immediately — the actual fetch (holdings + trades from the broker via
+that broker's `sync_account()`, writing into `assets`/`holdings`/`valuations`/`transactions`,
+deduped by trade id, never placing an order) runs on a dedicated `ThreadPoolExecutor`
+(`_BROKER_SYNC_EXECUTOR`), not inline in this request. Poll `GET /broker/connections` for the
+outcome (`sync_status`/`last_sync_summary`/`last_sync_error`) — the same shape this endpoint used
+to return synchronously now lands in `last_sync_summary` once `sync_status` flips to `"success"`.
+Each broker fetch retries a transient failure (a 5xx, or a timeout/connection error) up to 3 times
+with exponential backoff before giving up.
 
-`200 {"holdings_synced", "holdings_skipped", "trades_synced", "trades_skipped",
-"trades_duplicate"}` · `404` no connected account for this `(account_id, broker)` (never
-completed `connect`) · `422` the broker sync call itself returned an error (e.g. an expired
-session — re-run `connect`), or the stored access token couldn't be decrypted · `503`
-`PORTFOLIO_ENCRYPTION_KEY` unset.
+`202 {"status": "syncing", "account_id", "broker"}` · `404` no connected account for this
+`(account_id, broker)` (never completed `connect`) · `409` a sync for this `(account_id, broker)`
+is already running (per-connection lock; held for the background job's lifetime, not just this
+request's) · `422` the stored access token couldn't be decrypted (re-run `connect`) · `429` this
+`(account_id, broker)` pair has attempted a sync more than 12 times in the last hour · `503`
+`PORTFOLIO_ENCRYPTION_KEY` unset. Note: a broker-side sync error (e.g. an expired session) is
+**not** a synchronous status code here — it surfaces as `sync_status: "error"` +
+`last_sync_error` on the connections list instead, since the fetch itself hasn't happened yet by
+the time this request returns.
 
 **`GET /api/portfolio/broker/connections`** — 61. Query `profile_id: int`, **required**. `200
 {"connections": [{"id", "account_id", "broker", "token_obtained_at", "last_synced_at",
-"connected"}]}` — never returns `api_key`, `api_secret_enc`, or `access_token_enc`. `connected`
-is `token_obtained_at IS NOT NULL`, distinguishing "app credentials registered, OAuth handshake
-not yet completed" from a fully live connection.
+"sync_status", "last_sync_summary", "last_sync_error", "connected"}]}` — never returns `api_key`,
+`api_secret_enc`, or `access_token_enc`. `connected` is `token_obtained_at IS NOT NULL`,
+distinguishing "app credentials registered, OAuth handshake not yet completed" from a fully live
+connection. `sync_status` is one of `"idle" | "syncing" | "success" | "error"` — this is what the
+frontend polls (every 2s while `"syncing"`) after `POST .../sync` returns `202`.
+`last_sync_summary` is populated on the most recent *successful* sync only (left as-is, not
+cleared, after a later failure); `last_sync_error` is set only on a failed sync and cleared at the
+start of the next attempt.
 
 ---
 
@@ -1234,6 +1247,7 @@ Every bucket, in one place. All are per-IP (`api._client_ip`) unless noted.
 | `portfolio_concentration` | 10 | 60 s | 40 |
 | `portfolio_agg_read` | 120 | 60 s | 41, 43, 47, 52, 54, 61 |
 | `portfolio_agg_write` | 60 | 60 s | 42, 44, 45, 46, 48, 49, 50, 51, 53, 55, 56, 57, 58, 59, 60 |
+| `broker_sync_rl:<account_id>:<broker>` | 12 | 3600 s | 60 — **per (account, broker) connection**, not per-IP; caps sync *attempts* independent of the concurrency lock below |
 
 **Unrated-limited**: `GET /` (1), `GET /health` (2), `GET /api/auth/me` (24), `POST
 /api/auth/logout` (25), and — IP-wise — `GET /api/v1/consolidated/{symbol}` (29).
@@ -1245,6 +1259,8 @@ Two other global guards are not rate limits but reject requests:
   Redis-backed slots carry a 600 s TTL so a crashed worker doesn't strand one.
 - **Single-flight locks** — `market_picks_refresh` (#5), `sme_refresh` (#18), `screener_refresh`
   (#20), each 3600 s TTL. Surfaced as `409` from #18/#20 and from #5's force path.
+  `broker_sync:<account_id>:<broker>` (#60) is the same pattern at 300 s TTL, held for the
+  background sync job's lifetime rather than the request's — see #60's own entry above.
 
 ---
 

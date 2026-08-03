@@ -20,14 +20,57 @@ broker module that produced it, counted here, never guessed.
 
 from __future__ import annotations
 
+import time
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import insert, select, text, update
 
+from core.observability import get_logger, log_event
 from db.models import assets as assets_t
 from db.models import holdings as holdings_t
 from db.models import transactions as transactions_t
+
+LOGGER = get_logger("portfolio.broker_sync_common")
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """5xx and connection-level failures (timeouts, DNS blips, resets) are
+    transient — worth a retry. A 4xx is not: retrying the same expired
+    token or malformed request three times just delays the same failure
+    the caller needs anyway to prompt a reconnect. `requests`' HTTPError
+    carries `.response.status_code`; broker SDK exceptions (e.g.
+    kiteconnect's TokenException) generally don't, so anything without a
+    status code attached is assumed transient rather than guessed at."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status is None or status >= 500
+
+
+def call_with_backoff(fn, *, max_attempts: int = 3, base_delay_seconds: float = 1.0, broker: str = ""):
+    """Retries a single broker-API call (e.g. `kite.holdings`,
+    `lambda: _fetch_tradebook(...)`) on a transient failure, sleeping
+    `base_delay_seconds * 2**attempt` between attempts (1s, 2s, ... by
+    default) before giving up and re-raising the last exception. A plain
+    retry loop, not a circuit breaker or backoff library — this repo's
+    ThreadPoolExecutor-only concurrency model (see CLAUDE.md's
+    Architectural Constraints) rules out anything that needs its own
+    background scheduler, and each sync already runs on its own background
+    thread (routes/portfolio_aggregator.py), so a blocking sleep here costs
+    nothing but that one thread's time."""
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            last_exc = exc
+            if attempt >= max_attempts - 1 or not _is_retryable(exc):
+                raise
+            delay = base_delay_seconds * (2 ** attempt)
+            log_event(LOGGER, "broker_api_call_retrying", level="warning",
+                      broker=broker, attempt=attempt + 1, max_attempts=max_attempts,
+                      delay_seconds=delay, error=str(exc))
+            time.sleep(delay)
+    raise last_exc  # pragma: no cover — unreachable, loop always returns or raises
 
 
 def to_decimal(value, default=None) -> Decimal | None:

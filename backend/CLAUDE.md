@@ -1214,6 +1214,20 @@ this one).
      for whatever this lock doesn't catch (a crashed worker whose lock TTL hasn't expired yet,
      Redis unavailable and falling back to a per-process in-memory lock across multiple workers) —
      belt and suspenders, not either/or.
+   - **Broker API calls retry transient failures with exponential backoff.**
+     `broker_sync_common.call_with_backoff()` wraps each raw fetch (`kite.holdings`/`kite.trades`;
+     `hdfc_sync.py`/`paytm_sync.py`'s `requests`-based fetches) — up to 3 attempts, sleeping
+     `1s, 2s` between them, before re-raising to the module's own catch-all (which still degrades
+     to `{"error": ...}`, never a raised exception reaching the caller). Only failures judged
+     transient are retried: a `requests.HTTPError` with a 5xx status, or anything with no HTTP
+     status attached at all (a timeout, connection error, or a broker SDK exception like
+     kiteconnect's `TokenException`, which doesn't carry one). A 4xx is never retried — retrying
+     the same expired token or malformed request three times just delays the same failure the
+     caller needs anyway to prompt a reconnect. A plain retry loop, not a circuit breaker or a
+     backoff library — each sync already runs on its own background thread (point 4 below), so a
+     blocking `time.sleep` here costs only that one thread's time, and this repo's
+     ThreadPoolExecutor-only concurrency model (root `CLAUDE.md`'s Architectural Constraints)
+     rules out anything needing its own scheduler.
 
    `kite_sync.py` talks to the real `kiteconnect` PyPI package (its
    published API surface confirmed via `inspect.signature` against the installed package, not just
@@ -1243,12 +1257,38 @@ this one).
    a secret on every retry); supplying only one of the two is a 422, and resuming with neither
    registered yet is a 404. `connect` never sees `api_key`/`api_secret` at all — it looks up the
    row `login-url` already wrote, decrypts the secret, and exchanges `request_token` for an access
-   token. `sync` reads back the row's `api_key` (plaintext) and decrypts `access_token_enc`, calls
-   the broker module's `sync_account()`, then calls `portfolio_valuation.refresh_valuations()` on
-   success, same as the CAS/CSV import endpoints. `GET /broker/connections` never returns
-   `api_key`/`api_secret_enc`/`access_token_enc` — status/metadata only, plus a computed
-   `connected: bool` (`token_obtained_at is not None`) so the UI can distinguish "credentials
-   registered, OAuth not yet completed" from a fully live connection.
+   token.
+
+   **`sync` runs in the background, not inline in the request** — a full holdings+trades round
+   trip against a live broker API can take several seconds (longer with the backoff retries above),
+   long enough that holding a request thread open for it is poor UX and wastes a thread for no
+   reason. The handler does only the fast, synchronous part inline: a sliding-window rate-limit
+   check (`core/rate_limiter.py`'s `is_allowed("broker_sync_rl:{account_id}:{broker}", 12, 3600)` —
+   429 if this connection has attempted a sync too many times in the last hour, independent of
+   whether one is currently running), the same per-connection `try_acquire_lock` as before (409 if
+   already syncing), decrypting the stored token, and flipping `broker_connections.sync_status` to
+   `"syncing"` — then it schedules the actual `sync_account()` + `refresh_valuations()` call onto a
+   small dedicated `ThreadPoolExecutor` (`_BROKER_SYNC_EXECUTOR`, 4 workers, deliberately separate
+   from api.py's own default executor every other route runs on, so a burst of broker syncs can
+   never starve ordinary request handling) and returns **`202 {"status": "syncing", account_id,
+   broker}`** immediately. The lock is now held for the background job's lifetime, not the HTTP
+   request's, and is only ever released by the background job itself. The background job writes
+   its outcome back onto the connection row: `sync_status="success"` + `last_sync_summary` (the
+   same summary dict this endpoint used to return synchronously) on success, or
+   `sync_status="error"` + `last_sync_error` on either a `sync_account()`-reported error or an
+   unhandled exception in the background job (logged as `broker_sync_background_failed` — there's
+   no HTTP request left to surface it to, so the connection row is the only place left to record
+   it, same "never let a background failure be silent" instinct as
+   `pipelines/watchlist_alerts.py`). `GET /broker/connections` is how the frontend polls for the
+   outcome — it now also returns `sync_status`/`last_sync_summary`/`last_sync_error` alongside the
+   existing fields, still never `api_key`/`api_secret_enc`/`access_token_enc` (status/metadata
+   only), plus the same computed `connected: bool` (`token_obtained_at is not None`) so the UI can
+   distinguish "credentials registered, OAuth not yet completed" from a fully live connection.
+   ThreadPoolExecutor, not a job queue — see root `CLAUDE.md`'s Architectural Constraints; this
+   repo's stated scale (tens of users, a handful of personal broker connections) never needs
+   anything heavier, and isn't wired into `api.py`'s lifespan shutdown — an in-flight sync killed
+   on process exit is no different from today's crash-mid-sync case, which the lock's TTL already
+   exists to recover from.
 5. **Frontend** — `BrokerRow` (one per supported broker, per broker-type account) shows an inline
    API-key/API-secret form until that (account, broker) has a registered connection, after which
    "Connect"/"Reconnect" resumes using the saved credentials and the form collapses behind a
@@ -1258,47 +1298,57 @@ this one).
    brokers share one callback route, `frontend/app/portfolio-aggregator/broker-callback/page.tsx`
    (each broker's app is registered with this same redirect URI), which reads the stashed
    `{account_id, broker}` back, POSTs `connect` with the returned `request_token`, and redirects
-   to `/portfolio-aggregator` on success.
+   to `/portfolio-aggregator` on success. Clicking "Sync now" POSTs `sync`, which now returns
+   immediately (202) — `BrokerRow` shows "Syncing…" and polls the shared `connections` refetch
+   (`onSynced`, the same one every other mutation here already triggers) every 2s for as long as
+   `connection.sync_status === "syncing"`, stopping itself the moment the background job finishes;
+   the final message (`"Synced N holdings, M trades."` or the error text) comes from
+   `last_sync_summary`/`last_sync_error` once `sync_status` flips to `success`/`error`.
 6. **Migrations**: `df6b59581b8b` (the `broker_connections` table itself, Zerodha-only at the
    time), `6c43f4a2d489` (adding `api_key`/`api_secret_enc` once the per-connection-credential
-   redesign landed), and `b7cf5b79ce66` (`transactions.external_ref` + its unique constraint, for
-   the DB-enforced trade dedup in point 3 above) — all three round-trip-verified (upgrade →
-   `alembic check` clean → downgrade → upgrade) against a real local Postgres instance, same rigor
-   as every other revision in this repo.
+   redesign landed), `b7cf5b79ce66` (`transactions.external_ref` + its unique constraint, for
+   the DB-enforced trade dedup in point 3 above), and `35f10ea4dac3` (`broker_connections.
+   sync_status`/`last_sync_summary`/`last_sync_error`, for the background-sync polling in point 4
+   above) — all four round-trip-verified (upgrade → `alembic check` clean → downgrade → upgrade)
+   against a real local Postgres instance, same rigor as every other revision in this repo.
 7. **Tests**: `tests/test_broker_routes.py` (endpoint-level, SQLite in-memory) includes
    `test_two_accounts_use_independent_credentials_for_the_same_broker` — the regression test for
    point 2's actual bug, proving two accounts connecting the same broker get fully independent
    `api_key`/`api_secret`/`access_token` with no cross-contamination — plus coverage for the
-   register/resume/reconnect-invalidates-stale-token login-url modes and
+   register/resume/reconnect-invalidates-stale-token login-url modes,
    `test_concurrent_sync_for_same_connection_returns_409` (point 3's lock, simulated by holding
-   the same lock name the route itself would acquire). `tests/test_kite_sync.py` additionally
-   covers point 3's holdings reconciliation (sold-out → archived, bought-back → un-archived,
-   never touching a different-source asset sharing a symbol, and never firing on a genuinely
-   empty holdings response) and proves the `external_ref` constraint itself rejects a duplicate
-   insert at the DB level, not just via the application-side pre-check; `test_hdfc_sync.py`/
-   `test_paytm_sync.py` cover the same normalization/dedup/malformed-record ground for their own
-   brokers without repeating the shared-logic tests `broker_sync_common.py` already owns once.
+   the same lock name the route itself would acquire), `test_sync_rate_limited_after_too_many_
+   attempts_429` (point 4's sliding-window guard), and `test_sync_error_surfaces_as_last_sync_error`
+   (a `sync_account()`-reported error landing on `last_sync_error` via the background path rather
+   than a synchronous 422) — every sync-outcome test polls `GET /broker/connections` for
+   `sync_status` to leave `"syncing"` rather than asserting on the (now-immediate) POST response
+   body, the same way the real frontend does. `tests/test_kite_sync.py` additionally covers point
+   3's holdings reconciliation (sold-out → archived, bought-back → un-archived, never touching a
+   different-source asset sharing a symbol, and never firing on a genuinely empty holdings
+   response) and proves the `external_ref` constraint itself rejects a duplicate insert at the DB
+   level, not just via the application-side pre-check; `tests/test_broker_sync_common.py` covers
+   `call_with_backoff()` in isolation (retries a transient failure then succeeds, exhausts all
+   attempts and re-raises, retries a 5xx but never a 4xx) with a tiny `base_delay_seconds` rather
+   than mocking `time.sleep`, so the tests exercise the real sleep-then-retry control flow, not
+   just that sleep was called; `test_hdfc_sync.py`/`test_paytm_sync.py` cover the same
+   normalization/dedup/malformed-record ground for their own brokers without repeating the
+   shared-logic tests `broker_sync_common.py` already owns once.
 8. **Explicitly deferred, from an external review of this feature** — real gaps, not silently
    assumed solved, just not the right increment for a personal-scale tool per this repo's own
-   architectural constraints (root `CLAUDE.md`'s "extremely reliable monolith" table):
-   - **Synchronous sync, no job queue.** `POST .../sync` blocks for the whole call. Fine at
-     personal scale (a few hundred trades); would need converting to a job-id-plus-poll shape
-     (a Postgres table, not a broker — see the binding constraints) if a connection's trade
-     history ever grows into the thousands and syncs start taking tens of seconds.
-   - **No broker-side rate-limit/backoff handling.** A `429` from Kite/HDFC/Paytm surfaces as a
-     generic `{"error": ...}` from `sync_account()`'s catch-all, same as any other fetch failure
-     — correct but undifferentiated. Exponential backoff/circuit-breaker behavior was considered
-     and deliberately not built: this is a request-triggered, on-demand sync (not a scheduled
-     batch job hitting the same broker repeatedly), so the failure mode is "the user's own click
-     failed, they can retry" rather than a runaway retry storm.
+   architectural constraints (root `CLAUDE.md`'s "extremely reliable monolith" table). The
+   review's three "High" items (trade idempotency, holdings reconciliation, concurrent-sync
+   protection) and two of its "Medium" items (background/async sync, broker rate-limit/backoff)
+   are now built — points 3 and 4 above. What's still deliberately not built:
    - **No proactive token-expiry detection.** An expired/invalid access token surfaces as a `422`
      from the broker's own error message (safe, deterministic — the user reconnects via the
      existing "Reconnect" button), but `access_token_enc`/`connected` aren't proactively cleared
      on an auth-specific failure the way a credential *replacement* clears them (see point 2). Low
      priority: the current behavior is already correct, just not maximally informative.
-   - **No audit columns** (`last_sync_error`, `last_sync_started_at`, etc.) beyond
-     `last_synced_at`. Would help support/debugging at real scale; not worth the schema churn for
-     a personal tool where the operator IS the only support contact.
+   - **No audit trail beyond the single most-recent outcome.** `sync_status`/`last_sync_summary`/
+     `last_sync_error` (point 4 above) cover "what happened last time," not a history of every
+     attempt (`last_sync_started_at`, a full per-sync log table, etc.). Would help
+     support/debugging at real scale; not worth the schema churn for a personal tool where the
+     operator IS the only support contact.
    - **No broker capability flags** (`supports_holdings`/`supports_orders`/etc.). All three
      brokers today expose the identical holdings+trades shape, so this would be an abstraction
      with no second real caller yet — add it if/when a fourth broker actually needs a different
@@ -2296,7 +2346,7 @@ own, because nothing enforced a narrower blast radius).
    a genuinely empty database and verified (against a real local Postgres instance) to both
    `alembic upgrade head` cleanly onto nothing and `alembic downgrade base` cleanly back to
    nothing, producing exactly the same 11 tables, indexes, and constraints
-   `db/schema.sql`/`metadata.create_all()` already produce. **There are 7 revisions today** —
+   `db/schema.sql`/`metadata.create_all()` already produce. **There are 8 revisions today** —
    `0001_baseline_schema`, then `684c8a31e7e0_add_eod_price_store_and_corporate_` (the
    `securities`/`prices_daily`/`mf_nav_daily`/`corporate_actions` tables) and
    `8613aafc2d9d_add_portfolio_aggregator_foundation_` (`profiles`/`accounts`/`assets`/
@@ -2305,9 +2355,11 @@ own, because nothing enforced a narrower blast radius).
    time); `6c43f4a2d489` adds that table's `api_key`/`api_secret_enc` columns (the
    per-connection-credential redesign — see "Broker API sync" below), no new table; `b7cf5b79ce66`
    adds `transactions.external_ref` + its unique constraint (DB-enforced broker-trade dedup, same
-   section), also no new table. Every revision after `0001` was autogenerated and
-   round-trip-verified (upgrade → `alembic check` clean → downgrade → upgrade) against an isolated
-   scratch Postgres, the same way `0001` was.
+   section), also no new table; `35f10ea4dac3` adds `broker_connections.sync_status`/
+   `.last_sync_summary`/`.last_sync_error` (backs the background-sync poll, same section), also no
+   new table. Every revision after `0001` was autogenerated and round-trip-verified (upgrade →
+   `alembic check` clean → downgrade → upgrade) against an isolated scratch Postgres, the same way
+   `0001` was.
 3. **A deployment predating Alembic must `alembic stamp 0001` and THEN
    `alembic upgrade head` — not a bare `alembic stamp head`.** Such a deployment already has the
    original 11 tables (created by hand via `db/schema.sql`, or by a pipeline's `--setup-db`

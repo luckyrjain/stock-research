@@ -519,6 +519,25 @@ broker_connections = Table(
     # re-login is needed.
     Column("token_obtained_at", DateTime(timezone=True)),
     Column("last_synced_at",    DateTime(timezone=True)),
+    # Background-sync bookkeeping (see routes/portfolio_aggregator.py's
+    # POST /broker/{broker}/sync): a sync now runs on a background
+    # executor rather than inside the HTTP request, so the connections list
+    # is how the frontend polls for the outcome instead of getting it back
+    # synchronously in the POST response. One of "idle" | "syncing" |
+    # "success" | "error" — "idle" is both the pre-first-sync state and
+    # what a never-run connection has right after this column was added.
+    Column("sync_status",       String(20), nullable=False, server_default=text("'idle'")),
+    # The same summary dict sync_account() always returned synchronously
+    # before (holdings_synced/skipped/archived, trades_synced/skipped/
+    # duplicate) — populated on the most recent *successful* sync only;
+    # left as-is (not cleared) on a later failed sync, so the frontend can
+    # still show "last known good sync" alongside the fresh error.
+    Column("last_sync_summary", JSON),
+    # Set only on a failed sync (network/auth/broker-API error); cleared
+    # back to NULL at the start of the next sync attempt, not on success —
+    # so a transient failure's message doesn't linger once a later sync
+    # actually succeeds (last_sync_summary already signals that).
+    Column("last_sync_error",   Text),
     Column("created_at",        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")),
     UniqueConstraint("account_id", "broker", name="uq_broker_connections_account_broker"),
     Index("idx_broker_connections_profile", "profile_id"),

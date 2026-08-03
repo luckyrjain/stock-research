@@ -867,6 +867,18 @@ export interface BrokerConnection {
   // hasn't completed (or completed, then got invalidated by re-registering
   // different credentials) — true only once an access token is on file.
   connected:         boolean;
+  // A sync now runs on a background executor (routes/portfolio_aggregator.py's
+  // POST /broker/{broker}/sync returns 202 immediately) — this is how the
+  // frontend polls for the outcome. "idle" is both the pre-first-sync state
+  // and what a connection has right after upgrading to this field.
+  sync_status:       'idle' | 'syncing' | 'success' | 'error';
+  // Populated on the most recent *successful* sync only; left as-is (not
+  // cleared) after a later failed sync, so "last known good sync" stays
+  // visible alongside a fresh error.
+  last_sync_summary: BrokerSyncResult | null;
+  // Set only on a failed sync; cleared back to null at the start of the
+  // next attempt (not on success — last_sync_summary already signals that).
+  last_sync_error:   string | null;
 }
 
 export interface BrokerSyncResult {
@@ -875,4 +887,13 @@ export interface BrokerSyncResult {
   trades_synced:     number;
   trades_skipped:    number;
   trades_duplicate:  number;
+}
+
+// POST /broker/{broker}/sync's immediate response — the sync itself runs
+// in the background; see BrokerConnection's sync_status/last_sync_summary/
+// last_sync_error for the actual outcome, polled via GET /broker/connections.
+export interface BrokerSyncAck {
+  status:     'syncing';
+  account_id: number;
+  broker:     PortfolioBroker;
 }

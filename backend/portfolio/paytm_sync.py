@@ -154,8 +154,12 @@ def sync_account(engine, account_id: int, access_token: str, api_key: str) -> di
     `api_key` is this connection's own registered app key (broker_connections.api_key),
     never a deployment-wide env var — see db/models.py's broker_connections comment."""
     try:
-        raw_holdings = _fetch_holdings(api_key, access_token)
-        raw_orders = _fetch_orders(api_key, access_token)
+        raw_holdings = broker_sync_common.call_with_backoff(
+            lambda: _fetch_holdings(api_key, access_token), broker=BROKER_NAME,
+        )
+        raw_orders = broker_sync_common.call_with_backoff(
+            lambda: _fetch_orders(api_key, access_token), broker=BROKER_NAME,
+        )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         log_event(LOGGER, "paytm_sync_fetch_failed", level="warning",
                    account_id=account_id, error=str(exc))

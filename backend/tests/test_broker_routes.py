@@ -11,6 +11,7 @@ person's one broker account, not "whoever connects an account." Every test
 below registers its own api_key/api_secret via login-url before connecting.
 """
 import os
+import time
 import unittest
 import warnings
 from unittest.mock import patch
@@ -78,6 +79,25 @@ class BrokerRoutesTest(unittest.TestCase):
         return client.post(f"/api/portfolio/broker/{broker}/login-url", json={
             "account_id": account_id, "api_key": api_key, "api_secret": api_secret,
         })
+
+    def _wait_for_sync_status(self, profile_id: int, broker: str, account_id: int, *, timeout: float = 2.0) -> dict:
+        """POST .../sync now kicks off sync_account() on a background
+        executor and returns 202 immediately (see routes/
+        portfolio_aggregator.py's broker_sync) — polls GET
+        /broker/connections until this (account, broker) row's
+        sync_status leaves "syncing", the same way the real frontend
+        polls after seeing {"status": "syncing"}."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            resp = client.get(f"/api/portfolio/broker/connections?profile_id={profile_id}")
+            conn = next(
+                c for c in resp.json()["connections"]
+                if c["account_id"] == account_id and c["broker"] == broker
+            )
+            if conn["sync_status"] != "syncing":
+                return conn
+            time.sleep(0.02)
+        raise AssertionError(f"sync_status still 'syncing' after {timeout}s")
 
     # ── login-url (register app credentials + return login URL) ─────────────
 
@@ -306,8 +326,13 @@ class BrokerRoutesTest(unittest.TestCase):
                      json={"account_id": acc, "request_token": "rt"})
 
         resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json(), {"holdings_synced": 3, "trades_synced": 1})
+        self.assertEqual(resp.status_code, 202, resp.text)
+        self.assertEqual(resp.json(), {"status": "syncing", "account_id": acc, "broker": "zerodha"})
+
+        conn = self._wait_for_sync_status(pid, "zerodha", acc)
+        self.assertEqual(conn["sync_status"], "success")
+        self.assertEqual(conn["last_sync_summary"], {"holdings_synced": 3, "trades_synced": 1})
+        self.assertIsNone(conn["last_sync_error"])
         mock_sync.assert_called_once()
         self.assertEqual(mock_sync.call_args.kwargs.get("api_key"), "my-key")
 
@@ -342,13 +367,33 @@ class BrokerRoutesTest(unittest.TestCase):
 
         # Lock released — a subsequent sync must succeed normally.
         resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.status_code, 202, resp.text)
+        self._wait_for_sync_status(pid, "zerodha", acc)
         mock_sync.assert_called_once()
+
+    def test_sync_rate_limited_after_too_many_attempts_429(self) -> None:
+        """The rate limit is checked before the concurrency lock, so it
+        fires even with no sync ever actually connected/running — a plain
+        404 (no connection) is enough to prove the guard itself works."""
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        from routes.portfolio_aggregator import _BROKER_SYNC_RATE_LIMIT_MAX_CALLS
+
+        for _ in range(_BROKER_SYNC_RATE_LIMIT_MAX_CALLS):
+            resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
+            self.assertEqual(resp.status_code, 404)  # never connected — expected until the limit trips
+
+        resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
+        self.assertEqual(resp.status_code, 429)
 
     @patch("portfolio.kite_sync.sync_account")
     @patch("portfolio.kite_sync.exchange_request_token")
     @patch("portfolio.kite_sync.get_login_url")
-    def test_sync_propagates_kite_error_as_422(self, mock_login_url, mock_exchange, mock_sync) -> None:
+    def test_sync_error_surfaces_as_last_sync_error(self, mock_login_url, mock_exchange, mock_sync) -> None:
+        """A broker-API error is no longer a synchronous 422 — the sync
+        itself now runs on a background executor (see broker_sync()'s own
+        docstring), so it surfaces as sync_status="error"/last_sync_error
+        on the connections list instead, for the frontend to poll."""
         mock_login_url.return_value = "https://kite.trade/connect/login?v=3"
         mock_exchange.return_value = {"access_token": "token-1"}
         mock_sync.return_value = {"error": "session expired"}
@@ -360,17 +405,22 @@ class BrokerRoutesTest(unittest.TestCase):
                      json={"account_id": acc, "request_token": "rt"})
 
         resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
-        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(resp.status_code, 202)
+
+        conn = self._wait_for_sync_status(pid, "zerodha", acc)
+        self.assertEqual(conn["sync_status"], "error")
+        self.assertEqual(conn["last_sync_error"], "session expired")
 
     # ── the actual bug this redesign fixes: credentials are per-account,
     # not a shared global — two accounts connecting the same broker must
     # never cross-contaminate each other's api_key/api_secret/access_token.
 
+    @patch("portfolio.portfolio_valuation.refresh_valuations")
     @patch("portfolio.kite_sync.sync_account")
     @patch("portfolio.kite_sync.exchange_request_token")
     @patch("portfolio.kite_sync.get_login_url")
     def test_two_accounts_use_independent_credentials_for_the_same_broker(
-        self, mock_login_url, mock_exchange, mock_sync,
+        self, mock_login_url, mock_exchange, mock_sync, _mock_refresh,
     ) -> None:
         mock_login_url.side_effect = lambda api_key: f"https://kite.trade/connect/login?api_key={api_key}"
         mock_exchange.side_effect = lambda api_key, api_secret, request_token: {
@@ -404,6 +454,8 @@ class BrokerRoutesTest(unittest.TestCase):
 
         client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc_a})
         client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc_b})
+        self._wait_for_sync_status(pid, "zerodha", acc_a)
+        self._wait_for_sync_status(pid, "zerodha", acc_b)
         self.assertEqual(mock_sync.call_args_list[0].kwargs.get("api_key"), "key-A")
         self.assertEqual(mock_sync.call_args_list[1].kwargs.get("api_key"), "key-B")
 
@@ -487,8 +539,11 @@ class BrokerRoutesTest(unittest.TestCase):
                      json={"account_id": acc, "request_token": "rt"})
 
         resp = client.post("/api/portfolio/broker/paytm_money/sync", json={"account_id": acc})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json(), {"holdings_synced": 2, "trades_synced": 0})
+        self.assertEqual(resp.status_code, 202, resp.text)
+
+        conn = self._wait_for_sync_status(pid, "paytm_money", acc)
+        self.assertEqual(conn["sync_status"], "success")
+        self.assertEqual(conn["last_sync_summary"], {"holdings_synced": 2, "trades_synced": 0})
         mock_sync.assert_called_once()
         self.assertEqual(mock_sync.call_args.kwargs.get("api_key"), "my-paytm-key")
 
