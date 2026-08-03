@@ -149,10 +149,16 @@ make check   # verifies Python/Node/npm/.env/DB/Redis are all in place
 Edit `.env` with your provider key. If `DATABASE_URL` is set, run the migration once:
 
 ```bash
-cd backend && alembic upgrade head && cd ..
+make migrate
 ```
 
 Run it:
+
+```bash
+make dev   # backend (uvicorn --reload) + frontend (next dev) together, Ctrl+C stops both
+```
+
+Or run each half in its own terminal, if you want separate control:
 
 ```bash
 # Terminal A
@@ -163,6 +169,11 @@ cd frontend && npm run dev
 ```
 
 Single-stock CLI (no server): `cd backend && python main.py TCS`
+
+Want data in Screener/SME Signals right away instead of the empty "hasn't run yet" state?
+`make seed` runs those two batch pipelines once against real NSE/yfinance data (this app never
+seeds with synthetic fixtures — see [CLAUDE.md](CLAUDE.md#architectural-constraints--binding));
+it's slow (a few minutes) since Screener alone fetches all ~500 NIFTY 500 constituents.
 
 See [docs/setup.md](docs/setup.md) for full env var reference and troubleshooting, and
 `backend/CLAUDE.md`'s "Schema migrations" section for the existing-database (pre-Alembic) upgrade
@@ -187,7 +198,12 @@ Full reference: [docs/setup.md](docs/setup.md). The essentials:
 ```bash
 make test        # backend pytest + frontend tsc --noEmit
 make test-e2e     # frontend Playwright e2e (installs Chromium on first run)
+make lint         # the one enforced lint gate (frontend tsc --noEmit) — see below
 ```
+
+There's no ESLint config and no enforced Python linter in this repo (pylint is referenced via
+inline comments in a couple of files but isn't run in CI) — `frontend`'s `tsc --noEmit` in strict
+mode is the real code-quality gate, which is what `make lint` runs.
 
 Equivalent, run directly:
 
