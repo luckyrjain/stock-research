@@ -839,3 +839,26 @@ export interface CsvImportResult {
   assets_matched:  number;
   warnings:        string[];
 }
+
+// Broker API sync (Zerodha Kite Connect) — GET/POST /api/portfolio/broker/*.
+// Only 'zerodha' is supported today (routes/portfolio_aggregator.py's
+// _SUPPORTED_BROKERS); the type is a plain string, not a literal union, so a
+// second broker being enabled backend-side doesn't need a frontend type edit
+// just to stop rejecting it.
+export type PortfolioBroker = string;
+
+export interface BrokerConnection {
+  id:                number;
+  account_id:        number;
+  broker:            PortfolioBroker;
+  token_obtained_at: string | null;
+  last_synced_at:    string | null;
+}
+
+export interface BrokerSyncResult {
+  holdings_synced:   number;
+  holdings_skipped:  number;
+  trades_synced:     number;
+  trades_skipped:    number;
+  trades_duplicate:  number;
+}

@@ -22,6 +22,14 @@ router = APIRouter(prefix="/api/portfolio")
 _ACCOUNT_TYPES = {"bank", "broker", "amc", "epfo", "other"}
 _ASSET_TYPES = {"mf", "stock", "fd", "epf", "ppf", "cash", "manual", "loan"}
 
+# Broker-API integrations (docs/PRD-gmail-portfolio-intelligence.md's Phase 1) —
+# a closed allowlist, not user-supplied text, since each broker needs its own
+# sync module wired in below. Extending to HDFC Securities/Paytm Money is
+# "add another entry here + a portfolio/<broker>_sync.py module", not a
+# schema or route-shape change — see broker_connections' own comment in
+# db/models.py for why the table itself is already broker-agnostic.
+_SUPPORTED_BROKERS = {"zerodha"}
+
 
 def compute_networth(rows: list[dict]) -> dict:
     """Aggregates latest-valuation rows into a net worth summary. Pure
@@ -87,6 +95,15 @@ class AssetPatch(BaseModel):
 class ValuationIn(BaseModel):
     value: float = Field(ge=0)
     as_of: _date | None = None
+
+
+class BrokerConnectIn(BaseModel):
+    account_id: int
+    request_token: str
+
+
+class BrokerSyncIn(BaseModel):
+    account_id: int
 
 
 @router.get("/profiles")
@@ -488,3 +505,161 @@ async def import_csv_endpoint(
         return result
 
     return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
+
+
+def _require_supported_broker(broker: str) -> None:
+    if broker not in _SUPPORTED_BROKERS:
+        raise HTTPException(status_code=422, detail=f"broker must be one of: {sorted(_SUPPORTED_BROKERS)}")
+
+
+@router.get("/broker/{broker}/login-url")
+async def broker_login_url(request: Request, broker: str):
+    _require_supported_broker(broker)
+
+    def _sync() -> dict:
+        import os
+
+        from portfolio.kite_sync import get_login_url
+
+        api_key = os.environ.get("KITE_API_KEY", "")
+        if not api_key:
+            raise HTTPException(status_code=503, detail="KITE_API_KEY not configured.")
+        return {"login_url": get_login_url(api_key)}
+
+    return await run_owned_db_call(request, "portfolio_agg_read", 120, _sync, "portfolio_agg_read")
+
+
+@router.post("/broker/{broker}/connect")
+async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
+    _require_supported_broker(broker)
+
+    def _sync() -> dict:
+        import os
+
+        import api
+        from core.crypto import EncryptionNotConfigured, encrypt
+        from db.models import accounts, broker_connections
+        from portfolio.kite_sync import exchange_request_token
+        from sqlalchemy import insert, select, update
+
+        api_key = os.environ.get("KITE_API_KEY", "")
+        api_secret = os.environ.get("KITE_API_SECRET", "")
+        if not api_key or not api_secret:
+            raise HTTPException(status_code=503, detail="KITE_API_KEY/KITE_API_SECRET not configured.")
+
+        with api._get_db_engine().begin() as conn:
+            account = conn.execute(
+                select(accounts.c.id, accounts.c.profile_id, accounts.c.type)
+                .where(accounts.c.id == body.account_id)
+            ).first()
+            if account is None:
+                raise HTTPException(status_code=404, detail="account not found")
+            if account.type != "broker":
+                raise HTTPException(status_code=422, detail="account.type must be 'broker' to connect a broker API")
+
+            session = exchange_request_token(api_key, api_secret, body.request_token)
+            if "error" in session or "access_token" not in session:
+                raise HTTPException(status_code=422, detail=session.get("error", "Kite login failed"))
+
+            try:
+                token_enc = encrypt(session["access_token"])
+            except EncryptionNotConfigured as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+
+            import datetime as _dt
+            now = _dt.datetime.now(_dt.timezone.utc)
+            existing = conn.execute(
+                select(broker_connections.c.id).where(
+                    broker_connections.c.account_id == body.account_id,
+                    broker_connections.c.broker == broker,
+                )
+            ).first()
+            if existing:
+                conn.execute(
+                    update(broker_connections)
+                    .where(broker_connections.c.id == existing.id)
+                    .values(access_token_enc=token_enc, token_obtained_at=now)
+                )
+            else:
+                conn.execute(
+                    insert(broker_connections).values(
+                        profile_id=account.profile_id,
+                        account_id=body.account_id,
+                        broker=broker,
+                        access_token_enc=token_enc,
+                        token_obtained_at=now,
+                    )
+                )
+        return {"connected": True, "account_id": body.account_id, "broker": broker}
+
+    return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
+
+
+@router.post("/broker/{broker}/sync")
+async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
+    _require_supported_broker(broker)
+    account_id = body.account_id
+
+    def _sync() -> dict:
+        import os
+
+        import api
+        from core.crypto import EncryptionNotConfigured, decrypt
+        from db.models import broker_connections
+        from portfolio.kite_sync import sync_account
+        from portfolio.portfolio_valuation import refresh_valuations
+        from sqlalchemy import select
+
+        with api._get_db_engine().connect() as conn:
+            conn_row = conn.execute(
+                select(broker_connections.c.access_token_enc).where(
+                    broker_connections.c.account_id == account_id,
+                    broker_connections.c.broker == broker,
+                )
+            ).first()
+        if conn_row is None or not conn_row.access_token_enc:
+            raise HTTPException(status_code=404, detail=f"no connected {broker} account for this account_id")
+
+        try:
+            access_token = decrypt(conn_row.access_token_enc)
+        except EncryptionNotConfigured as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+        except Exception:
+            raise HTTPException(
+                status_code=422,
+                detail="stored credential could not be decrypted — reconnect this broker account",
+            )
+
+        api_key = os.environ.get("KITE_API_KEY", "")
+        result = sync_account(api._get_db_engine(), account_id, access_token, api_key=api_key)
+        if "error" in result:
+            raise HTTPException(status_code=422, detail=result["error"])
+        refresh_valuations(api._get_db_engine())
+        return result
+
+    return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
+
+
+@router.get("/broker/connections")
+async def list_broker_connections(request: Request, profile_id: int):
+    def _sync() -> dict:
+        import api
+        from db.models import broker_connections
+        from sqlalchemy import select
+
+        with api._get_db_engine().connect() as conn:
+            rows = conn.execute(
+                select(
+                    broker_connections.c.id,
+                    broker_connections.c.account_id,
+                    broker_connections.c.broker,
+                    broker_connections.c.token_obtained_at,
+                    broker_connections.c.last_synced_at,
+                )
+                .where(broker_connections.c.profile_id == profile_id)
+                .order_by(broker_connections.c.id)
+            ).mappings().fetchall()
+        # Never returns access_token_enc — connection status/metadata only.
+        return {"connections": [dict(r) for r in rows]}
+
+    return await run_owned_db_call(request, "portfolio_agg_read", 120, _sync, "portfolio_agg_read")

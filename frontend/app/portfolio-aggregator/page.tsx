@@ -6,6 +6,7 @@ import type {
   PortfolioProfile, PortfolioAccount, PortfolioAccountType,
   PortfolioAsset, PortfolioAssetType, PortfolioNetWorth,
   CasImportResult, CsvPreviewResult, CsvImportResult,
+  BrokerConnection, BrokerSyncResult,
 } from '@/types';
 
 const CSV_MAPPING_KEY_PREFIX = 'portfolio_csv_mapping:';
@@ -13,6 +14,13 @@ const CSV_REQUIRED_FIELDS = ['date', 'symbol', 'side', 'quantity', 'price'] as c
 const CSV_ALL_FIELDS = [...CSV_REQUIRED_FIELDS, 'amount', 'isin'] as const;
 
 const PROFILE_KEY = 'portfolio_aggregator_profile_id';
+
+// Only broker supported today (routes/portfolio_aggregator.py's
+// _SUPPORTED_BROKERS). Kite's own login redirect has no way to echo custom
+// state back, so the account being connected is stashed here right before
+// the browser leaves for kite.trade, and read back by the callback page.
+const ZERODHA_BROKER = 'zerodha';
+const PENDING_KITE_ACCOUNT_KEY = 'portfolio_pending_kite_account_id';
 
 const ACCOUNT_TYPES: PortfolioAccountType[] = ['bank', 'broker', 'amc', 'epfo', 'other'];
 const ASSET_TYPES: PortfolioAssetType[] = ['mf', 'stock', 'fd', 'epf', 'ppf', 'cash', 'manual', 'loan'];
@@ -230,8 +238,65 @@ function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () =
   );
 }
 
-function AccountBlock({ account, assets, onChanged }: {
-  account: PortfolioAccount; assets: PortfolioAsset[]; onChanged: () => void;
+function BrokerConnectControls({ account, connection, onSynced }: {
+  account: PortfolioAccount; connection: BrokerConnection | undefined; onSynced: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function connect() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const { login_url } = await api<{ login_url: string }>(`broker/${ZERODHA_BROKER}/login-url`);
+      localStorage.setItem(PENDING_KITE_ACCOUNT_KEY, String(account.id));
+      window.location.href = login_url;
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'Could not start Zerodha login');
+      setBusy(false);
+    }
+  }
+
+  async function sync() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const res = await api<BrokerSyncResult>(`broker/${ZERODHA_BROKER}/sync`, {
+        method: 'POST',
+        body: JSON.stringify({ account_id: account.id }),
+      });
+      setMsg(`Synced ${res.holdings_synced} holdings, ${res.trades_synced} trades.`);
+      onSynced();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'Sync failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <span className="flex items-center gap-2">
+      {connection ? (
+        <>
+          <span className="text-xs text-muted">
+            Zerodha connected{connection.last_synced_at ? ` · last synced ${new Date(connection.last_synced_at).toLocaleString('en-IN')}` : ' · never synced'}
+          </span>
+          <button onClick={sync} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
+            {busy ? 'Syncing…' : 'Sync now'}
+          </button>
+        </>
+      ) : (
+        <button onClick={connect} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
+          {busy ? 'Redirecting…' : 'Connect Zerodha'}
+        </button>
+      )}
+      {msg && <span className="text-xs text-muted">{msg}</span>}
+    </span>
+  );
+}
+
+function AccountBlock({ account, assets, connection, onChanged }: {
+  account: PortfolioAccount; assets: PortfolioAsset[]; connection: BrokerConnection | undefined; onChanged: () => void;
 }) {
   const [showAdd, setShowAdd] = useState(false);
 
@@ -254,6 +319,9 @@ function AccountBlock({ account, assets, onChanged }: {
           {account.name} <span className="text-muted font-normal">· {account.type}{account.institution ? ` · ${account.institution}` : ''}</span>
         </p>
         <div className="flex items-center gap-3">
+          {account.type === 'broker' && (
+            <BrokerConnectControls account={account} connection={connection} onSynced={onChanged} />
+          )}
           <button onClick={() => setShowAdd(s => !s)} className="text-xs text-accent font-semibold">
             {showAdd ? 'Cancel' : '+ Asset'}
           </button>
@@ -442,6 +510,7 @@ function ImportCsvForm({ accounts, onImported }: { accounts: PortfolioAccount[];
 function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitch: () => void }) {
   const [accounts, setAccounts] = useState<PortfolioAccount[]>([]);
   const [assetsByAccount, setAssetsByAccount] = useState<Record<number, PortfolioAsset[]>>({});
+  const [connections, setConnections] = useState<BrokerConnection[]>([]);
   const [networth, setNetworth] = useState<PortfolioNetWorth | null>(null);
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
@@ -458,6 +527,9 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
       setAssetsByAccount(Object.fromEntries(entries));
     });
     api<PortfolioNetWorth>(`networth?profile_id=${profile.id}`).then(setNetworth);
+    api<{ connections: BrokerConnection[] }>(`broker/connections?profile_id=${profile.id}`)
+      .then(d => setConnections(d.connections))
+      .catch(() => setConnections([]));
   }, [profile.id]);
 
   useEffect(refresh, [refresh]);
@@ -536,7 +608,13 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
 
       <div className="flex flex-col gap-3">
         {accounts.map(acc => (
-          <AccountBlock key={acc.id} account={acc} assets={assetsByAccount[acc.id] ?? []} onChanged={refresh} />
+          <AccountBlock
+            key={acc.id}
+            account={acc}
+            assets={assetsByAccount[acc.id] ?? []}
+            connection={connections.find(c => c.account_id === acc.id && c.broker === ZERODHA_BROKER)}
+            onChanged={refresh}
+          />
         ))}
         {accounts.length === 0 && <p className="text-sm text-muted">No accounts yet — add one above.</p>}
       </div>

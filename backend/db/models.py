@@ -2,7 +2,7 @@ import os
 
 from sqlalchemy import (
     JSON, BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, ForeignKey, Index,
-    Integer, MetaData, Numeric, String, Table, UniqueConstraint, text,
+    Integer, MetaData, Numeric, String, Table, Text, UniqueConstraint, text,
 )
 from sqlalchemy import create_engine as _create_engine
 
@@ -451,6 +451,46 @@ transactions = Table(
     Column("units",    Numeric(18, 4)),
     Column("meta",     JSON, nullable=False, server_default="{}"),
     Index("idx_transactions_asset", "asset_id"),
+)
+
+
+# Broker API connections — Zerodha Kite Connect today, extensible to other
+# free-tier brokers (HDFC Securities InvestRight, Paytm Money) without a
+# schema change: `broker` is a plain string, not an enum, checked against a
+# closed allowlist at the route layer instead. See
+# docs/PRD-gmail-portfolio-intelligence.md's Decision 9/Phase 1 for why
+# broker APIs are preferred over Gmail-parsed transactions where available —
+# structured, authoritative, no extraction error.
+#
+# Deliberately keyed to `profiles`/`accounts`, not a `user_id` — this reuses
+# the Portfolio Aggregator's existing no-auth, localhost-only model rather
+# than requiring the separate `users`/`sessions` magic-link system. A known,
+# disclosed deviation from that doc's own Decision 6 (which calls for
+# `user_id`-scoped ownership before this is ever exposed to more than one
+# operator) — acceptable for personal/local use, not for a real multi-tenant
+# deployment. `access_token_enc` is Fernet-encrypted via core/crypto.py, not
+# hashed like `sessions`/`api_keys` — a broker token must be read back to
+# call the broker's API, unlike a session/API-key token which only needs
+# comparison.
+broker_connections = Table(
+    "broker_connections",
+    metadata,
+    Column("id",                Integer, primary_key=True, autoincrement=True),
+    Column("profile_id",        Integer, ForeignKey("profiles.id"), nullable=False),
+    Column("account_id",        Integer, ForeignKey("accounts.id"), nullable=False),
+    Column("broker",            String(20), nullable=False),
+    # NULL until the OAuth-style login flow completes at least once.
+    Column("access_token_enc",  Text),
+    # Kite (and most broker APIs) issue a session token that expires daily
+    # (Kite: ~06:00 IST the next day) — this is when it was *obtained*, not
+    # when it expires, since brokers don't publish a fixed TTL to compute
+    # from; a sync call that gets an auth error is the actual signal that
+    # re-login is needed.
+    Column("token_obtained_at", DateTime(timezone=True)),
+    Column("last_synced_at",    DateTime(timezone=True)),
+    Column("created_at",        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")),
+    UniqueConstraint("account_id", "broker", name="uq_broker_connections_account_broker"),
+    Index("idx_broker_connections_profile", "profile_id"),
 )
 
 
