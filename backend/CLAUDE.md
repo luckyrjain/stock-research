@@ -1168,12 +1168,25 @@ this one).
    to call the broker's API, unlike a hashed session/API-key token which only needs comparison.
    `PORTFOLIO_ENCRYPTION_KEY` (`.env.example`) gates both; unset, connecting any broker account
    fails closed (503), never falling back to plaintext storage.
-3. **Sync modules** (`portfolio/`) — `kite_sync.py`, `hdfc_sync.py`, `paytm_sync.py` each expose
-   the identical `get_login_url(api_key)` / `exchange_request_token(api_key, api_secret,
-   request_token)` / `sync_account(engine, account_id, access_token, api_key)` interface, so
-   `routes/portfolio_aggregator.py::_broker_sync_module(broker)` dispatches on `broker` with a
-   plain `if/elif` over three known module imports rather than any string-built import path.
-   `sync_account()` wraps its holdings + trades writes in **one** `engine.begin()` transaction —
+3. **Sync modules** (`portfolio/`) — `kite_sync.py` and `paytm_sync.py` expose the identical
+   `get_login_url(api_key)` / `exchange_request_token(api_key, api_secret, request_token)` /
+   `sync_account(engine, account_id, access_token, api_key)` interface (both are real
+   browser-redirect OAuth-style logins), so `routes/portfolio_aggregator.py::_broker_sync_module(broker)`
+   dispatches on `broker` with a plain `if/elif` over three known module imports rather than any
+   string-built import path. **`hdfc_sync.py` does not share that interface** — HDFC Securities'
+   real API has no browser redirect at all (confirmed via a real, working set of curl commands,
+   not public docs — developer.hdfcsec.com's own docs site is a JS-rendered SPA no outbound-fetch
+   tool in this sandbox can render). It's a 5-step flow this app itself must drive: `GET /login`
+   (returns a `token_id`) → `POST /login/validate` (the user's own HDFC username/password, entered
+   directly into this app, never persisted) → `POST /twofa/validate` (the OTP HDFC sends
+   out-of-band, returns `request_token`) → `GET /authorise?consent=true` → `POST /access-token`
+   (the actual `access_token` exchange, keyed by `apiSecret` in the body, not a checksum). See
+   `hdfc_sync.py`'s own module docstring for the full request/response shape of each step.
+   `sync_account(engine, account_id, access_token, api_key)` is still the one function every
+   module (including `hdfc_sync.py`) exposes identically — that's the interface
+   `routes/portfolio_aggregator.py`'s `POST /broker/{broker}/sync` dispatches through; only the
+   *login* half diverges for HDFC. `sync_account()` wraps its holdings + trades writes in **one**
+   `engine.begin()` transaction —
    an insert failing partway through rolls back everything from that sync attempt, never a mix of
    old trades against new holdings. `broker_sync_common.py` holds the shared "write an
    already-normalized holding/trade into `assets`/`holdings`/`valuations`/`transactions`" half
@@ -1235,17 +1248,24 @@ this one).
    `requests` — Paytm Money's own client SDK (`pyPMClient`) has no working PyPI release, so
    depending on it would mean vendoring GitHub source for a thin wrapper, which this codebase's
    "prefer the standard library and already-installed dependencies" policy advises against.
-   **Disclosed limitation**: `developer.hdfcsec.com` and `developer.paytmmoney.com` both blocked
-   this sandbox's outbound fetches (403), so HDFC Securities' and Paytm Money's exact REST base
-   URL, endpoint paths, checksum-signing scheme, and response field names were not verified
-   against a live response — they follow the general shape confirmed via public docs/SDK snippets
-   plus the observation that Indian broker "Open APIs" (Kite Connect, Paytm Money, Upstox, Angel
-   One, Dhan) all converge on the same login-redirect-with-`request_token` →
-   exchange-for-`access_token` → REST shape. A field either module expects but a real response
+   **Disclosed limitation, HDFC Securities**: the login flow (all 5 steps) and the holdings
+   endpoint (`GET /portfolio/holdings`) are confirmed against a real, working account — not a
+   guess. The tradebook endpoint (`GET /portfolio/tradebook`) is **not** independently
+   confirmed — inferred from the same `/portfolio/` prefix the holdings endpoint actually uses,
+   since no working tradebook call was supplied. A field this module expects but a real response
    doesn't have degrades that one holding/trade to skipped (logged), never a fabricated value —
-   spot-check against a live account before relying on either in production. Zerodha's own module
-   carries the equivalent disclosure for the same reason (no outbound internet to kite.trade in
-   this sandbox either) — its exact response field names are taken from Kite's own published docs.
+   spot-check trade sync specifically against a live account before relying on it.
+
+   **Disclosed limitation, Paytm Money**: `developer.paytmmoney.com` blocked this sandbox's
+   outbound fetches (403), so its exact REST base URL, endpoint paths, checksum-signing scheme,
+   and response field names were not verified against a live response — it follows the general
+   shape confirmed via public docs/SDK snippets plus the observation that Indian broker "Open
+   APIs" (Kite Connect, Paytm Money, Upstox, Angel One, Dhan) mostly converge on a
+   login-redirect-with-`request_token` → exchange-for-`access_token` → REST shape (HDFC Securities
+   was the one exception found so far — see above). Same "degrades to skipped, never fabricated"
+   convention applies. Zerodha's own module carries the equivalent disclosure for the same reason
+   (no outbound internet to kite.trade in this sandbox either) — its exact response field names
+   are taken from Kite's own published docs.
 4. **API** (`routes/portfolio_aggregator.py`, still under the `/api/portfolio` prefix) —
    `POST /broker/{broker}/login-url`, `POST /broker/{broker}/connect`, `POST /broker/{broker}/sync`,
    `GET /broker/connections?profile_id=`. `login-url` is two modes in one endpoint since they
@@ -1257,7 +1277,25 @@ this one).
    a secret on every retry); supplying only one of the two is a 422, and resuming with neither
    registered yet is a 404. `connect` never sees `api_key`/`api_secret` at all — it looks up the
    row `login-url` already wrote, decrypts the secret, and exchanges `request_token` for an access
-   token.
+   token. **Both reject `hdfc_securities` outright (422, pointing at the endpoints below)** — its
+   real login doesn't fit this two-endpoint contract at all.
+
+   **`hdfc_securities` gets two dedicated endpoints instead**: `POST
+   /broker/hdfc_securities/login-start` (`{account_id, api_key?, api_secret?, username,
+   password}` — same both-or-neither credential semantics as `login-url`; `username`/`password`
+   are HDFC's own broker login, passed straight through to HDFC's `/login/validate` and never
+   written to `broker_connections` or anywhere else) drives steps 1-2 of the real flow and always
+   returns `200 {"otp_required": true}` on success — there's no case where HDFC's login completes
+   without an OTP. `POST /broker/hdfc_securities/verify-otp` (`{account_id, otp}`) drives steps
+   3-5 (OTP verification → consent → access-token exchange) in one call, since consent and the
+   token exchange need no further user input once the OTP is in — chaining them saves the user a
+   third click. `pending_token_id` (the `token_id` HDFC's step 1 returns, needed by steps 2-5) is
+   cleared in a separate, already-committed transaction *before* the OTP/consent/exchange calls
+   run, specifically so a later failure's `HTTPException` — which rolls back whatever transaction
+   it's raised inside — can never silently leave a stale `pending_token_id` around
+   (`test_verify_otp_wrong_otp_clears_pending_token_not_credentials` is the regression test for
+   this; the first version of this endpoint cleared it in the same transaction as the failure,
+   which the exception's own rollback then undid).
 
    **`sync` runs in the background, not inline in the request** — a full holdings+trades round
    trip against a live broker API can take several seconds (longer with the backoff retries above),
@@ -1289,16 +1327,29 @@ this one).
    anything heavier, and isn't wired into `api.py`'s lifespan shutdown — an in-flight sync killed
    on process exit is no different from today's crash-mid-sync case, which the lock's TTL already
    exists to recover from.
-5. **Frontend** — `BrokerRow` (one per supported broker, per broker-type account) shows an inline
-   API-key/API-secret form until that (account, broker) has a registered connection, after which
-   "Connect"/"Reconnect" resumes using the saved credentials and the form collapses behind a
-   "change API key" link. Clicking connect POSTs `login-url`, stashes `{account_id, broker}` in
-   `localStorage` (`PENDING_BROKER_CONNECT_KEY` — none of the three brokers' login redirects has a
-   way to echo back custom state), then redirects to the broker's own login page. All three
-   brokers share one callback route, `frontend/app/portfolio-aggregator/broker-callback/page.tsx`
-   (each broker's app is registered with this same redirect URI), which reads the stashed
-   `{account_id, broker}` back, POSTs `connect` with the returned `request_token`, and redirects
-   to `/portfolio-aggregator` on success. Clicking "Sync now" POSTs `sync`, which now returns
+5. **Frontend** — `BrokerRow` (one per redirect-based broker — Zerodha, Paytm Money — per
+   broker-type account) shows an inline API-key/API-secret form until that (account, broker) has
+   a registered connection, after which "Connect"/"Reconnect" resumes using the saved credentials
+   and the form collapses behind a "change API key" link. Clicking connect POSTs `login-url`,
+   stashes `{account_id, broker}` in `localStorage` (`PENDING_BROKER_CONNECT_KEY` — neither
+   broker's login redirect has a way to echo back custom state), then redirects to the broker's
+   own login page. Both share one callback route,
+   `frontend/app/portfolio-aggregator/broker-callback/page.tsx` (each broker's app is registered
+   with this same redirect URI), which reads the stashed `{account_id, broker}` back, POSTs
+   `connect` with the returned `request_token`, and redirects to `/portfolio-aggregator` on
+   success.
+
+   **`HdfcBrokerRow` is a separate component, not a variant of `BrokerRow`** — HDFC's real login
+   never leaves the page at all, so it shares almost no state shape with the redirect flow (two
+   sequential inline forms instead of a URL to navigate to). Step 1: an API-key/API-secret form
+   (same both-or-neither semantics, same "collapses after first registration" behavior) plus
+   HDFC username/password fields, POSTing `login-start`; on success the form swaps to a single OTP
+   input. Step 2: submitting the OTP POSTs `verify-otp`; on failure the component drops back to
+   the credentials form (`pending_token_id` is already single-use server-side — retrying the same
+   OTP without restarting from `login-start` could never work anyway). Never touches
+   `PENDING_BROKER_CONNECT_KEY` or the shared broker-callback route.
+
+   Clicking "Sync now" (either component) POSTs `sync`, which now returns
    immediately (202) — `BrokerRow` shows "Syncing…" and polls the shared `connections` refetch
    (`onSynced`, the same one every other mutation here already triggers) every 2s for as long as
    `connection.sync_status === "syncing"`, stopping itself the moment the background job finishes;
@@ -1307,10 +1358,13 @@ this one).
 6. **Migrations**: `df6b59581b8b` (the `broker_connections` table itself, Zerodha-only at the
    time), `6c43f4a2d489` (adding `api_key`/`api_secret_enc` once the per-connection-credential
    redesign landed), `b7cf5b79ce66` (`transactions.external_ref` + its unique constraint, for
-   the DB-enforced trade dedup in point 3 above), and `35f10ea4dac3` (`broker_connections.
+   the DB-enforced trade dedup in point 3 above), `35f10ea4dac3` (`broker_connections.
    sync_status`/`last_sync_summary`/`last_sync_error`, for the background-sync polling in point 4
-   above) — all four round-trip-verified (upgrade → `alembic check` clean → downgrade → upgrade)
-   against a real local Postgres instance, same rigor as every other revision in this repo.
+   above), and `976659233671` (`broker_connections.pending_token_id`, added once HDFC Securities'
+   real multi-step login turned out to need server-side state between `login-start` and
+   `verify-otp` — see point 4 above) — all five round-trip-verified (upgrade → `alembic check`
+   clean → downgrade → upgrade) against a real local Postgres instance, same rigor as every other
+   revision in this repo.
 7. **Tests**: `tests/test_broker_routes.py` (endpoint-level, SQLite in-memory) includes
    `test_two_accounts_use_independent_credentials_for_the_same_broker` — the regression test for
    point 2's actual bug, proving two accounts connecting the same broker get fully independent
@@ -1332,7 +1386,16 @@ this one).
    than mocking `time.sleep`, so the tests exercise the real sleep-then-retry control flow, not
    just that sleep was called; `test_hdfc_sync.py`/`test_paytm_sync.py` cover the same
    normalization/dedup/malformed-record ground for their own brokers without repeating the
-   shared-logic tests `broker_sync_common.py` already owns once.
+   shared-logic tests `broker_sync_common.py` already owns once. `test_hdfc_sync.py` additionally
+   has a `LoginFlowTest` class covering all 5 real login-flow functions individually (request
+   shape — which param is a query param vs. JSON body — and the "missing expected field degrades
+   to `{"error": ...}`, never a `KeyError`" contract each one shares).
+   `tests/test_broker_routes.py` covers HDFC's own two-endpoint flow separately from the
+   Zerodha/Paytm-shaped tests above: `test_login_start_success_registers_credentials_and_stores_pending_token`,
+   `test_verify_otp_success_stores_access_token_and_clears_pending`, and
+   `test_verify_otp_wrong_otp_clears_pending_token_not_credentials` (the regression test described
+   in point 4 above), plus confirming the generic `login-url`/`connect` endpoints reject
+   `hdfc_securities` with a 422 pointing at the dedicated endpoints.
 8. **Explicitly deferred, from an external review of this feature** — real gaps, not silently
    assumed solved, just not the right increment for a personal-scale tool per this repo's own
    architectural constraints (root `CLAUDE.md`'s "extremely reliable monolith" table). The
@@ -1353,11 +1416,14 @@ this one).
      brokers today expose the identical holdings+trades shape, so this would be an abstraction
      with no second real caller yet — add it if/when a fourth broker actually needs a different
      capability set, not speculatively now.
-   - **HDFC Securities and Paytm Money are labeled experimental/beta in the UI** (`BrokerRow` in
-     `frontend/app/portfolio-aggregator/page.tsx`) until each has completed one successful live
-     sync against a real account — their exact REST shape was never verified against a live
-     response in this sandbox (see point 3's disclosed limitation). Tracked in `docs/backlog.md`'s
-     "Product roadmap" section until that first live sync closes it.
+   - **Paytm Money is labeled experimental/beta in the UI** (`BrokerRow` in
+     `frontend/app/portfolio-aggregator/page.tsx`) until it's completed one successful live sync
+     against a real account — its exact REST shape was never verified against a live response in
+     this sandbox (see point 3's disclosed limitation). Tracked in `docs/backlog.md`'s "Product
+     roadmap" section until that first live sync closes it. **HDFC Securities' login flow and
+     holdings endpoint are confirmed** against a real account (see point 3) and no longer carry
+     this flag; its tradebook endpoint is still an inferred guess, so trade sync specifically is
+     worth a second look before fully trusting it.
 
 ### Portfolio valuation engine (`portfolio/portfolio_valuation.py`)
 
@@ -2346,7 +2412,7 @@ own, because nothing enforced a narrower blast radius).
    a genuinely empty database and verified (against a real local Postgres instance) to both
    `alembic upgrade head` cleanly onto nothing and `alembic downgrade base` cleanly back to
    nothing, producing exactly the same 11 tables, indexes, and constraints
-   `db/schema.sql`/`metadata.create_all()` already produce. **There are 8 revisions today** —
+   `db/schema.sql`/`metadata.create_all()` already produce. **There are 9 revisions today** —
    `0001_baseline_schema`, then `684c8a31e7e0_add_eod_price_store_and_corporate_` (the
    `securities`/`prices_daily`/`mf_nav_daily`/`corporate_actions` tables) and
    `8613aafc2d9d_add_portfolio_aggregator_foundation_` (`profiles`/`accounts`/`assets`/
@@ -2357,6 +2423,8 @@ own, because nothing enforced a narrower blast radius).
    adds `transactions.external_ref` + its unique constraint (DB-enforced broker-trade dedup, same
    section), also no new table; `35f10ea4dac3` adds `broker_connections.sync_status`/
    `.last_sync_summary`/`.last_sync_error` (backs the background-sync poll, same section), also no
+   new table; `976659233671` adds `broker_connections.pending_token_id` (HDFC Securities' real,
+   non-redirect login needs a place to hold its `token_id` across steps — same section), also no
    new table. Every revision after `0001` was autogenerated and round-trip-verified (upgrade →
    `alembic check` clean → downgrade → upgrade) against an isolated scratch Postgres, the same way
    `0001` was.

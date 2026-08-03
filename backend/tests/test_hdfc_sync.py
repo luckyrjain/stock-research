@@ -1,6 +1,6 @@
 import unittest
 from datetime import date, datetime, timezone
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from sqlalchemy import create_engine, insert, select
 from sqlalchemy.pool import StaticPool
@@ -15,7 +15,14 @@ from db.models import (
     transactions,
     valuations,
 )
-from portfolio.hdfc_sync import sync_account
+from portfolio.hdfc_sync import (
+    authorise,
+    get_access_token,
+    start_login,
+    submit_credentials,
+    submit_otp,
+    sync_account,
+)
 
 _TABLES = [profiles, accounts, assets, holdings, valuations, transactions, broker_connections]
 
@@ -59,6 +66,89 @@ _TRADE = {
     "price": 3480.0,
     "trade_time": "2024-01-15T10:30:00",
 }
+
+
+def _mock_response(json_body: dict, status_ok: bool = True) -> Mock:
+    resp = Mock()
+    resp.json.return_value = json_body
+    if status_ok:
+        resp.raise_for_status = Mock()
+    else:
+        resp.raise_for_status = Mock(side_effect=Exception("HTTP error"))
+    return resp
+
+
+class LoginFlowTest(unittest.TestCase):
+    """The 5-step login HDFC's real API actually requires — see
+    portfolio/hdfc_sync.py's own module docstring. Each step is a thin
+    requests wrapper; these tests confirm request shape (which param goes
+    in the query string vs. the JSON body) and that a missing expected
+    field degrades to {"error": ...}, never a KeyError."""
+
+    @patch("portfolio.hdfc_sync.requests.get")
+    def test_start_login_success(self, mock_get):
+        mock_get.return_value = _mock_response({"data": {"token_id": "tok-1"}})
+        result = start_login("my-key")
+        self.assertEqual(result, {"token_id": "tok-1"})
+        mock_get.assert_called_once()
+        self.assertEqual(mock_get.call_args.kwargs["params"], {"api_key": "my-key"})
+
+    @patch("portfolio.hdfc_sync.requests.get")
+    def test_start_login_missing_token_id_is_error(self, mock_get):
+        mock_get.return_value = _mock_response({"data": {}})
+        result = start_login("my-key")
+        self.assertIn("error", result)
+
+    @patch("portfolio.hdfc_sync.requests.get")
+    def test_start_login_http_failure_returns_error_not_raise(self, mock_get):
+        mock_get.return_value = _mock_response({}, status_ok=False)
+        result = start_login("my-key")
+        self.assertIn("error", result)
+
+    @patch("portfolio.hdfc_sync.requests.post")
+    def test_submit_credentials_success(self, mock_post):
+        mock_post.return_value = _mock_response({"status": "ok"})
+        result = submit_credentials("my-key", "tok-1", "user", "pass")
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(mock_post.call_args.kwargs["params"], {"api_key": "my-key", "token_id": "tok-1"})
+        self.assertEqual(mock_post.call_args.kwargs["json"], {"username": "user", "password": "pass"})
+
+    @patch("portfolio.hdfc_sync.requests.post")
+    def test_submit_otp_success(self, mock_post):
+        mock_post.return_value = _mock_response({"data": {"request_token": "req-1"}})
+        result = submit_otp("my-key", "tok-1", "654321")
+        self.assertEqual(result, {"request_token": "req-1"})
+        self.assertEqual(mock_post.call_args.kwargs["json"], {"answer": "654321"})
+
+    @patch("portfolio.hdfc_sync.requests.post")
+    def test_submit_otp_missing_request_token_is_error(self, mock_post):
+        mock_post.return_value = _mock_response({"data": {}})
+        result = submit_otp("my-key", "tok-1", "000000")
+        self.assertIn("error", result)
+
+    @patch("portfolio.hdfc_sync.requests.get")
+    def test_authorise_success(self, mock_get):
+        mock_get.return_value = _mock_response({"status": "ok"})
+        result = authorise("my-key", "tok-1", "req-1")
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(
+            mock_get.call_args.kwargs["params"],
+            {"api_key": "my-key", "token_id": "tok-1", "consent": "true", "request_token": "req-1"},
+        )
+
+    @patch("portfolio.hdfc_sync.requests.post")
+    def test_get_access_token_success(self, mock_post):
+        mock_post.return_value = _mock_response({"data": {"access_token": "at-1"}})
+        result = get_access_token("my-key", "my-secret", "req-1")
+        self.assertEqual(result, {"access_token": "at-1"})
+        self.assertEqual(mock_post.call_args.kwargs["params"], {"api_key": "my-key", "request_token": "req-1"})
+        self.assertEqual(mock_post.call_args.kwargs["json"], {"apiSecret": "my-secret"})
+
+    @patch("portfolio.hdfc_sync.requests.post")
+    def test_get_access_token_missing_is_error(self, mock_post):
+        mock_post.return_value = _mock_response({"data": {}})
+        result = get_access_token("my-key", "my-secret", "req-1")
+        self.assertIn("error", result)
 
 
 class SyncAccountTest(unittest.TestCase):

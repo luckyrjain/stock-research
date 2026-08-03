@@ -984,7 +984,7 @@ All 17 use `run_owned_db_call()` (see [its envelope](#watchlist)), so all share:
 their bucket, and `422` for a `ValueError`. Two buckets, both per IP:
 
 - **`portfolio_agg_read` — 120 / 60 s**: #41, #43, #47, #52, #54, #61
-- **`portfolio_agg_write` — 60 / 60 s**: #42, #44, #45, #46, #48, #49, #50, #51, #53, #55, #56, #57, #58, #59, #60
+- **`portfolio_agg_write` — 60 / 60 s**: #42, #44, #45, #46, #48, #49, #50, #51, #53, #55, #56, #57, #58, #59, #60, #62, #63
 
 Closed enums used below:
 
@@ -1136,13 +1136,19 @@ silent guess. `refresh_valuations()` runs on success.
 ### Broker API sync
 
 `{broker}` is a path parameter, checked against a closed allowlist —
-`zerodha` | `hdfc_securities` | `paytm_money` — before any of the four endpoints below do
-anything else; any other value is `422`. There is **no env-var-configured broker key anywhere in
-this deployment** — every account supplies its own app credentials (`api_key`/`api_secret`,
-registered under that broker's own developer portal) inline in the request body, stored
-per-connection in `broker_connections` (see `docs/database.md`).
+`zerodha` | `hdfc_securities` | `paytm_money` — before any of the four `{broker}`-parameterized
+endpoints below do anything else; any other value is `422`. There is **no env-var-configured
+broker key anywhere in this deployment** — every account supplies its own app credentials
+(`api_key`/`api_secret`, registered under that broker's own developer portal) inline in the
+request body, stored per-connection in `broker_connections` (see `docs/database.md`).
 
-**`POST /api/portfolio/broker/{broker}/login-url`** — 58. JSON body:
+**`hdfc_securities` does not use `login-url`/`connect`** — its real login has no browser redirect
+at all (see `backend/CLAUDE.md`'s "Broker API sync" section for the full 5-step flow). Both
+endpoints reject it with `422`, pointing at the two dedicated endpoints further down
+(`login-start`/`verify-otp`). `sync` and `connections` are unaffected — both work identically for
+all three brokers once a connection has an access token, regardless of how it got one.
+
+**`POST /api/portfolio/broker/{broker}/login-url`** — 58 (`zerodha`/`paytm_money` only). JSON body:
 
 | Field | Type | Required |
 |---|---|---|
@@ -1162,7 +1168,7 @@ for this `(account_id, broker)` · `422` `account.type != "broker"`, or exactly 
 `api_key`/`api_secret` supplied · `503` `PORTFOLIO_ENCRYPTION_KEY` unset (first-time/replace mode
 only — needed to encrypt `api_secret` before it's stored).
 
-**`POST /api/portfolio/broker/{broker}/connect`** — 59. JSON body: `{"account_id": int,
+**`POST /api/portfolio/broker/{broker}/connect`** — 59 (`zerodha`/`paytm_money` only). JSON body: `{"account_id": int,
 "request_token": string}`. Reads back the credentials `login-url` already registered for this
 `(account_id, broker)` — the caller never resupplies `api_key`/`api_secret` here — decrypts the
 secret, and exchanges `request_token` for an access token via that broker's own sync module.
@@ -1202,6 +1208,32 @@ frontend polls (every 2s while `"syncing"`) after `POST .../sync` returns `202`.
 `last_sync_summary` is populated on the most recent *successful* sync only (left as-is, not
 cleared, after a later failure); `last_sync_error` is set only on a failed sync and cleared at the
 start of the next attempt.
+
+**`POST /api/portfolio/broker/hdfc_securities/login-start`** — 62. JSON body: `{"account_id":
+int, "api_key"?: string, "api_secret"?: string, "username": string, "password": string}`.
+`api_key`/`api_secret` are both-or-neither, same semantics as `login-url` above.
+`username`/`password` are HDFC's own broker-login credentials — passed straight through to
+HDFC's `/login/validate` and never written to `broker_connections` or anywhere else. Drives
+steps 1-2 of HDFC's real login (`GET /login` for a `token_id`, then `/login/validate`) and
+stores the resulting `token_id` as `pending_token_id` on the connection row.
+
+`200 {"otp_required": true}` (always — there's no HDFC login that completes without an OTP) ·
+`404` unknown `account_id`, or (no `api_key` supplied) nothing registered yet for this account ·
+`422` `account.type != "broker"`, exactly one of `api_key`/`api_secret` supplied, or HDFC
+rejected the login/credentials step · `503` `PORTFOLIO_ENCRYPTION_KEY` unset (first-time/replace
+mode only).
+
+**`POST /api/portfolio/broker/hdfc_securities/verify-otp`** — 63. JSON body: `{"account_id": int,
+"otp": string}`. Drives steps 3-5 (OTP verification → consent → access-token exchange) in one
+call — consent and the token exchange need no further user input once the OTP is in.
+`pending_token_id` is cleared in its own committed step *before* these three HDFC calls run, so
+a failure at any point never leaves a stale pending login behind (clearing it inside the same
+transaction as the failure would roll back along with everything else the failure aborts).
+
+`200 {"connected": true, "account_id", "broker": "hdfc_securities"}` · `404` no `login-start`
+call in progress for this account (call it first) · `422` HDFC rejected the OTP, the consent
+step, or the token exchange, or the stored app secret couldn't be decrypted · `503`
+`PORTFOLIO_ENCRYPTION_KEY` unset.
 
 ---
 
@@ -1246,7 +1278,7 @@ Every bucket, in one place. All are per-IP (`api._client_ip`) unless noted.
 | `positions_claim` | 5 | 3600 s | 39 |
 | `portfolio_concentration` | 10 | 60 s | 40 |
 | `portfolio_agg_read` | 120 | 60 s | 41, 43, 47, 52, 54, 61 |
-| `portfolio_agg_write` | 60 | 60 s | 42, 44, 45, 46, 48, 49, 50, 51, 53, 55, 56, 57, 58, 59, 60 |
+| `portfolio_agg_write` | 60 | 60 s | 42, 44, 45, 46, 48, 49, 50, 51, 53, 55, 56, 57, 58, 59, 60, 62, 63 |
 | `broker_sync_rl:<account_id>:<broker>` | 12 | 3600 s | 60 — **per (account, broker) connection**, not per-IP; caps sync *attempts* independent of the concurrency lock below |
 
 **Unrated-limited**: `GET /` (1), `GET /health` (2), `GET /api/auth/me` (24), `POST

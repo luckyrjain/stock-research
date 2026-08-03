@@ -538,6 +538,18 @@ broker_connections = Table(
     # so a transient failure's message doesn't linger once a later sync
     # actually succeeds (last_sync_summary already signals that).
     Column("last_sync_error",   Text),
+    # HDFC Securities only — its real API has no browser-redirect login at
+    # all (portfolio/hdfc_sync.py's own module docstring has the full
+    # flow): GET /login returns this token_id, which then has to be
+    # threaded through /login/validate (username/password) and
+    # /twofa/validate (OTP) before an access token can be requested. Every
+    # other broker (Kite Connect, Paytm Money) leaves this NULL always —
+    # their redirect-based flow carries its own request_token back via the
+    # browser URL, needing no server-side state between login-url and
+    # connect. Cleared back to NULL once verify-otp completes (success or
+    # failure) — it's single-use, scoped to one login attempt, never a
+    # standing credential like api_key/api_secret_enc.
+    Column("pending_token_id",  String(255)),
     Column("created_at",        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")),
     UniqueConstraint("account_id", "broker", name="uq_broker_connections_account_broker"),
     Index("idx_broker_connections_profile", "profile_id"),

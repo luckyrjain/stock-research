@@ -16,21 +16,26 @@ const CSV_ALL_FIELDS = [...CSV_REQUIRED_FIELDS, 'amount', 'isin'] as const;
 const PROFILE_KEY = 'portfolio_aggregator_profile_id';
 
 // Brokers supported today (routes/portfolio_aggregator.py's
-// _SUPPORTED_BROKERS) — each broker's own login redirect has no way to
+// _SUPPORTED_BROKERS) — each redirect-based broker's login has no way to
 // echo custom state back, so the account + broker being connected are
 // stashed here right before the browser leaves for the broker's login
-// page, and read back by the shared broker-callback page.
+// page, and read back by the shared broker-callback page. HDFC Securities
+// never redirects at all (see HdfcBrokerRow below) so it never touches
+// this key.
 //
-// HDFC Securities and Paytm Money are marked experimental: their exact REST
-// shape (endpoints, field names, checksum scheme) was inferred from public
-// docs/SDK snippets, not verified against a live response (see
-// backend/portfolio/hdfc_sync.py's and paytm_sync.py's own module
-// docstrings) — unlike Zerodha, confirmed against the installed
-// kiteconnect package's real API surface. Remove once each has completed
-// one successful live sync against a real account (docs/backlog.md).
+// Paytm Money is marked experimental: its exact REST shape (endpoints,
+// field names, checksum scheme) was inferred from public docs/SDK
+// snippets, not verified against a live response (see backend/portfolio/
+// paytm_sync.py's own module docstring) — unlike Zerodha (confirmed
+// against the installed kiteconnect package's real API surface) and HDFC
+// Securities (its real login flow and holdings endpoint were confirmed
+// against a live account; only the tradebook/trade-sync endpoint is still
+// an inferred guess — see backend/portfolio/hdfc_sync.py's own module
+// docstring). Remove Paytm's flag once it's completed one successful live
+// sync against a real account (docs/backlog.md).
 const SUPPORTED_BROKERS: { id: string; label: string; experimental?: boolean }[] = [
   { id: 'zerodha', label: 'Zerodha' },
-  { id: 'hdfc_securities', label: 'HDFC Securities', experimental: true },
+  { id: 'hdfc_securities', label: 'HDFC Securities' },
   { id: 'paytm_money', label: 'Paytm Money', experimental: true },
 ];
 const PENDING_BROKER_CONNECT_KEY = 'portfolio_pending_broker_connect';
@@ -251,6 +256,222 @@ function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () =
   );
 }
 
+// HDFC Securities' real login has no browser redirect at all — the app
+// itself collects the HDFC username/password and relays an OTP, in two
+// steps against POST .../login-start then POST .../verify-otp (see
+// backend/portfolio/hdfc_sync.py's module docstring for the full 5-step
+// flow this drives). Deliberately a separate component from BrokerRow
+// rather than a shared one with a redirect/no-redirect branch — the two
+// flows share almost no state shape (a URL to navigate to vs. two
+// sequential forms) and forcing one component to cover both would obscure
+// more than it'd reuse.
+function HdfcBrokerRow({ account, connection, onSynced }: {
+  account: PortfolioAccount; connection: BrokerConnection | undefined; onSynced: () => void;
+}) {
+  const label = 'HDFC Securities';
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [showCreds, setShowCreds] = useState(!connection);
+  const [apiKey, setApiKey] = useState('');
+  const [apiSecret, setApiSecret] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  // Set once login-start succeeds — switches the form to the OTP step.
+  // Reset (back to the credentials form) whenever the account/connection
+  // identity changes, so a stale in-progress login from a different
+  // account/connection can never bleed into this one.
+  const [otpRequired, setOtpRequired] = useState(false);
+  const [otp, setOtp] = useState('');
+
+  useEffect(() => {
+    setOtpRequired(false);
+    setOtp('');
+  }, [account.id, connection?.id]);
+
+  async function loginStart() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      if (showCreds && (!apiKey.trim() || !apiSecret.trim())) {
+        setMsg('Enter both API key and API secret.');
+        setBusy(false);
+        return;
+      }
+      if (!username.trim() || !password.trim()) {
+        setMsg('Enter your HDFC Securities username and password.');
+        setBusy(false);
+        return;
+      }
+      const body: { account_id: number; api_key?: string; api_secret?: string; username: string; password: string } = {
+        account_id: account.id, username: username.trim(), password,
+      };
+      if (showCreds) {
+        body.api_key = apiKey.trim();
+        body.api_secret = apiSecret.trim();
+      }
+      await api<{ otp_required: true }>('broker/hdfc_securities/login-start', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      setPassword('');
+      setOtpRequired(true);
+      setMsg('Enter the OTP HDFC just sent you.');
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'Could not start HDFC Securities login');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function verifyOtp() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      if (!otp.trim()) {
+        setMsg('Enter the OTP.');
+        setBusy(false);
+        return;
+      }
+      await api<{ connected: boolean }>('broker/hdfc_securities/verify-otp', {
+        method: 'POST',
+        body: JSON.stringify({ account_id: account.id, otp: otp.trim() }),
+      });
+      setOtp('');
+      setOtpRequired(false);
+      setShowCreds(false);
+      setMsg('Connected.');
+      onSynced();
+    } catch (e) {
+      // A failed OTP clears the backend's pending_token_id (single-use) —
+      // the user has to restart from login-start, not just retry the OTP.
+      setOtpRequired(false);
+      setMsg(e instanceof Error ? e.message : 'OTP verification failed — try connecting again');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sync() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api<BrokerSyncAck>('broker/hdfc_securities/sync', {
+        method: 'POST',
+        body: JSON.stringify({ account_id: account.id }),
+      });
+      setMsg('Syncing…');
+      onSynced();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'Sync failed');
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (connection?.sync_status !== 'syncing') return;
+    const id = setInterval(onSynced, 2000);
+    return () => clearInterval(id);
+  }, [connection?.sync_status, onSynced]);
+
+  useEffect(() => {
+    if (connection?.sync_status === 'success' && connection.last_sync_summary) {
+      const r = connection.last_sync_summary;
+      const archived = r.holdings_archived ? `, ${r.holdings_archived} archived` : '';
+      setMsg(`Synced ${r.holdings_synced} holdings, ${r.trades_synced} trades${archived}.`);
+      setBusy(false);
+    } else if (connection?.sync_status === 'error' && connection.last_sync_error) {
+      setMsg(connection.last_sync_error);
+      setBusy(false);
+    }
+  }, [connection?.sync_status, connection?.last_sync_summary, connection?.last_sync_error]);
+
+  const syncing = busy || connection?.sync_status === 'syncing';
+
+  return (
+    <span className="flex flex-col gap-1">
+      <span className="flex items-center gap-2 flex-wrap">
+        {connection?.connected && (
+          <span className="text-xs text-muted">
+            {label} connected{connection.last_synced_at ? ` · last synced ${new Date(connection.last_synced_at).toLocaleString('en-IN')}` : ' · never synced'}
+          </span>
+        )}
+        {connection && !connection.connected && (
+          <span className="text-xs text-muted">{label}: API key saved, not yet connected</span>
+        )}
+        {connection?.connected && (
+          <button onClick={sync} disabled={syncing} className="text-xs text-accent font-semibold disabled:opacity-50">
+            {syncing ? 'Syncing…' : 'Sync now'}
+          </button>
+        )}
+        {!otpRequired && (!connection || !connection.connected || showCreds) && (
+          <button onClick={loginStart} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
+            {busy ? 'Connecting…' : connection?.connected ? `Reconnect ${label}` : `Connect ${label}`}
+          </button>
+        )}
+        {connection && !showCreds && !otpRequired && (
+          <button onClick={() => setShowCreds(true)} className="text-xs text-muted hover:text-tx">
+            change API key
+          </button>
+        )}
+        {msg && <span className="text-xs text-muted">{msg}</span>}
+      </span>
+      {!otpRequired && (showCreds || !connection || !connection.connected) && (
+        <span className="flex items-center gap-2 flex-wrap">
+          {showCreds && (
+            <>
+              <input
+                value={apiKey}
+                onChange={e => setApiKey(e.target.value)}
+                placeholder="HDFC Securities API key"
+                className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-40"
+              />
+              <input
+                value={apiSecret}
+                onChange={e => setApiSecret(e.target.value)}
+                placeholder="API secret"
+                type="password"
+                className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-40"
+              />
+            </>
+          )}
+          <input
+            value={username}
+            onChange={e => setUsername(e.target.value)}
+            placeholder="HDFC username"
+            className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-32"
+          />
+          <input
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="HDFC password"
+            type="password"
+            className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-32"
+          />
+          {connection && showCreds && (
+            <button onClick={() => setShowCreds(false)} className="text-xs text-muted hover:text-tx">
+              cancel
+            </button>
+          )}
+        </span>
+      )}
+      {otpRequired && (
+        <span className="flex items-center gap-2">
+          <input
+            value={otp}
+            onChange={e => setOtp(e.target.value)}
+            placeholder="OTP"
+            inputMode="numeric"
+            className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-24"
+          />
+          <button onClick={verifyOtp} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
+            {busy ? 'Verifying…' : 'Verify OTP'}
+          </button>
+        </span>
+      )}
+    </span>
+  );
+}
+
 function BrokerRow({ account, broker, connection, onSynced }: {
   account: PortfolioAccount; broker: { id: string; label: string; experimental?: boolean };
   connection: BrokerConnection | undefined; onSynced: () => void;
@@ -404,13 +625,22 @@ function BrokerConnectControls({ account, connections, onSynced }: {
   return (
     <span className="flex items-center gap-3 flex-wrap">
       {SUPPORTED_BROKERS.map(broker => (
-        <BrokerRow
-          key={broker.id}
-          account={account}
-          broker={broker}
-          connection={connections.find(c => c.broker === broker.id)}
-          onSynced={onSynced}
-        />
+        broker.id === 'hdfc_securities' ? (
+          <HdfcBrokerRow
+            key={broker.id}
+            account={account}
+            connection={connections.find(c => c.broker === broker.id)}
+            onSynced={onSynced}
+          />
+        ) : (
+          <BrokerRow
+            key={broker.id}
+            account={account}
+            broker={broker}
+            connection={connections.find(c => c.broker === broker.id)}
+            onSynced={onSynced}
+          />
+        )
       ))}
     </span>
   );
