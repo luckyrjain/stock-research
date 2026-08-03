@@ -59,18 +59,6 @@ async function captureStaticPages(page) {
   }
 }
 
-// Captures the stock-analysis flow. Races three outcomes so a fast SSE
-// error (e.g. a blocked/unreachable data source — see api.py's `phase ===
-// 'error'` state, rendered as a "Try Again" banner in app/page.tsx) is
-// detected in seconds rather than silently eating the full timeout and
-// being mislabeled as "still in progress":
-//   - a completed BUY/HOLD/SELL verdict  -> analysis-report.png (the real
-//     deal — needs a configured LLM key + live network access to the six
-//     data sources)
-//   - the SSE stream errored out         -> analysis-error.png
-//   - neither within the timeout         -> analysis-progress.png, the
-//     same in-flight "fetching data" state this repo shipped before live
-//     capture was possible in every environment
 // Waits for whichever of two selectors appears first, without the "first
 // promise to settle" race going stale: waitForSelector only ever settles
 // early on a match, or late (at `timeoutMs`) on a miss — so converting a
@@ -90,6 +78,18 @@ async function waitForFirst(page, selectors, timeoutMs) {
   return rest.find(Boolean) ?? 'timeout';
 }
 
+// Captures the stock-analysis flow. Races three outcomes so a fast SSE
+// error (e.g. a blocked/unreachable data source — see api.py's `phase ===
+// 'error'` state, rendered as a "Try Again" banner in app/page.tsx) is
+// detected in seconds rather than silently eating the full timeout and
+// being mislabeled as "still in progress":
+//   - a completed BUY/HOLD/SELL verdict  -> analysis-report.png (the real
+//     deal — needs a configured LLM key + live network access to the six
+//     data sources)
+//   - the SSE stream errored out         -> analysis-error.png
+//   - neither within the timeout         -> analysis-progress.png, the
+//     same in-flight "fetching data" state this repo shipped before live
+//     capture was possible in every environment
 async function captureAnalysis(page) {
   await page.goto(`${BASE_URL}/?symbol=${encodeURIComponent(ANALYSIS_SYMBOL)}`, {
     waitUntil: 'domcontentloaded',
