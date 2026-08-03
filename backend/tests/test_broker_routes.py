@@ -231,6 +231,36 @@ class BrokerRoutesTest(unittest.TestCase):
         resp = client.get(f"/api/portfolio/broker/connections?profile_id={pid}")
         self.assertFalse(resp.json()["connections"][0]["connected"])
 
+    @patch("portfolio.portfolio_valuation.refresh_valuations")
+    @patch("portfolio.kite_sync.sync_account")
+    @patch("portfolio.kite_sync.exchange_request_token")
+    @patch("portfolio.kite_sync.get_login_url")
+    def test_reregistering_credentials_clears_stale_sync_outcome(
+        self, mock_login_url, mock_exchange, mock_sync, _mock_refresh,
+    ) -> None:
+        """A successful sync's summary was fetched under credentials that no
+        longer exist once they're replaced — leaving sync_status="success"
+        on display would misleadingly imply the *new* credentials already
+        synced something."""
+        mock_login_url.return_value = "https://kite.trade/connect/login?v=3"
+        mock_exchange.return_value = {"access_token": "token-for-old-key"}
+        mock_sync.return_value = {"holdings_synced": 3, "trades_synced": 1}
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        self._register_credentials("zerodha", acc, "old-key", "old-secret")
+        client.post("/api/portfolio/broker/zerodha/connect", json={"account_id": acc, "request_token": "rt"})
+        client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
+        conn = self._wait_for_sync_status(pid, "zerodha", acc)
+        self.assertEqual(conn["sync_status"], "success")
+
+        self._register_credentials("zerodha", acc, "new-key", "new-secret")
+
+        resp = client.get(f"/api/portfolio/broker/connections?profile_id={pid}")
+        conn = resp.json()["connections"][0]
+        self.assertEqual(conn["sync_status"], "idle")
+        self.assertIsNone(conn["last_sync_summary"])
+        self.assertIsNone(conn["last_sync_error"])
+
     def test_connect_no_registered_credentials_404(self) -> None:
         pid = self._mk_profile()
         acc = self._mk_account(pid)

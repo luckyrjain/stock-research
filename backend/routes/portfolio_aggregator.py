@@ -643,6 +643,11 @@ async def broker_login_url(request: Request, broker: str, body: BrokerLoginUrlIn
                     .values(
                         api_key=body.api_key, api_secret_enc=api_secret_enc,
                         access_token_enc=None, token_obtained_at=None,
+                        # A prior sync's outcome was fetched under credentials
+                        # that no longer exist — leaving "success" and its
+                        # summary on display would misleadingly imply the new
+                        # credentials have already synced something.
+                        sync_status="idle", last_sync_summary=None, last_sync_error=None,
                     )
                 )
             else:
@@ -811,23 +816,43 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
         from portfolio.portfolio_valuation import refresh_valuations
         from sqlalchemy import update
 
-        mod = _broker_sync_module(broker)
+        # Three independently-guarded steps, not one big try/except: a
+        # failure recording the outcome (the second step) must never stop
+        # the lock release (the third) from running, and refresh_valuations()
+        # runs on its own connection/transaction rather than nested inside
+        # the one used for the final status update — the original
+        # synchronous version of this endpoint never held a transaction open
+        # across that call either, and there is no reason for this one to.
+        result, error = None, None
         try:
+            mod = _broker_sync_module(broker)
             result = mod.sync_account(
                 api._get_db_engine(), account_id, prepared["access_token"], api_key=prepared["api_key"],
             )
+            if "error" in result:
+                error = result["error"]
+            else:
+                refresh_valuations(api._get_db_engine())
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # No HTTP request is left to surface this to — record it on the
+            # connection row instead, same "never let a background failure
+            # be silent" instinct as pipelines/watchlist_alerts.py.
+            api.log_event(api.LOGGER, "broker_sync_background_failed", level="error",
+                           account_id=account_id, broker=broker, error=str(exc))
+            error = str(exc)
+
+        try:
             with api._get_db_engine().begin() as conn:
-                if "error" in result:
+                if error is not None:
                     conn.execute(
                         update(broker_connections)
                         .where(
                             broker_connections.c.account_id == account_id,
                             broker_connections.c.broker == broker,
                         )
-                        .values(sync_status="error", last_sync_error=result["error"])
+                        .values(sync_status="error", last_sync_error=error)
                     )
                 else:
-                    refresh_valuations(api._get_db_engine())
                     conn.execute(
                         update(broker_connections)
                         .where(
@@ -837,20 +862,13 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
                         .values(sync_status="success", last_sync_summary=result, last_sync_error=None)
                     )
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            # No HTTP request is left to surface this to — record it on the
-            # connection row instead, same "never let a background failure
-            # be silent" instinct as pipelines/watchlist_alerts.py.
-            api.log_event(api.LOGGER, "broker_sync_background_failed", level="error",
+            # A failure writing the outcome itself (e.g. a transient DB
+            # blip) must not prevent the lock release below — a stuck
+            # sync_status="syncing" with the lock released is recoverable
+            # (the next sync attempt just overwrites it); a stuck lock
+            # would not be, short of its TTL expiring.
+            api.log_event(api.LOGGER, "broker_sync_status_write_failed", level="error",
                            account_id=account_id, broker=broker, error=str(exc))
-            with api._get_db_engine().begin() as conn:
-                conn.execute(
-                    update(broker_connections)
-                    .where(
-                        broker_connections.c.account_id == account_id,
-                        broker_connections.c.broker == broker,
-                    )
-                    .values(sync_status="error", last_sync_error=str(exc))
-                )
         finally:
             rate_limiter.release_lock(lock_name)
 

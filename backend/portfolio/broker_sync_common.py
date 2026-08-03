@@ -39,10 +39,16 @@ def _is_retryable(exc: Exception) -> bool:
     transient — worth a retry. A 4xx is not: retrying the same expired
     token or malformed request three times just delays the same failure
     the caller needs anyway to prompt a reconnect. `requests`' HTTPError
-    carries `.response.status_code`; broker SDK exceptions (e.g.
-    kiteconnect's TokenException) generally don't, so anything without a
-    status code attached is assumed transient rather than guessed at."""
+    carries `.response.status_code`; kiteconnect's own `KiteException`
+    hierarchy (e.g. `TokenException`, raised for auth failures) instead
+    carries a `.code` attribute directly on the exception — checked second
+    so a `requests`-style `.response.status_code` always wins if somehow
+    both are present. Anything with neither attached (a bare timeout,
+    connection error, or an exception type this codebase doesn't know
+    about) is assumed transient rather than guessed at."""
     status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status is None:
+        status = getattr(exc, "code", None)
     return status is None or status >= 500
 
 

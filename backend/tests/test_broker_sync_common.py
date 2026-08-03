@@ -18,6 +18,15 @@ class _HttpError(Exception):
         self.response = MagicMock(status_code=status_code)
 
 
+class _KiteException(Exception):
+    """Mirrors kiteconnect's own KiteException shape: a `.code` attribute
+    directly on the exception, no `.response` at all — unlike `requests`'
+    HTTPError, which carries the status on `.response.status_code`."""
+    def __init__(self, code):
+        super().__init__(f"kite error {code}")
+        self.code = code
+
+
 class CallWithBackoffTest(unittest.TestCase):
     def test_succeeds_on_first_attempt_no_retry(self):
         fn = MagicMock(return_value="ok")
@@ -52,6 +61,24 @@ class CallWithBackoffTest(unittest.TestCase):
         with self.assertRaises(_HttpError):
             call_with_backoff(fn, max_attempts=3, base_delay_seconds=0.001)
         self.assertEqual(fn.call_count, 1)
+
+    def test_kiteconnect_style_exception_code_attribute_is_honored(self):
+        """kiteconnect's own KiteException carries `.code` directly (no
+        `.response`) — a real gap this test guards against: without
+        checking `.code` too, TokenException(code=403) would fall through
+        to "no status attached" and get retried as if it were transient,
+        wasting ~3s of backoff sleep on an auth failure that a retry can
+        never fix."""
+        fn = MagicMock(side_effect=_KiteException(403))
+        with self.assertRaises(_KiteException):
+            call_with_backoff(fn, max_attempts=3, base_delay_seconds=0.001)
+        self.assertEqual(fn.call_count, 1)
+
+    def test_kiteconnect_style_5xx_code_is_retried(self):
+        fn = MagicMock(side_effect=[_KiteException(503), "ok"])
+        result = call_with_backoff(fn, max_attempts=3, base_delay_seconds=0.001)
+        self.assertEqual(result, "ok")
+        self.assertEqual(fn.call_count, 2)
 
 
 if __name__ == "__main__":
