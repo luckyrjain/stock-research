@@ -95,12 +95,21 @@ def find_or_create_asset(conn, account_id: int, symbol: str, exchange: str | Non
     broker sync module's own `tradingsymbol`-equivalent field is already the
     canonical NSE/BSE trading symbol (it's what the broker's own order
     actually executed against), so there's no broker-internal-code-to-
-    canonical-symbol gap to close the way there is for a raw CSV export."""
+    canonical-symbol gap to close the way there is for a raw CSV export.
+
+    Scoped to `meta.source == meta_source`, same as reconcile_stale_holdings()
+    — without this, a CSV-imported or manually-entered asset (or one created
+    by a DIFFERENT broker connection) sharing this symbol would be silently
+    adopted and overwritten instead of each source getting its own row. This
+    was a real gap: reconcile_stale_holdings()'s own "never touches a
+    different source's asset" guarantee only holds if the asset it's
+    checking was actually created under this source in the first place."""
     existing = conn.execute(
         select(assets_t.c.id).where(
             assets_t.c.account_id == account_id,
             assets_t.c.symbol == symbol,
             assets_t.c.type == "stock",
+            assets_t.c.meta["source"].as_string() == meta_source,
         )
     ).first()
     if existing:
@@ -202,7 +211,14 @@ def sync_holdings(conn, account_id: int, normalized_holdings: list[dict | None],
     for a reason that isn't "sold everything" must not archive an entire
     portfolio; that failure mode is worse than the stale-ghost-holding
     problem this function exists to fix, so reconciliation is skipped
-    (not run at all) on a genuinely empty holdings list."""
+    (not run at all) on a genuinely empty holdings list. The same guard
+    applies to a *non-empty* response where every single entry fails to
+    normalize (e.g. a broker field-name change) — `synced == 0` either
+    way, which is what actually gates reconciliation below, not merely
+    whether the raw/normalized list had any elements: a list full of
+    `None`s is non-empty but has nothing usable in `seen_symbols`, and
+    running reconciliation against an empty `seen_symbols` set is exactly
+    the "archive everything" failure this guard exists to prevent."""
     synced, skipped = 0, 0
     seen_symbols: set[str] = set()
     for h in normalized_holdings:
@@ -217,7 +233,7 @@ def sync_holdings(conn, account_id: int, normalized_holdings: list[dict | None],
         seen_symbols.add(h["symbol"])
         synced += 1
 
-    archived = reconcile_stale_holdings(conn, account_id, meta_source, seen_symbols) if normalized_holdings else 0
+    archived = reconcile_stale_holdings(conn, account_id, meta_source, seen_symbols) if synced > 0 else 0
     return {"holdings_synced": synced, "holdings_skipped": skipped, "holdings_archived": archived}
 
 
@@ -230,8 +246,12 @@ def sync_trades(conn, account_id: int, normalized_trades: list[dict | None], met
     passing this pre-check before either commits). Callers are expected to
     also hold routes/portfolio_aggregator.py's per-(account,broker) sync
     lock, so hitting the constraint here should be rare — when it does
-    happen, the whole sync's transaction aborts and surfaces as a clean
-    422 to that caller, never a silent duplicate row."""
+    happen, the whole sync's transaction aborts, never a silent duplicate
+    row. `sync_account()` runs on a background executor (see
+    routes/portfolio_aggregator.py's broker_sync()), not inline in an HTTP
+    request, so this surfaces as `sync_status="error"`/`last_sync_error`
+    on the connection row for the frontend to poll, not a synchronous
+    422."""
     synced, skipped, duplicates = 0, 0, 0
     seen = existing_trade_ids(conn, account_id, meta_source)
     for t in normalized_trades:

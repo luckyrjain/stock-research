@@ -884,6 +884,7 @@ export interface BrokerConnection {
 export interface BrokerSyncResult {
   holdings_synced:   number;
   holdings_skipped:  number;
+  holdings_archived: number;
   trades_synced:     number;
   trades_skipped:    number;
   trades_duplicate:  number;

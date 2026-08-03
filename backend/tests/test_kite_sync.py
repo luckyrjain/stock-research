@@ -162,7 +162,8 @@ class SyncAccountTest(unittest.TestCase):
         self.assertEqual(result["holdings_skipped"], 1)
 
     @patch("portfolio.kite_sync._get_kite_client")
-    def test_fetch_failure_returns_error_dict_not_raise(self, mock_get_client):
+    @patch("portfolio.broker_sync_common.time.sleep")  # opaque exception → call_with_backoff retries; skip the real sleeps
+    def test_fetch_failure_returns_error_dict_not_raise(self, _mock_sleep, mock_get_client):
         kite = MagicMock()
         kite.holdings.side_effect = Exception("network blip")
         mock_get_client.return_value = kite
@@ -236,10 +237,41 @@ class SyncAccountTest(unittest.TestCase):
             self.assertFalse(asset["archived"])
 
     @patch("portfolio.kite_sync._get_kite_client")
+    def test_non_empty_but_entirely_malformed_holdings_response_does_not_archive(self, mock_get_client):
+        """A NON-empty raw response where every single holding fails to
+        normalize (e.g. a broker field-name change) must not be treated as
+        "the fetch had content, so reconcile" — synced == 0 either way, and
+        reconciling against an empty seen_symbols set would archive every
+        existing holding for this connection despite the broker not having
+        actually said anything sold out. Distinct from the genuinely-empty
+        case above: this response is non-empty, so a naive "was the list
+        non-empty" check would (incorrectly) let reconciliation run."""
+        mock_get_client.return_value = self._mock_kite(holdings_data=[_HOLDING, _HOLDING_INFY], trades_data=[])
+        sync_account(self.engine, self.account_id, "fake-token", api_key="fake-key")
+
+        malformed = [{"exchange": "NSE"}, {"exchange": "BSE"}]  # both missing tradingsymbol/quantity
+        mock_get_client.return_value = self._mock_kite(holdings_data=malformed, trades_data=[])
+        result = sync_account(self.engine, self.account_id, "fake-token", api_key="fake-key")
+        self.assertEqual(result["holdings_synced"], 0)
+        self.assertEqual(result["holdings_skipped"], 2)
+        self.assertEqual(result["holdings_archived"], 0)
+
+        with self.engine.connect() as conn:
+            tcs = conn.execute(select(assets).where(assets.c.symbol == "TCS")).mappings().first()
+            infy = conn.execute(select(assets).where(assets.c.symbol == "INFY")).mappings().first()
+            self.assertFalse(tcs["archived"])
+            self.assertFalse(infy["archived"])
+
+    @patch("portfolio.kite_sync._get_kite_client")
     def test_reconciliation_never_touches_a_different_brokers_asset(self, mock_get_client):
         """Two different broker connections on the same account must never
         archive each other's holdings just because they happen to share a
-        symbol — reconciliation is scoped to meta.source."""
+        symbol — reconciliation is scoped to meta.source. Uses a NON-empty
+        holdings response containing the same symbol as the pre-existing
+        CSV asset — an empty response would make this pass vacuously,
+        since sync_holdings()'s loop (and reconciliation) never runs at
+        all against an empty list, regardless of whether the isolation
+        guarantee actually holds."""
         with self.engine.begin() as conn:
             conn.execute(
                 insert(assets).values(
@@ -247,7 +279,12 @@ class SyncAccountTest(unittest.TestCase):
                     meta={"source": "csv"}, archived=False,
                 )
             )
-        mock_get_client.return_value = self._mock_kite(holdings_data=[], trades_data=[])
+            csv_asset_id = conn.execute(
+                select(assets.c.id).where(assets.c.symbol == "TCS", assets.c.meta["source"].as_string() == "csv")
+            ).scalar_one()
+            conn.execute(insert(holdings).values(asset_id=csv_asset_id, units=100, avg_cost=2000.0))
+
+        mock_get_client.return_value = self._mock_kite(holdings_data=[_HOLDING], trades_data=[])
         sync_account(self.engine, self.account_id, "fake-token", api_key="fake-key")
 
         with self.engine.connect() as conn:
@@ -255,6 +292,20 @@ class SyncAccountTest(unittest.TestCase):
                 select(assets).where(assets.c.symbol == "TCS", assets.c.meta["source"].as_string() == "csv")
             ).mappings().first()
             self.assertFalse(csv_asset["archived"])
+            # The CSV-tracked position must be untouched — not adopted and
+            # overwritten by the broker sync's own TCS holding.
+            csv_holding = conn.execute(
+                select(holdings).where(holdings.c.asset_id == csv_asset["id"])
+            ).mappings().first()
+            self.assertEqual(float(csv_holding["units"]), 100.0)
+            self.assertEqual(float(csv_holding["avg_cost"]), 2000.0)
+
+            # The broker sync gets its OWN "TCS" asset row, not the CSV one.
+            zerodha_asset = conn.execute(
+                select(assets).where(assets.c.symbol == "TCS", assets.c.meta["source"].as_string() == "zerodha_api")
+            ).mappings().first()
+            self.assertIsNotNone(zerodha_asset)
+            self.assertNotEqual(zerodha_asset["id"], csv_asset["id"])
 
     # ── DB-level trade dedup guarantee (belt, not just the app-level pre-check) ──
 

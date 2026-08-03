@@ -124,7 +124,8 @@ class SyncAccountTest(unittest.TestCase):
         self.assertEqual(result["holdings_skipped"], 1)
 
     @patch("portfolio.paytm_sync._fetch_holdings")
-    def test_fetch_failure_returns_error_dict_not_raise(self, mock_holdings):
+    @patch("portfolio.broker_sync_common.time.sleep")  # opaque exception → call_with_backoff retries; skip the real sleeps
+    def test_fetch_failure_returns_error_dict_not_raise(self, _mock_sleep, mock_holdings):
         mock_holdings.side_effect = Exception("network blip")
 
         result = sync_account(self.engine, self.account_id, "fake-token", api_key="fake-key")

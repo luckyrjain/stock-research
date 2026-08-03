@@ -300,14 +300,17 @@ function BrokerRow({ account, broker, connection, onSynced }: {
         method: 'POST',
         body: JSON.stringify({ account_id: account.id }),
       });
-      // The sync itself runs in the background (202 Accepted) — the
-      // polling effect below picks up sync_status flipping to
-      // success/error via connection, which onSynced() re-fetches.
+      // The sync itself runs in the background (202 Accepted). `busy`
+      // deliberately stays true here rather than clearing in a `finally`
+      // below — the connections list hasn't been refetched yet at this
+      // point, so `connection.sync_status` is still whatever it was
+      // *before* this click, not yet "syncing". Clearing `busy` here would
+      // briefly re-enable "Sync now" until the next poll catches up. The
+      // status-resolution effect below clears it once the outcome is known.
       setMsg('Syncing…');
       onSynced();
     } catch (e) {
       setMsg(e instanceof Error ? e.message : 'Sync failed');
-    } finally {
       setBusy(false);
     }
   }
@@ -325,9 +328,12 @@ function BrokerRow({ account, broker, connection, onSynced }: {
   useEffect(() => {
     if (connection?.sync_status === 'success' && connection.last_sync_summary) {
       const r = connection.last_sync_summary;
-      setMsg(`Synced ${r.holdings_synced} holdings, ${r.trades_synced} trades.`);
+      const archived = r.holdings_archived ? `, ${r.holdings_archived} archived` : '';
+      setMsg(`Synced ${r.holdings_synced} holdings, ${r.trades_synced} trades${archived}.`);
+      setBusy(false);
     } else if (connection?.sync_status === 'error' && connection.last_sync_error) {
       setMsg(connection.last_sync_error);
+      setBusy(false);
     }
   }, [connection?.sync_status, connection?.last_sync_summary, connection?.last_sync_error]);
 
