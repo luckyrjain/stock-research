@@ -24,12 +24,12 @@ fi
 : "${DATABASE_URL:?DATABASE_URL not set — add it to .env or export it first (see docs/setup.md)}"
 
 echo "Seeding SME Signals (NSE Emerge + BSE SME golden/death cross data)..."
-(cd backend && ../.venv/bin/python sme_ema_pipeline.py) \
+(cd backend && ../.venv/bin/python -m pipelines.sme_ema_pipeline) \
   || echo "SME Signals pipeline reported an unhealthy run (see output above) — continuing."
 
 echo
 echo "Seeding Screener (NIFTY 500 quant + technical metrics — this is the slow one)..."
-(cd backend && ../.venv/bin/python screener_pipeline.py) \
+(cd backend && ../.venv/bin/python -m pipelines.screener_pipeline) \
   || echo "Screener pipeline reported an unhealthy run (see output above) — continuing."
 
 echo
