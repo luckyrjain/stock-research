@@ -115,21 +115,74 @@ def existing_trade_ids(conn, account_id: int, meta_source: str) -> set[str]:
     return {r[0] for r in rows}
 
 
+def reconcile_stale_holdings(conn, account_id: int, meta_source: str, seen_symbols: set[str]) -> int:
+    """Archives — never deletes, same convention cas_import.py already
+    established for a closed folio with real history: XIRR needs the
+    transaction trail even after a position is fully closed — a
+    broker-sourced asset that used to appear in this connection's holdings
+    but doesn't anymore (the account fully sold out of it). Scoped to
+    `meta.source == meta_source` so this only ever touches an asset THIS
+    broker connection created; a manually-entered or CAS/CSV-sourced asset
+    that happens to share a symbol is untouched. `sync_holdings()` calls
+    this only when the broker's fetch returned at least one real holding —
+    see its own docstring for why a genuinely empty response is treated as
+    "nothing to reconcile from" rather than "the user sold everything.\""""
+    rows = conn.execute(
+        select(assets_t.c.id, assets_t.c.symbol).where(
+            assets_t.c.account_id == account_id,
+            assets_t.c.type == "stock",
+            assets_t.c.archived.is_(False),
+            assets_t.c.meta["source"].as_string() == meta_source,
+        )
+    ).all()
+    archived = 0
+    for row in rows:
+        if row.symbol not in seen_symbols:
+            conn.execute(update(assets_t).where(assets_t.c.id == row.id).values(archived=True))
+            archived += 1
+    return archived
+
+
 def sync_holdings(conn, account_id: int, normalized_holdings: list[dict | None], meta_source: str, today: date) -> dict:
+    """A holdings sync is treated as authoritative for whatever this broker
+    connection itself created — a symbol previously synced but absent from
+    the latest fetch gets archived (see reconcile_stale_holdings), and a
+    previously-archived symbol reappearing (bought back after being fully
+    sold) is un-archived here. Deliberately NOT authoritative when the raw
+    fetch came back completely empty — a broker API hiccup returning `[]`
+    for a reason that isn't "sold everything" must not archive an entire
+    portfolio; that failure mode is worse than the stale-ghost-holding
+    problem this function exists to fix, so reconciliation is skipped
+    (not run at all) on a genuinely empty holdings list."""
     synced, skipped = 0, 0
+    seen_symbols: set[str] = set()
     for h in normalized_holdings:
         if h is None:
             skipped += 1
             continue
         asset_id = find_or_create_asset(conn, account_id, h["symbol"], h.get("exchange"), meta_source)
+        conn.execute(update(assets_t).where(assets_t.c.id == asset_id).values(archived=False))
         upsert_holding(conn, asset_id, h["quantity"], h.get("avg_price"))
         if h.get("last_price") is not None:
             upsert_valuation(conn, asset_id, today, h["quantity"] * h["last_price"])
+        seen_symbols.add(h["symbol"])
         synced += 1
-    return {"holdings_synced": synced, "holdings_skipped": skipped}
+
+    archived = reconcile_stale_holdings(conn, account_id, meta_source, seen_symbols) if normalized_holdings else 0
+    return {"holdings_synced": synced, "holdings_skipped": skipped, "holdings_archived": archived}
 
 
 def sync_trades(conn, account_id: int, normalized_trades: list[dict | None], meta_source: str) -> dict:
+    """The Python-level `seen` pre-check below is the fast path (avoids a
+    round trip to the DB's own constraint in the common, single-writer
+    case) — but `transactions.uq_transactions_asset_external_ref` (see
+    db/models.py) is what actually *guarantees* no duplicate trade under a
+    genuine race (two concurrent syncs for the same connection both
+    passing this pre-check before either commits). Callers are expected to
+    also hold routes/portfolio_aggregator.py's per-(account,broker) sync
+    lock, so hitting the constraint here should be rare — when it does
+    happen, the whole sync's transaction aborts and surfaces as a clean
+    422 to that caller, never a silent duplicate row."""
     synced, skipped, duplicates = 0, 0, 0
     seen = existing_trade_ids(conn, account_id, meta_source)
     for t in normalized_trades:
@@ -148,6 +201,7 @@ def sync_trades(conn, account_id: int, normalized_trades: list[dict | None], met
                 type=t["side"],
                 amount=t["quantity"] * t["price"],
                 units=t["quantity"],
+                external_ref=f"{meta_source}:{t['trade_id']}",
                 meta={
                     "source": meta_source,
                     "trade_id": t["trade_id"],

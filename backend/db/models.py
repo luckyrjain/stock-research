@@ -450,7 +450,17 @@ transactions = Table(
     Column("amount",   Numeric(16, 2), nullable=False),
     Column("units",    Numeric(18, 4)),
     Column("meta",     JSON, nullable=False, server_default="{}"),
+    # NULL for cas_import/csv_import rows (their own idempotency is content-
+    # based, documented in docs/database.md's own known-gaps list) — set only
+    # by portfolio/broker_sync_common.py, as f"{meta_source}:{trade_id}", so a
+    # broker's own trade id is a real, DB-enforced unique key per asset rather
+    # than a Python-only pre-check a concurrent sync could race past. A plain
+    # column + UniqueConstraint, not a functional/partial index on meta's own
+    # JSON fields, so this holds identically on both Postgres (production) and
+    # SQLite (this table's test backend) with no dialect-specific expression.
+    Column("external_ref", String(80)),
     Index("idx_transactions_asset", "asset_id"),
+    UniqueConstraint("asset_id", "external_ref", name="uq_transactions_asset_external_ref"),
 )
 
 

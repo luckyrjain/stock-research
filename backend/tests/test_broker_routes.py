@@ -311,6 +311,40 @@ class BrokerRoutesTest(unittest.TestCase):
         mock_sync.assert_called_once()
         self.assertEqual(mock_sync.call_args.kwargs.get("api_key"), "my-key")
 
+    @patch("portfolio.portfolio_valuation.refresh_valuations")
+    @patch("portfolio.kite_sync.sync_account")
+    @patch("portfolio.kite_sync.exchange_request_token")
+    @patch("portfolio.kite_sync.get_login_url")
+    def test_concurrent_sync_for_same_connection_returns_409(
+        self, mock_login_url, mock_exchange, mock_sync, _mock_refresh,
+    ) -> None:
+        """A double-click, a retried request, or two open tabs must not let
+        two sync_account() calls for the same connection race each other —
+        simulates "already running" the same way a real concurrent request
+        would leave the lock held."""
+        mock_login_url.return_value = "https://kite.trade/connect/login?v=3"
+        mock_exchange.return_value = {"access_token": "token-1"}
+        mock_sync.return_value = {"holdings_synced": 0, "trades_synced": 0}
+
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        self._register_credentials("zerodha", acc, "k", "s")
+        client.post("/api/portfolio/broker/zerodha/connect", json={"account_id": acc, "request_token": "rt"})
+
+        lock_name = f"broker_sync:{acc}:zerodha"
+        self.assertTrue(rate_limiter.try_acquire_lock(lock_name, 300))
+        try:
+            resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
+            self.assertEqual(resp.status_code, 409)
+            mock_sync.assert_not_called()
+        finally:
+            rate_limiter.release_lock(lock_name)
+
+        # Lock released — a subsequent sync must succeed normally.
+        resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        mock_sync.assert_called_once()
+
     @patch("portfolio.kite_sync.sync_account")
     @patch("portfolio.kite_sync.exchange_request_token")
     @patch("portfolio.kite_sync.get_login_url")

@@ -28,6 +28,13 @@ _ASSET_TYPES = {"mf", "stock", "fd", "epf", "ppf", "cash", "manual", "loan"}
 # db/models.py for why the table itself is already broker-agnostic.
 _SUPPORTED_BROKERS = {"zerodha", "hdfc_securities", "paytm_money"}
 
+# Generous upper bound on one account's holdings+trades sync — same
+# "TTL survives a crashed worker" reasoning as api.py's SME/screener/
+# market-picks refresh locks, just scoped much smaller (one connection,
+# not a whole market/pipeline run).
+_BROKER_SYNC_LOCK_TTL_SECONDS = 300
+
+
 def _broker_sync_module(broker: str):
     """Returns the portfolio.<broker>_sync module for a supported broker.
     A plain if/elif over three known names rather than importlib string
@@ -684,11 +691,24 @@ async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
 
 @router.post("/broker/{broker}/sync")
 async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
+    """A double-click, two open tabs, or a retried request while a sync is
+    still running could otherwise race two sync_account() calls for the
+    same connection against each other — both would pass
+    broker_sync_common.py's own trade-id pre-check before either commits,
+    producing duplicate trades were it not for `transactions`'s own
+    `uq_transactions_asset_external_ref` DB constraint (belt) plus this
+    per-connection lock (suspenders, and the one that actually prevents a
+    concurrent attempt from starting at all — same `try_acquire_lock`/
+    `release_lock` pattern api.py's SME/screener/market-picks refresh
+    endpoints already use for the identical "don't let two runs overlap"
+    problem)."""
     _require_supported_broker(broker)
     account_id = body.account_id
+    lock_name = f"broker_sync:{account_id}:{broker}"
 
     def _sync() -> dict:
         import api
+        from core import rate_limiter
         from core.crypto import EncryptionNotConfigured, decrypt
         from db.models import broker_connections
         from portfolio.portfolio_valuation import refresh_valuations
@@ -696,31 +716,36 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
 
         mod = _broker_sync_module(broker)
 
-        with api._get_db_engine().connect() as conn:
-            conn_row = conn.execute(
-                select(broker_connections.c.api_key, broker_connections.c.access_token_enc).where(
-                    broker_connections.c.account_id == account_id,
-                    broker_connections.c.broker == broker,
-                )
-            ).first()
-        if conn_row is None or not conn_row.access_token_enc:
-            raise HTTPException(status_code=404, detail=f"no connected {broker} account for this account_id")
-
+        if not rate_limiter.try_acquire_lock(lock_name, _BROKER_SYNC_LOCK_TTL_SECONDS):
+            raise HTTPException(status_code=409, detail=f"a sync for this {broker} connection is already running")
         try:
-            access_token = decrypt(conn_row.access_token_enc)
-        except EncryptionNotConfigured as exc:
-            raise HTTPException(status_code=503, detail=str(exc))
-        except Exception:
-            raise HTTPException(
-                status_code=422,
-                detail="stored credential could not be decrypted — reconnect this broker account",
-            )
+            with api._get_db_engine().connect() as conn:
+                conn_row = conn.execute(
+                    select(broker_connections.c.api_key, broker_connections.c.access_token_enc).where(
+                        broker_connections.c.account_id == account_id,
+                        broker_connections.c.broker == broker,
+                    )
+                ).first()
+            if conn_row is None or not conn_row.access_token_enc:
+                raise HTTPException(status_code=404, detail=f"no connected {broker} account for this account_id")
 
-        result = mod.sync_account(api._get_db_engine(), account_id, access_token, api_key=conn_row.api_key)
-        if "error" in result:
-            raise HTTPException(status_code=422, detail=result["error"])
-        refresh_valuations(api._get_db_engine())
-        return result
+            try:
+                access_token = decrypt(conn_row.access_token_enc)
+            except EncryptionNotConfigured as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+            except Exception:
+                raise HTTPException(
+                    status_code=422,
+                    detail="stored credential could not be decrypted — reconnect this broker account",
+                )
+
+            result = mod.sync_account(api._get_db_engine(), account_id, access_token, api_key=conn_row.api_key)
+            if "error" in result:
+                raise HTTPException(status_code=422, detail=result["error"])
+            refresh_valuations(api._get_db_engine())
+            return result
+        finally:
+            rate_limiter.release_lock(lock_name)
 
     return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
 

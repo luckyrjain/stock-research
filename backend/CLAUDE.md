@@ -1173,12 +1173,49 @@ this one).
    request_token)` / `sync_account(engine, account_id, access_token, api_key)` interface, so
    `routes/portfolio_aggregator.py::_broker_sync_module(broker)` dispatches on `broker` with a
    plain `if/elif` over three known module imports rather than any string-built import path.
-   `broker_sync_common.py` holds the shared "write an already-normalized holding/trade into
-   `assets`/`holdings`/`valuations`/`transactions`" half every module builds on
-   (`find_or_create_asset`/`upsert_holding`/`upsert_valuation`/`sync_holdings`/`sync_trades`) —
-   reading and interpreting each broker's own raw JSON shape (field names, timestamp format) stays
-   local to that broker's own module, normalized into a common intermediate dict before the shared
-   functions ever see it. `kite_sync.py` talks to the real `kiteconnect` PyPI package (its
+   `sync_account()` wraps its holdings + trades writes in **one** `engine.begin()` transaction —
+   an insert failing partway through rolls back everything from that sync attempt, never a mix of
+   old trades against new holdings. `broker_sync_common.py` holds the shared "write an
+   already-normalized holding/trade into `assets`/`holdings`/`valuations`/`transactions`" half
+   every module builds on (`find_or_create_asset`/`upsert_holding`/`upsert_valuation`/
+   `sync_holdings`/`sync_trades`/`reconcile_stale_holdings`) — reading and interpreting each
+   broker's own raw JSON shape (field names, timestamp format) stays local to that broker's own
+   module, normalized into a common intermediate dict before the shared functions ever see it.
+
+   - **Trade dedup is DB-enforced, not just a Python pre-check.** `transactions.external_ref`
+     (`f"{meta_source}:{trade_id}"`, `UniqueConstraint(asset_id, external_ref)`,
+     `uq_transactions_asset_external_ref`) means a broker's own trade id can only ever land once
+     per asset regardless of what raced past `sync_trades()`'s own in-memory `seen` pre-check —
+     that pre-check is the fast path for the common single-writer case; the constraint is what
+     actually *guarantees* correctness under a genuine concurrent-sync race, at the cost of
+     aborting that sync's whole transaction (never a silent duplicate row) if it's ever hit. NULL
+     for `cas_import`/`csv_import` rows (their own idempotency stays content-based, a pre-existing
+     documented gap — see `docs/database.md`'s known-schema-gaps list), so this constraint has no
+     effect on either import path.
+   - **Holdings sync is authoritative for what it created, never for anything else.**
+     `reconcile_stale_holdings()` archives (same `archived=true`-not-deleted convention
+     `cas_import.py` already established for a closed folio — the transaction history survives
+     for XIRR) a `stock` asset whose `meta.source` matches this broker connection and whose symbol
+     is missing from the *current* holdings fetch — i.e. genuinely sold out completely.
+     Re-appearing in a later sync (bought back) un-archives it. Scoped strictly to
+     `meta.source == meta_source`, so two different brokers (or a manual/CSV-sourced asset)
+     sharing a symbol under the same account can never archive each other's holdings. **Never
+     runs at all when the raw holdings fetch came back completely empty** — a broker API hiccup
+     returning `[]` is indistinguishable from "sold literally everything," and silently archiving
+     an entire portfolio on that ambiguity would be worse than the stale-ghost-holding problem
+     this exists to fix; it only reconciles when at least one real holding was actually returned.
+   - **Concurrent syncs for the same connection are locked out**, not just DB-constraint-protected
+     — `routes/portfolio_aggregator.py`'s `POST .../sync` takes `core/rate_limiter.py`'s
+     `try_acquire_lock("broker_sync:{account_id}:{broker}", 300)` before calling `sync_account()`
+     (same `try_acquire_lock`/`release_lock` pattern the SME/screener/market-picks refresh
+     endpoints already use for the identical "don't let two runs of the same thing overlap"
+     problem), returning `409` immediately rather than letting a double-click or two open tabs
+     race two full syncs against each other. The `external_ref` constraint above is the backstop
+     for whatever this lock doesn't catch (a crashed worker whose lock TTL hasn't expired yet,
+     Redis unavailable and falling back to a per-process in-memory lock across multiple workers) —
+     belt and suspenders, not either/or.
+
+   `kite_sync.py` talks to the real `kiteconnect` PyPI package (its
    published API surface confirmed via `inspect.signature` against the installed package, not just
    documentation); `hdfc_sync.py`/`paytm_sync.py` talk to their REST endpoints directly via
    `requests` — Paytm Money's own client SDK (`pyPMClient`) has no working PyPI release, so
@@ -1223,16 +1260,54 @@ this one).
    `{account_id, broker}` back, POSTs `connect` with the returned `request_token`, and redirects
    to `/portfolio-aggregator` on success.
 6. **Migrations**: `df6b59581b8b` (the `broker_connections` table itself, Zerodha-only at the
-   time) then `6c43f4a2d489` (adding `api_key`/`api_secret_enc` once the per-connection-credential
-   redesign landed) — both round-trip-verified (upgrade → `alembic check` clean → downgrade →
-   upgrade) against a real local Postgres instance, same rigor as every other revision in this repo.
+   time), `6c43f4a2d489` (adding `api_key`/`api_secret_enc` once the per-connection-credential
+   redesign landed), and `b7cf5b79ce66` (`transactions.external_ref` + its unique constraint, for
+   the DB-enforced trade dedup in point 3 above) — all three round-trip-verified (upgrade →
+   `alembic check` clean → downgrade → upgrade) against a real local Postgres instance, same rigor
+   as every other revision in this repo.
 7. **Tests**: `tests/test_broker_routes.py` (endpoint-level, SQLite in-memory) includes
    `test_two_accounts_use_independent_credentials_for_the_same_broker` — the regression test for
    point 2's actual bug, proving two accounts connecting the same broker get fully independent
    `api_key`/`api_secret`/`access_token` with no cross-contamination — plus coverage for the
-   register/resume/reconnect-invalidates-stale-token login-url modes. `tests/test_kite_sync.py`,
-   `test_hdfc_sync.py`, `test_paytm_sync.py` cover each sync module's holdings/trades
-   normalization, dedup, and malformed-record handling independently of the route layer.
+   register/resume/reconnect-invalidates-stale-token login-url modes and
+   `test_concurrent_sync_for_same_connection_returns_409` (point 3's lock, simulated by holding
+   the same lock name the route itself would acquire). `tests/test_kite_sync.py` additionally
+   covers point 3's holdings reconciliation (sold-out → archived, bought-back → un-archived,
+   never touching a different-source asset sharing a symbol, and never firing on a genuinely
+   empty holdings response) and proves the `external_ref` constraint itself rejects a duplicate
+   insert at the DB level, not just via the application-side pre-check; `test_hdfc_sync.py`/
+   `test_paytm_sync.py` cover the same normalization/dedup/malformed-record ground for their own
+   brokers without repeating the shared-logic tests `broker_sync_common.py` already owns once.
+8. **Explicitly deferred, from an external review of this feature** — real gaps, not silently
+   assumed solved, just not the right increment for a personal-scale tool per this repo's own
+   architectural constraints (root `CLAUDE.md`'s "extremely reliable monolith" table):
+   - **Synchronous sync, no job queue.** `POST .../sync` blocks for the whole call. Fine at
+     personal scale (a few hundred trades); would need converting to a job-id-plus-poll shape
+     (a Postgres table, not a broker — see the binding constraints) if a connection's trade
+     history ever grows into the thousands and syncs start taking tens of seconds.
+   - **No broker-side rate-limit/backoff handling.** A `429` from Kite/HDFC/Paytm surfaces as a
+     generic `{"error": ...}` from `sync_account()`'s catch-all, same as any other fetch failure
+     — correct but undifferentiated. Exponential backoff/circuit-breaker behavior was considered
+     and deliberately not built: this is a request-triggered, on-demand sync (not a scheduled
+     batch job hitting the same broker repeatedly), so the failure mode is "the user's own click
+     failed, they can retry" rather than a runaway retry storm.
+   - **No proactive token-expiry detection.** An expired/invalid access token surfaces as a `422`
+     from the broker's own error message (safe, deterministic — the user reconnects via the
+     existing "Reconnect" button), but `access_token_enc`/`connected` aren't proactively cleared
+     on an auth-specific failure the way a credential *replacement* clears them (see point 2). Low
+     priority: the current behavior is already correct, just not maximally informative.
+   - **No audit columns** (`last_sync_error`, `last_sync_started_at`, etc.) beyond
+     `last_synced_at`. Would help support/debugging at real scale; not worth the schema churn for
+     a personal tool where the operator IS the only support contact.
+   - **No broker capability flags** (`supports_holdings`/`supports_orders`/etc.). All three
+     brokers today expose the identical holdings+trades shape, so this would be an abstraction
+     with no second real caller yet — add it if/when a fourth broker actually needs a different
+     capability set, not speculatively now.
+   - **HDFC Securities and Paytm Money should be labeled experimental/beta** in the UI and docs
+     until each has completed one successful live sync against a real account — their exact REST
+     shape was never verified against a live response in this sandbox (see point 3's disclosed
+     limitation). Not yet done as of this writing; a `docs/backlog.md` entry would be the right
+     place to track it.
 
 ### Portfolio valuation engine (`portfolio/portfolio_valuation.py`)
 
@@ -2221,16 +2296,18 @@ own, because nothing enforced a narrower blast radius).
    a genuinely empty database and verified (against a real local Postgres instance) to both
    `alembic upgrade head` cleanly onto nothing and `alembic downgrade base` cleanly back to
    nothing, producing exactly the same 11 tables, indexes, and constraints
-   `db/schema.sql`/`metadata.create_all()` already produce. **There are 6 revisions today** —
+   `db/schema.sql`/`metadata.create_all()` already produce. **There are 7 revisions today** —
    `0001_baseline_schema`, then `684c8a31e7e0_add_eod_price_store_and_corporate_` (the
    `securities`/`prices_daily`/`mf_nav_daily`/`corporate_actions` tables) and
    `8613aafc2d9d_add_portfolio_aggregator_foundation_` (`profiles`/`accounts`/`assets`/
    `holdings`/`valuations`/`transactions`), bringing the schema to 21 tables; `a7f2c1d09b34` adds
    `app_state` for 22; `df6b59581b8b` adds `broker_connections` for 23 (Zerodha-only shape at the
    time); `6c43f4a2d489` adds that table's `api_key`/`api_secret_enc` columns (the
-   per-connection-credential redesign — see "Broker API sync" below), no new table. Every revision
-   after `0001` was autogenerated and round-trip-verified (upgrade → `alembic check` clean →
-   downgrade → upgrade) against an isolated scratch Postgres, the same way `0001` was.
+   per-connection-credential redesign — see "Broker API sync" below), no new table; `b7cf5b79ce66`
+   adds `transactions.external_ref` + its unique constraint (DB-enforced broker-trade dedup, same
+   section), also no new table. Every revision after `0001` was autogenerated and
+   round-trip-verified (upgrade → `alembic check` clean → downgrade → upgrade) against an isolated
+   scratch Postgres, the same way `0001` was.
 3. **A deployment predating Alembic must `alembic stamp 0001` and THEN
    `alembic upgrade head` — not a bare `alembic stamp head`.** Such a deployment already has the
    original 11 tables (created by hand via `db/schema.sql`, or by a pipeline's `--setup-db`
