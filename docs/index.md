@@ -37,8 +37,9 @@ AlphaPulse already think about X."
 **Portfolio Aggregator** — a separate, unauthenticated personal net-worth tracker (distinct from
 the Portfolio/Positions page above): profiles → accounts → assets (stocks, mutual funds, FDs,
 EPF/PPF, cash, loans), fed by an EOD price store (NSE bhavcopy + AMFI NAV), a corporate-actions/
-adjusted-price pipeline, a nightly valuation + XIRR engine, and CAS PDF / broker CSV import
-(reconciled via a securities-master symbol resolver). Reachable at `/portfolio-aggregator`.
+adjusted-price pipeline, a nightly valuation + XIRR engine, and CAS PDF / broker CSV import or a
+direct broker API sync (Zerodha, HDFC Securities, Paytm Money — reconciled via a
+securities-master symbol resolver). Reachable at `/portfolio-aggregator`.
 
 **Accounts & API access** — passwordless magic-link sign-in, and API keys for programmatic
 access to a public `/api/v1/*` surface.

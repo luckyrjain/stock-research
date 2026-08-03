@@ -1353,11 +1353,11 @@ this one).
      brokers today expose the identical holdings+trades shape, so this would be an abstraction
      with no second real caller yet — add it if/when a fourth broker actually needs a different
      capability set, not speculatively now.
-   - **HDFC Securities and Paytm Money should be labeled experimental/beta** in the UI and docs
-     until each has completed one successful live sync against a real account — their exact REST
-     shape was never verified against a live response in this sandbox (see point 3's disclosed
-     limitation). Not yet done as of this writing; a `docs/backlog.md` entry would be the right
-     place to track it.
+   - **HDFC Securities and Paytm Money are labeled experimental/beta in the UI** (`BrokerRow` in
+     `frontend/app/portfolio-aggregator/page.tsx`) until each has completed one successful live
+     sync against a real account — their exact REST shape was never verified against a live
+     response in this sandbox (see point 3's disclosed limitation). Tracked in `docs/backlog.md`'s
+     "Product roadmap" section until that first live sync closes it.
 
 ### Portfolio valuation engine (`portfolio/portfolio_valuation.py`)
 

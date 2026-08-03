@@ -20,10 +20,18 @@ const PROFILE_KEY = 'portfolio_aggregator_profile_id';
 // echo custom state back, so the account + broker being connected are
 // stashed here right before the browser leaves for the broker's login
 // page, and read back by the shared broker-callback page.
-const SUPPORTED_BROKERS: { id: string; label: string }[] = [
+//
+// HDFC Securities and Paytm Money are marked experimental: their exact REST
+// shape (endpoints, field names, checksum scheme) was inferred from public
+// docs/SDK snippets, not verified against a live response (see
+// backend/portfolio/hdfc_sync.py's and paytm_sync.py's own module
+// docstrings) — unlike Zerodha, confirmed against the installed
+// kiteconnect package's real API surface. Remove once each has completed
+// one successful live sync against a real account (docs/backlog.md).
+const SUPPORTED_BROKERS: { id: string; label: string; experimental?: boolean }[] = [
   { id: 'zerodha', label: 'Zerodha' },
-  { id: 'hdfc_securities', label: 'HDFC Securities' },
-  { id: 'paytm_money', label: 'Paytm Money' },
+  { id: 'hdfc_securities', label: 'HDFC Securities', experimental: true },
+  { id: 'paytm_money', label: 'Paytm Money', experimental: true },
 ];
 const PENDING_BROKER_CONNECT_KEY = 'portfolio_pending_broker_connect';
 
@@ -244,7 +252,7 @@ function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () =
 }
 
 function BrokerRow({ account, broker, connection, onSynced }: {
-  account: PortfolioAccount; broker: { id: string; label: string };
+  account: PortfolioAccount; broker: { id: string; label: string; experimental?: boolean };
   connection: BrokerConnection | undefined; onSynced: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -328,6 +336,11 @@ function BrokerRow({ account, broker, connection, onSynced }: {
   return (
     <span className="flex flex-col gap-1">
       <span className="flex items-center gap-2 flex-wrap">
+        {broker.experimental && (
+          <span className="text-xs text-hold font-semibold" title="Not yet verified against a live account — see docs/backlog.md">
+            beta
+          </span>
+        )}
         {connection?.connected && (
           <span className="text-xs text-muted">
             {broker.label} connected{connection.last_synced_at ? ` · last synced ${new Date(connection.last_synced_at).toLocaleString('en-IN')}` : ' · never synced'}

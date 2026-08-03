@@ -50,13 +50,16 @@ Nothing on that rejected list should be proposed or scaffolded without the human
    this is **not** a credential brute-force risk; it is unauthenticated DB-load amplification.
    One `_rate_limit()` call before the lookup fixes it. *(`api-reference.md` §Response-contract
    inconsistencies #3)*
-2. **`transactions` has no unique constraint.** Both importers' idempotency is a read-then-write
-   with no DB-level guard, so two concurrent uploads of overlapping tradebooks can both insert.
-   Needs a partial unique index — i.e. a migration. *(`database.md` §Known schema gaps #6)*
-3. **Portfolio Aggregator has no auth and no ownership scoping.** All 17 endpoints accept any
-   profile id from any caller, and the six tables hold real personal financial data. Deliberate
-   for a localhost/Tailscale tool — but it must not be exposed on a public interface as-is.
-   *(`api-reference.md`, `database.md`, `feature-catalog.md`)*
+2. **`cas_import`/`csv_import` still have no unique constraint.** Both importers' idempotency is a
+   read-then-write with no DB-level guard, so two concurrent uploads of overlapping tradebooks can
+   both insert. The broker-API-sync writer closed this exact gap for its own rows
+   (`transactions.external_ref` + `uq_transactions_asset_external_ref`); the same fix would close
+   it for these two paths too, if it's ever worth doing. *(`database.md` §Known schema gaps #6)*
+3. **Portfolio Aggregator has no auth and no ownership scoping.** All 22 endpoints (including the
+   4 broker-API-sync ones) accept any profile id/account id from any caller, and the tables hold
+   real personal financial data — including, since broker sync landed, encrypted broker app
+   secrets and access tokens. Deliberate for a localhost/Tailscale tool — but it must not be
+   exposed on a public interface as-is. *(`api-reference.md`, `database.md`, `feature-catalog.md`)*
 4. **`client_id` is a grouping key, not a security boundary.** Anyone holding one can read/write
    that browser's anonymous watchlist and positions. Claim endpoints are rate-limited and
    audit-logged, which bounds abuse without eliminating a targeted guess. *(`feature-catalog.md`)*
@@ -159,7 +162,7 @@ Fixed on this branch: global focus indicator, `muted` contrast, solid-fill ink, 
 
 ## Engineering debt
 
-- **`api.py` is ~2,760 lines and holds 29 of the 57 routes.** Only watchlist, positions and the
+- **`api.py` is ~2,760 lines and holds 29 of the 61 routes.** Only watchlist, positions and the
   Portfolio Aggregator have been extracted to `routes/`.
 - **`pipelines/market_picks_pipeline.py` has never been decomposed** — the largest module in the repo, with
   six phases sharing mutable state and threading/async coordination.
@@ -198,6 +201,15 @@ Fixed on this branch: global focus indicator, `muted` contrast, solid-fill ink, 
 fixtures, but nobody has run a real CAMS/KFintech PDF or a real broker export through them. The
 untestable part is third-party (`casparser`'s extraction of your actual statement layout) and your
 broker's actual CSV quirks — more synthetic fixtures would re-test the same code paths.
+
+- **~~HDFC Securities and Paytm Money broker-sync should be labeled experimental/beta~~ — done.**
+  `BrokerRow` (`frontend/app/portfolio-aggregator/page.tsx`) now shows a "beta" tag for both. Still
+  open: actually completing one successful live sync against a real account for each, to confirm
+  their REST shape (base URL, endpoint paths, checksum-signing scheme, response field names) —
+  currently inferred from public docs/SDK snippets, not verified against a live response, since
+  this sandbox's outbound fetches to both developer portals are blocked (403). Zerodha's
+  `kiteconnect` integration doesn't carry this caveat (verified against the installed package's
+  real API surface). See `backend/CLAUDE.md`'s "Broker API sync" §8 for the full disclosure.
 
 ---
 

@@ -170,7 +170,14 @@ broken down by type/account). Fed by:
   since a Kite Connect/HDFC/Paytm Money "app" is only ever issued to one specific broker login.
   The app secret and the broker's access token are both encrypted at rest (Fernet,
   `PORTFOLIO_ENCRYPTION_KEY`); re-registering a broker account's credentials invalidates its
-  prior access token rather than leaving a stale one on file.
+  prior access token (and any stale sync result shown from before the change) rather than leaving
+  it on file. A sync's trades are deduped at the database level (a unique constraint, not just an
+  in-memory check), and a sold-out holding is archived — never deleted, so XIRR history survives —
+  while a broker response that comes back completely empty is treated as ambiguous and left alone,
+  never archiving an entire portfolio on an API hiccup. Kicking off a sync returns immediately and
+  runs in the background (polled via `sync_status`/`last_sync_summary`/`last_sync_error`), guarded
+  by a per-connection concurrency lock, a sliding-window rate limit on sync attempts, and
+  exponential-backoff retry on the broker's own API calls.
 
 No authentication by design — profiles are a picker, not an account system. Reachable at
 `/portfolio-aggregator` (not `/portfolio`, which stays the Positions page); labelled "Net Worth"
