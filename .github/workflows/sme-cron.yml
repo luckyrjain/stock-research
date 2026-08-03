@@ -38,4 +38,4 @@ jobs:
       - name: Run SME golden cross pipeline
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python sme_ema_pipeline.py
+        run: python -m pipelines.sme_ema_pipeline

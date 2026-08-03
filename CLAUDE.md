@@ -16,11 +16,11 @@ A full-stack Indian equity research platform. Given an NSE/BSE ticker (e.g. `TCS
 
 A second mode — **Market Picks** — runs a multi-agent pipeline that scrapes 20 Indian and global financial sources, extracts stock recommendations with an LLM, validates symbols against the NSE equity master, runs due diligence on each, and returns a confidence-ranked watchlist with BUY / WATCHLIST / HOLD / SELL ratings.
 
-A third mode — **SME Signals** — is a PostgreSQL-backed batch pipeline (`sme_ema_pipeline.py`) that screens all NSE Emerge + BSE SME stocks for EMA20/EMA50 **golden cross** and **death cross** events, served at `/sme-signals` via `GET /api/sme-signals`.
+A third mode — **SME Signals** — is a PostgreSQL-backed batch pipeline (`pipelines/sme_ema_pipeline.py`) that screens all NSE Emerge + BSE SME stocks for EMA20/EMA50 **golden cross** and **death cross** events, served at `/sme-signals` via `GET /api/sme-signals`.
 
-A fourth mode — **Screener** — is a PostgreSQL-backed batch pipeline (`screener_pipeline.py`) over the NIFTY 500 universe, filterable/sortable by industry, P/E, market cap, and RSI/EMA trend, served at `/screener` via `GET /api/screener`.
+A fourth mode — **Screener** — is a PostgreSQL-backed batch pipeline (`pipelines/screener_pipeline.py`) over the NIFTY 500 universe, filterable/sortable by industry, P/E, market cap, and RSI/EMA trend, served at `/screener` via `GET /api/screener`.
 
-A **Watchlist** ties the three modes together: a star button in each dashboard adds/removes a stock from a PostgreSQL-backed `watchlist_items` table, and `/watchlist` lists everything starred with live prices. Each row is owned by either an anonymous per-browser `client_id` (a UUID in `localStorage`) or, once signed in, an account (`user_id`) — see "Watchlist flow" below for how a request's identity is resolved, and "Account & magic-link auth flow" for the account system itself. Signing in never migrates an existing `client_id`'s rows onto the account. A daily batch job (`watchlist_alerts.py`, see "Watchlist alert emails" below) re-analyses every account-owned watchlist symbol and emails a digest to any user whose stock's recommendation changed since the prior stored verdict — anonymous `client_id` rows have no email to notify and are excluded.
+A **Watchlist** ties the three modes together: a star button in each dashboard adds/removes a stock from a PostgreSQL-backed `watchlist_items` table, and `/watchlist` lists everything starred with live prices. Each row is owned by either an anonymous per-browser `client_id` (a UUID in `localStorage`) or, once signed in, an account (`user_id`) — see "Watchlist flow" below for how a request's identity is resolved, and "Account & magic-link auth flow" for the account system itself. Signing in never migrates an existing `client_id`'s rows onto the account. A daily batch job (`pipelines/watchlist_alerts.py`, see "Watchlist alert emails" below) re-analyses every account-owned watchlist symbol and emails a digest to any user whose stock's recommendation changed since the prior stored verdict — anonymous `client_id` rows have no email to notify and are excluded.
 
 A minimal **account system** (magic-link email, no passwords) exists via `POST /api/auth/request-link` + `GET /api/auth/verify` — a `Sign in` link appears in every page's nav bar (`AuthWidget`). Both the watchlist (above) and "I bought this" positions tracking (`frontend/lib/positions.ts`, backed by a `positions` table with the same anonymous-`client_id`-or-account-`user_id` ownership shape as `watchlist_items` — see "Positions" under "Market picks flow" below) are account-aware.
 
@@ -67,7 +67,7 @@ things with more than one real caller.
 
 ## Repo Structure
 
-**All backend paths in this document — every bare filename or path like `crew.py`,
+**All backend paths in this document — every bare filename or path like `analyst/crew.py`,
 `tools/nse_tools.py`, `routes/positions.py` — are relative to `backend/`, not the repo root.**
 `frontend/` stays a sibling of `backend/` at the repo root, unchanged. This split exists purely to
 make the top-level repo listing readable (two clearly-separated stacks); it changes no import
@@ -81,43 +81,51 @@ stock-research/
 ├── backend/
 │   ├── api.py                  FastAPI server — SSE endpoints and symbol validation
 │   ├── main.py                 CLI entry point; also contains _fetch_task, _build_report (shared with api.py)
-│   ├── crew.py                 Analyst guardrails, run_analysis_with_fallback (direct litellm call,
-│   │                           cross-provider failover)
-│   ├── llm_cost.py             Per-call LLM cost instrumentation + running daily total
-│   ├── cache.py                File-based TTL cache (output/<SYMBOL>/<task>.json)
-│   ├── schemas.py              Normalization contracts: raw tool output → canonical dicts
-│   ├── market_picks_pipeline.py  Multi-agent weekly picks pipeline (6 phases)
-│   ├── sme_ema_pipeline.py     SME golden/death cross batch pipeline (PostgreSQL)
-│   ├── screener_pipeline.py    NIFTY 500 custom screener batch pipeline (PostgreSQL)
-│   ├── eod_prices_pipeline.py  EOD bhavcopy + AMFI NAV ingestion (PostgreSQL) — see "EOD price
-│   │                           store + corporate actions flow" below
-│   ├── corporate_actions_pipeline.py  Split/bonus/dividend-adjusted close recompute
-│   ├── portfolio_valuation.py  Portfolio Aggregator's nightly auto-valuation + XIRR engine
-│   ├── cas_import.py           CAS PDF (CAMS/KFintech) mutual-fund statement import
-│   ├── csv_import.py           Broker CSV/XLSX tradebook import (Zerodha preset)
-│   ├── source_quality.py       Per-run Market Picks source-quality telemetry
-│   ├── source_quality_report.py  Aggregation CLI for the above
-│   ├── state_store.py          Durable JSON state (PostgreSQL app_state table) — daily pick
-│   │                           snapshots, telemetry, counters, CAS archives, CLI reports
-│   ├── verdict_history.py      Daily verdict/price snapshots (PostgreSQL) — powers the hero's timeline strip
-│   ├── mf_holdings_history.py  Quarterly MF stake snapshots (PostgreSQL) — powers the stake-delta badges
 │   ├── auth.py                 Magic-link auth: token/session issuance + validation (PostgreSQL)
-│   ├── email_sender.py         Sends the magic-link sign-in + watchlist-alert emails over generic SMTP
-│   ├── watchlist_alerts.py     Daily batch job: emails signed-in users on a watched stock's recommendation change
-│   ├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
-│   ├── routes/                 Per-domain FastAPI routers extracted out of api.py (see
-│   │                           "Route module extraction" below) — watchlist.py, positions.py,
-│   │                           portfolio_aggregator.py, _shared.py (the read/write wrapper all share)
-│   ├── observability.py        Structured JSON logging via log_event()
-│   ├── error_tracking.py       Optional Sentry-style hook, wired into log_event()'s error-level path
-│   ├── schema_drift.py         Type-drift detection for the six scraped data slices
-│   ├── peer_analytics.py       Peer-percentile + absolute valuation-anchor math (api.py + market_picks_pipeline.py)
-│   ├── source_health.py        Freshness/volume monitoring for market-picks sources + macro overlay
-│   ├── scraper_error_counters.py  Error (not empty-result) counters for the 4 standalone per-symbol scrapers
 │   ├── requirements.txt
 │   ├── alembic.ini             Schema-migration config (see "Schema migrations" below)
 │   ├── migrations/             Alembic migration scripts — env.py + versions/*.py
 │   ├── Dockerfile              Backend image (see docker-compose.yml at the repo root)
+│   ├── analyst/                 The LLM-calling analyst step and its cost tracking
+│   │   ├── crew.py                 Analyst guardrails, run_analysis_with_fallback (direct litellm call,
+│   │   │                           cross-provider failover)
+│   │   └── llm_cost.py             Per-call LLM cost instrumentation + running daily total
+│   ├── analytics/                Per-symbol report-enrichment modules, no shared code between them
+│   │   ├── verdict_history.py      Daily verdict/price snapshots (PostgreSQL) — powers the hero's timeline strip
+│   │   ├── mf_holdings_history.py  Quarterly MF stake snapshots (PostgreSQL) — powers the stake-delta badges
+│   │   └── peer_analytics.py       Peer-percentile + absolute valuation-anchor math (api.py + pipelines/market_picks_pipeline.py)
+│   ├── core/                   Shared infra utilities, no per-feature business logic
+│   │   ├── cache.py                File-based TTL cache (output/<SYMBOL>/<task>.json)
+│   │   ├── schemas.py              Normalization contracts: raw tool output → canonical dicts
+│   │   ├── state_store.py          Durable JSON state (PostgreSQL app_state table) — daily pick
+│   │   │                           snapshots, telemetry, counters, CAS archives, CLI reports
+│   │   ├── rate_limiter.py         Shared sliding-window rate limit / concurrency-slot / lock primitives
+│   │   ├── observability.py        Structured JSON logging via log_event()
+│   │   ├── error_tracking.py       Optional Sentry-style hook, wired into log_event()'s error-level path
+│   │   ├── schema_drift.py         Type-drift detection for the six scraped data slices
+│   │   └── email_sender.py         Sends the magic-link sign-in + watchlist-alert emails over generic SMTP
+│   ├── pipelines/               Standalone batch jobs, each with its own CLI entry point
+│   │   ├── market_picks_pipeline.py  Multi-agent weekly picks pipeline (6 phases)
+│   │   ├── sme_ema_pipeline.py     SME golden/death cross batch pipeline (PostgreSQL)
+│   │   ├── screener_pipeline.py    NIFTY 500 custom screener batch pipeline (PostgreSQL)
+│   │   ├── eod_prices_pipeline.py  EOD bhavcopy + AMFI NAV ingestion (PostgreSQL) — see "EOD price
+│   │   │                           store + corporate actions flow" below
+│   │   ├── corporate_actions_pipeline.py  Split/bonus/dividend-adjusted close recompute
+│   │   └── watchlist_alerts.py     Daily batch job: emails signed-in users on a watched stock's recommendation change
+│   ├── portfolio/               Portfolio Aggregator's valuation + statement-import modules
+│   │   ├── portfolio_valuation.py  Nightly auto-valuation + XIRR engine
+│   │   ├── cas_import.py           CAS PDF (CAMS/KFintech) mutual-fund statement import
+│   │   ├── csv_import.py           Broker CSV/XLSX tradebook import (Zerodha preset)
+│   │   └── dcf_valuation.py        Deterministic two-stage DCF off the cash-flow statement
+│   ├── telemetry/               Scraper/Market-Picks source observability — freshness, per-run yield, error counts
+│   │   ├── source_health.py        Freshness/volume monitoring for market-picks sources + macro overlay
+│   │   ├── source_quality.py       Per-run Market Picks source-quality telemetry
+│   │   ├── source_quality_report.py  Aggregation CLI for the above
+│   │   └── scraper_error_counters.py  Error (not empty-result) counters for the 4 standalone per-symbol scrapers
+│   ├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
+│   ├── routes/                 Per-domain FastAPI routers extracted out of api.py (see
+│   │                           "Route module extraction" below) — watchlist.py, positions.py,
+│   │                           portfolio_aggregator.py, _shared.py (the read/write wrapper all share)
 │   ├── config/
 │   │   ├── analyst.json        Analyst role/goal/backstory + section labels (config.crew_tasks.ANALYST_SECTIONS)
 │   │   └── crew_tasks.py       Builds the analyst prompt string from analyst.json
@@ -125,7 +133,7 @@ stock-research/
 │   │   ├── market_picks_tools.py  RSS + GNews scrapers for 14 sources; exports SOURCES + SCRAPER_FNS
 │   │   │                          (merges in hdfc_sec_agent.py + 4 others below → 20 sources total)
 │   │   ├── sme_tools.py           NSE Emerge + BSE SME stock-list fetchers
-│   │   ├── nifty500_tools.py      NIFTY 500 constituent list fetcher (screener_pipeline.py's universe)
+│   │   ├── nifty500_tools.py      NIFTY 500 constituent list fetcher (pipelines/screener_pipeline.py's universe)
 │   │   ├── hdfc_sec_agent.py      HDFC Securities Fundamental + Technical scrapers (GNews-based)
 │   │   ├── securities_master.py   NSE/BSE main-board + SME symbol resolver (broker-code/ISIN/fuzzy-name)
 │   │   ├── eod_sources.py         NSE bhavcopy + AMFI NAV fetch/parse

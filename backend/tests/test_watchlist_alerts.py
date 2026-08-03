@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-import watchlist_alerts
+from pipelines import watchlist_alerts
 
 
 class _FakeConn:
@@ -52,17 +52,17 @@ class GetWatchedSymbolsTest(unittest.TestCase):
 
 class DetectChangeTest(unittest.TestCase):
     def test_none_with_fewer_than_two_entries(self) -> None:
-        with patch("watchlist_alerts.verdict_history.load_history", return_value=[{"recommendation": "BUY"}]):
+        with patch("pipelines.watchlist_alerts.verdict_history.load_history", return_value=[{"recommendation": "BUY"}]):
             self.assertIsNone(watchlist_alerts._detect_change("TCS"))
 
     def test_none_when_recommendation_unchanged(self) -> None:
         history = [{"recommendation": "BUY", "confidence": "HIGH"}, {"recommendation": "BUY", "confidence": "HIGH"}]
-        with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
+        with patch("pipelines.watchlist_alerts.verdict_history.load_history", return_value=history):
             self.assertIsNone(watchlist_alerts._detect_change("TCS"))
 
     def test_returns_change_dict_when_recommendation_differs(self) -> None:
         history = [{"recommendation": "HOLD", "confidence": "MEDIUM"}, {"recommendation": "BUY", "confidence": "HIGH"}]
-        with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
+        with patch("pipelines.watchlist_alerts.verdict_history.load_history", return_value=history):
             change = watchlist_alerts._detect_change("TCS")
         self.assertEqual(change, {
             "kind": "recommendation_change",
@@ -72,23 +72,23 @@ class DetectChangeTest(unittest.TestCase):
 
     def test_none_when_latest_recommendation_missing(self) -> None:
         history = [{"recommendation": "HOLD"}, {"recommendation": None}]
-        with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
+        with patch("pipelines.watchlist_alerts.verdict_history.load_history", return_value=history):
             self.assertIsNone(watchlist_alerts._detect_change("TCS"))
 
 
 class DetectPriceMoveTest(unittest.TestCase):
     def test_none_with_fewer_than_two_entries(self) -> None:
-        with patch("watchlist_alerts.verdict_history.load_history", return_value=[{"current_price": 100.0}]):
+        with patch("pipelines.watchlist_alerts.verdict_history.load_history", return_value=[{"current_price": 100.0}]):
             self.assertIsNone(watchlist_alerts._detect_price_move("TCS"))
 
     def test_none_when_move_under_threshold(self) -> None:
         history = [{"current_price": 100.0}, {"current_price": 105.0}]  # +5%, under the 10% threshold
-        with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
+        with patch("pipelines.watchlist_alerts.verdict_history.load_history", return_value=history):
             self.assertIsNone(watchlist_alerts._detect_price_move("TCS"))
 
     def test_returns_move_dict_when_move_at_or_above_threshold(self) -> None:
         history = [{"current_price": 100.0}, {"current_price": 112.0}]  # +12%
-        with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
+        with patch("pipelines.watchlist_alerts.verdict_history.load_history", return_value=history):
             move = watchlist_alerts._detect_price_move("TCS")
         self.assertEqual(move, {
             "kind": "price_move", "symbol": "TCS",
@@ -97,18 +97,18 @@ class DetectPriceMoveTest(unittest.TestCase):
 
     def test_detects_downward_move_too(self) -> None:
         history = [{"current_price": 100.0}, {"current_price": 85.0}]  # -15%
-        with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
+        with patch("pipelines.watchlist_alerts.verdict_history.load_history", return_value=history):
             move = watchlist_alerts._detect_price_move("TCS")
         self.assertEqual(move["change_pct"], -15.0)
 
     def test_none_when_either_price_missing(self) -> None:
         history = [{"current_price": None}, {"current_price": 112.0}]
-        with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
+        with patch("pipelines.watchlist_alerts.verdict_history.load_history", return_value=history):
             self.assertIsNone(watchlist_alerts._detect_price_move("TCS"))
 
     def test_none_when_prior_price_is_zero(self) -> None:
         history = [{"current_price": 0.0}, {"current_price": 112.0}]
-        with patch("watchlist_alerts.verdict_history.load_history", return_value=history):
+        with patch("pipelines.watchlist_alerts.verdict_history.load_history", return_value=history):
             self.assertIsNone(watchlist_alerts._detect_price_move("TCS"))
 
 
@@ -121,10 +121,10 @@ class AnalyzeSymbolTest(unittest.TestCase):
         return sig
 
     def test_cache_hit_skips_llm_and_still_saves_snapshot(self) -> None:
-        with patch("watchlist_alerts.cache.is_fresh", return_value=True), \
-             patch("watchlist_alerts.cache.load", return_value={"recommendation": "HOLD"}), \
-             patch("watchlist_alerts.run_analysis_with_fallback") as run_analysis, \
-             patch("watchlist_alerts.verdict_history.save_snapshot") as save_snapshot:
+        with patch("pipelines.watchlist_alerts.cache.is_fresh", return_value=True), \
+             patch("pipelines.watchlist_alerts.cache.load", return_value={"recommendation": "HOLD"}), \
+             patch("pipelines.watchlist_alerts.run_analysis_with_fallback") as run_analysis, \
+             patch("pipelines.watchlist_alerts.verdict_history.save_snapshot") as save_snapshot:
             result = watchlist_alerts._analyze_symbol("TCS", "run1")
 
         run_analysis.assert_not_called()
@@ -135,14 +135,14 @@ class AnalyzeSymbolTest(unittest.TestCase):
         def fake_fetch_task(name, symbol, run_id):
             return {"raw": name}
 
-        with patch("watchlist_alerts.cache.is_fresh", return_value=False), \
-             patch("watchlist_alerts.cache.load", return_value=None), \
-             patch("watchlist_alerts.cache.save") as cache_save, \
-             patch("watchlist_alerts._fetch_task", side_effect=fake_fetch_task), \
-             patch("watchlist_alerts.schema_normalize", side_effect=lambda name, data: {**data, "symbol": "TCS"} if name != "stock_info" else {"current_price": 100.0}), \
-             patch("watchlist_alerts.run_signal_engine", return_value=self._fake_signal_result()), \
-             patch("watchlist_alerts.run_analysis_with_fallback", return_value={"recommendation": "BUY"}) as run_analysis, \
-             patch("watchlist_alerts.verdict_history.save_snapshot") as save_snapshot:
+        with patch("pipelines.watchlist_alerts.cache.is_fresh", return_value=False), \
+             patch("pipelines.watchlist_alerts.cache.load", return_value=None), \
+             patch("pipelines.watchlist_alerts.cache.save") as cache_save, \
+             patch("pipelines.watchlist_alerts._fetch_task", side_effect=fake_fetch_task), \
+             patch("pipelines.watchlist_alerts.schema_normalize", side_effect=lambda name, data: {**data, "symbol": "TCS"} if name != "stock_info" else {"current_price": 100.0}), \
+             patch("pipelines.watchlist_alerts.run_signal_engine", return_value=self._fake_signal_result()), \
+             patch("pipelines.watchlist_alerts.run_analysis_with_fallback", return_value={"recommendation": "BUY"}) as run_analysis, \
+             patch("pipelines.watchlist_alerts.verdict_history.save_snapshot") as save_snapshot:
             result = watchlist_alerts._analyze_symbol("TCS", "run1")
 
         run_analysis.assert_called_once()
@@ -151,30 +151,30 @@ class AnalyzeSymbolTest(unittest.TestCase):
         self.assertEqual(result, {"recommendation": "BUY"})
 
     def test_missing_stock_info_returns_none(self) -> None:
-        with patch("watchlist_alerts.cache.is_fresh", return_value=False), \
-             patch("watchlist_alerts.cache.load", return_value=None), \
-             patch("watchlist_alerts._fetch_task", return_value={"error": "boom"}), \
-             patch("watchlist_alerts.schema_normalize", return_value={"error": "boom"}), \
-             patch("watchlist_alerts.run_analysis_with_fallback") as run_analysis:
+        with patch("pipelines.watchlist_alerts.cache.is_fresh", return_value=False), \
+             patch("pipelines.watchlist_alerts.cache.load", return_value=None), \
+             patch("pipelines.watchlist_alerts._fetch_task", return_value={"error": "boom"}), \
+             patch("pipelines.watchlist_alerts.schema_normalize", return_value={"error": "boom"}), \
+             patch("pipelines.watchlist_alerts.run_analysis_with_fallback") as run_analysis:
             result = watchlist_alerts._analyze_symbol("TCS", "run1")
 
         self.assertIsNone(result)
         run_analysis.assert_not_called()
 
     def test_exception_is_isolated_and_returns_none(self) -> None:
-        with patch("watchlist_alerts.cache.is_fresh", side_effect=RuntimeError("boom")):
+        with patch("pipelines.watchlist_alerts.cache.is_fresh", side_effect=RuntimeError("boom")):
             result = watchlist_alerts._analyze_symbol("TCS", "run1")
         self.assertIsNone(result)
 
     def test_force_bypasses_cache_entirely(self) -> None:
-        with patch("watchlist_alerts.cache.is_fresh") as is_fresh, \
-             patch("watchlist_alerts.cache.load"), \
-             patch("watchlist_alerts.cache.save"), \
-             patch("watchlist_alerts._fetch_task", return_value={"current_price": 100.0}), \
-             patch("watchlist_alerts.schema_normalize", side_effect=lambda name, data: data), \
-             patch("watchlist_alerts.run_signal_engine", return_value=self._fake_signal_result()), \
-             patch("watchlist_alerts.run_analysis_with_fallback", return_value={"recommendation": "BUY"}), \
-             patch("watchlist_alerts.verdict_history.save_snapshot"):
+        with patch("pipelines.watchlist_alerts.cache.is_fresh") as is_fresh, \
+             patch("pipelines.watchlist_alerts.cache.load"), \
+             patch("pipelines.watchlist_alerts.cache.save"), \
+             patch("pipelines.watchlist_alerts._fetch_task", return_value={"current_price": 100.0}), \
+             patch("pipelines.watchlist_alerts.schema_normalize", side_effect=lambda name, data: data), \
+             patch("pipelines.watchlist_alerts.run_signal_engine", return_value=self._fake_signal_result()), \
+             patch("pipelines.watchlist_alerts.run_analysis_with_fallback", return_value={"recommendation": "BUY"}), \
+             patch("pipelines.watchlist_alerts.verdict_history.save_snapshot"):
             watchlist_alerts._analyze_symbol("TCS", "run1", force=True)
 
         is_fresh.assert_not_called()
@@ -213,8 +213,8 @@ class RunTest(unittest.TestCase):
     def test_true_with_no_watched_symbols(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         os.environ["ANTHROPIC_API_KEY"] = "fake"
-        with patch("watchlist_alerts.get_engine", return_value=MagicMock()), \
-             patch("watchlist_alerts._get_watched_symbols", return_value={}):
+        with patch("pipelines.watchlist_alerts.get_engine", return_value=MagicMock()), \
+             patch("pipelines.watchlist_alerts._get_watched_symbols", return_value={}):
             self.assertTrue(watchlist_alerts.run())
 
     def test_sends_alert_email_only_for_changed_symbols(self) -> None:
@@ -229,12 +229,12 @@ class RunTest(unittest.TestCase):
         def fake_detect(symbol, changes=None):
             return change if symbol == "TCS" else None
 
-        with patch("watchlist_alerts.get_engine", return_value=MagicMock()), \
-             patch("watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
-             patch("watchlist_alerts._analyze_symbol", return_value={"recommendation": "BUY"}), \
-             patch("watchlist_alerts._detect_change", side_effect=fake_detect), \
-             patch("watchlist_alerts._detect_price_move", return_value=None), \
-             patch("watchlist_alerts.send_watchlist_alert_email", return_value=True) as send_email:
+        with patch("pipelines.watchlist_alerts.get_engine", return_value=MagicMock()), \
+             patch("pipelines.watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
+             patch("pipelines.watchlist_alerts._analyze_symbol", return_value={"recommendation": "BUY"}), \
+             patch("pipelines.watchlist_alerts._detect_change", side_effect=fake_detect), \
+             patch("pipelines.watchlist_alerts._detect_price_move", return_value=None), \
+             patch("pipelines.watchlist_alerts.send_watchlist_alert_email", return_value=True) as send_email:
             result = watchlist_alerts.run()
 
         self.assertTrue(result)
@@ -246,12 +246,12 @@ class RunTest(unittest.TestCase):
         by_symbol = {"TCS": [{"user_id": 1, "email": "a@example.com"}]}
         move = {"kind": "price_move", "symbol": "TCS", "old_price": 100.0, "new_price": 115.0, "change_pct": 15.0}
 
-        with patch("watchlist_alerts.get_engine", return_value=MagicMock()), \
-             patch("watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
-             patch("watchlist_alerts._analyze_symbol", return_value={"recommendation": "HOLD"}), \
-             patch("watchlist_alerts._detect_change", return_value=None), \
-             patch("watchlist_alerts._detect_price_move", return_value=move), \
-             patch("watchlist_alerts.send_watchlist_alert_email", return_value=True) as send_email:
+        with patch("pipelines.watchlist_alerts.get_engine", return_value=MagicMock()), \
+             patch("pipelines.watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
+             patch("pipelines.watchlist_alerts._analyze_symbol", return_value={"recommendation": "HOLD"}), \
+             patch("pipelines.watchlist_alerts._detect_change", return_value=None), \
+             patch("pipelines.watchlist_alerts._detect_price_move", return_value=move), \
+             patch("pipelines.watchlist_alerts.send_watchlist_alert_email", return_value=True) as send_email:
             result = watchlist_alerts.run()
 
         self.assertTrue(result)
@@ -264,12 +264,12 @@ class RunTest(unittest.TestCase):
         change = {"kind": "recommendation_change", "symbol": "TCS", "old_recommendation": "HOLD", "new_recommendation": "SELL", "confidence": "HIGH"}
         move = {"kind": "price_move", "symbol": "TCS", "old_price": 100.0, "new_price": 80.0, "change_pct": -20.0}
 
-        with patch("watchlist_alerts.get_engine", return_value=MagicMock()), \
-             patch("watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
-             patch("watchlist_alerts._analyze_symbol", return_value={"recommendation": "SELL"}), \
-             patch("watchlist_alerts._detect_change", return_value=change), \
-             patch("watchlist_alerts._detect_price_move", return_value=move), \
-             patch("watchlist_alerts.send_watchlist_alert_email", return_value=True) as send_email:
+        with patch("pipelines.watchlist_alerts.get_engine", return_value=MagicMock()), \
+             patch("pipelines.watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
+             patch("pipelines.watchlist_alerts._analyze_symbol", return_value={"recommendation": "SELL"}), \
+             patch("pipelines.watchlist_alerts._detect_change", return_value=change), \
+             patch("pipelines.watchlist_alerts._detect_price_move", return_value=move), \
+             patch("pipelines.watchlist_alerts.send_watchlist_alert_email", return_value=True) as send_email:
             result = watchlist_alerts.run()
 
         self.assertTrue(result)
@@ -280,12 +280,12 @@ class RunTest(unittest.TestCase):
         os.environ["ANTHROPIC_API_KEY"] = "fake"
         by_symbol = {f"SYM{i}": [{"user_id": 1, "email": "a@example.com"}] for i in range(watchlist_alerts._MAX_ALERT_SYMBOLS + 5)}
 
-        with patch("watchlist_alerts.get_engine", return_value=MagicMock()), \
-             patch("watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
-             patch("watchlist_alerts._analyze_symbol", return_value={"recommendation": "HOLD"}) as analyze, \
-             patch("watchlist_alerts._detect_change", return_value=None), \
-             patch("watchlist_alerts._detect_price_move", return_value=None), \
-             patch("watchlist_alerts.send_watchlist_alert_email"):
+        with patch("pipelines.watchlist_alerts.get_engine", return_value=MagicMock()), \
+             patch("pipelines.watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
+             patch("pipelines.watchlist_alerts._analyze_symbol", return_value={"recommendation": "HOLD"}) as analyze, \
+             patch("pipelines.watchlist_alerts._detect_change", return_value=None), \
+             patch("pipelines.watchlist_alerts._detect_price_move", return_value=None), \
+             patch("pipelines.watchlist_alerts.send_watchlist_alert_email"):
             watchlist_alerts.run()
 
         self.assertEqual(analyze.call_count, watchlist_alerts._MAX_ALERT_SYMBOLS)
@@ -295,17 +295,17 @@ class RunTest(unittest.TestCase):
         os.environ["ANTHROPIC_API_KEY"] = "fake"
         by_symbol = {"A": [{"user_id": 1, "email": "a@example.com"}], "B": [{"user_id": 1, "email": "a@example.com"}]}
 
-        with patch("watchlist_alerts.get_engine", return_value=MagicMock()), \
-             patch("watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
-             patch("watchlist_alerts._analyze_symbol", return_value=None), \
-             patch("watchlist_alerts.send_watchlist_alert_email"):
+        with patch("pipelines.watchlist_alerts.get_engine", return_value=MagicMock()), \
+             patch("pipelines.watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
+             patch("pipelines.watchlist_alerts._analyze_symbol", return_value=None), \
+             patch("pipelines.watchlist_alerts.send_watchlist_alert_email"):
             self.assertFalse(watchlist_alerts.run())
 
     def test_ollama_provider_does_not_require_api_key(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         os.environ["LLM_PROVIDER"] = "ollama"
-        with patch("watchlist_alerts.get_engine", return_value=MagicMock()), \
-             patch("watchlist_alerts._get_watched_symbols", return_value={}):
+        with patch("pipelines.watchlist_alerts.get_engine", return_value=MagicMock()), \
+             patch("pipelines.watchlist_alerts._get_watched_symbols", return_value={}):
             self.assertTrue(watchlist_alerts.run())
 
     def test_detect_recent_changes_is_called_once_per_symbol_not_twice(self) -> None:
@@ -326,14 +326,14 @@ class RunTest(unittest.TestCase):
             "INFY": [{"user_id": 1, "email": "a@example.com"}],
         }
 
-        with patch("watchlist_alerts.get_engine", return_value=MagicMock()), \
-             patch("watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
-             patch("watchlist_alerts._analyze_symbol", return_value={"recommendation": "HOLD"}), \
+        with patch("pipelines.watchlist_alerts.get_engine", return_value=MagicMock()), \
+             patch("pipelines.watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
+             patch("pipelines.watchlist_alerts._analyze_symbol", return_value={"recommendation": "HOLD"}), \
              patch(
-                 "watchlist_alerts.verdict_history.detect_recent_changes",
+                 "pipelines.watchlist_alerts.verdict_history.detect_recent_changes",
                  return_value={"recommendation_change": None, "price_move": None},
              ) as mock_detect, \
-             patch("watchlist_alerts.send_watchlist_alert_email"):
+             patch("pipelines.watchlist_alerts.send_watchlist_alert_email"):
             self.assertTrue(watchlist_alerts.run())
 
         # Exactly one call per watched symbol (2 symbols -> 2 calls), not

@@ -11,7 +11,7 @@ ANALYST_SECTIONS: dict[str, str] = _analyst_cfg["sections"]
 # build_analysis_prompt() only ever pulled ANALYST_SECTIONS out of this
 # config. Wired into the prompt itself (see the "ADDITIONAL ANALYST
 # INSTRUCTIONS"/"VALUATION GUIDANCE" sections below) so both actually reach
-# the model, matching crew.py's own comment (right above its
+# the model, matching analyst/crew.py's own comment (right above its
 # filings-handling code) that already assumed this was happening.
 _INSTRUCTIONS: list[str] = _analyst_cfg.get("instructions", [])
 _VALUATION_GUIDANCE: list[str] = _analyst_cfg.get("valuation_guidance", [])

@@ -1,5 +1,5 @@
 """Shared SQLite backing for tests of the modules that persist through
-state_store.py (llm_cost, source_health, scraper_error_counters,
+core/state_store.py (llm_cost, source_health, scraper_error_counters,
 source_quality, market_picks_pipeline's history, main's CLI report,
 cas_import's archive).
 
@@ -27,7 +27,7 @@ _BUSY_TIMEOUT_SECONDS = 30
 def _patched(engine, url: str) -> ExitStack:
     stack = ExitStack()
     stack.enter_context(patch.dict(os.environ, {"DATABASE_URL": url}))
-    stack.enter_context(patch("state_store._get_engine", return_value=engine))
+    stack.enter_context(patch("core.state_store._get_engine", return_value=engine))
     stack.callback(engine.dispose)
     return stack
 

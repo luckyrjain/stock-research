@@ -3,13 +3,13 @@ Securities master + broker-code resolver.
 
 Combines three registries into one symbol lookup:
   - NSE main-board: db.models.securities table (populated nightly by
-    eod_prices_pipeline.py from NSE's EQUITY_L.csv — no fetch needed here).
+    pipelines/eod_prices_pipeline.py from NSE's EQUITY_L.csv — no fetch needed here).
   - BSE main-board:  BSE public API (this module; groups A/B/T/Z/X/XT/P/MT/TS).
   - NSE Emerge + BSE SME: tools/sme_tools.py (unchanged).
 
 resolve_symbol() lets a broker's internal stock code be matched against a
 real trading symbol via ISIN, exact code (with a known suffix stripped), or
-fuzzy company-name match. Consumed by csv_import.py's broker CSV import
+fuzzy company-name match. Consumed by portfolio/csv_import.py's broker CSV import
 (new-asset resolution) — see that module for the integration.
 """
 
@@ -65,7 +65,7 @@ def _is_fresh(path: Path) -> bool:
 
 def _save_cache(path: Path, data: list[dict]) -> None:
     # Atomic write (tempfile + os.replace) — same convention as
-    # cache.py::save()/tools/sme_tools.py::_save_cache, so an interrupted
+    # core/cache.py::save()/tools/sme_tools.py::_save_cache, so an interrupted
     # write never leaves a corrupt file behind for the next read to choke on.
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")

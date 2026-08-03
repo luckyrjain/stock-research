@@ -105,7 +105,7 @@ async def get_watchlist_calendar(request: Request, symbols: str = Query(...)):
        single-stock report's "Corporate Filings" card. No new scraping.
     2. A same-day recommendation-change / price-move flag via
        verdict_history.detect_recent_changes() — the same two conditions
-       watchlist_alerts.py's daily digest email already computes and sends,
+       pipelines/watchlist_alerts.py's daily digest email already computes and sends,
        now also reachable without waiting for that email to arrive. Degrades
        to both `None` (not an error) when DATABASE_URL isn't set, same as
        every other verdict_history-backed read in this app.
@@ -131,8 +131,8 @@ async def get_watchlist_calendar(request: Request, symbols: str = Query(...)):
         return {"entries": []}
 
     def _one(sym: str) -> dict | None:
-        import cache
-        import verdict_history
+        from core import cache
+        from analytics import verdict_history
         from signals.filings_classifier import classify_filings
 
         cached = cache.load(sym, "filings")

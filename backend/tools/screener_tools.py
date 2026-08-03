@@ -532,7 +532,7 @@ def get_fundamentals(symbol: str) -> str:
         # doesn't import this module, so there's no circularity, but this
         # keeps the dependency scoped to the one code path that needs it,
         # matching this codebase's existing lazy-import convention for
-        # cross-tool composition (e.g. market_picks_pipeline.py's
+        # cross-tool composition (e.g. pipelines/market_picks_pipeline.py's
         # _fetch_valuation_percentile). Never lets a fallback failure
         # affect the primary Screener payload above.
         if not ratios:

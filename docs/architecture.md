@@ -69,8 +69,8 @@ report has loaded, so none of them can delay or fail the SSE stream:
 
 | Endpoint | Adds | Cache TTL |
 |---|---|---|
-| `GET /api/peers/{symbol}` | Peer percentile ranking + `absolute_anchor` (own P/E vs. own 3-5y history) — `peer_analytics.py` | 24h |
-| `GET /api/financials/{symbol}` | Multi-year Income Statement/Balance Sheet/Cash Flow + `dcf` (deterministic two-stage DCF, `dcf_valuation.py`) + `concalls` | 24h |
+| `GET /api/peers/{symbol}` | Peer percentile ranking + `absolute_anchor` (own P/E vs. own 3-5y history) — `analytics/peer_analytics.py` | 24h |
+| `GET /api/financials/{symbol}` | Multi-year Income Statement/Balance Sheet/Cash Flow + `dcf` (deterministic two-stage DCF, `portfolio/dcf_valuation.py`) + `concalls` | 24h |
 | `GET /api/shareholding-detail/{symbol}` | Individually-named shareholders (promoters + every other category) from NSE's quarterly shareholding XBRL — the granular counterpart to the aggregate `shareholding` slice | 168h |
 | `GET /api/insider-activity/{symbol}` | Promoter/director PIT disclosures + bulk/block deals, scoped to one symbol (90-day window) | 24h |
 | `GET /api/street-consensus/{symbol}` | GNews articles citing Trendlyne + a scraped numeric consensus (rating/analyst count/target price) from trendlyne.com directly | 24h |
@@ -79,7 +79,7 @@ report has loaded, so none of them can delay or fail the SSE stream:
 
 All degrade to `null`/`[]`/an empty section rather than failing the page. A genuine scrape
 *failure* is deliberately **not** cached (retried next request) and increments a
-`scraper_error_counters.py` counter; a legitimately empty result is cached normally. See
+`telemetry/scraper_error_counters.py` counter; a legitimately empty result is cached normally. See
 CLAUDE.md's per-flow sections for exact shapes and the disclosed scraper-verification caveats.
 
 **Filings classification**: `signals/filings_classifier.py` runs pure text classification (no new
@@ -88,7 +88,7 @@ recent rating action, and the next results date. `main._build_report()` adds thi
 `filings_summary`; `signals/filings.py::filings_signal()` separately calls
 `classify_rating_action()` to nudge the filings *signal's* score.
 
-**MF holdings trend**: `mf_holdings_history.py` (Postgres) snapshots the `mf_holdings` task's
+**MF holdings trend**: `analytics/mf_holdings_history.py` (Postgres) snapshots the `mf_holdings` task's
 shareholding disclosure on every fetch and computes quarter-over-quarter stake deltas
 (`compute_stake_deltas()`). Kept out of `_build_report()` itself (it's a DB call, and
 `_build_report()` runs directly on the event loop) — each caller (`api.py` via `run_in_executor`,
@@ -162,7 +162,7 @@ summary" subsections for the full field/endpoint list.
 
 ## Request flow: SME Signals
 
-`sme_ema_pipeline.py` is a standalone batch job (own `main()`, PostgreSQL via `DATABASE_URL`) —
+`pipelines/sme_ema_pipeline.py` is a standalone batch job (own `main()`, PostgreSQL via `DATABASE_URL`) —
 not called from `api.py` except via the background-refresh endpoint. Fetches NSE Emerge + BSE SME
 stock lists, downloads a year of daily OHLCV per stock via yfinance, computes EMA20/EMA50 (flags
 golden/death crosses), RSI(14), volume-spike, liquidity, and market cap, then upserts into
@@ -183,7 +183,7 @@ The DB column is `cross_type` (`CROSS` is a reserved SQL keyword); the API/TS fi
 
 ## Request flow: NIFTY 500 Screener
 
-`screener_pipeline.py` generalizes the SME pattern to the primary NSE/BSE large/mid-cap universe.
+`pipelines/screener_pipeline.py` generalizes the SME pattern to the primary NSE/BSE large/mid-cap universe.
 Universe is NIFTY 500 specifically (`tools/nifty500_tools.py`, 24h cache), not the full ~2000-symbol
 NSE master — a daily per-stock yfinance `.info` scrape is only reasonable at a bounded, curated
 scale. No new scraping logic: reuses `tools.nse_tools.get_stock_quote` (price/P-E/market
@@ -202,8 +202,8 @@ the real currently-populated set, so the frontend's filter chips are never a har
 
 ## Request flow: EOD Price Store + Corporate Actions
 
-`eod_prices_pipeline.py` is a standalone batch job, same shape as `sme_ema_pipeline.py`/
-`screener_pipeline.py` — but ingestion-only, no request-serving endpoint of its own (the first
+`pipelines/eod_prices_pipeline.py` is a standalone batch job, same shape as `pipelines/sme_ema_pipeline.py`/
+`pipelines/screener_pipeline.py` — but ingestion-only, no request-serving endpoint of its own (the first
 consumer is the valuation engine below). Two data sources: NSE's daily
 `sec_bhavdata_full_DDMMYYYY.csv` bhavcopy (OHLC, previous close, volume, turnover, delivery %) and
 AMFI's `NAVAll.txt` (mutual-fund NAVs, filtered to schemes actually held in the Portfolio
@@ -218,14 +218,14 @@ weekdays, not just today, so a cron run that fires before the file is published 
 hole. CLI: `--setup-db`/`--reset-db` (scoped to its own 3 tables), `--date YYYY-MM-DD`,
 `--backfill YYYY-MM-DD`. Scheduled after the bhavcopy's ~19:00 IST publish — see the cron table.
 
-`corporate_actions_pipeline.py` (`tools/corporate_actions.py` for the fetch/parse) ingests NSE's
+`pipelines/corporate_actions_pipeline.py` (`tools/corporate_actions.py` for the fetch/parse) ingests NSE's
 corporate-actions feed (splits/bonuses/dividends/rights, parsed from the free-text PURPOSE field —
 never guesses a ratio it can't parse cleanly) into `corporate_actions`, then recomputes
 `prices_daily.adj_close` for affected symbols. CLI: `--setup-db`/`--reset-db`,
-`--backfill`/`--recompute SYMBOL`/`--recompute-all`. Wired into `eod_prices_pipeline.py::run()` as
+`--backfill`/`--recompute SYMBOL`/`--recompute-all`. Wired into `pipelines/eod_prices_pipeline.py::run()` as
 an isolated step after the bhavcopy/NAV ingestion (own try/except, own `log_event()` — a
 corporate-actions failure never affects the pipeline's own exit code or the equity data it already
-landed). `portfolio_valuation.py`'s nightly refresh (see below) is wired in the same way, as a
+landed). `portfolio/portfolio_valuation.py`'s nightly refresh (see below) is wired in the same way, as a
 further isolated step after corporate actions — so the run order is always bhavcopy/NAV → adjusted
 prices → portfolio valuations.
 
@@ -247,7 +247,7 @@ credentials, a deliberate personal-scale-tool decision, not an oversight.
   import flows below populate it. Net worth = sum of each non-archived asset's latest valuation,
   with `loan` assets subtracted. Full CRUD for profiles/accounts/assets + a manual valuation-upsert
   endpoint (422 on a future `as_of` date).
-- **Valuation engine** (`portfolio_valuation.py`): `refresh_valuations(engine)` auto-values every
+- **Valuation engine** (`portfolio/portfolio_valuation.py`): `refresh_valuations(engine)` auto-values every
   non-archived `mf`/`stock` asset with a `holdings` row — stock from `prices_daily.close` (live
   yfinance quote as fallback), mf from `mf_nav_daily.nav` — upserting into the same `valuations`
   table the manual-entry path writes to (the engine is authoritative for mf/stock: a nightly run
@@ -258,14 +258,14 @@ credentials, a deliberate personal-scale-tool decision, not an oversight.
   per-asset and pooled portfolio XIRR from `transactions` rows (buy → −amount, sell/dividend →
   +amount) plus each asset's latest valuation as the terminal flow — null wherever `transactions`
   has nothing for that asset, which is every asset until one of the two import flows below runs.
-- **CAS PDF import** (`cas_import.py`, `POST /api/portfolio/import-cas`): parses a CAMS/KFintech
+- **CAS PDF import** (`portfolio/cas_import.py`, `POST /api/portfolio/import-cas`): parses a CAMS/KFintech
   detailed CAS statement (`casparser` library; the PDF itself never touches disk, only a
   PII-scrubbed parsed-JSON archive in `app_state`'s `cas_archive` namespace), reconciles against `assets` by AMFI
   scheme code then ISIN, creates missing `mf` assets, sets `holdings.units` to the CAS closing
   balance, and inserts `transactions` tagged `meta.source='cas'` — re-import replaces only those
   tagged rows, never a manually-entered one. Calls `refresh_valuations()` on success so imported
   schemes get an immediate value wherever a NAV already exists.
-- **Broker CSV import** (`csv_import.py`, `POST /api/portfolio/import-csv/preview` +
+- **Broker CSV import** (`portfolio/csv_import.py`, `POST /api/portfolio/import-csv/preview` +
   `POST /api/portfolio/import-csv`): a generic column-mapping importer (Zerodha tradebook
   auto-detected by header signature, any other broker via fuzzy header-name guessing) rather than
   one parser per broker. Appends + dedupes by content-key (date/type/units/amount) rather than
@@ -290,11 +290,11 @@ run fails its GitHub Actions job loudly rather than "succeeding" with mostly-emp
 
 | Job | Schedule (UTC) | Writes | Health gate |
 |---|---|---|---|
-| `sme_ema_pipeline.py` | `0 13 * * 1-5` (18:30 IST) | `sme_stocks`, `ema_signals` | empty stock list, or OHLCV error rate > 50% (`_MAX_ACCEPTABLE_ERROR_RATE`) |
-| `watchlist_alerts.py` | `30 13 * * 1-5` | emails; `verdict_history` snapshots | per-symbol failure rate > 50% |
-| `screener_pipeline.py` | `0 14 * * 1-5` | `screener_stocks` | — |
-| `eod_prices_pipeline.py` | `15 14 * * 1-5` (19:45 IST) | `securities`, `prices_daily`, `mf_nav_daily`; then corporate actions, then portfolio valuations | — |
-| `market_picks_pipeline.py` | `30 1 * * 1` (Mondays) | `output/_market_picks/`, `app_state` (`market_picks_history`) | > 70% empty sources, or zero consolidated picks |
+| `pipelines/sme_ema_pipeline.py` | `0 13 * * 1-5` (18:30 IST) | `sme_stocks`, `ema_signals` | empty stock list, or OHLCV error rate > 50% (`_MAX_ACCEPTABLE_ERROR_RATE`) |
+| `pipelines/watchlist_alerts.py` | `30 13 * * 1-5` | emails; `verdict_history` snapshots | per-symbol failure rate > 50% |
+| `pipelines/screener_pipeline.py` | `0 14 * * 1-5` | `screener_stocks` | — |
+| `pipelines/eod_prices_pipeline.py` | `15 14 * * 1-5` (19:45 IST) | `securities`, `prices_daily`, `mf_nav_daily`; then corporate actions, then portfolio valuations | — |
+| `pipelines/market_picks_pipeline.py` | `30 1 * * 1` (Mondays) | `output/_market_picks/`, `app_state` (`market_picks_history`) | > 70% empty sources, or zero consolidated picks |
 | `tests_live/` contract check | `0 6 * * 1` (Mondays) | nothing — early-warning only | job fails on a real contract break |
 
 Staggering is deliberate: SME → watchlist alerts → screener → EOD, 30-60 min apart, so two jobs
@@ -305,9 +305,9 @@ repository secret and fail fast with a clear message when it's missing rather th
 `market-picks-cron.yml` is the odd one out — it calls `GET /api/market-picks?force=true` on the
 already-deployed backend over HTTP rather than running the pipeline itself, because the picks cache
 is a local file on the backend host and a GitHub runner's computed result would have nowhere to
-land. `market_picks_pipeline.py`'s own `main()` exists for a self-hosted crontab on that same host.
+land. `pipelines/market_picks_pipeline.py`'s own `main()` exists for a self-hosted crontab on that same host.
 
-### Watchlist alert emails (`watchlist_alerts.py`)
+### Watchlist alert emails (`pipelines/watchlist_alerts.py`)
 
 The one batch job wired to the *single-stock* pipeline rather than a bulk scrape. One query joins
 `watchlist_items` to `users` filtered to `user_id IS NOT NULL` — an anonymous `client_id` row has
@@ -324,7 +324,7 @@ the prior verdict; needs both rows to exist, so a first-time symbol never alerts
 move** ≥ `_PRICE_MOVE_THRESHOLD_PCT` (10%) — a stock can move double digits and still close as a
 HOLD, which the recommendation check alone would miss. `_MAX_ALERT_SYMBOLS` (50) caps distinct
 symbols per run, since each one is a real paid LLM call; symbols past the cap are logged, not
-silently dropped. `email_sender.py` sends **one digest per user per run**, not one email per
+silently dropped. `core/email_sender.py` sends **one digest per user per run**, not one email per
 symbol; it shares `_send_via_smtp()` with the magic-link sender and is best-effort — returns
 `True`/`False`, never raises, and a missing `SMTP_HOST` just means nothing arrives.
 
@@ -452,7 +452,7 @@ which is a separate formula — see that pipeline's `_phase_score`.)
 lag up to 6h behind everything else in the same report. Acceptable for a momentum confirmation on
 daily closes; surprising in a support ticket if you don't know it. Their I/O also means
 `run_signal_engine()` is not pure CPU, so any caller on an event loop must go through
-`loop.run_in_executor()`; the three other callers (`main.py` CLI, `watchlist_alerts.py`,
+`loop.run_in_executor()`; the three other callers (`main.py` CLI, `pipelines/watchlist_alerts.py`,
 `_phase_research`) are already in a sync script or an executor thread.
 
 **Sector-aware weight tilts** (`_weights_for_sector()`, keyed off yfinance's `sector` field):
@@ -477,7 +477,7 @@ confidence formula.
 
 ## LLM analyst layer
 
-`crew.py::run_analysis_with_fallback()` — no CrewAI orchestration, a direct `litellm.completion`
+`analyst/crew.py::run_analysis_with_fallback()` — no CrewAI orchestration, a direct `litellm.completion`
 call (CrewAI's `@tool` decorator is the only remaining CrewAI usage anywhere in this repo, purely
 for the data-fetching tools' `.run()` calling convention).
 
@@ -537,7 +537,7 @@ itself (outside `analysis`, so it isn't subject to the four-file analyst-schema 
 see "Important Rules" below). `results-dashboard.tsx` renders a "⚠ Analysis degraded" banner when
 true, clarifying the scraped market data elsewhere in the report is still real.
 
-**Cost instrumentation** (`llm_cost.py`): every `litellm.completion()` call (guardrail retries and
+**Cost instrumentation** (`analyst/llm_cost.py`): every `litellm.completion()` call (guardrail retries and
 failed failover attempts included, not just the one that ultimately validates) is logged
 (`llm_call_cost` event) and accumulated into `app_state`'s `llm_cost` namespace, one record per
 UTC day (`call_count`/`total_cost_usd`/`calls_with_unknown_cost`), serialized by
@@ -548,7 +548,7 @@ pricing data for degrades to `None`, never a fabricated number.
 
 ---
 
-## Caching architecture (`cache.py`)
+## Caching architecture (`core/cache.py`)
 
 File-based JSON cache under `output/<SYMBOL>/<task>.json`, one file per (symbol, task), each
 carrying a `_meta.fetched_at` timestamp that freshness is always re-derived from (never trusted
@@ -586,7 +586,7 @@ so they get one shared entry instead of one per stock analysed: `"_MACRO"` for
 entry; the atomic tempfile + `os.replace` write means the worst case is a few redundant fetches,
 never a corrupt file.
 
-**Outside `cache.py` entirely**: `output/_market_picks/picks.json` (192h / 7d + 24h buffer, its own
+**Outside `core/cache.py` entirely**: `output/_market_picks/picks.json` (192h / 7d + 24h buffer, its own
 `_PICKS_CACHE_TTL_HOURS`), `output/_extract_cache/<hash>.json` (6h, content-aware key over title +
 URL + summary, pruned once per pipeline run), `output/_nse_master.txt` (24h),
 `output/_bse_main_master.json` (24h, securities master), and `output/_bhavcopy/` (raw bhavcopy
@@ -630,8 +630,8 @@ changes are authored as new Alembic revisions (`alembic revision --autogenerate`
 into `db/schema.sql` — that file is kept only as a frozen historical reference and for the two
 tables `tests/test_schema_sql_migrations.py` still exercises its old guard-convention against.
 
-Each pipeline's own `--reset-db` CLI flag varies in blast radius: `screener_pipeline.py --reset-db`
-is scoped to just `screener_stocks`; `sme_ema_pipeline.py --reset-db` calls
+Each pipeline's own `--reset-db` CLI flag varies in blast radius: `pipelines/screener_pipeline.py --reset-db`
+is scoped to just `screener_stocks`; `pipelines/sme_ema_pipeline.py --reset-db` calls
 `metadata.drop_all()`/`create_all()` against the *shared* `MetaData()`, so it drops every table in
 the database, not just its own two — a disclosed, not-yet-fixed footgun (see CLAUDE.md).
 
@@ -691,7 +691,7 @@ validation, prices — are still inline in `api.py`. Splitting further is disclo
 Three pieces of backend guard state were originally in-memory, which silently became *per-worker*
 the moment the backend scaled past one process. All three now optionally share state through Redis.
 
-**`rate_limiter.py`** exposes three primitives: `is_allowed()` (sliding window), `try_acquire_slot()`/
+**`core/rate_limiter.py`** exposes three primitives: `is_allowed()` (sliding window), `try_acquire_slot()`/
 `release_slot()` (named concurrency ceiling — the LLM-call slot), `try_acquire_lock()`/
 `release_lock()` (single-run lock — the SME/Screener refresh guard). Redis-backed via small Lua
 scripts / `SET NX EX` for atomic check-and-set, falling back to the original in-memory
@@ -733,10 +733,10 @@ on a 429, preserving "409 already-running takes priority over 429 too-many-reque
 
 ## Observability
 
-- **`observability.py`** — `log_event(logger, event, level=..., exc=None, **fields)` is the single
+- **`core/observability.py`** — `log_event(logger, event, level=..., exc=None, **fields)` is the single
   structured-JSON-logging entry point every backend module calls. `LOG_LEVEL` (default `INFO`)
   gates it.
-- **`error_tracking.py`** — `log_event()`'s error-level path forwards `(event, fields, exc)` to
+- **`core/error_tracking.py`** — `log_event()`'s error-level path forwards `(event, fields, exc)` to
   `capture_error()` when `SENTRY_DSN` is set (unset by default: zero behavior change out of the
   box). Pluggable in the sense of "any Sentry-protocol ingest endpoint," not a multi-backend
   registry. `init_error_tracking()` runs once per process at every CLI/server entry point and is
@@ -745,14 +745,14 @@ on a 429, preserving "409 already-running takes priority over 429 too-many-reque
   plain `logger.error()` line `log_event` emits *immediately before* calling `capture_error()`,
   shipping every error as two differently-shaped events. A broken or unreachable Sentry backend
   can never break the primary log line.
-- **`schema_drift.py`** — type-drift detection, for the six `ALL_DATA_TASKS` slices only.
+- **`core/schema_drift.py`** — type-drift detection, for the six `ALL_DATA_TASKS` slices only.
   `schemas.CONTRACTS`'s optional `"types"` map (`{field: dict|list}`) is the single source of
-  truth, so there's no second field list to drift from `schemas.py`. `check_drift()` flags a field
+  truth, so there's no second field list to drift from `core/schemas.py`. `check_drift()` flags a field
   that is *present but the wrong shape* — never one that's legitimately absent, which is the
   common, expected case under this codebase's "never invent" convention. Wired into
   `main._fetch_task()`, the one choke point both the CLI and the SSE endpoint already go through.
   Logs at `warning` (a human should look at the scraper; this isn't a page), never raises.
-- **`source_health.py`** — volume/freshness anomaly detection, for the 20 Market Picks sources +
+- **`telemetry/source_health.py`** — volume/freshness anomaly detection, for the 20 Market Picks sources +
   the two macro-overlay fetches. Records a per-source daily ok/not-ok result in `app_state`'s
   `source_health` namespace and warns once a source with an established healthy baseline (≥5 prior
   days, at least one successful) has failed 3 consecutive *days*. Time-normalized — several calls
@@ -760,21 +760,21 @@ on a 429, preserving "409 already-running takes priority over 429 too-many-reque
   the threshold in minutes. Serialized per source by `state_store.mutate()`'s row lock, which is
   what stops two racing read-modify-write cycles losing an update. A brand-new source never alerts
   (no baseline to regress from).
-- **`source_quality.py`** — per-*run* Market Picks source telemetry, complementing the day-level
+- **`telemetry/source_quality.py`** — per-*run* Market Picks source telemetry, complementing the day-level
   view above: one record per run in `app_state`'s `source_quality` namespace, recording for each source how
   many articles it yielded, how many picks the LLM extracted from them, and how many survived
-  NSE-symbol validation. This is the funnel `source_health.py` can't see — a source that reliably
+  NSE-symbol validation. This is the funnel `telemetry/source_health.py` can't see — a source that reliably
   returns articles which never once become a validated pick looks perfectly healthy to a
   boolean ok/not-ok check. Each run owns its own key, so no lock is needed.
-  `source_quality_report.py` is the CLI that aggregates these across runs.
-- **`scraper_error_counters.py`** — for the standalone per-symbol endpoints (`peers`, `financials`,
+  `telemetry/source_quality_report.py` is the CLI that aggregates these across runs.
+- **`telemetry/scraper_error_counters.py`** — for the standalone per-symbol endpoints (`peers`, `financials`,
   `insider_activity`'s two sub-fetches, `street_consensus`'s two sub-fetches), where an empty
   result is the expected common case and the volume-anomaly heuristic above would be pure noise.
   Distinguishes a genuine `{"error": ...}` tool result from a legitimate empty one and counts/logs
   only the former — no "N bad days" threshold, since these are on-demand endpoints where a single
   error already means one real user's request degraded. A grep-able counter file plus a warning
   log line, not a metrics platform.
-- **`llm_cost.py`** — see "LLM analyst layer" above.
+- **`analyst/llm_cost.py`** — see "LLM analyst layer" above.
 - **`tests_live/`** — a second, opt-in test root (`RUN_LIVE_TESTS=1`, weekly cron) that checks four
   high-blast-radius scrapers against live responses, so a contract break surfaces before production
   traffic finds it. It probes each host with a bare `requests.head()` **first**: tools never raise,
@@ -804,12 +804,12 @@ signal-engine → analyst flow the web app's SSE endpoint runs, sharing `main._f
 `main._build_report()` with `api.py` — the two entry points cannot drift on report shape. Also
 saves its finished report to `app_state` under `cli_report`, keyed `SYMBOL:YYYY-MM-DD` (or to
 `output/<SYMBOL>/report_<date>.json` when `DATABASE_URL` is unset). Batch pipelines each have their own CLI
-too: `sme_ema_pipeline.py`, `screener_pipeline.py`, `market_picks_pipeline.py` (`main()`, for a
-self-hosted crontab alternative to the GitHub Actions cron), `watchlist_alerts.py` (`--force`),
-`eod_prices_pipeline.py` (`--setup-db`/`--reset-db`/`--date`/`--backfill`),
-`corporate_actions_pipeline.py` (`--setup-db`/`--reset-db`/`--backfill`/`--recompute`/
-`--recompute-all`), `portfolio_valuation.py` (standalone-runnable, no flags — just runs
-`refresh_valuations()` once), and `cas_import.py --replay <archived-json> --account-id N` (re-runs
+too: `pipelines/sme_ema_pipeline.py`, `pipelines/screener_pipeline.py`, `pipelines/market_picks_pipeline.py` (`main()`, for a
+self-hosted crontab alternative to the GitHub Actions cron), `pipelines/watchlist_alerts.py` (`--force`),
+`pipelines/eod_prices_pipeline.py` (`--setup-db`/`--reset-db`/`--date`/`--backfill`),
+`pipelines/corporate_actions_pipeline.py` (`--setup-db`/`--reset-db`/`--backfill`/`--recompute`/
+`--recompute-all`), `portfolio/portfolio_valuation.py` (standalone-runnable, no flags — just runs
+`refresh_valuations()` once), and `portfolio/cas_import.py --replay <archived-json> --account-id N` (re-runs
 a CAS import from a previously-archived parse, for debugging/recovery without re-uploading the PDF).
 
 ---
@@ -826,35 +826,35 @@ stock-research/
 │   ├── api.py                     FastAPI server — 29 of the 57 routes, both SSE endpoints,
 │   │                               symbol validation, shared helpers routes/ depends on
 │   ├── main.py                    CLI entry point; _fetch_task/_build_report shared with api.py
-│   ├── crew.py                    Analyst guardrails, cross-provider failover, run_analysis_with_fallback
-│   ├── llm_cost.py                Per-call LLM cost instrumentation + running daily total
-│   ├── cache.py                   File-based TTL cache, optional Redis write-through/read-first
-│   ├── rate_limiter.py            Shared-state (Redis or in-memory) rate limits, slots, locks
-│   ├── schemas.py                 Normalization contracts: raw tool output → canonical dicts
-│   ├── schema_drift.py            Type-drift detection for the six ALL_DATA_TASKS slices
-│   ├── source_health.py           Freshness/volume monitoring for Market Picks' 20 sources + macro
-│   ├── scraper_error_counters.py  Error counters for the 4 standalone per-symbol scrapers
-│   ├── observability.py           Structured JSON logging (log_event())
-│   ├── error_tracking.py          Optional Sentry-compatible hook, wired into log_event()
-│   ├── peer_analytics.py          Peer-percentile + absolute valuation-anchor math (shared by
-│   │                               api.py's /api/peers and market_picks_pipeline.py's _phase_research)
-│   ├── dcf_valuation.py           Deterministic two-stage DCF off cash-flow statement data
-│   ├── verdict_history.py         Daily verdict/price snapshots (Postgres) — verdict timeline strip
-│   ├── mf_holdings_history.py     Quarterly MF stake snapshots (Postgres) — stake-delta badges
+│   ├── analyst/crew.py                    Analyst guardrails, cross-provider failover, run_analysis_with_fallback
+│   ├── analyst/llm_cost.py                Per-call LLM cost instrumentation + running daily total
+│   ├── core/cache.py                   File-based TTL cache, optional Redis write-through/read-first
+│   ├── core/rate_limiter.py            Shared-state (Redis or in-memory) rate limits, slots, locks
+│   ├── core/schemas.py                 Normalization contracts: raw tool output → canonical dicts
+│   ├── core/schema_drift.py            Type-drift detection for the six ALL_DATA_TASKS slices
+│   ├── telemetry/source_health.py           Freshness/volume monitoring for Market Picks' 20 sources + macro
+│   ├── telemetry/scraper_error_counters.py  Error counters for the 4 standalone per-symbol scrapers
+│   ├── core/observability.py           Structured JSON logging (log_event())
+│   ├── core/error_tracking.py          Optional Sentry-compatible hook, wired into log_event()
+│   ├── analytics/peer_analytics.py          Peer-percentile + absolute valuation-anchor math (shared by
+│   │                               api.py's /api/peers and pipelines/market_picks_pipeline.py's _phase_research)
+│   ├── portfolio/dcf_valuation.py           Deterministic two-stage DCF off cash-flow statement data
+│   ├── analytics/verdict_history.py         Daily verdict/price snapshots (Postgres) — verdict timeline strip
+│   ├── analytics/mf_holdings_history.py     Quarterly MF stake snapshots (Postgres) — stake-delta badges
 │   ├── auth.py                    Magic-link auth: token/session/API-key issuance + validation
-│   ├── email_sender.py            Magic-link + watchlist-alert emails over generic SMTP
-│   ├── watchlist_alerts.py        Daily batch job: emails users on a watched stock's rec change
-│   ├── market_picks_pipeline.py   6-phase multi-agent weekly picks pipeline
-│   ├── sme_ema_pipeline.py        SME golden/death cross batch pipeline (Postgres)
-│   ├── screener_pipeline.py       NIFTY 500 custom screener batch pipeline (Postgres)
-│   ├── eod_prices_pipeline.py     NSE bhavcopy + AMFI NAV ingestion; also runs corporate-actions
+│   ├── core/email_sender.py            Magic-link + watchlist-alert emails over generic SMTP
+│   ├── pipelines/watchlist_alerts.py        Daily batch job: emails users on a watched stock's rec change
+│   ├── pipelines/market_picks_pipeline.py   6-phase multi-agent weekly picks pipeline
+│   ├── pipelines/sme_ema_pipeline.py        SME golden/death cross batch pipeline (Postgres)
+│   ├── pipelines/screener_pipeline.py       NIFTY 500 custom screener batch pipeline (Postgres)
+│   ├── pipelines/eod_prices_pipeline.py     NSE bhavcopy + AMFI NAV ingestion; also runs corporate-actions
 │   │                               and portfolio-valuation as isolated final steps
-│   ├── corporate_actions_pipeline.py  NSE corporate-actions ingestion + adj_close recompute
-│   ├── source_quality.py          Per-run Market Picks source telemetry (yield, dedup, extraction rate)
-│   ├── source_quality_report.py   CLI aggregating source_quality.py's per-run JSON files
-│   ├── portfolio_valuation.py     Portfolio Aggregator: refresh_valuations(), xirr(), xirr_report()
-│   ├── cas_import.py              CAMS/KFintech CAS PDF import → Portfolio Aggregator transactions
-│   ├── csv_import.py              Generic broker-CSV import (Zerodha preset) → transactions
+│   ├── pipelines/corporate_actions_pipeline.py  NSE corporate-actions ingestion + adj_close recompute
+│   ├── telemetry/source_quality.py          Per-run Market Picks source telemetry (yield, dedup, extraction rate)
+│   ├── telemetry/source_quality_report.py   CLI aggregating telemetry/source_quality.py's per-run JSON files
+│   ├── portfolio/portfolio_valuation.py     Portfolio Aggregator: refresh_valuations(), xirr(), xirr_report()
+│   ├── portfolio/cas_import.py              CAMS/KFintech CAS PDF import → Portfolio Aggregator transactions
+│   ├── portfolio/csv_import.py              Generic broker-CSV import (Zerodha preset) → transactions
 │   ├── requirements.txt
 │   ├── alembic.ini                Schema-migration config
 │   ├── Dockerfile
@@ -889,7 +889,7 @@ stock-research/
 │   │   ├── market_picks_tools.py     RSS + GNews scrapers (merges in hdfc_sec_agent.py's sources)
 │   │   ├── hdfc_sec_agent.py         HDFC Securities scrapers
 │   │   ├── sme_tools.py              NSE Emerge + BSE SME stock-list fetchers
-│   │   ├── nifty500_tools.py         NIFTY 500 constituent list (screener_pipeline.py's universe)
+│   │   ├── nifty500_tools.py         NIFTY 500 constituent list (pipelines/screener_pipeline.py's universe)
 │   │   ├── nse_insider_trades.py / nse_bulk_block_deals.py   PIT + bulk/block deal feeds
 │   │   ├── nse_fii_dii_tools.py      Daily FII/DII net equity flow
 │   │   ├── macro_context_tools.py    RBI repo rate + CPI inflation
@@ -900,7 +900,7 @@ stock-research/
 │   │   ├── eod_sources.py            NSE bhavcopy + equity-master fetch/parse, AMFI NAV fetch/parse
 │   │   ├── corporate_actions.py      NSE corporate-actions fetch + PURPOSE-string parser
 │   │   ├── securities_master.py      NSE+BSE main-board + SME merge, resolve_symbol() (broker-code
-│   │   │                               → canonical symbol; consumed by csv_import.py)
+│   │   │                               → canonical symbol; consumed by portfolio/csv_import.py)
 │   │   ├── _gnews_timeout.py         Patches a hard timeout onto gnews→feedparser→urllib, which
 │   │   │                               has none — one hung GNews call would otherwise block
 │   │   │                               _phase_scrape's executor shutdown indefinitely

@@ -7,15 +7,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import cache
+from core import cache
 
 
 class _CacheRedisTestBase(unittest.TestCase):
     """Shared setup for every Redis-backed cache test: a scratch disk
     directory (same convention as test_cache_failures.py) plus a reset of
-    cache.py's own lazily-constructed Redis client state, mirroring
+    core/cache.py's own lazily-constructed Redis client state, mirroring
     tests/test_rate_limiter.py's _MemoryStateResetMixin for the equivalent
-    module-level Redis client cache in rate_limiter.py."""
+    module-level Redis client cache in core/rate_limiter.py."""
 
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-cache-redis-test-")
@@ -61,7 +61,7 @@ class SaveWritesThroughToRedisTest(_CacheRedisTestBase):
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
 
-        with patch("cache._get_redis_client", return_value=fake_client):
+        with patch("core.cache._get_redis_client", return_value=fake_client):
             cache.save("TCS", "news", {"symbol": "TCS", "articles": []})
 
         fake_client.set.assert_called_once()
@@ -77,7 +77,7 @@ class SaveWritesThroughToRedisTest(_CacheRedisTestBase):
         os.environ["REDIS_URL"] = "redis://localhost:6379/0"
         fake_client = MagicMock()
 
-        with patch("cache._get_redis_client", return_value=fake_client):
+        with patch("core.cache._get_redis_client", return_value=fake_client):
             cache.save("TCS", "news", {"error": "temporary upstream failure", "symbol": "TCS"})
 
         fake_client.set.assert_not_called()
@@ -88,7 +88,7 @@ class SaveWritesThroughToRedisTest(_CacheRedisTestBase):
         fake_client = MagicMock()
         fake_client.set.side_effect = ConnectionError("redis unreachable")
 
-        with patch("cache._get_redis_client", return_value=fake_client):
+        with patch("core.cache._get_redis_client", return_value=fake_client):
             cache.save("TCS", "news", {"symbol": "TCS", "articles": []})  # must not raise
 
         self.assertTrue(cache.cache_path("TCS", "news").exists())
@@ -107,7 +107,7 @@ class LoadPrefersRedisTest(_CacheRedisTestBase):
         fake_client = MagicMock()
         fake_client.get.return_value = json.dumps(self._fresh_payload("TCS", articles=[{"title": "from redis"}]))
 
-        with patch("cache._get_redis_client", return_value=fake_client):
+        with patch("core.cache._get_redis_client", return_value=fake_client):
             result = cache.load("TCS", "news")
 
         self.assertIsNotNone(result)
@@ -125,7 +125,7 @@ class LoadPrefersRedisTest(_CacheRedisTestBase):
         fake_client = MagicMock()
         fake_client.get.return_value = json.dumps(self._stale_payload("TCS", "news", articles=[]))
 
-        with patch("cache._get_redis_client", return_value=fake_client):
+        with patch("core.cache._get_redis_client", return_value=fake_client):
             result = cache.load("TCS", "news")
 
         self.assertIsNone(result)
@@ -138,7 +138,7 @@ class LoadPrefersRedisTest(_CacheRedisTestBase):
         fake_client = MagicMock()
         fake_client.get.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
 
-        with patch("cache._get_redis_client", return_value=fake_client):
+        with patch("core.cache._get_redis_client", return_value=fake_client):
             result = cache.load("TCS", "news")
 
         self.assertIsNone(result)
@@ -151,7 +151,7 @@ class LoadPrefersRedisTest(_CacheRedisTestBase):
         fake_client = MagicMock()
         fake_client.get.return_value = None
 
-        with patch("cache._get_redis_client", return_value=fake_client):
+        with patch("core.cache._get_redis_client", return_value=fake_client):
             result = cache.load("TCS", "news")
 
         self.assertIsNotNone(result)
@@ -165,7 +165,7 @@ class LoadPrefersRedisTest(_CacheRedisTestBase):
         fake_client = MagicMock()
         fake_client.get.side_effect = ConnectionError("redis unreachable")
 
-        with patch("cache._get_redis_client", return_value=fake_client):
+        with patch("core.cache._get_redis_client", return_value=fake_client):
             result = cache.load("TCS", "news")  # must not raise
 
         self.assertIsNotNone(result)
@@ -178,7 +178,7 @@ class IsFreshPrefersRedisTest(_CacheRedisTestBase):
         fake_client = MagicMock()
         fake_client.get.return_value = json.dumps(self._fresh_payload("TCS"))
 
-        with patch("cache._get_redis_client", return_value=fake_client):
+        with patch("core.cache._get_redis_client", return_value=fake_client):
             self.assertTrue(cache.is_fresh("TCS", "news"))
 
     def test_stale_redis_entry_is_not_fresh_even_with_a_fresh_disk_copy(self) -> None:
@@ -189,7 +189,7 @@ class IsFreshPrefersRedisTest(_CacheRedisTestBase):
         fake_client = MagicMock()
         fake_client.get.return_value = json.dumps(self._stale_payload("TCS", "news"))
 
-        with patch("cache._get_redis_client", return_value=fake_client):
+        with patch("core.cache._get_redis_client", return_value=fake_client):
             self.assertFalse(cache.is_fresh("TCS", "news"))
 
     def test_redis_miss_falls_back_to_disk(self) -> None:
@@ -200,7 +200,7 @@ class IsFreshPrefersRedisTest(_CacheRedisTestBase):
         fake_client = MagicMock()
         fake_client.get.return_value = None
 
-        with patch("cache._get_redis_client", return_value=fake_client):
+        with patch("core.cache._get_redis_client", return_value=fake_client):
             self.assertTrue(cache.is_fresh("TCS", "news"))
 
 

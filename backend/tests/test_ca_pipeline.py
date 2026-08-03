@@ -4,11 +4,11 @@ from datetime import date
 
 from sqlalchemy import create_engine, text
 
-from corporate_actions_pipeline import (
+from pipelines.corporate_actions_pipeline import (
     _upsert_actions, recompute_symbol,
 )
 from db.models import corporate_actions, metadata, prices_daily, securities
-from eod_prices_pipeline import _upsert_prices
+from pipelines.eod_prices_pipeline import _upsert_prices
 
 
 def _silence_sqlite_date_adapter_warning() -> None:

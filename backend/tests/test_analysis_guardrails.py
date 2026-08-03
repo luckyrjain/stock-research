@@ -24,7 +24,7 @@ sys.modules.setdefault(
     SimpleNamespace(get_latest_news=object()),
 )
 
-import crew
+from analyst import crew
 from state_store_harness import isolated_state_store
 
 
@@ -64,7 +64,7 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
     }
 
     def setUp(self) -> None:
-        # crew.py records LLM cost on every completion() call via llm_cost.py —
+        # analyst/crew.py records LLM cost on every completion() call via analyst/llm_cost.py —
         # point its persistence at a throwaway in-memory DB so this test file
         # never touches a real one, same convention as every other stateful
         # module's own test file.
@@ -488,8 +488,8 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
 
     def test_records_cost_on_a_successful_call(self) -> None:
         with patch("litellm.completion", return_value=_llm_response(json.dumps(self._VALID_PAYLOAD))), \
-             patch("llm_cost.estimate_cost_usd", return_value=0.0123), \
-             patch("llm_cost.record_call_cost") as mock_record:
+             patch("analyst.llm_cost.estimate_cost_usd", return_value=0.0123), \
+             patch("analyst.llm_cost.record_call_cost") as mock_record:
             crew.run_analysis_with_fallback("SAILIFE", self.all_data)
 
         mock_record.assert_called_once()
@@ -839,7 +839,7 @@ class CrossProviderFailoverTest(unittest.TestCase):
     """A full provider outage (not a formatting hiccup on an otherwise
     healthy provider) previously converged straight to the generic
     safe-HOLD fallback, indistinguishable from the fallback a working
-    provider's guardrail failure also produces — see crew.py's own
+    provider's guardrail failure also produces — see analyst/crew.py's own
     run_analysis_with_fallback docstring. These cover the failover path
     that now runs when a second provider's API key is also configured."""
 

@@ -5,8 +5,8 @@ import threading
 import unittest
 from unittest.mock import patch
 
-import scraper_error_counters
-import state_store
+from telemetry import scraper_error_counters
+from core import state_store
 from state_store_harness import isolated_state_store, shared_state_store
 
 
@@ -15,7 +15,7 @@ def _mp_record_error(state_dir: str, scraper_name: str) -> None:
     runs in a genuinely separate OS process, not a thread, to exercise the
     actual cross-process guarantee state_store.mutate()'s row lock provides —
     same pattern as tests/test_llm_cost.py's own _mp_record_call."""
-    import scraper_error_counters as _sec
+    from telemetry import scraper_error_counters as _sec
 
     with shared_state_store(state_dir, create=False):
         _sec.record_scraper_error(scraper_name)
@@ -26,7 +26,7 @@ class RecordScraperErrorTest(unittest.TestCase):
         self.addCleanup(isolated_state_store().close)
 
     def test_first_error_is_recorded_and_logged(self) -> None:
-        with patch("scraper_error_counters.log_event") as mock_log:
+        with patch("telemetry.scraper_error_counters.log_event") as mock_log:
             scraper_error_counters.record_scraper_error("peers", symbol="TCS")
         self.assertEqual(scraper_error_counters.get_error_count("peers"), 1)
         mock_log.assert_called_once()
@@ -64,8 +64,8 @@ class RecordScraperErrorTest(unittest.TestCase):
         # line is what an operator actually greps for, so a store failure
         # must still emit it (with a null count rather than a guessed one)
         # instead of swallowing the scraper error entirely.
-        with patch("state_store._get_engine", side_effect=RuntimeError("db down")):
-            with patch("scraper_error_counters.log_event") as mock_log:
+        with patch("core.state_store._get_engine", side_effect=RuntimeError("db down")):
+            with patch("telemetry.scraper_error_counters.log_event") as mock_log:
                 scraper_error_counters.record_scraper_error("peers", symbol="TCS")
 
         mock_log.assert_called_once()
@@ -75,7 +75,7 @@ class RecordScraperErrorTest(unittest.TestCase):
         self.assertIsNone(kwargs.get("error_count"))
 
     def test_get_error_count_never_raises_when_the_store_is_broken(self) -> None:
-        with patch("state_store._get_engine", side_effect=RuntimeError("db down")):
+        with patch("core.state_store._get_engine", side_effect=RuntimeError("db down")):
             self.assertEqual(scraper_error_counters.get_error_count("peers"), 0)
 
 

@@ -92,7 +92,7 @@ class AlembicMigrationTest(unittest.TestCase):
     def test_stamp_head_on_a_pre_existing_schema_matches_upgrade_head(self) -> None:
         # The documented existing-deployment path: a database that already
         # has every table (created via metadata.create_all(), the same way
-        # sme_ema_pipeline.py/screener_pipeline.py's --setup-db do) should
+        # pipelines/sme_ema_pipeline.py/screener_pipeline.py's --setup-db do) should
         # be stampable as "already at head" with zero drift afterward —
         # exactly db.models.stamp_alembic_head's own contract.
         from alembic import command

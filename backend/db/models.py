@@ -186,7 +186,7 @@ api_keys = Table(
 )
 
 
-# Custom stock screener (see screener_pipeline.py) — a stored-metrics table
+# Custom stock screener (see pipelines/screener_pipeline.py) — a stored-metrics table
 # for the NIFTY 500 universe, mirroring sme_stocks' "fetch once, filter/sort
 # many" shape so GET /api/screener never needs a live yfinance call per
 # request. nse_industry comes from NSE's own published NIFTY 500 constituent
@@ -319,7 +319,7 @@ prices_daily = Table(
     Column("delivery_qty",  BigInteger),
     Column("delivery_pct",  Numeric(6, 2)),
     # Split/bonus-adjusted close. Seeded to `close` on insert; the corporate
-    # actions recompute job (corporate_actions_pipeline.py) is the only
+    # actions recompute job (pipelines/corporate_actions_pipeline.py) is the only
     # writer after that — a re-ingested day's ON CONFLICT UPDATE must never
     # touch this column, or a replay would clobber an already-adjusted value
     # back to raw.
@@ -437,9 +437,9 @@ valuations = Table(
     Index("idx_valuations_asset", "asset_id"),
 )
 
-# Written by cas_import.py (CAS-sourced rows, meta.source="cas") and
-# csv_import.py (broker-CSV-sourced rows, meta.source="csv"); read by
-# portfolio_valuation.py's xirr_report() to compute per-asset/portfolio XIRR.
+# Written by portfolio/cas_import.py (CAS-sourced rows, meta.source="cas") and
+# portfolio/csv_import.py (broker-CSV-sourced rows, meta.source="csv"); read by
+# portfolio/portfolio_valuation.py's xirr_report() to compute per-asset/portfolio XIRR.
 transactions = Table(
     "transactions",
     metadata,
@@ -489,7 +489,7 @@ def stamp_alembic_head() -> None:
     section documents for an *existing* deployment migrating onto Alembic
     for the first time (`alembic stamp head`).
 
-    Both sme_ema_pipeline.py's and screener_pipeline.py's own --setup-db
+    Both pipelines/sme_ema_pipeline.py's and pipelines/screener_pipeline.py's own --setup-db
     call metadata.create_all(engine) directly, bypassing Alembic entirely —
     a fresh database set up this way ends up with all 11 tables but no
     `alembic_version` row, so a subsequent `alembic upgrade head` fails

@@ -4,7 +4,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine, select
 from sqlalchemy.pool import StaticPool
 
-from cas_import import _scrub, import_cas, parse_cas
+from portfolio.cas_import import _scrub, import_cas, parse_cas
 from db.models import accounts, assets, holdings, metadata, profiles, transactions
 
 

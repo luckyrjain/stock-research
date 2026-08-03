@@ -16,7 +16,7 @@ raising into the signal engine.
 """
 import requests
 
-from observability import get_logger, log_event
+from core.observability import get_logger, log_event
 from tools._nse_session import get_nse_session
 
 LOGGER = get_logger("nse_fii_dii_tools")

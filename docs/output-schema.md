@@ -12,7 +12,7 @@ when you need to know *how to make the call*, read there.
 ## Per-symbol cache files
 
 Each symbol gets its own folder under `backend/output/<SYMBOL>/` (or, when `REDIS_URL` is set, the same
-data lives in Redis and disk becomes a fast local mirror/fallback — see `cache.py` and backend/CLAUDE.md's
+data lives in Redis and disk becomes a fast local mirror/fallback — see `core/cache.py` and backend/CLAUDE.md's
 "Redis-backed cache for multi-host deployments" section). One file per cache "task", each with its
 own TTL (`cache.TTL_HOURS`):
 
@@ -36,7 +36,7 @@ backend/output/TCS/
 The CLI's finished report goes to PostgreSQL, under the `cli_report` namespace in `app_state`,
 keyed `SYMBOL:YYYY-MM-DD` (see the table further down) — or, when `DATABASE_URL` is unset (not
 required for the core `python main.py <SYMBOL>` flow), falls back to `output/<SYMBOL>/report_<date>.json`,
-the same disk write this codebase always did before `state_store.py` existed.
+the same disk write this codebase always did before `core/state_store.py` existed.
 
 `fii_dii_flow` and `macro_context` (both 24h) are cached under a fixed `"_MACRO"` pseudo-symbol
 (market-wide, not per-symbol), and `index_history` (24h) under a `"NSEI"` pseudo-symbol — neither
@@ -95,7 +95,7 @@ convention, see backend/CLAUDE.md's "Important Rules for Claude").
 | `generated_at` | string | Run date in `YYYY-MM-DD` format — stamped fresh on every assembly, not a per-task freshness signal (see `data_freshness`) |
 | `data_freshness` | object | `{stock_info, research, news, shareholding, mf_holdings, filings}` — each task's own real `_meta.fetched_at` ISO timestamp (or `null`), captured before `_meta` is stripped |
 | `analysis` | object | Final LLM analyst output (see below) |
-| `degraded` | boolean | `true` when every configured LLM provider failed (or failed guardrails past its retry) and `analysis` is `crew.py`'s generic safe-fallback HOLD, not a real analyst call. A sibling of `analysis` (not nested inside it) so it isn't subject to the four-file analyst-schema lockstep rule — the LLM never produces this field. See backend/CLAUDE.md's "LLM cost instrumentation + cross-provider failover" point 3 |
+| `degraded` | boolean | `true` when every configured LLM provider failed (or failed guardrails past its retry) and `analysis` is `analyst/crew.py`'s generic safe-fallback HOLD, not a real analyst call. A sibling of `analysis` (not nested inside it) so it isn't subject to the four-file analyst-schema lockstep rule — the LLM never produces this field. See backend/CLAUDE.md's "LLM cost instrumentation + cross-provider failover" point 3 |
 | `signals` | object | Quantitative signal engine output (see below) |
 | `stock_info` | object | Quote and company information |
 | `research` | object | Fundamental ratios, about text, quarterly trend |
@@ -308,7 +308,7 @@ when nothing in the fetch window matches a known pattern.
 
 ### `mf_holdings_trend`
 
-Per-fund stake deltas vs. the prior stored quarterly snapshot — see `mf_holdings_history.py`
+Per-fund stake deltas vs. the prior stored quarterly snapshot — see `analytics/mf_holdings_history.py`
 (PostgreSQL-backed; empty array when `DATABASE_URL` isn't set or no prior snapshot exists).
 
 ```json
@@ -555,7 +555,7 @@ own try/except, so one failing doesn't blank out the other.
 ```
 
 One row per day the analysis pipeline actually ran (both CLI and web, same-day re-runs upsert
-rather than duplicate) — see `verdict_history.py`. `return_since_pct`/`outcome` grade each entry
+rather than duplicate) — see `analytics/verdict_history.py`. `return_since_pct`/`outcome` grade each entry
 against **today's** live price; `outcome` is only ever `'win'`/`'loss'` for `BUY`/`SELL` calls (a
 `HOLD` makes no directional claim, so it's never graded) and `null` when ungraded or the live
 price fetch failed. An unset `DATABASE_URL` or a failed query degrades to the same shape with an
@@ -688,7 +688,7 @@ candidate name) rather than guessing.
 |---|---|---|---|
 | `backend/output/_extract_cache/<hash>.json` | 6 h | SHA-256 of source name + article titles/URLs | LLM extraction result per source |
 | `backend/output/_nse_master.txt` | 24 h | — | Newline-separated set of valid NSE equity symbols from EQUITY_L.csv |
-| `backend/output/_nifty500_master.json` | 24 h | — | NIFTY 500 constituent list (`{symbol, company_name, industry, isin}[]`) — screener_pipeline.py's universe |
+| `backend/output/_nifty500_master.json` | 24 h | — | NIFTY 500 constituent list (`{symbol, company_name, industry, isin}[]`) — pipelines/screener_pipeline.py's universe |
 | `backend/output/_bhavcopy/<YYYY-MM-DD>.csv` | Permanent | Trade date | Raw NSE bhavcopy archive — EOD price store ingestion replay without re-hitting NSE |
 
 Everything under `backend/output/` is regenerable cache. Durable state lives in PostgreSQL, in
@@ -701,7 +701,7 @@ the `app_state` table (`namespace`, `key`, `payload` JSON) — see [Database](da
 | `source_health` | Source name | Per-source daily ok/not-ok history for market-picks sources + macro overlay fetches |
 | `scraper_errors` | Scraper name (`peers`, `financials`, `insider_trades`, `bulk_block_deals`, `trendlyne_articles`, `trendlyne_numeric_consensus`) | Error counter for the standalone per-symbol scrapers |
 | `source_quality` | Market Picks run id | Per-run source telemetry (yield, syndication-dedup rate, extraction success) for the 20 Market Picks sources |
-| `cas_archive` | `YYYY-MM-DD-HHMMSS` | PII-scrubbed parsed CAS-statement JSON — replay via (from `backend/`) `python cas_import.py --replay <key> --account-id N` |
+| `cas_archive` | `YYYY-MM-DD-HHMMSS` | PII-scrubbed parsed CAS-statement JSON — replay via (from `backend/`) `python -m portfolio.cas_import --replay <key> --account-id N` |
 | `cli_report` | `SYMBOL:YYYY-MM-DD` | The CLI's own finished report (`main.py`); nothing reads it back; falls back to a disk write under `output/` when `DATABASE_URL` is unset |
 
 ---

@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import MagicMock, patch
 
-import screener_pipeline
+from pipelines import screener_pipeline
 from signals.models import Signal
 
 
@@ -106,14 +106,14 @@ class ResetDbScopeTest(unittest.TestCase):
     """--reset-db must only touch this pipeline's own table — db/models.py's
     MetaData() is shared across every table in the app (users, sessions,
     watchlist_items, ...), so metadata.drop_all() here would take down
-    unrelated, NOT-regenerable data. See sme_ema_pipeline.py's own
+    unrelated, NOT-regenerable data. See pipelines/sme_ema_pipeline.py's own
     --reset-db, which predates this fix and still has that broader-than-
     intended blast radius (documented as a disclosed limitation in
     CLAUDE.md)."""
 
     def test_reset_db_drops_and_creates_only_screener_stocks(self) -> None:
         fake_engine = MagicMock()
-        with patch("sys.argv", ["screener_pipeline.py", "--reset-db"]), \
+        with patch("sys.argv", ["pipelines/screener_pipeline.py", "--reset-db"]), \
              patch.object(screener_pipeline, "get_engine", return_value=fake_engine), \
              patch.object(screener_pipeline, "screener_stocks") as fake_table, \
              patch.object(screener_pipeline, "metadata") as fake_metadata:

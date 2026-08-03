@@ -5,8 +5,8 @@ import threading
 import unittest
 from unittest.mock import patch
 
-import source_health
-import state_store
+from telemetry import source_health
+from core import state_store
 from state_store_harness import isolated_state_store, shared_state_store
 
 
@@ -20,7 +20,7 @@ def _mp_record_and_check(state_dir: str, source_name: str, date: str, ok: bool) 
     thread, is what actually exercises the cross-process guarantee
     state_store.mutate()'s row lock provides. Builds its own engine over the
     parent's SQLite file, since a SQLAlchemy engine is not fork-safe."""
-    import source_health as _source_health
+    from telemetry import source_health as _source_health
 
     with shared_state_store(state_dir, create=False):
         _source_health.record_and_check(source_name, ok, date=date)
@@ -43,7 +43,7 @@ class RecordAndCheckTest(unittest.TestCase):
             source_health.record_and_check(source, ok, date=d)
 
     def test_first_run_is_recorded_with_no_alert(self) -> None:
-        with patch("source_health.log_event") as mock_log:
+        with patch("telemetry.source_health.log_event") as mock_log:
             source_health.record_and_check("Test Source", True)
         self.assertEqual(self._oks("Test Source"), [True])
         mock_log.assert_not_called()
@@ -52,7 +52,7 @@ class RecordAndCheckTest(unittest.TestCase):
         # No established healthy baseline yet — a source that's simply
         # always been empty (e.g. genuinely no coverage) shouldn't page
         # anyone.
-        with patch("source_health.log_event") as mock_log:
+        with patch("telemetry.source_health.log_event") as mock_log:
             self._record_on_days(
                 "New Source",
                 [(f"2026-01-0{i}", False) for i in range(1, 6)],
@@ -60,7 +60,7 @@ class RecordAndCheckTest(unittest.TestCase):
         mock_log.assert_not_called()
 
     def test_healthy_source_failing_three_days_in_a_row_alerts(self) -> None:
-        with patch("source_health.log_event") as mock_log:
+        with patch("telemetry.source_health.log_event") as mock_log:
             self._record_on_days(
                 "Reliable Source",
                 [(f"2026-01-0{i}", True) for i in range(1, 6)]
@@ -72,7 +72,7 @@ class RecordAndCheckTest(unittest.TestCase):
         self.assertEqual(kwargs["level"], "warning")
 
     def test_healthy_source_failing_only_two_days_does_not_alert_yet(self) -> None:
-        with patch("source_health.log_event") as mock_log:
+        with patch("telemetry.source_health.log_event") as mock_log:
             self._record_on_days(
                 "Reliable Source",
                 [(f"2026-01-0{i}", True) for i in range(1, 6)]
@@ -81,7 +81,7 @@ class RecordAndCheckTest(unittest.TestCase):
         mock_log.assert_not_called()
 
     def test_alert_fires_only_once_not_every_subsequent_failing_day(self) -> None:
-        with patch("source_health.log_event") as mock_log:
+        with patch("telemetry.source_health.log_event") as mock_log:
             self._record_on_days(
                 "Reliable Source",
                 [(f"2026-01-0{i}", True) for i in range(1, 6)]
@@ -92,7 +92,7 @@ class RecordAndCheckTest(unittest.TestCase):
         self.assertEqual(mock_log.call_count, 2)  # still 3 consecutive bad days each time — expected re-alert
 
     def test_recovery_resets_the_consecutive_failure_streak(self) -> None:
-        with patch("source_health.log_event") as mock_log:
+        with patch("telemetry.source_health.log_event") as mock_log:
             self._record_on_days(
                 "Reliable Source",
                 [(f"2026-01-0{i}", True) for i in range(1, 6)]
@@ -115,7 +115,7 @@ class RecordAndCheckTest(unittest.TestCase):
         self.assertEqual(self._history("Bursty Source"), [{"date": "2026-01-01", "ok": False}])
 
     def test_same_day_collapse_does_not_falsely_alert(self) -> None:
-        with patch("source_health.log_event") as mock_log:
+        with patch("telemetry.source_health.log_event") as mock_log:
             self._record_on_days(
                 "Reliable Source",
                 [(f"2026-01-0{i}", True) for i in range(1, 6)],
@@ -146,7 +146,7 @@ class RecordAndCheckTest(unittest.TestCase):
         fired_on = []
         for i, d in enumerate(dates):
             ok = i < healthy_days
-            with patch("source_health.log_event") as mock_log:
+            with patch("telemetry.source_health.log_event") as mock_log:
                 source_health.record_and_check("Outage Source", ok, date=d)
             if mock_log.called:
                 fired_on.append(i)
@@ -167,7 +167,7 @@ class RecordAndCheckTest(unittest.TestCase):
             source_health._NAMESPACE, source_health._safe_name("Legacy Source"),
             {"days": [{"date": f"2026-01-0{i}", "ok": True} for i in range(1, 6)]},  # no "ever_healthy" key
         )
-        with patch("source_health.log_event") as mock_log:
+        with patch("telemetry.source_health.log_event") as mock_log:
             self._record_on_days("Legacy Source", [(f"2026-01-0{i}", False) for i in range(6, 9)])
         mock_log.assert_called_once()  # still correctly alerts on 3 consecutive failures
 
@@ -178,7 +178,7 @@ class RecordAndCheckTest(unittest.TestCase):
         self.assertEqual(self._oks("Source B"), [False])
 
     def test_special_characters_in_source_name_do_not_raise(self) -> None:
-        with patch("source_health.log_event"):
+        with patch("telemetry.source_health.log_event"):
             source_health.record_and_check("Motilal Oswal / ICICI Direct / Axis Securities", True)
         # No exception is the assertion here.
 
@@ -187,13 +187,13 @@ class RecordAndCheckTest(unittest.TestCase):
         # payload that isn't the shape this module expects must degrade to
         # "no history yet", not raise.
         state_store.save(source_health._NAMESPACE, source_health._safe_name("Bad Record Source"), {})
-        with patch("source_health.log_event") as mock_log:
+        with patch("telemetry.source_health.log_event") as mock_log:
             source_health.record_and_check("Bad Record Source", True)
         self.assertEqual(len(self._oks("Bad Record Source")), 1)
         mock_log.assert_not_called()
 
     def test_never_raises_even_if_the_state_store_is_broken(self) -> None:
-        with patch("state_store._get_engine", side_effect=RuntimeError("db down")):
+        with patch("core.state_store._get_engine", side_effect=RuntimeError("db down")):
             try:
                 source_health.record_and_check("Any Source", True)
             except Exception as exc:  # pragma: no cover - the assertion IS that this doesn't happen
@@ -254,7 +254,7 @@ class ConcurrencySafetyTest(unittest.TestCase):
 class MultiProcessConcurrencySafetyTest(unittest.TestCase):
     """The gap ConcurrencySafetyTest's own tests don't cover: they only spawn
     threads within one process. The race this module's locking actually
-    targets is two separate *processes* (several market_picks_pipeline.py
+    targets is two separate *processes* (several pipelines/market_picks_pipeline.py
     workers, or several backend API workers) contending for the same source's
     record, which a plain threading.Lock cannot prevent at all. This spawns
     real OS processes."""

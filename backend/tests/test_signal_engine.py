@@ -40,7 +40,7 @@ class ExtractFeaturesTest(unittest.TestCase):
         self.assertEqual(features["filings"], [])
 
     def test_wrong_type_ratios_degrades_to_empty_dict_not_a_crash(self) -> None:
-        # Regression test for an adversarial-review finding: schemas.py's
+        # Regression test for an adversarial-review finding: core/schemas.py's
         # own contract check only validates FIELD PRESENCE, not type — a
         # scraped/cached "ratios" value present but of the wrong type (a
         # list instead of a dict, e.g. from schema drift or a malformed

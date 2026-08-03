@@ -41,4 +41,4 @@ jobs:
       - name: Run custom screener pipeline
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python screener_pipeline.py
+        run: python -m pipelines.screener_pipeline

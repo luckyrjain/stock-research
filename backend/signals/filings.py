@@ -21,7 +21,7 @@ _ORDER_FILLER_RE = re.compile(r"\bin order to\b")
 # A credit-rating change is a small confirmation nudge on top of the
 # keyword-hit score below, not a primary driver — mirrors the
 # "confirmation signal layered on top" pattern _compute_confidence()'s
-# valuation nudge already established in market_picks_pipeline.py. Only
+# valuation nudge already established in pipelines/market_picks_pipeline.py. Only
 # upgrade/downgrade move the score; "reaffirmed" is neutral (the rating
 # didn't change, so it carries no new directional information).
 _RATING_NUDGE = 0.15

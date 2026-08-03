@@ -1,6 +1,6 @@
 import unittest
 
-from dcf_valuation import compute_dcf_estimate
+from portfolio.dcf_valuation import compute_dcf_estimate
 
 
 def _cash_flow(values: list[float | None], label: str = "Cash from Operating Activity") -> dict:
