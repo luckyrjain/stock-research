@@ -59,30 +59,59 @@ async function captureStaticPages(page) {
   }
 }
 
-// Captures the stock-analysis flow. If a completed BUY/HOLD/SELL verdict
-// renders within the timeout, saves analysis-report.png (the real deal —
-// needs a configured LLM key + live network access to the six data
-// sources). Otherwise falls back to analysis-progress.png, the same
-// in-flight "fetching data" state this repo shipped before live capture
-// was possible in every environment.
+// Captures the stock-analysis flow. Races three outcomes so a fast SSE
+// error (e.g. a blocked/unreachable data source — see api.py's `phase ===
+// 'error'` state, rendered as a "Try Again" banner in app/page.tsx) is
+// detected in seconds rather than silently eating the full timeout and
+// being mislabeled as "still in progress":
+//   - a completed BUY/HOLD/SELL verdict  -> analysis-report.png (the real
+//     deal — needs a configured LLM key + live network access to the six
+//     data sources)
+//   - the SSE stream errored out         -> analysis-error.png
+//   - neither within the timeout         -> analysis-progress.png, the
+//     same in-flight "fetching data" state this repo shipped before live
+//     capture was possible in every environment
+// Waits for whichever of two selectors appears first, without the "first
+// promise to settle" race going stale: waitForSelector only ever settles
+// early on a match, or late (at `timeoutMs`) on a miss — so converting a
+// miss to `null` via .then(hit, () => null) can't produce a false-early
+// "neither appeared" result, it can only under-report a genuine hit that
+// arrives after the other selector's own timeout. Both selectors share the
+// same timeout and start together, so that can't happen either: whichever
+// settles first is the real answer, or (if that first settlement is a
+// miss) both are timing out together and the tag stays 'timeout'.
+async function waitForFirst(page, selectors, timeoutMs) {
+  const waits = Object.entries(selectors).map(([tag, selector]) =>
+    page.waitForSelector(selector, { timeout: timeoutMs }).then(() => tag, () => null),
+  );
+  const first = await Promise.race(waits);
+  if (first) return first;
+  const rest = await Promise.all(waits);
+  return rest.find(Boolean) ?? 'timeout';
+}
+
 async function captureAnalysis(page) {
   await page.goto(`${BASE_URL}/?symbol=${encodeURIComponent(ANALYSIS_SYMBOL)}`, {
     waitUntil: 'domcontentloaded',
   });
   await page.waitForTimeout(2_000); // let the SSE stream open and the progress tracker mount
 
-  // Exact-text match (not substring) — several progress-tracker labels
-  // ("MF Holdings", "Shareholding") contain "hold" as a substring, which a
-  // loose /BUY|HOLD|SELL/ regex would match before the real report loads.
-  const verdictSelector = 'text=/^(BUY|SELL|HOLD)$/';
-  const completed = await page
-    .waitForSelector(verdictSelector, { timeout: ANALYSIS_TIMEOUT_MS })
-    .then(() => true)
-    .catch(() => false);
+  const outcome = await waitForFirst(
+    page,
+    {
+      // Exact-text match (not substring) — several progress-tracker labels
+      // ("MF Holdings", "Shareholding") contain "hold" as a substring,
+      // which a loose /BUY|HOLD|SELL/ regex would match before the real
+      // report loads.
+      report: 'text=/^(BUY|SELL|HOLD)$/',
+      error: 'text=Try Again', // the SSE-error retry banner in app/page.tsx
+    },
+    ANALYSIS_TIMEOUT_MS,
+  );
 
   await page.waitForTimeout(500);
 
-  if (completed) {
+  if (outcome === 'report') {
     const outPath = path.join(OUT_DIR, 'analysis-report.png');
     await screenshotMainContent(page, outPath);
     console.log(`captured analysis-report.png (${ANALYSIS_SYMBOL})`);
@@ -90,6 +119,13 @@ async function captureAnalysis(page) {
       '  NOTE: check whether the "Analysis degraded" banner is showing — that means no ' +
       'LLM provider was reachable and this is the safe HOLD fallback, not a real analyst call. ' +
       'Re-run with a configured LLM key for a genuine result.',
+    );
+  } else if (outcome === 'error') {
+    const outPath = path.join(OUT_DIR, 'analysis-error.png');
+    await screenshotMainContent(page, outPath);
+    console.log(
+      `captured analysis-error.png (analysis for ${ANALYSIS_SYMBOL} errored out — not committed ` +
+      'to the README by default; check the message on screen and your backend logs)',
     );
   } else {
     const outPath = path.join(OUT_DIR, 'analysis-progress.png');
