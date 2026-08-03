@@ -32,7 +32,6 @@ a real deployment.
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 
 import requests
@@ -146,12 +145,14 @@ def _normalize_trade(o: dict) -> dict | None:
     }
 
 
-def sync_account(engine, account_id: int, access_token: str, api_key: str | None = None) -> dict:
+def sync_account(engine, account_id: int, access_token: str, api_key: str) -> dict:
     """Syncs one connected Paytm Money account's holdings + filled orders
     into the existing Portfolio Aggregator schema. Read-only. Returns a
     summary dict; never raises — a broker-API hiccup degrades to an
-    {"error": ...} result, same convention as every tools/*.py module."""
-    api_key = api_key or os.environ.get("PAYTM_MONEY_API_KEY", "")
+    {"error": ...} result, same convention as every tools/*.py module.
+
+    `api_key` is this connection's own registered app key (broker_connections.api_key),
+    never a deployment-wide env var — see db/models.py's broker_connections comment."""
     try:
         raw_holdings = _fetch_holdings(api_key, access_token)
         raw_orders = _fetch_orders(api_key, access_token)

@@ -18,7 +18,6 @@ that one holding/trade being skipped (logged), never a fabricated value.
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 
 from sqlalchemy import update
@@ -105,14 +104,17 @@ def _normalize_trade(t: dict) -> dict | None:
     }
 
 
-def sync_account(engine, account_id: int, access_token: str, api_key: str | None = None) -> dict:
+def sync_account(engine, account_id: int, access_token: str, api_key: str) -> dict:
     """Syncs one connected Zerodha account's holdings + today's executed
     trades into the existing Portfolio Aggregator schema. Read-only against
     Kite (holdings/positions/trades — never places an order). Returns a
     summary dict; never raises — a broker-API hiccup degrades to an
     {"error": ...} result, same convention as every tools/*.py module,
-    even though this lives under portfolio/ rather than tools/."""
-    api_key = api_key or os.environ.get("KITE_API_KEY", "")
+    even though this lives under portfolio/ rather than tools/.
+
+    `api_key` is this connection's own registered app key (broker_connections.api_key),
+    never a deployment-wide env var — see db/models.py's broker_connections comment
+    for why a single global KITE_API_KEY wouldn't work across different accounts."""
     try:
         kite = _get_kite_client(api_key, access_token=access_token)
         raw_holdings = kite.holdings()

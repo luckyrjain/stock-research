@@ -162,14 +162,23 @@ broken down by type/account). Fed by:
   Emerge/BSE SME, ISIN → exact code → fuzzy name matching) to turn a broker's own stock code into
   a canonical NSE/BSE symbol — a fuzzy or unresolved match keeps the broker's raw code and warns,
   never silently substitutes a guess.
+- **Broker API sync** (Zerodha Kite Connect, HDFC Securities InvestRight, Paytm Money Open
+  API — all free-tier for personal use) as a live alternative to the file-based imports above: a
+  connected broker account's holdings and trades sync directly, no upload, no manual re-run.
+  Every account supplies its own app credentials (API key/secret, registered under that broker's
+  own developer portal) inline when connecting — there is no shared, deployment-wide broker key,
+  since a Kite Connect/HDFC/Paytm Money "app" is only ever issued to one specific broker login.
+  The app secret and the broker's access token are both encrypted at rest (Fernet,
+  `PORTFOLIO_ENCRYPTION_KEY`); re-registering a broker account's credentials invalidates its
+  prior access token rather than leaving a stale one on file.
 
 No authentication by design — profiles are a picker, not an account system. Reachable at
 `/portfolio-aggregator` (not `/portfolio`, which stays the Positions page); labelled "Net Worth"
 in the nav so the two aren't confused.
 
 *Depth: `backend/CLAUDE.md` §"Portfolio aggregator", §"Portfolio valuation engine",
-§"CAS PDF import", §"Broker CSV/XLSX import", §"EOD price store + corporate actions flow",
-§"Securities master + symbol resolver".*
+§"CAS PDF import", §"Broker CSV/XLSX import", §"Broker API sync", §"EOD price store + corporate
+actions flow", §"Securities master + symbol resolver".*
 
 ### Platform Quality Investments (not user-facing features, but load-bearing)
 - **Data integrity:** schema-drift (type-shape) detection on the six core data slices;
@@ -258,14 +267,21 @@ something concrete rather than restating them.
 - **No self-serve payments.** `users.tier` is set by an operator by hand.
 - **Portfolio Aggregator has no authentication** (profiles are a picker) and is not
   cross-referenced with Watchlist/Positions — a stock researched in one is invisible to the other.
+- **HDFC Securities' and Paytm Money's broker-sync REST shapes were never verified against a
+  live response** (their developer portals were unreachable from this sandbox) — endpoint
+  paths, the checksum-signing scheme, and response field names follow the general shape other
+  Indian broker "Open APIs" (Kite Connect included) publicly document, not a confirmed live
+  contract. A mismatch degrades a holding/trade to skipped, never a fabricated value; Zerodha's
+  own field names are similarly unverified live, taken from Kite's published docs.
 - **EOD price store is ingestion-only** outside the aggregator: no BSE bhavcopy, no intraday, no
   total-return (dividend-adjusted) series, and the SME pipeline still fetches its own OHLCV from
   yfinance rather than reading from it.
 - **`--reset-db` scoping is a convention, not an enforced rule.** Every pipeline now scopes its
   reset to the tables it owns (`sme_ema_pipeline` was the last holdout and has been brought in
   line), but nothing stops a new pipeline from reaching for `metadata.drop_all()` — the shared
-  SQLAlchemy `MetaData()` carries all 22 tables, including six holding non-regenerable personal
-  financial data. See `docs/database.md` for the table-ownership map.
+  SQLAlchemy `MetaData()` carries all 23 tables, including seven holding non-regenerable personal
+  financial data (and, for `broker_connections`, real broker API credentials). See
+  `docs/database.md` for the table-ownership map.
 - **`client_id` is a grouping key, not a security boundary** — anyone holding one can read/write
   that browser's anonymous watchlist and positions. The claim endpoints (which reassign rows
   exclusively and permanently) are rate-limited to 5/hour and audit-logged, which bounds

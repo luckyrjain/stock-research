@@ -1,8 +1,8 @@
 # API Reference
 
 The **request contract** for every FastAPI endpoint: method, path, auth, params, request body,
-status codes, rate limits, and caching behaviour. **57 endpoints** — 29 in `backend/api.py`, 28
-across `backend/routes/` (`watchlist.py` 5, `positions.py` 6, `portfolio_aggregator.py` 17).
+status codes, rate limits, and caching behaviour. **61 endpoints** — 29 in `backend/api.py`, 32
+across `backend/routes/` (`watchlist.py` 5, `positions.py` 6, `portfolio_aggregator.py` 21).
 
 **Division of responsibility with [`output-schema.md`](output-schema.md):**
 
@@ -157,7 +157,7 @@ only when **every** section succeeded.
 
 ---
 
-## All 57 endpoints
+## All 61 endpoints
 
 Auth column: `—` none · `session` session bearer · `owner` session-or-`client_id` · `key`
 `X-API-Key`.
@@ -221,6 +221,10 @@ Auth column: `—` none · `session` session bearer · `owner` session-or-`clien
 | 55 | POST | `/api/portfolio/import-cas` | — | Import a CAMS/KFintech detailed CAS PDF |
 | 56 | POST | `/api/portfolio/import-csv/preview` | — | Preview + map a broker CSV/XLSX |
 | 57 | POST | `/api/portfolio/import-csv` | — | Import mapped broker rows |
+| 58 | POST | `/api/portfolio/broker/{broker}/login-url` | — | Register (or reuse) app credentials, get the broker's login URL |
+| 59 | POST | `/api/portfolio/broker/{broker}/connect` | — | Exchange a `request_token` for an access token |
+| 60 | POST | `/api/portfolio/broker/{broker}/sync` | — | Pull holdings/trades from the connected broker account |
+| 61 | GET | `/api/portfolio/broker/connections` | — | List broker connections for a profile (never credentials) |
 
 Endpoints 41–57 have **no authentication and no ownership scoping** — any caller may read or
 mutate any profile's data by id. This is a disclosed, deliberate scope call (a personal
@@ -960,7 +964,7 @@ Note: the rate-limit bucket is `portfolio_concentration` but the log/event prefi
 
 ---
 
-## Portfolio Aggregator (41–57)
+## Portfolio Aggregator (41–61)
 
 A **separate** personal net-worth tracker: profiles → accounts → assets → valuations, plus XIRR
 and two import paths. Mounted under the same `/api/portfolio` prefix as #40 but otherwise
@@ -979,8 +983,8 @@ All 17 use `run_owned_db_call()` (see [its envelope](#watchlist)), so all share:
 "DATABASE_URL not configured."` when unset, sanitized `503` on any unexpected DB error, `429` on
 their bucket, and `422` for a `ValueError`. Two buckets, both per IP:
 
-- **`portfolio_agg_read` — 120 / 60 s**: #41, #43, #47, #52, #54
-- **`portfolio_agg_write` — 60 / 60 s**: #42, #44, #45, #46, #48, #49, #50, #51, #53, #55, #56, #57
+- **`portfolio_agg_read` — 120 / 60 s**: #41, #43, #47, #52, #54, #61
+- **`portfolio_agg_write` — 60 / 60 s**: #42, #44, #45, #46, #48, #49, #50, #51, #53, #55, #56, #57, #58, #59, #60
 
 Closed enums used below:
 
@@ -1129,6 +1133,63 @@ rather than aborting the file. New-asset symbols are resolved through
 NSE/BSE symbol, while `fuzzy`/`unresolved` keeps the raw broker code and adds a warning — never a
 silent guess. `refresh_valuations()` runs on success.
 
+### Broker API sync
+
+`{broker}` is a path parameter, checked against a closed allowlist —
+`zerodha` | `hdfc_securities` | `paytm_money` — before any of the four endpoints below do
+anything else; any other value is `422`. There is **no env-var-configured broker key anywhere in
+this deployment** — every account supplies its own app credentials (`api_key`/`api_secret`,
+registered under that broker's own developer portal) inline in the request body, stored
+per-connection in `broker_connections` (see `docs/database.md`).
+
+**`POST /api/portfolio/broker/{broker}/login-url`** — 58. JSON body:
+
+| Field | Type | Required |
+|---|---|---|
+| `account_id` | int | yes |
+| `api_key` | string | only for first-time setup (see below) |
+| `api_secret` | string | only for first-time setup (see below) |
+
+Two modes sharing one endpoint: supplying **both** `api_key` and `api_secret` registers (or
+replaces) that connection's credentials — and clears any previously-obtained access token, since
+a token minted under different credentials can't still be valid; omitting **both** resumes an
+already-registered connection's login flow without resupplying the secret (retrying an expired
+`request_token`, or a closed tab, shouldn't force re-typing it). Supplying exactly one of the two
+is `422`.
+
+`200 {"login_url"}` · `404` unknown `account_id`, or (resume mode) nothing was ever registered
+for this `(account_id, broker)` · `422` `account.type != "broker"`, or exactly one of
+`api_key`/`api_secret` supplied · `503` `PORTFOLIO_ENCRYPTION_KEY` unset (first-time/replace mode
+only — needed to encrypt `api_secret` before it's stored).
+
+**`POST /api/portfolio/broker/{broker}/connect`** — 59. JSON body: `{"account_id": int,
+"request_token": string}`. Reads back the credentials `login-url` already registered for this
+`(account_id, broker)` — the caller never resupplies `api_key`/`api_secret` here — decrypts the
+secret, and exchanges `request_token` for an access token via that broker's own sync module.
+
+`200 {"connected": true, "account_id", "broker"}` · `404` no credentials registered yet for this
+account/broker (call `login-url` first) · `422` the broker rejected the exchange (bad/expired
+`request_token`), or the stored secret couldn't be decrypted (re-register via `login-url`) ·
+`503` `PORTFOLIO_ENCRYPTION_KEY` unset.
+
+**`POST /api/portfolio/broker/{broker}/sync`** — 60. JSON body: `{"account_id": int}`. Fetches
+holdings + trades from the broker (via that broker's `sync_account()`) and writes them into
+`assets`/`holdings`/`valuations`/`transactions`, deduped by trade id — never places an order,
+read-only against the broker. Calls `refresh_valuations()` on success, same as the CAS/CSV import
+endpoints.
+
+`200 {"holdings_synced", "holdings_skipped", "trades_synced", "trades_skipped",
+"trades_duplicate"}` · `404` no connected account for this `(account_id, broker)` (never
+completed `connect`) · `422` the broker sync call itself returned an error (e.g. an expired
+session — re-run `connect`), or the stored access token couldn't be decrypted · `503`
+`PORTFOLIO_ENCRYPTION_KEY` unset.
+
+**`GET /api/portfolio/broker/connections`** — 61. Query `profile_id: int`, **required**. `200
+{"connections": [{"id", "account_id", "broker", "token_obtained_at", "last_synced_at",
+"connected"}]}` — never returns `api_key`, `api_secret_enc`, or `access_token_enc`. `connected`
+is `token_obtained_at IS NOT NULL`, distinguishing "app credentials registered, OAuth handshake
+not yet completed" from a fully live connection.
+
 ---
 
 ## Rate-limit bucket index
@@ -1171,8 +1232,8 @@ Every bucket, in one place. All are per-IP (`api._client_ip`) unless noted.
 | `positions_write` | 60 | 60 s | 36, 37, 38 |
 | `positions_claim` | 5 | 3600 s | 39 |
 | `portfolio_concentration` | 10 | 60 s | 40 |
-| `portfolio_agg_read` | 120 | 60 s | 41, 43, 47, 52, 54 |
-| `portfolio_agg_write` | 60 | 60 s | 42, 44, 45, 46, 48, 49, 50, 51, 53, 55, 56, 57 |
+| `portfolio_agg_read` | 120 | 60 s | 41, 43, 47, 52, 54, 61 |
+| `portfolio_agg_write` | 60 | 60 s | 42, 44, 45, 46, 48, 49, 50, 51, 53, 55, 56, 57, 58, 59, 60 |
 
 **Unrated-limited**: `GET /` (1), `GET /health` (2), `GET /api/auth/me` (24), `POST
 /api/auth/logout` (25), and — IP-wise — `GET /api/v1/consolidated/{symbol}` (29).

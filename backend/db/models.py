@@ -473,10 +473,24 @@ transactions = Table(
 # disclosed deviation from that doc's own Decision 6 (which calls for
 # `user_id`-scoped ownership before this is ever exposed to more than one
 # operator) — acceptable for personal/local use, not for a real multi-tenant
-# deployment. `access_token_enc` is Fernet-encrypted via core/crypto.py, not
-# hashed like `sessions`/`api_keys` — a broker token must be read back to
-# call the broker's API, unlike a session/API-key token which only needs
-# comparison.
+# deployment.
+#
+# `api_key`/`api_secret_enc` are per-CONNECTION, not a deployment-wide env
+# var — every broker in this list requires each caller to register their own
+# "app" (Kite Connect, HDFC's Individual API, Paytm Money's Open API all work
+# this way: you create an app under your own broker login and get back a
+# key/secret scoped to that app), so a single global KITE_API_KEY-style env
+# var would only ever work for one person's one broker login, not "whoever
+# connects an account." Each account supplies its own pair at connect time
+# (frontend: BrokerRow's inline form in portfolio-aggregator/page.tsx).
+# `api_key` mirrors Kite Connect's own security model — it's embedded
+# directly in the browser-visible login-redirect URL, so it's closer to a
+# public client id than a secret — stored plaintext; `api_secret_enc` is the
+# genuine secret and is Fernet-encrypted, same as `access_token_enc`. Both
+# are set together by the login-url step (which needs api_key to build the
+# redirect and stores api_secret for the connect step that follows); NULL
+# only for a row that predates this column (never true for a fresh
+# deployment) or via a direct DB edit.
 broker_connections = Table(
     "broker_connections",
     metadata,
@@ -484,6 +498,8 @@ broker_connections = Table(
     Column("profile_id",        Integer, ForeignKey("profiles.id"), nullable=False),
     Column("account_id",        Integer, ForeignKey("accounts.id"), nullable=False),
     Column("broker",            String(20), nullable=False),
+    Column("api_key",           String(255)),
+    Column("api_secret_enc",    Text),
     # NULL until the OAuth-style login flow completes at least once.
     Column("access_token_enc",  Text),
     # Kite (and most broker APIs) issue a session token that expires daily

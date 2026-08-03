@@ -28,18 +28,6 @@ _ASSET_TYPES = {"mf", "stock", "fd", "epf", "ppf", "cash", "manual", "loan"}
 # db/models.py for why the table itself is already broker-agnostic.
 _SUPPORTED_BROKERS = {"zerodha", "hdfc_securities", "paytm_money"}
 
-# Each broker's own API key/secret env var names (see .env.example) — every
-# module in this map exposes the identical get_login_url/exchange_request_token/
-# sync_account interface (portfolio/kite_sync.py's own shape), so the routes
-# below dispatch on `broker` without a broker-specific branch beyond this
-# table and _broker_sync_module()'s import.
-_BROKER_ENV_KEYS = {
-    "zerodha": ("KITE_API_KEY", "KITE_API_SECRET"),
-    "hdfc_securities": ("HDFC_SEC_API_KEY", "HDFC_SEC_API_SECRET"),
-    "paytm_money": ("PAYTM_MONEY_API_KEY", "PAYTM_MONEY_API_SECRET"),
-}
-
-
 def _broker_sync_module(broker: str):
     """Returns the portfolio.<broker>_sync module for a supported broker.
     A plain if/elif over three known names rather than importlib string
@@ -121,6 +109,20 @@ class AssetPatch(BaseModel):
 class ValuationIn(BaseModel):
     value: float = Field(ge=0)
     as_of: _date | None = None
+
+
+class BrokerLoginUrlIn(BaseModel):
+    account_id: int
+    # This account's own app credentials, registered by whoever owns this
+    # broker login (e.g. developers.kite.trade) — never a deployment-wide
+    # env var, since a Kite Connect/HDFC/Paytm Money "app" is created under
+    # one specific broker account, not issued once per AlphaPulse instance.
+    # Both optional: omit both to reuse whatever was registered on a prior
+    # call (resuming/retrying an OAuth handshake shouldn't force re-typing
+    # a secret every time) — first-time setup for this (account, broker)
+    # must supply both, and either alone is a 422.
+    api_key: str | None = Field(default=None, min_length=1, max_length=255)
+    api_secret: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class BrokerConnectIn(BaseModel):
@@ -538,41 +540,35 @@ def _require_supported_broker(broker: str) -> None:
         raise HTTPException(status_code=422, detail=f"broker must be one of: {sorted(_SUPPORTED_BROKERS)}")
 
 
-@router.get("/broker/{broker}/login-url")
-async def broker_login_url(request: Request, broker: str):
+@router.post("/broker/{broker}/login-url")
+async def broker_login_url(request: Request, broker: str, body: BrokerLoginUrlIn):
+    """Returns the login URL to start (or resume) connecting `broker` for
+    this account. A POST, not a GET, since a first-time call's api_secret
+    must never ride along in a query string (server access logs, browser
+    history).
+
+    Two modes, both handled here since they share almost everything:
+    - **First-time setup** — body carries both api_key and api_secret (see
+      BrokerLoginUrlIn — never a shared env var, each account brings its
+      own app credentials). Registers/replaces them on the broker_connections
+      row and clears any previously-obtained access token, since it was
+      minted for whatever credentials were on file before and can't
+      possibly still be valid for a changed api_key.
+    - **Resume/retry** — body omits both. Reuses whatever was already
+      registered (a request_token expiring, or the user closing the tab
+      mid-handshake, shouldn't force re-typing a secret every retry) —
+      404 if nothing was ever registered for this (account, broker)."""
     _require_supported_broker(broker)
+    if bool(body.api_key) != bool(body.api_secret):
+        raise HTTPException(status_code=422, detail="provide both api_key and api_secret, or neither to reuse saved credentials")
 
     def _sync() -> dict:
-        import os
-
-        mod = _broker_sync_module(broker)
-        api_key_env, _ = _BROKER_ENV_KEYS[broker]
-        api_key = os.environ.get(api_key_env, "")
-        if not api_key:
-            raise HTTPException(status_code=503, detail=f"{api_key_env} not configured.")
-        return {"login_url": mod.get_login_url(api_key)}
-
-    return await run_owned_db_call(request, "portfolio_agg_read", 120, _sync, "portfolio_agg_read")
-
-
-@router.post("/broker/{broker}/connect")
-async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
-    _require_supported_broker(broker)
-
-    def _sync() -> dict:
-        import os
-
         import api
         from core.crypto import EncryptionNotConfigured, encrypt
         from db.models import accounts, broker_connections
         from sqlalchemy import insert, select, update
 
         mod = _broker_sync_module(broker)
-        api_key_env, api_secret_env = _BROKER_ENV_KEYS[broker]
-        api_key = os.environ.get(api_key_env, "")
-        api_secret = os.environ.get(api_secret_env, "")
-        if not api_key or not api_secret:
-            raise HTTPException(status_code=503, detail=f"{api_key_env}/{api_secret_env} not configured.")
 
         with api._get_db_engine().begin() as conn:
             account = conn.execute(
@@ -584,28 +580,34 @@ async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
             if account.type != "broker":
                 raise HTTPException(status_code=422, detail="account.type must be 'broker' to connect a broker API")
 
-            session = mod.exchange_request_token(api_key, api_secret, body.request_token)
-            if "error" in session or "access_token" not in session:
-                raise HTTPException(status_code=422, detail=session.get("error", "Kite login failed"))
-
-            try:
-                token_enc = encrypt(session["access_token"])
-            except EncryptionNotConfigured as exc:
-                raise HTTPException(status_code=503, detail=str(exc))
-
-            import datetime as _dt
-            now = _dt.datetime.now(_dt.timezone.utc)
             existing = conn.execute(
-                select(broker_connections.c.id).where(
+                select(broker_connections.c.id, broker_connections.c.api_key).where(
                     broker_connections.c.account_id == body.account_id,
                     broker_connections.c.broker == broker,
                 )
             ).first()
+
+            if not body.api_key:
+                if existing is None or not existing.api_key:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"no {broker} app credentials registered for this account yet — provide api_key/api_secret",
+                    )
+                return {"login_url": mod.get_login_url(existing.api_key)}
+
+            try:
+                api_secret_enc = encrypt(body.api_secret)
+            except EncryptionNotConfigured as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+
             if existing:
                 conn.execute(
                     update(broker_connections)
                     .where(broker_connections.c.id == existing.id)
-                    .values(access_token_enc=token_enc, token_obtained_at=now)
+                    .values(
+                        api_key=body.api_key, api_secret_enc=api_secret_enc,
+                        access_token_enc=None, token_obtained_at=None,
+                    )
                 )
             else:
                 conn.execute(
@@ -613,10 +615,68 @@ async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
                         profile_id=account.profile_id,
                         account_id=body.account_id,
                         broker=broker,
-                        access_token_enc=token_enc,
-                        token_obtained_at=now,
+                        api_key=body.api_key,
+                        api_secret_enc=api_secret_enc,
                     )
                 )
+            return {"login_url": mod.get_login_url(body.api_key)}
+
+    return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
+
+
+@router.post("/broker/{broker}/connect")
+async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
+    _require_supported_broker(broker)
+
+    def _sync() -> dict:
+        import datetime as _dt
+
+        import api
+        from core.crypto import EncryptionNotConfigured, decrypt, encrypt
+        from db.models import broker_connections
+        from sqlalchemy import select, update
+
+        mod = _broker_sync_module(broker)
+
+        with api._get_db_engine().begin() as conn:
+            conn_row = conn.execute(
+                select(broker_connections.c.id, broker_connections.c.api_key, broker_connections.c.api_secret_enc)
+                .where(
+                    broker_connections.c.account_id == body.account_id,
+                    broker_connections.c.broker == broker,
+                )
+            ).first()
+            if conn_row is None or not conn_row.api_key or not conn_row.api_secret_enc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"no {broker} app credentials registered for this account — call login-url first",
+                )
+
+            try:
+                api_secret = decrypt(conn_row.api_secret_enc)
+            except EncryptionNotConfigured as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+            except Exception:
+                raise HTTPException(
+                    status_code=422,
+                    detail="stored app secret could not be decrypted — re-register this broker's API key/secret",
+                )
+
+            session = mod.exchange_request_token(conn_row.api_key, api_secret, body.request_token)
+            if "error" in session or "access_token" not in session:
+                raise HTTPException(status_code=422, detail=session.get("error", "broker login failed"))
+
+            try:
+                token_enc = encrypt(session["access_token"])
+            except EncryptionNotConfigured as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+
+            now = _dt.datetime.now(_dt.timezone.utc)
+            conn.execute(
+                update(broker_connections)
+                .where(broker_connections.c.id == conn_row.id)
+                .values(access_token_enc=token_enc, token_obtained_at=now)
+            )
         return {"connected": True, "account_id": body.account_id, "broker": broker}
 
     return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
@@ -628,8 +688,6 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
     account_id = body.account_id
 
     def _sync() -> dict:
-        import os
-
         import api
         from core.crypto import EncryptionNotConfigured, decrypt
         from db.models import broker_connections
@@ -637,11 +695,10 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
         from sqlalchemy import select
 
         mod = _broker_sync_module(broker)
-        api_key_env, _ = _BROKER_ENV_KEYS[broker]
 
         with api._get_db_engine().connect() as conn:
             conn_row = conn.execute(
-                select(broker_connections.c.access_token_enc).where(
+                select(broker_connections.c.api_key, broker_connections.c.access_token_enc).where(
                     broker_connections.c.account_id == account_id,
                     broker_connections.c.broker == broker,
                 )
@@ -659,8 +716,7 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
                 detail="stored credential could not be decrypted — reconnect this broker account",
             )
 
-        api_key = os.environ.get(api_key_env, "")
-        result = mod.sync_account(api._get_db_engine(), account_id, access_token, api_key=api_key)
+        result = mod.sync_account(api._get_db_engine(), account_id, access_token, api_key=conn_row.api_key)
         if "error" in result:
             raise HTTPException(status_code=422, detail=result["error"])
         refresh_valuations(api._get_db_engine())
@@ -688,7 +744,11 @@ async def list_broker_connections(request: Request, profile_id: int):
                 .where(broker_connections.c.profile_id == profile_id)
                 .order_by(broker_connections.c.id)
             ).mappings().fetchall()
-        # Never returns access_token_enc — connection status/metadata only.
-        return {"connections": [dict(r) for r in rows]}
+        # Never returns api_key/api_secret_enc/access_token_enc — connection
+        # status/metadata only. `connected` distinguishes "app credentials
+        # registered, OAuth handshake not yet completed" (token_obtained_at
+        # is null — login-url ran, connect hasn't) from a fully live
+        # connection, since a row now exists after the credentials-only step.
+        return {"connections": [{**dict(r), "connected": r["token_obtained_at"] is not None} for r in rows]}
 
     return await run_owned_db_call(request, "portfolio_agg_read", 120, _sync, "portfolio_agg_read")

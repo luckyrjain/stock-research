@@ -840,12 +840,22 @@ export interface CsvImportResult {
   warnings:        string[];
 }
 
-// Broker API sync (Zerodha Kite Connect) — GET/POST /api/portfolio/broker/*.
-// Only 'zerodha' is supported today (routes/portfolio_aggregator.py's
-// _SUPPORTED_BROKERS); the type is a plain string, not a literal union, so a
-// second broker being enabled backend-side doesn't need a frontend type edit
-// just to stop rejecting it.
+// Broker API sync (Zerodha/HDFC Securities/Paytm Money) — POST /api/portfolio/broker/*.
+// The broker id is a plain string, not a literal union, so enabling a
+// fourth broker backend-side doesn't need a frontend type edit just to
+// stop rejecting it.
 export type PortfolioBroker = string;
+
+// Credentials (api_key/api_secret) are per-connection, entered by whoever
+// owns that broker login — never a shared deployment config. Both fields
+// optional: omit both to resume/retry an already-registered connection's
+// OAuth handshake without re-typing the secret (routes/portfolio_aggregator.py's
+// broker_login_url — 404 if nothing was registered yet).
+export interface BrokerLoginUrlRequest {
+  account_id:  number;
+  api_key?:    string;
+  api_secret?: string;
+}
 
 export interface BrokerConnection {
   id:                number;
@@ -853,6 +863,10 @@ export interface BrokerConnection {
   broker:            PortfolioBroker;
   token_obtained_at: string | null;
   last_synced_at:    string | null;
+  // False once app credentials are registered but the OAuth handshake
+  // hasn't completed (or completed, then got invalidated by re-registering
+  // different credentials) — true only once an access token is on file.
+  connected:         boolean;
 }
 
 export interface BrokerSyncResult {

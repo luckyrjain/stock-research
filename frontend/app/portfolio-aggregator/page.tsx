@@ -249,12 +249,33 @@ function BrokerRow({ account, broker, connection, onSynced }: {
 }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  // Credential form starts open until an app has been registered for this
+  // (account, broker) — after that, "Connect"/"Reconnect" reuses the saved
+  // key/secret (see BrokerLoginUrlRequest) and this stays collapsed behind
+  // an explicit "change API key" link, so a normal resume/retry never
+  // forces re-typing a secret.
+  const [showCreds, setShowCreds] = useState(!connection);
+  const [apiKey, setApiKey] = useState('');
+  const [apiSecret, setApiSecret] = useState('');
 
   async function connect() {
     setBusy(true);
     setMsg(null);
     try {
-      const { login_url } = await api<{ login_url: string }>(`broker/${broker.id}/login-url`);
+      const body: { account_id: number; api_key?: string; api_secret?: string } = { account_id: account.id };
+      if (showCreds) {
+        if (!apiKey.trim() || !apiSecret.trim()) {
+          setMsg('Enter both API key and API secret.');
+          setBusy(false);
+          return;
+        }
+        body.api_key = apiKey.trim();
+        body.api_secret = apiSecret.trim();
+      }
+      const { login_url } = await api<{ login_url: string }>(`broker/${broker.id}/login-url`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
       localStorage.setItem(PENDING_BROKER_CONNECT_KEY, JSON.stringify({ account_id: account.id, broker: broker.id }));
       window.location.href = login_url;
     } catch (e) {
@@ -281,22 +302,55 @@ function BrokerRow({ account, broker, connection, onSynced }: {
   }
 
   return (
-    <span className="flex items-center gap-2">
-      {connection ? (
-        <>
+    <span className="flex flex-col gap-1">
+      <span className="flex items-center gap-2 flex-wrap">
+        {connection?.connected && (
           <span className="text-xs text-muted">
             {broker.label} connected{connection.last_synced_at ? ` · last synced ${new Date(connection.last_synced_at).toLocaleString('en-IN')}` : ' · never synced'}
           </span>
+        )}
+        {connection && !connection.connected && (
+          <span className="text-xs text-muted">{broker.label}: API key saved, not yet connected</span>
+        )}
+        {connection?.connected && (
           <button onClick={sync} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
             {busy ? 'Syncing…' : 'Sync now'}
           </button>
-        </>
-      ) : (
-        <button onClick={connect} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
-          {busy ? 'Redirecting…' : `Connect ${broker.label}`}
-        </button>
+        )}
+        {(!connection || !connection.connected || showCreds) && (
+          <button onClick={connect} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
+            {busy ? 'Redirecting…' : connection?.connected ? `Reconnect ${broker.label}` : `Connect ${broker.label}`}
+          </button>
+        )}
+        {connection && !showCreds && (
+          <button onClick={() => setShowCreds(true)} className="text-xs text-muted hover:text-tx">
+            change API key
+          </button>
+        )}
+        {msg && <span className="text-xs text-muted">{msg}</span>}
+      </span>
+      {showCreds && (
+        <span className="flex items-center gap-2">
+          <input
+            value={apiKey}
+            onChange={e => setApiKey(e.target.value)}
+            placeholder={`${broker.label} API key`}
+            className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-40"
+          />
+          <input
+            value={apiSecret}
+            onChange={e => setApiSecret(e.target.value)}
+            placeholder="API secret"
+            type="password"
+            className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-40"
+          />
+          {connection && (
+            <button onClick={() => setShowCreds(false)} className="text-xs text-muted hover:text-tx">
+              cancel
+            </button>
+          )}
+        </span>
       )}
-      {msg && <span className="text-xs text-muted">{msg}</span>}
     </span>
   );
 }

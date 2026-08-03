@@ -1135,6 +1135,105 @@ nav-bar label "Net Worth" so the two aren't confused for the same feature).
    CSV/XLSX import (further below) both write into it now, so XIRR returns real numbers once
    either import path has run for an asset.
 
+### Broker API sync (Zerodha / HDFC Securities / Paytm Money)
+
+The CAS/CSV importers above are both point-in-time uploads a user has to remember to redo — a
+broker account that already has an API closes that gap by pulling holdings/trades directly, no
+file, no manual re-upload. Three brokers today, each a free-tier "personal"/individual API
+requiring no paid subscription: Zerodha Kite Connect, HDFC Securities InvestRight Open API, Paytm
+Money Open API — all researched as free for the personal-use case this feature targets (see
+`docs/PRD-gmail-portfolio-intelligence.md`'s own Phase 1, on a separate branch; not yet merged to
+this one).
+
+1. **Schema** (`db/models.py`) — `broker_connections`: one row per `(account_id, broker)`
+   (`UniqueConstraint`), holding `api_key` (plaintext), `api_secret_enc` (Fernet), and
+   `access_token_enc` (Fernet, nullable until the OAuth-style handshake completes at least once).
+   `broker` is a plain string checked against a closed allowlist at the route layer
+   (`_SUPPORTED_BROKERS`), not a DB enum — adding a fourth broker needs no schema change, just a
+   new `portfolio/<broker>_sync.py` module (point 3 below). Keyed to `profiles`/`accounts`, not a
+   `user_id` — reuses the Portfolio Aggregator's existing no-auth model rather than the separate
+   `users`/`sessions` magic-link system, the same disclosed personal-use-only deviation the rest
+   of this feature area already makes (see "No auth, by design" above).
+2. **Credentials are per-connection, never a deployment-wide env var.** This was the actual design
+   mistake in the first version of this feature, caught in review before it shipped: Kite
+   Connect/HDFC/Paytm Money "apps" are each registered under one specific broker login (e.g.
+   developers.kite.trade), so a single `KITE_API_KEY`-style env var could only ever work for one
+   person's one broker account — not "whoever connects an account" via
+   `/portfolio-aggregator`. Every account instead supplies its own `api_key`/`api_secret` inline
+   in the UI when connecting that broker (`frontend/app/portfolio-aggregator/page.tsx`'s
+   `BrokerRow`), and the backend never reads a broker API key from `os.environ` anywhere.
+   `api_key` is stored plaintext (Kite's own security model already treats it as a public client
+   id — it's embedded directly in the browser-visible login-redirect URL); `api_secret_enc` is
+   Fernet-encrypted via `core/crypto.py`, same as `access_token_enc` — both need to be read back
+   to call the broker's API, unlike a hashed session/API-key token which only needs comparison.
+   `PORTFOLIO_ENCRYPTION_KEY` (`.env.example`) gates both; unset, connecting any broker account
+   fails closed (503), never falling back to plaintext storage.
+3. **Sync modules** (`portfolio/`) — `kite_sync.py`, `hdfc_sync.py`, `paytm_sync.py` each expose
+   the identical `get_login_url(api_key)` / `exchange_request_token(api_key, api_secret,
+   request_token)` / `sync_account(engine, account_id, access_token, api_key)` interface, so
+   `routes/portfolio_aggregator.py::_broker_sync_module(broker)` dispatches on `broker` with a
+   plain `if/elif` over three known module imports rather than any string-built import path.
+   `broker_sync_common.py` holds the shared "write an already-normalized holding/trade into
+   `assets`/`holdings`/`valuations`/`transactions`" half every module builds on
+   (`find_or_create_asset`/`upsert_holding`/`upsert_valuation`/`sync_holdings`/`sync_trades`) —
+   reading and interpreting each broker's own raw JSON shape (field names, timestamp format) stays
+   local to that broker's own module, normalized into a common intermediate dict before the shared
+   functions ever see it. `kite_sync.py` talks to the real `kiteconnect` PyPI package (its
+   published API surface confirmed via `inspect.signature` against the installed package, not just
+   documentation); `hdfc_sync.py`/`paytm_sync.py` talk to their REST endpoints directly via
+   `requests` — Paytm Money's own client SDK (`pyPMClient`) has no working PyPI release, so
+   depending on it would mean vendoring GitHub source for a thin wrapper, which this codebase's
+   "prefer the standard library and already-installed dependencies" policy advises against.
+   **Disclosed limitation**: `developer.hdfcsec.com` and `developer.paytmmoney.com` both blocked
+   this sandbox's outbound fetches (403), so HDFC Securities' and Paytm Money's exact REST base
+   URL, endpoint paths, checksum-signing scheme, and response field names were not verified
+   against a live response — they follow the general shape confirmed via public docs/SDK snippets
+   plus the observation that Indian broker "Open APIs" (Kite Connect, Paytm Money, Upstox, Angel
+   One, Dhan) all converge on the same login-redirect-with-`request_token` →
+   exchange-for-`access_token` → REST shape. A field either module expects but a real response
+   doesn't have degrades that one holding/trade to skipped (logged), never a fabricated value —
+   spot-check against a live account before relying on either in production. Zerodha's own module
+   carries the equivalent disclosure for the same reason (no outbound internet to kite.trade in
+   this sandbox either) — its exact response field names are taken from Kite's own published docs.
+4. **API** (`routes/portfolio_aggregator.py`, still under the `/api/portfolio` prefix) —
+   `POST /broker/{broker}/login-url`, `POST /broker/{broker}/connect`, `POST /broker/{broker}/sync`,
+   `GET /broker/connections?profile_id=`. `login-url` is two modes in one endpoint since they
+   share almost everything: supplying both `api_key` and `api_secret` in the body registers (or
+   replaces) that connection's credentials — and clears any previously-obtained
+   `access_token_enc`/`token_obtained_at`, since a token minted under different credentials can't
+   possibly still be valid — while omitting both reuses whatever was already registered (a
+   `request_token` expiring, or the user closing the tab mid-handshake, shouldn't force re-typing
+   a secret on every retry); supplying only one of the two is a 422, and resuming with neither
+   registered yet is a 404. `connect` never sees `api_key`/`api_secret` at all — it looks up the
+   row `login-url` already wrote, decrypts the secret, and exchanges `request_token` for an access
+   token. `sync` reads back the row's `api_key` (plaintext) and decrypts `access_token_enc`, calls
+   the broker module's `sync_account()`, then calls `portfolio_valuation.refresh_valuations()` on
+   success, same as the CAS/CSV import endpoints. `GET /broker/connections` never returns
+   `api_key`/`api_secret_enc`/`access_token_enc` — status/metadata only, plus a computed
+   `connected: bool` (`token_obtained_at is not None`) so the UI can distinguish "credentials
+   registered, OAuth not yet completed" from a fully live connection.
+5. **Frontend** — `BrokerRow` (one per supported broker, per broker-type account) shows an inline
+   API-key/API-secret form until that (account, broker) has a registered connection, after which
+   "Connect"/"Reconnect" resumes using the saved credentials and the form collapses behind a
+   "change API key" link. Clicking connect POSTs `login-url`, stashes `{account_id, broker}` in
+   `localStorage` (`PENDING_BROKER_CONNECT_KEY` — none of the three brokers' login redirects has a
+   way to echo back custom state), then redirects to the broker's own login page. All three
+   brokers share one callback route, `frontend/app/portfolio-aggregator/broker-callback/page.tsx`
+   (each broker's app is registered with this same redirect URI), which reads the stashed
+   `{account_id, broker}` back, POSTs `connect` with the returned `request_token`, and redirects
+   to `/portfolio-aggregator` on success.
+6. **Migrations**: `df6b59581b8b` (the `broker_connections` table itself, Zerodha-only at the
+   time) then `6c43f4a2d489` (adding `api_key`/`api_secret_enc` once the per-connection-credential
+   redesign landed) — both round-trip-verified (upgrade → `alembic check` clean → downgrade →
+   upgrade) against a real local Postgres instance, same rigor as every other revision in this repo.
+7. **Tests**: `tests/test_broker_routes.py` (endpoint-level, SQLite in-memory) includes
+   `test_two_accounts_use_independent_credentials_for_the_same_broker` — the regression test for
+   point 2's actual bug, proving two accounts connecting the same broker get fully independent
+   `api_key`/`api_secret`/`access_token` with no cross-contamination — plus coverage for the
+   register/resume/reconnect-invalidates-stale-token login-url modes. `tests/test_kite_sync.py`,
+   `test_hdfc_sync.py`, `test_paytm_sync.py` cover each sync module's holdings/trades
+   normalization, dedup, and malformed-record handling independently of the route layer.
+
 ### Portfolio valuation engine (`portfolio/portfolio_valuation.py`)
 
 Closes two of the five gaps point 5 above used to list: the Portfolio Aggregator's `valuations`
@@ -2122,12 +2221,15 @@ own, because nothing enforced a narrower blast radius).
    a genuinely empty database and verified (against a real local Postgres instance) to both
    `alembic upgrade head` cleanly onto nothing and `alembic downgrade base` cleanly back to
    nothing, producing exactly the same 11 tables, indexes, and constraints
-   `db/schema.sql`/`metadata.create_all()` already produce. **There are 4 revisions today** —
+   `db/schema.sql`/`metadata.create_all()` already produce. **There are 6 revisions today** —
    `0001_baseline_schema`, then `684c8a31e7e0_add_eod_price_store_and_corporate_` (the
    `securities`/`prices_daily`/`mf_nav_daily`/`corporate_actions` tables) and
    `8613aafc2d9d_add_portfolio_aggregator_foundation_` (`profiles`/`accounts`/`assets`/
-   `holdings`/`valuations`/`transactions`), bringing the schema to 21 tables; a fourth, `a7f2c1d09b34`, adds `app_state` for 22. The first two
-   later revisions were autogenerated and round-trip-verified (upgrade → `alembic check` clean →
+   `holdings`/`valuations`/`transactions`), bringing the schema to 21 tables; `a7f2c1d09b34` adds
+   `app_state` for 22; `df6b59581b8b` adds `broker_connections` for 23 (Zerodha-only shape at the
+   time); `6c43f4a2d489` adds that table's `api_key`/`api_secret_enc` columns (the
+   per-connection-credential redesign — see "Broker API sync" below), no new table. Every revision
+   after `0001` was autogenerated and round-trip-verified (upgrade → `alembic check` clean →
    downgrade → upgrade) against an isolated scratch Postgres, the same way `0001` was.
 3. **A deployment predating Alembic must `alembic stamp 0001` and THEN
    `alembic upgrade head` — not a bare `alembic stamp head`.** Such a deployment already has the
@@ -2647,8 +2749,9 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
   appears to need one, say so and stop rather than building it. The binding list and the reasoning
   are in that file; `docs/backlog.md` links to it.
 - **Scope every pipeline's `--reset-db` to the tables that pipeline owns.** Never
-  `metadata.drop_all()` — the shared `MetaData()` carries all 22 tables, six of which hold
-  non-regenerable personal financial data. See `docs/database.md` for the ownership map.
+  `metadata.drop_all()` — the shared `MetaData()` carries all 23 tables, seven of which hold
+  non-regenerable personal financial data (and, for `broker_connections`, real broker API
+  credentials). See `docs/database.md` for the ownership map.
 - **`output/` is cache only. Durable state goes to PostgreSQL.** Every file under `output/` must
   be regenerable by re-running something; if losing it would lose real information, it belongs in
   the database. Anything shaped like "a JSON blob under a key" goes through `core/state_store.py`

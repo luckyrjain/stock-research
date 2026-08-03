@@ -28,7 +28,6 @@ to a real deployment.
 from __future__ import annotations
 
 import hashlib
-import os
 from datetime import datetime, timezone
 
 import requests
@@ -127,12 +126,14 @@ def _normalize_trade(t: dict) -> dict | None:
     }
 
 
-def sync_account(engine, account_id: int, access_token: str, api_key: str | None = None) -> dict:
+def sync_account(engine, account_id: int, access_token: str, api_key: str) -> dict:
     """Syncs one connected HDFC Securities account's holdings + tradebook
     into the existing Portfolio Aggregator schema. Read-only. Returns a
     summary dict; never raises — a broker-API hiccup degrades to an
-    {"error": ...} result, same convention as every tools/*.py module."""
-    api_key = api_key or os.environ.get("HDFC_SEC_API_KEY", "")
+    {"error": ...} result, same convention as every tools/*.py module.
+
+    `api_key` is this connection's own registered app key (broker_connections.api_key),
+    never a deployment-wide env var — see db/models.py's broker_connections comment."""
     try:
         raw_holdings = _fetch_holdings(api_key, access_token)
         raw_trades = _fetch_tradebook(api_key, access_token)
