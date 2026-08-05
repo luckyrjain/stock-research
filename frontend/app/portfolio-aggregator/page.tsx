@@ -1,7 +1,11 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, type ReactNode } from 'react';
+import Link from 'next/link';
 import SiteNav from '@/components/site-nav';
+import { Skeleton } from '@/components/data-table-ui';
+import { usePositions } from '@/lib/positions';
+import { getClientId } from '@/lib/watchlist';
 import type {
   PortfolioProfile, PortfolioAccount, PortfolioAccountType,
   PortfolioAsset, PortfolioAssetType, PortfolioNetWorth,
@@ -43,6 +47,13 @@ const PENDING_BROKER_CONNECT_KEY = 'portfolio_pending_broker_connect';
 const ACCOUNT_TYPES: PortfolioAccountType[] = ['bank', 'broker', 'amc', 'epfo', 'other'];
 const ASSET_TYPES: PortfolioAssetType[] = ['mf', 'stock', 'fd', 'epf', 'ppf', 'cash', 'manual', 'loan'];
 const SECURITY_TYPES = new Set(['mf', 'stock']);
+
+const ACCOUNT_TYPE_ICON: Record<PortfolioAccountType, string> = {
+  bank: '🏦', broker: '📈', amc: '📄', epfo: '🏛️', other: '💼',
+};
+const ASSET_TYPE_ICON: Record<PortfolioAssetType, string> = {
+  mf: '📄', stock: '📈', fd: '🏦', epf: '🏛️', ppf: '🏛️', cash: '💵', manual: '✏️', loan: '⚠️',
+};
 
 function fmtInr(n: number): string {
   return `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
@@ -118,6 +129,19 @@ function ProfilePicker({ onSelect }: { onSelect: (p: PortfolioProfile) => void }
   );
 }
 
+// Visible micro-label above a compact form input, so these dense inline
+// add-account/add-asset forms don't rely on placeholder text as the only
+// label (placeholder-as-label disappears once typed into and isn't
+// announced consistently by screen readers).
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="flex flex-col gap-1 text-[10px] font-semibold text-muted uppercase tracking-wide">
+      {label}
+      {children}
+    </label>
+  );
+}
+
 function AddAccountForm({ profileId, onAdded }: { profileId: number; onAdded: () => void }) {
   const [name, setName] = useState('');
   const [type, setType] = useState<PortfolioAccountType>('bank');
@@ -136,17 +160,21 @@ function AddAccountForm({ profileId, onAdded }: { profileId: number; onAdded: ()
   }
 
   return (
-    <div className="flex flex-wrap gap-2 items-center">
-      <input
-        value={name}
-        onChange={e => setName(e.target.value)}
-        placeholder="Account name (e.g. HDFC Savings)"
-        className="px-3 py-2 rounded-lg border border-border bg-surface text-sm text-tx"
-      />
-      <select value={type} onChange={e => setType(e.target.value as PortfolioAccountType)}
-        className="px-3 py-2 rounded-lg border border-border bg-surface text-sm text-tx">
-        {ACCOUNT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-      </select>
+    <div className="flex flex-wrap gap-2 items-end">
+      <Field label="Account name">
+        <input
+          value={name}
+          onChange={e => setName(e.target.value)}
+          placeholder="e.g. HDFC Savings"
+          className="px-3 py-2 rounded-lg border border-border bg-surface text-sm text-tx"
+        />
+      </Field>
+      <Field label="Type">
+        <select value={type} onChange={e => setType(e.target.value as PortfolioAccountType)}
+          className="px-3 py-2 rounded-lg border border-border bg-surface text-sm text-tx">
+          {ACCOUNT_TYPES.map(t => <option key={t} value={t}>{ACCOUNT_TYPE_ICON[t]} {t}</option>)}
+        </select>
+      </Field>
       <button onClick={submit} className="px-4 py-2 rounded-lg bg-accent text-bg text-sm font-semibold">
         Add account
       </button>
@@ -185,23 +213,33 @@ function AddAssetForm({ accountId, onAdded }: { accountId: number; onAdded: () =
   }
 
   return (
-    <div className="flex flex-wrap gap-2 items-center pl-4">
-      <select value={type} onChange={e => setType(e.target.value as PortfolioAssetType)}
-        className="px-2 py-1.5 rounded-lg border border-border bg-bg text-xs text-tx">
-        {ASSET_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-      </select>
-      <input value={name} onChange={e => setName(e.target.value)} placeholder="Name"
-        className="px-2 py-1.5 rounded-lg border border-border bg-bg text-xs text-tx w-32" />
+    <div className="flex flex-wrap gap-2 items-end pl-4">
+      <Field label="Type">
+        <select value={type} onChange={e => setType(e.target.value as PortfolioAssetType)}
+          className="px-2 py-1.5 rounded-lg border border-border bg-bg text-xs text-tx">
+          {ASSET_TYPES.map(t => <option key={t} value={t}>{ASSET_TYPE_ICON[t]} {t}</option>)}
+        </select>
+      </Field>
+      <Field label="Name">
+        <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. TCS shares"
+          className="px-2 py-1.5 rounded-lg border border-border bg-bg text-xs text-tx w-32" />
+      </Field>
       {isSecurity && (
         <>
-          <input value={symbol} onChange={e => setSymbol(e.target.value)} placeholder="Symbol"
-            className="px-2 py-1.5 rounded-lg border border-border bg-bg text-xs text-tx w-20" />
-          <input value={units} onChange={e => setUnits(e.target.value)} placeholder="Units" type="number"
-            className="px-2 py-1.5 rounded-lg border border-border bg-bg text-xs text-tx w-20" />
+          <Field label="Symbol">
+            <input value={symbol} onChange={e => setSymbol(e.target.value)} placeholder="TCS"
+              className="px-2 py-1.5 rounded-lg border border-border bg-bg text-xs text-tx w-20" />
+          </Field>
+          <Field label="Units">
+            <input value={units} onChange={e => setUnits(e.target.value)} placeholder="10" type="number"
+              className="px-2 py-1.5 rounded-lg border border-border bg-bg text-xs text-tx w-20" />
+          </Field>
         </>
       )}
-      <input value={value} onChange={e => setValue(e.target.value)} placeholder="Value ₹" type="number"
-        className="px-2 py-1.5 rounded-lg border border-border bg-bg text-xs text-tx w-28" />
+      <Field label="Value ₹">
+        <input value={value} onChange={e => setValue(e.target.value)} placeholder="0" type="number"
+          className="px-2 py-1.5 rounded-lg border border-border bg-bg text-xs text-tx w-28" />
+      </Field>
       <button onClick={submit} className="px-3 py-1.5 rounded-lg border border-accent text-accent text-xs font-semibold">
         Add asset
       </button>
@@ -213,6 +251,8 @@ function AddAssetForm({ accountId, onAdded }: { accountId: number; onAdded: () =
 function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () => void }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(String(asset.value ?? ''));
+  const { isPositioned } = usePositions();
+  const alsoTracked = asset.symbol ? isPositioned(asset.symbol) : false;
 
   async function saveValue() {
     const v = parseFloat(value);
@@ -223,6 +263,7 @@ function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () =
   }
 
   async function remove() {
+    if (!confirm(`Delete "${asset.name}"? This can't be undone.`)) return;
     await api(`assets/${asset.id}`, { method: 'DELETE' });
     onChanged();
   }
@@ -232,9 +273,14 @@ function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () =
   return (
     <div className="flex items-center justify-between py-1.5 pl-4 border-b border-border last:border-0 text-sm">
       <span className="text-tx">
-        {asset.name}
+        <span aria-hidden="true">{ASSET_TYPE_ICON[asset.type]}</span> {asset.name}
         {asset.symbol && <span className="text-muted"> ({asset.symbol})</span>}
         <span className="text-muted"> · {asset.type}</span>
+        {alsoTracked && (
+          <Link href="/portfolio" className="ml-2 text-[10px] font-semibold text-accent hover:underline">
+            also in Positions →
+          </Link>
+        )}
       </span>
       {editing ? (
         <span className="flex items-center gap-1">
@@ -265,8 +311,8 @@ function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () =
 // flows share almost no state shape (a URL to navigate to vs. two
 // sequential forms) and forcing one component to cover both would obscure
 // more than it'd reuse.
-function HdfcBrokerRow({ account, connection, onSynced }: {
-  account: PortfolioAccount; connection: BrokerConnection | undefined; onSynced: () => void;
+function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
+  account: PortfolioAccount; connection: BrokerConnection | undefined; onSynced: () => void; onPoll: () => void;
 }) {
   const label = 'HDFC Securities';
   const [busy, setBusy] = useState(false);
@@ -357,7 +403,7 @@ function HdfcBrokerRow({ account, connection, onSynced }: {
     try {
       await api<BrokerSyncAck>('broker/hdfc_securities/sync', {
         method: 'POST',
-        body: JSON.stringify({ account_id: account.id }),
+        body: JSON.stringify({ account_id: account.id, client_id: getClientId() }),
       });
       setMsg('Syncing…');
       onSynced();
@@ -369,9 +415,9 @@ function HdfcBrokerRow({ account, connection, onSynced }: {
 
   useEffect(() => {
     if (connection?.sync_status !== 'syncing') return;
-    const id = setInterval(onSynced, 2000);
+    const id = setInterval(onPoll, 2000);
     return () => clearInterval(id);
-  }, [connection?.sync_status, onSynced]);
+  }, [connection?.sync_status, onPoll]);
 
   useEffect(() => {
     if (connection?.sync_status === 'success' && connection.last_sync_summary) {
@@ -399,11 +445,17 @@ function HdfcBrokerRow({ account, connection, onSynced }: {
           <span className="text-xs text-muted">{label}: API key saved, not yet connected</span>
         )}
         {connection?.connected && (
-          <button onClick={sync} disabled={syncing} className="text-xs text-accent font-semibold disabled:opacity-50">
+          <button onClick={sync} disabled={syncing} className="text-xs text-accent font-semibold disabled:opacity-50 flex items-center gap-1.5">
+            {syncing && <span className="w-2.5 h-2.5 rounded-full border border-current border-t-transparent animate-spin-slow" />}
             {syncing ? 'Syncing…' : 'Sync now'}
           </button>
         )}
-        {!otpRequired && (!connection || !connection.connected || showCreds) && (
+        {/* `connection.connected` only means a token was obtained once —
+            it stays true after the token expires (see sync_status/
+            last_sync_error instead), so "Reconnect" must not be gated on
+            it alone or it hides exactly when it's needed most: right
+            after a sync fails with an expired/invalid token. */}
+        {!otpRequired && (!connection || !connection.connected || connection.sync_status === 'error' || showCreds) && (
           <button onClick={loginStart} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
             {busy ? 'Connecting…' : connection?.connected ? `Reconnect ${label}` : `Connect ${label}`}
           </button>
@@ -415,7 +467,7 @@ function HdfcBrokerRow({ account, connection, onSynced }: {
         )}
         {msg && <span className="text-xs text-muted">{msg}</span>}
       </span>
-      {!otpRequired && (showCreds || !connection || !connection.connected) && (
+      {!otpRequired && (showCreds || !connection || !connection.connected || connection.sync_status === 'error') && (
         <span className="flex items-center gap-2 flex-wrap">
           {showCreds && (
             <>
@@ -472,9 +524,9 @@ function HdfcBrokerRow({ account, connection, onSynced }: {
   );
 }
 
-function BrokerRow({ account, broker, connection, onSynced }: {
+function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
   account: PortfolioAccount; broker: { id: string; label: string; experimental?: boolean };
-  connection: BrokerConnection | undefined; onSynced: () => void;
+  connection: BrokerConnection | undefined; onSynced: () => void; onPoll: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -519,7 +571,7 @@ function BrokerRow({ account, broker, connection, onSynced }: {
     try {
       await api<BrokerSyncAck>(`broker/${broker.id}/sync`, {
         method: 'POST',
-        body: JSON.stringify({ account_id: account.id }),
+        body: JSON.stringify({ account_id: account.id, client_id: getClientId() }),
       });
       // The sync itself runs in the background (202 Accepted). `busy`
       // deliberately stays true here rather than clearing in a `finally`
@@ -542,9 +594,9 @@ function BrokerRow({ account, broker, connection, onSynced }: {
   // stops itself the moment sync_status leaves "syncing".
   useEffect(() => {
     if (connection?.sync_status !== 'syncing') return;
-    const id = setInterval(onSynced, 2000);
+    const id = setInterval(onPoll, 2000);
     return () => clearInterval(id);
-  }, [connection?.sync_status, onSynced]);
+  }, [connection?.sync_status, onPoll]);
 
   useEffect(() => {
     if (connection?.sync_status === 'success' && connection.last_sync_summary) {
@@ -577,11 +629,15 @@ function BrokerRow({ account, broker, connection, onSynced }: {
           <span className="text-xs text-muted">{broker.label}: API key saved, not yet connected</span>
         )}
         {connection?.connected && (
-          <button onClick={sync} disabled={syncing} className="text-xs text-accent font-semibold disabled:opacity-50">
+          <button onClick={sync} disabled={syncing} className="text-xs text-accent font-semibold disabled:opacity-50 flex items-center gap-1.5">
+            {syncing && <span className="w-2.5 h-2.5 rounded-full border border-current border-t-transparent animate-spin-slow" />}
             {syncing ? 'Syncing…' : 'Sync now'}
           </button>
         )}
-        {(!connection || !connection.connected || showCreds) && (
+        {/* See HdfcBrokerRow's identical comment — `connected` alone stays
+            true after token expiry, so gate Reconnect on sync_status
+            too or it hides right when it's needed. */}
+        {(!connection || !connection.connected || connection.sync_status === 'error' || showCreds) && (
           <button onClick={connect} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
             {busy ? 'Redirecting…' : connection?.connected ? `Reconnect ${broker.label}` : `Connect ${broker.label}`}
           </button>
@@ -619,39 +675,75 @@ function BrokerRow({ account, broker, connection, onSynced }: {
   );
 }
 
-function BrokerConnectControls({ account, connections, onSynced }: {
-  account: PortfolioAccount; connections: BrokerConnection[]; onSynced: () => void;
+// One (account, broker) pair is a real credential registration — showing
+// all 3 supported brokers' full connect controls on every broker account
+// regardless of which one the user actually meant was the reported "sharp
+// UX" complaint: an account for one broker doesn't need the other two
+// brokers' connect buttons/forms cluttering the row. Now only brokers
+// already registered on this account (a `connections` row exists, whether
+// or not the handshake finished — see BrokerConnection.connected's own
+// comment) get their full row; anything else is behind a single "+ Connect
+// broker" picker so at most one extra row is ever visible at a time.
+function BrokerConnectControls({ account, connections, onSynced, onPoll }: {
+  account: PortfolioAccount; connections: BrokerConnection[]; onSynced: () => void; onPoll: () => void;
 }) {
+  const [addingBrokerId, setAddingBrokerId] = useState<string | null>(null);
+  const registeredIds = new Set(connections.map(c => c.broker));
+  const registered = SUPPORTED_BROKERS.filter(b => registeredIds.has(b.id));
+  const unregistered = SUPPORTED_BROKERS.filter(b => !registeredIds.has(b.id));
+  const addingBroker = unregistered.find(b => b.id === addingBrokerId);
+
+  // Deliberately does NOT clear addingBrokerId on a successful connect —
+  // doing that synchronously (before the async onSynced()/refresh() has
+  // actually landed the new connection in `connections`) briefly removed
+  // this broker from BOTH the "adding" slot and `registered` for one
+  // render, which React sees as the component disappearing and remounting
+  // at a different tree position: local state (the "Connected." message)
+  // was lost right after the user saw it. `addingBroker` above already
+  // derives to undefined the moment this broker's connection actually
+  // shows up in `registered` — `unregistered` stops containing it — so no
+  // explicit clearing is needed; the id lingering in state until then is
+  // harmless.
+  function renderBroker(broker: { id: string; label: string; experimental?: boolean }) {
+    const connection = connections.find(c => c.broker === broker.id);
+    return broker.id === 'hdfc_securities' ? (
+      <HdfcBrokerRow key={broker.id} account={account} connection={connection} onSynced={onSynced} onPoll={onPoll} />
+    ) : (
+      <BrokerRow key={broker.id} account={account} broker={broker} connection={connection} onSynced={onSynced} onPoll={onPoll} />
+    );
+  }
+
   return (
     <span className="flex items-center gap-3 flex-wrap">
-      {SUPPORTED_BROKERS.map(broker => (
-        broker.id === 'hdfc_securities' ? (
-          <HdfcBrokerRow
-            key={broker.id}
-            account={account}
-            connection={connections.find(c => c.broker === broker.id)}
-            onSynced={onSynced}
-          />
-        ) : (
-          <BrokerRow
-            key={broker.id}
-            account={account}
-            broker={broker}
-            connection={connections.find(c => c.broker === broker.id)}
-            onSynced={onSynced}
-          />
+      {registered.map(renderBroker)}
+      {addingBroker ? (
+        <span className="flex items-center gap-2 flex-wrap bg-surface border border-border rounded-lg px-2 py-1">
+          {renderBroker(addingBroker)}
+          <button onClick={() => setAddingBrokerId(null)} className="text-xs text-muted hover:text-tx">cancel</button>
+        </span>
+      ) : (
+        unregistered.length > 0 && (
+          <select
+            defaultValue=""
+            onChange={e => { if (e.target.value) setAddingBrokerId(e.target.value); }}
+            className="text-xs text-accent font-semibold bg-transparent border border-accent/40 rounded-lg px-2 py-1"
+          >
+            <option value="" disabled>+ Connect broker…</option>
+            {unregistered.map(b => <option key={b.id} value={b.id}>{b.label}</option>)}
+          </select>
         )
-      ))}
+      )}
     </span>
   );
 }
 
-function AccountBlock({ account, assets, connections, onChanged }: {
-  account: PortfolioAccount; assets: PortfolioAsset[]; connections: BrokerConnection[]; onChanged: () => void;
+function AccountBlock({ account, assets, connections, onChanged, onPoll }: {
+  account: PortfolioAccount; assets: PortfolioAsset[]; connections: BrokerConnection[]; onChanged: () => void; onPoll: () => void;
 }) {
   const [showAdd, setShowAdd] = useState(false);
 
   async function removeAccount() {
+    if (!confirm(`Delete account "${account.name}"? This can't be undone.`)) return;
     try {
       await api(`accounts/${account.id}`, { method: 'DELETE' });
       onChanged();
@@ -663,15 +755,24 @@ function AccountBlock({ account, assets, connections, onChanged }: {
     }
   }
 
+  const subtotal = assets.reduce((s, a) => s + (a.type === 'loan' ? -(a.value ?? 0) : (a.value ?? 0)), 0);
+
   return (
     <div className="bg-card border border-border rounded-xl p-4">
-      <div className="flex items-center justify-between mb-2">
+      <div className="flex items-center justify-between mb-2 pb-2 border-b border-border">
         <p className="text-sm font-semibold text-tx">
-          {account.name} <span className="text-muted font-normal">· {account.type}{account.institution ? ` · ${account.institution}` : ''}</span>
+          <span aria-hidden="true">{ACCOUNT_TYPE_ICON[account.type]}</span> {account.name}
+          {' '}
+          <span className="text-muted font-normal">· {account.type}{account.institution ? ` · ${account.institution}` : ''}</span>
+          {assets.length > 0 && (
+            <span className={`ml-2 font-mono ${subtotal < 0 ? 'text-sell' : 'text-muted'}`}>
+              {subtotal < 0 ? '−' : ''}{fmtInr(Math.abs(subtotal))}
+            </span>
+          )}
         </p>
         <div className="flex items-center gap-3">
           {account.type === 'broker' && (
-            <BrokerConnectControls account={account} connections={connections} onSynced={onChanged} />
+            <BrokerConnectControls account={account} connections={connections} onSynced={onChanged} onPoll={onPoll} />
           )}
           <button onClick={() => setShowAdd(s => !s)} className="text-xs text-accent font-semibold">
             {showAdd ? 'Cancel' : '+ Asset'}
@@ -868,6 +969,20 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
   const [refreshing, setRefreshing] = useState(false);
   const [showImportCas, setShowImportCas] = useState(false);
   const [showImportCsv, setShowImportCsv] = useState(false);
+  // Gates the skeleton vs. "No accounts yet" empty state below — accounts
+  // starts at [] same as the true empty case, so without this flag the
+  // first paint reads as an already-empty profile instead of still loading.
+  // Only ever flips true, never back — later refresh() calls (after adding
+  // an asset, syncing, etc.) shouldn't re-flash the skeleton.
+  const [loaded, setLoaded] = useState(false);
+  // Separate from `loaded` above — networth is fetched independently
+  // (a completely different, unawaited api() call in refresh() below) and
+  // can resolve before or after the accounts+assets fetch. Reusing
+  // `loaded` for the Net Worth skeleton left a window where accounts
+  // finished first: loaded is true (skeleton condition false) but
+  // networth is still null (data condition also false), so the whole
+  // card rendered nothing for that stretch instead of skeleton or data.
+  const [netWorthLoaded, setNetWorthLoaded] = useState(false);
 
   const refresh = useCallback(() => {
     api<{ accounts: PortfolioAccount[] }>(`accounts?profile_id=${profile.id}`).then(async d => {
@@ -876,8 +991,20 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
         d.accounts.map(async acc => [acc.id, (await api<{ assets: PortfolioAsset[] }>(`assets?account_id=${acc.id}`)).assets] as const),
       );
       setAssetsByAccount(Object.fromEntries(entries));
-    });
-    api<PortfolioNetWorth>(`networth?profile_id=${profile.id}`).then(setNetworth);
+    }).finally(() => setLoaded(true));
+    api<PortfolioNetWorth>(`networth?profile_id=${profile.id}`).then(setNetworth).finally(() => setNetWorthLoaded(true));
+    api<{ connections: BrokerConnection[] }>(`broker/connections?profile_id=${profile.id}`)
+      .then(d => setConnections(d.connections))
+      .catch(() => setConnections([]));
+  }, [profile.id]);
+
+  // Lighter than refresh() — used by the 2s sync-status poll below, which
+  // only needs the connections list (the one place sync_status lives), not
+  // a full accounts+per-account-assets+networth refetch every tick. Sharing
+  // refresh() for that poll blew through the "portfolio_agg_read" rate
+  // limit (120/60s, shared across all these read endpoints) in well under a
+  // minute with just two accounts.
+  const pollConnections = useCallback(() => {
     api<{ connections: BrokerConnection[] }>(`broker/connections?profile_id=${profile.id}`)
       .then(d => setConnections(d.connections))
       .catch(() => setConnections([]));
@@ -932,20 +1059,45 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
       {showImportCas && <ImportCasForm accounts={accounts} onImported={() => { refresh(); setShowImportCas(false); }} />}
       {showImportCsv && <ImportCsvForm accounts={accounts} onImported={() => { refresh(); setShowImportCsv(false); }} />}
 
-      {networth && (
+      {!networth && !netWorthLoaded && (
         <div className="bg-card border border-border rounded-xl p-5 mb-6">
-          <p className="text-[11px] font-semibold text-muted tracking-[1px] uppercase mb-2">Net Worth</p>
-          <p className="text-3xl font-bold font-mono text-tx mb-3">{fmtInr(networth.total)}</p>
-          <div className="flex flex-wrap gap-x-6 gap-y-1">
-            {Object.entries(networth.by_type).map(([type, val]) => (
-              <span key={type} className="text-sm text-muted">
-                {type}: <span className={`font-mono font-semibold ${val < 0 ? 'text-sell' : 'text-tx'}`}>{fmtInr(val)}</span>
-              </span>
-            ))}
-            {Object.keys(networth.by_type).length === 0 && <span className="text-sm text-muted">No assets yet.</span>}
-          </div>
+          <Skeleton className="h-3 w-24 mb-3" />
+          <Skeleton className="h-8 w-40 mb-3" />
+          <Skeleton className="h-3 w-full" />
         </div>
       )}
+      {networth && (() => {
+        const entries = Object.entries(networth.by_type).sort(([, a], [, b]) => Math.abs(b) - Math.abs(a));
+        const scale = entries.reduce((s, [, v]) => s + Math.abs(v), 0) || 1;
+        return (
+          <div className="bg-card border border-border rounded-xl p-5 mb-6">
+            <p className="text-[11px] font-semibold text-muted tracking-[1px] uppercase mb-2">Net Worth</p>
+            <p className="text-3xl font-bold font-mono text-tx mb-3">{fmtInr(networth.total)}</p>
+            {entries.length > 0 && (
+              <div className="flex h-2 w-full rounded-full overflow-hidden mb-3 bg-border/60">
+                {entries.map(([type, val], i) => (
+                  <div
+                    key={type}
+                    title={`${type}: ${fmtInr(val)}`}
+                    className={val < 0 ? 'bg-sell' : 'bg-accent'}
+                    style={{ width: `${(Math.abs(val) / scale) * 100}%`, opacity: val < 0 ? 0.7 : 1 - i * 0.15 }}
+                  />
+                ))}
+              </div>
+            )}
+            <div className="flex flex-wrap gap-x-6 gap-y-1">
+              {entries.map(([type, val]) => (
+                <span key={type} className="text-sm text-muted">
+                  <span aria-hidden="true">{ASSET_TYPE_ICON[type as PortfolioAssetType] ?? '💼'}</span>{' '}
+                  {type} <span className="text-tx/60">({Math.round((Math.abs(val) / scale) * 100)}%)</span>:{' '}
+                  <span className={`font-mono font-semibold ${val < 0 ? 'text-sell' : 'text-tx'}`}>{fmtInr(val)}</span>
+                </span>
+              ))}
+              {entries.length === 0 && <span className="text-sm text-muted">No assets yet.</span>}
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="flex items-center justify-between mb-3">
         <p className="text-sm font-semibold text-tx">Accounts</p>
@@ -957,18 +1109,25 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
         <div className="mb-4"><AddAccountForm profileId={profile.id} onAdded={() => { refresh(); setShowAddAccount(false); }} /></div>
       )}
 
-      <div className="flex flex-col gap-3">
-        {accounts.map(acc => (
-          <AccountBlock
-            key={acc.id}
-            account={acc}
-            assets={assetsByAccount[acc.id] ?? []}
-            connections={connections.filter(c => c.account_id === acc.id)}
-            onChanged={refresh}
-          />
-        ))}
-        {accounts.length === 0 && <p className="text-sm text-muted">No accounts yet — add one above.</p>}
-      </div>
+      {!loaded ? (
+        <div className="flex flex-col gap-3">
+          {[0, 1].map(i => <Skeleton key={i} className="h-16 w-full" />)}
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {accounts.map(acc => (
+            <AccountBlock
+              key={acc.id}
+              account={acc}
+              assets={assetsByAccount[acc.id] ?? []}
+              connections={connections.filter(c => c.account_id === acc.id)}
+              onChanged={refresh}
+              onPoll={pollConnections}
+            />
+          ))}
+          {accounts.length === 0 && <p className="text-sm text-muted">No accounts yet — add one above.</p>}
+        </div>
+      )}
     </div>
   );
 }

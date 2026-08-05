@@ -1248,13 +1248,42 @@ this one).
    `requests` — Paytm Money's own client SDK (`pyPMClient`) has no working PyPI release, so
    depending on it would mean vendoring GitHub source for a thin wrapper, which this codebase's
    "prefer the standard library and already-installed dependencies" policy advises against.
-   **Disclosed limitation, HDFC Securities**: the login flow (all 5 steps) and the holdings
-   endpoint (`GET /portfolio/holdings`) are confirmed against a real, working account — not a
-   guess. The tradebook endpoint (`GET /portfolio/tradebook`) is **not** independently
-   confirmed — inferred from the same `/portfolio/` prefix the holdings endpoint actually uses,
-   since no working tradebook call was supplied. A field this module expects but a real response
-   doesn't have degrades that one holding/trade to skipped (logged), never a fabricated value —
-   spot-check trade sync specifically against a live account before relying on it.
+   **HDFC Securities is confirmed against a real, working account** — not a guess, and it went
+   through two real correction rounds once actually exercised:
+   - The **login flow's response shape** was originally guessed as `{"data": {"token_id": ...}}`
+     (matching the `snake_case`-under-`"data"` shape common to other Indian broker APIs). The
+     real shape is flat, camelCase, no wrapper at all — `{"tokenId": "..."}`. `start_login()` /
+     `submit_otp()` / `get_access_token()` normalize this to this module's own snake_case
+     convention (`token_id`/`request_token`/`access_token`) so callers never see HDFC's own
+     field-naming style. `requestToken`/`accessToken` (steps 3 and 5) are inferred by matching
+     step 1's confirmed pattern, not independently verified — each degrades to a clean
+     `{"error": ...}` if the guess is wrong, never a `KeyError`.
+   - **Holdings have no trading-symbol field at all** — confirmed real shape is `{"status":
+     "success", "data": [{"security_id", "exchange", "company_name", "sector_name", "isin",
+     "quantity", "average_price", "close_price", ...}]}`. This was a real, shipped bug: the
+     original `_normalize_holding()` only ever looked for `trading_symbol`/`symbol`, which don't
+     exist in HDFC's response — every real holding silently synced as zero. `_resolve_hdfc_symbol()`
+     now runs the same `tools.securities_master.resolve_symbol()` ISIN resolution `portfolio/csv_import.py`
+     already does for a raw broker CSV export (reused, not reinvented) — `broker_sync_common.find_or_create_asset()`'s
+     own docstring explicitly assumed every broker module already has a canonical trading symbol,
+     an assumption that held for Kite/Paytm but was wrong for HDFC. Falls back to the ISIN itself
+     as the symbol when resolution can't find a confident match (never silently dropping a real
+     holding over an unresolved ISIN), and returns nothing only when there's truly no identifier
+     at all. `sync_account()` loads the securities master once per sync (`get_full_securities_master()`),
+     shared across every holding/trade, same "load once, not once per row" convention `csv_import.py`
+     already established.
+   - **The tradebook endpoint was also wrong**: originally guessed as `GET /portfolio/tradebook`
+     (matching holdings' own `/portfolio/` prefix) — the real endpoint is `GET /oapi/v1/trades`,
+     no `/portfolio/` prefix at all. Its response field names are still unconfirmed (no live
+     tradebook response has been supplied yet) — `_normalize_trade()` tries the same
+     `trading_symbol`/`symbol` fields first, falling through to the same ISIN resolution holdings
+     needs only if those are absent, so it degrades gracefully either way once a real response is
+     seen.
+   - **Holdings and tradebook fetches are independent** — this was also a real, shipped bug: the
+     original code ran both inside one `try`/`except`, so the (then-wrong) tradebook 404 killed
+     the whole sync, discarding an already-working holdings fetch. `sync_account()` now catches
+     each fetch's failure separately; only a genuine failure of *both* degrades the call to
+     `{"error": ...}`, since at that point there's nothing left to write.
 
    **Disclosed limitation, Paytm Money**: `developer.paytmmoney.com` blocked this sandbox's
    outbound fetches (403), so its exact REST base URL, endpoint paths, checksum-signing scheme,

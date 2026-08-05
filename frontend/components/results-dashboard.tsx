@@ -232,7 +232,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
       </div>
 
       <ValuationSummaryStrip
-        llmVerdict={a?.valuation?.verdict}
+        llmVerdict={report.degraded ? undefined : a?.valuation?.verdict}
         dcf={financials?.dcf}
         peerPePercentile={percentileByNormalizedKey['pe']}
         absoluteAnchor={peers?.absolute_anchor ?? null}
@@ -245,47 +245,63 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
         {/* Investment Thesis — summary + bull/bear as one card */}
         <div className="lg:col-span-3">
           <Card title="Investment Thesis" className="h-full">
-            {(() => {
-              const text    = a?.summary ?? '';
-              const bullets = summaryBullets(text);
-              return bullets.length > 1 ? (
-                <ul className="space-y-2 mb-5">
-                  {bullets.map((b, i) => (
-                    <li key={i} className="flex gap-2 text-sm text-tx leading-relaxed">
-                      <span className={`${cfg.text} shrink-0 mt-px`}>›</span>
-                      <span>{b}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-sm text-tx leading-relaxed mb-5">{text || 'Analysis pending.'}</p>
-              );
-            })()}
+            {report.degraded ? (
+              // crew.py's _safe_analysis_fallback() fills summary/bull_factors/
+              // bear_factors with generic filler text ("Market data was fetched
+              // successfully.", etc.) so the JSON schema stays satisfiable —
+              // never real analysis. Rendering those as if they were genuine
+              // bull/bear factors was actively misleading (the degraded banner
+              // above explained the situation but this card contradicted it
+              // by looking like a normal report). No results, shown as such.
+              <p className="text-sm text-muted leading-relaxed">
+                No analysis available for this run — see the notice above. Market data, ratios, and
+                shareholding elsewhere on this page are real and unaffected.
+              </p>
+            ) : (
+              <>
+                {(() => {
+                  const text    = a?.summary ?? '';
+                  const bullets = summaryBullets(text);
+                  return bullets.length > 1 ? (
+                    <ul className="space-y-2 mb-5">
+                      {bullets.map((b, i) => (
+                        <li key={i} className="flex gap-2 text-sm text-tx leading-relaxed">
+                          <span className={`${cfg.text} shrink-0 mt-px`}>›</span>
+                          <span>{b}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-sm text-tx leading-relaxed mb-5">{text || 'Analysis pending.'}</p>
+                  );
+                })()}
 
-            <div className="grid grid-cols-2 gap-5 pt-4 border-t border-border">
-              <div>
-                <p className="text-[11px] font-semibold text-buy tracking-[1px] uppercase mb-3">Bull Case</p>
-                <ul className="space-y-2">
-                  {(a?.bull_factors ?? []).map((f, i) => (
-                    <li key={i} className="flex gap-2 text-sm text-tx">
-                      <span className="text-buy mt-0.5 shrink-0">▲</span>
-                      <span>{formatFactor(f)}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-              <div>
-                <p className="text-[11px] font-semibold text-sell tracking-[1px] uppercase mb-3">Bear Case</p>
-                <ul className="space-y-2">
-                  {(a?.bear_factors ?? []).map((f, i) => (
-                    <li key={i} className="flex gap-2 text-sm text-tx">
-                      <span className="text-sell mt-0.5 shrink-0">▼</span>
-                      <span>{formatFactor(f)}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
+                <div className="grid grid-cols-2 gap-5 pt-4 border-t border-border">
+                  <div>
+                    <p className="text-[11px] font-semibold text-buy tracking-[1px] uppercase mb-3">Bull Case</p>
+                    <ul className="space-y-2">
+                      {(a?.bull_factors ?? []).map((f, i) => (
+                        <li key={i} className="flex gap-2 text-sm text-tx">
+                          <span className="text-buy mt-0.5 shrink-0">▲</span>
+                          <span>{formatFactor(f)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-semibold text-sell tracking-[1px] uppercase mb-3">Bear Case</p>
+                    <ul className="space-y-2">
+                      {(a?.bear_factors ?? []).map((f, i) => (
+                        <li key={i} className="flex gap-2 text-sm text-tx">
+                          <span className="text-sell mt-0.5 shrink-0">▼</span>
+                          <span>{formatFactor(f)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </>
+            )}
           </Card>
         </div>
 
@@ -372,13 +388,22 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
 
           <StreetConsensusCard consensus={streetConsensus} />
 
-          {a?.valuation && (
+          {/* a?.valuation is always present even when degraded (fallback
+              fills a generic "Fairly Valued"/filler comment) — only render
+              the LLM verdict/comment when the analysis is real. The DCF
+              sub-block below is deterministic, not LLM-derived, so it's
+              unaffected and can carry the card alone under degraded. */}
+          {(!report.degraded ? a?.valuation : financials?.dcf) && (
             <Card title="Valuation">
-              <p className={`text-sm font-semibold mb-1 ${
-                a.valuation.verdict === 'Undervalued' ? 'text-buy' :
-                a.valuation.verdict === 'Overvalued'  ? 'text-sell' : 'text-hold'
-              }`}>{a.valuation.verdict}</p>
-              <p className="text-sm text-muted leading-relaxed">{a.valuation.comment}</p>
+              {!report.degraded && a?.valuation && (
+                <>
+                  <p className={`text-sm font-semibold mb-1 ${
+                    a.valuation.verdict === 'Undervalued' ? 'text-buy' :
+                    a.valuation.verdict === 'Overvalued'  ? 'text-sell' : 'text-hold'
+                  }`}>{a.valuation.verdict}</p>
+                  <p className="text-sm text-muted leading-relaxed">{a.valuation.comment}</p>
+                </>
+              )}
               {financials?.dcf && (
                 <div className={`mt-3 pt-3 border-t border-border text-xs ${
                   financials.dcf.verdict === 'Undervalued' ? 'text-buy' :
@@ -452,7 +477,9 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
       </div>
 
       {/* ── 3. Key Risks ── */}
-      {(a?.key_risks ?? []).length > 0 && (
+      {/* key_risks is also fallback filler under degraded — see the
+          Investment Thesis card's comment above. */}
+      {!report.degraded && (a?.key_risks ?? []).length > 0 && (
         <Card title="Key Risks">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {(a?.key_risks ?? []).map((risk, i) => (
@@ -466,8 +493,11 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
       )}
 
       {/* ── 4. Narrative row: context cards ── */}
+      {/* business_quality/institutional_trend/news_highlights are also
+          fallback filler under degraded — see the Investment Thesis card's
+          comment above. */}
       {(() => {
-        const narrativeCards = [
+        const narrativeCards = report.degraded ? [] : [
           a?.business_quality && (
             <Card key="bq" title="Business Quality">
               <p className="text-sm text-tx leading-relaxed">{a.business_quality}</p>

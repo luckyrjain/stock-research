@@ -168,6 +168,13 @@ class BrokerConnectIn(BaseModel):
 
 class BrokerSyncIn(BaseModel):
     account_id: int
+    # Optional — the browser's own anonymous identity (lib/watchlist.ts's
+    # getClientId(), same one Watchlist/Positions already use), passed only
+    # so synced holdings can also be mirrored into `positions` (see
+    # portfolio/broker_sync_common.py's upsert_position_from_holding). Never
+    # stored on accounts/profiles themselves — Portfolio Aggregator has no
+    # owner concept otherwise and this doesn't add one.
+    client_id: str | None = None
 
 
 class HdfcLoginStartIn(BaseModel):
@@ -750,7 +757,10 @@ async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
             conn.execute(
                 update(broker_connections)
                 .where(broker_connections.c.id == conn_row.id)
-                .values(access_token_enc=token_enc, token_obtained_at=now)
+                # See the identical comment on the hdfc_securities verify-otp
+                # handler above — a fresh token invalidates whatever the
+                # previous token's last sync attempt recorded.
+                .values(access_token_enc=token_enc, token_obtained_at=now, sync_status="idle", last_sync_error=None)
             )
         return {"connected": True, "account_id": body.account_id, "broker": broker}
 
@@ -940,7 +950,17 @@ async def hdfc_verify_otp(request: Request, body: HdfcVerifyOtpIn):
             conn.execute(
                 update(broker_connections)
                 .where(broker_connections.c.id == conn_row.id)
-                .values(access_token_enc=token_enc, token_obtained_at=now, pending_token_id=None)
+                # A fresh token invalidates whatever the *previous* token's
+                # last sync attempt recorded — without clearing these, the
+                # frontend's poll immediately re-displays the stale
+                # last_sync_error right after showing "Connected.", making a
+                # successful reconnect look like it failed again. `idle`
+                # matches what a connection has before its first-ever sync
+                # (see BrokerConnection.sync_status's own comment).
+                .values(
+                    access_token_enc=token_enc, token_obtained_at=now, pending_token_id=None,
+                    sync_status="idle", last_sync_error=None,
+                )
             )
         return {"connected": True, "account_id": body.account_id, "broker": "hdfc_securities"}
 
@@ -979,6 +999,37 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
     account_id = body.account_id
     lock_name = f"broker_sync:{account_id}:{broker}"
     rate_key = f"broker_sync_rl:{account_id}:{broker}"
+
+    # Resolved once, synchronously, in the request/response cycle — not
+    # inside _run_and_release below, which runs on a background thread
+    # pool after this function returns, where re-reading `request` would be
+    # unsafe. A signed-in session always wins over `client_id` (see
+    # routes/watchlist.py::resolve_owner's own docstring) so a synced
+    # holding lands under the SAME column GET /api/positions actually reads
+    # for that caller — writing it under client_id unconditionally would
+    # make it invisible to a signed-in user's own /portfolio page, since
+    # that page reads positions by user_id, not client_id, once signed in.
+    # Never raises past this point: a missing/malformed client_id and no
+    # session just means "don't mirror this sync into positions," not "the
+    # sync itself fails" — position-mirroring is purely additive.
+    #
+    # Disclosed limitation: the web UI's own proxy for this whole feature
+    # (frontend/app/api/portfolio/[...path]/route.ts) deliberately never
+    # forwards the session cookie — Portfolio Aggregator is anonymous/
+    # client_id-only by design (see that proxy's own comment). So in
+    # practice, through the actual web UI, `token` here is always None and
+    # this always resolves to the client_id path; the session-preferring
+    # branch only matters for a caller hitting this endpoint directly with
+    # a bearer token. Implemented correctly regardless, rather than
+    # skipped, since it's this endpoint's own contract to get right
+    # independent of which caller happens to exercise it today.
+    owner = None
+    try:
+        import api
+        from routes.watchlist import resolve_owner
+        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
+    except ValueError:
+        pass
 
     def _prepare() -> dict:
         import api
@@ -1052,6 +1103,7 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
             mod = _broker_sync_module(broker)
             result = mod.sync_account(
                 api._get_db_engine(), account_id, prepared["access_token"], api_key=prepared["api_key"],
+                owner=owner,
             )
             if "error" in result:
                 error = result["error"]
