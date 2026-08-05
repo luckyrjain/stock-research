@@ -8,6 +8,7 @@ import PositionButton from './position-button';
 import { usePositions } from '@/lib/positions';
 import { getClientId } from '@/lib/watchlist';
 import { safeExternalHref } from './dashboard-format';
+import { SortableTh, FilterChip } from './data-table-ui';
 
 type SortKey    = 'confidence_score' | 'change_pct' | 'pe_ratio' | 'valuation_percentile';
 type ConfFilter = 'all' | 'high' | 'medium' | 'low';
@@ -395,40 +396,6 @@ function ExpandedRow({ pick }: { pick: MarketPick }) {
   );
 }
 
-function SortableHeader({ label, sortK, currentKey, currentDir, onSort, tooltip }: {
-  label: string;
-  sortK: SortKey;
-  currentKey: SortKey | null;
-  currentDir: 'asc' | 'desc';
-  onSort: (k: SortKey) => void;
-  tooltip?: React.ReactNode;
-}) {
-  const active = currentKey === sortK;
-  return (
-    <th
-      aria-sort={active ? (currentDir === 'desc' ? 'descending' : 'ascending') : 'none'}
-      className="p-0 text-left text-[10px] font-bold text-muted uppercase tracking-wider whitespace-nowrap"
-    >
-      <div className="flex items-center gap-1">
-        {/* Button owns the original cell padding so the full header area stays
-            clickable/hoverable, not just the label+arrow's own tight bounding box. */}
-        <button
-          type="button"
-          onClick={() => onSort(sortK)}
-          className="flex items-center gap-1 px-4 py-3 uppercase tracking-wider
-                     cursor-pointer hover:text-tx transition-colors select-none group"
-        >
-          {label}
-          <span className={`text-[9px] transition-colors ${active ? 'text-accent' : 'text-muted/25 group-hover:text-muted/60'}`}>
-            {active ? (currentDir === 'desc' ? '↓' : '↑') : '↕'}
-          </span>
-        </button>
-        {tooltip && <span className="pr-4">{tooltip}</span>}
-      </div>
-    </th>
-  );
-}
-
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function MarketPicksDashboard({ picks, generatedAt, fromCache, onRescan, pricesLastUpdated }: Props) {
@@ -572,7 +539,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
       </div>
 
       {/* ── Filters: search + confidence chips ── */}
-      <div className="flex flex-col sm:flex-row gap-3 mb-5">
+      <div className="flex flex-col sm:flex-row flex-wrap gap-3 mb-5">
         {/* Search */}
         <div className="relative flex-1 max-w-[280px]">
           <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted/60 pointer-events-none"
@@ -612,7 +579,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                           border transition-colors
                 ${confFilter === id
                   ? active
-                  : 'bg-transparent border-border text-muted hover:text-tx hover:border-border-hi'}`}
+                  : 'bg-surface border-border text-muted hover:text-tx hover:border-border-hi'}`}
             >
               {dot && <span className={`w-1.5 h-1.5 rounded-full inline-block
                 ${dot} ${confFilter === id ? '' : 'opacity-50'}`} />}
@@ -629,17 +596,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
             { id: 'medium', label: 'Medium' },
             { id: 'long',   label: 'Long' },
           ] as const).map(({ id, label }) => (
-            <button
-              key={id}
-              onClick={() => setHorizonFilter(id)}
-              aria-pressed={horizonFilter === id}
-              className={`px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-colors
-                ${horizonFilter === id
-                  ? 'bg-accent/10 border-accent/30 text-accent'
-                  : 'bg-transparent border-border text-muted hover:text-tx hover:border-border-hi'}`}
-            >
-              {label}
-            </button>
+            <FilterChip key={id} value={id} active={horizonFilter === id} onClick={setHorizonFilter} label={label} />
           ))}
         </div>
 
@@ -651,17 +608,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
             { id: 'mid',   label: 'Mid' },
             { id: 'small', label: 'Small' },
           ] as const).map(({ id, label }) => (
-            <button
-              key={id}
-              onClick={() => setCapFilter(id)}
-              aria-pressed={capFilter === id}
-              className={`px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-colors
-                ${capFilter === id
-                  ? 'bg-accent/10 border-accent/30 text-accent'
-                  : 'bg-transparent border-border text-muted hover:text-tx hover:border-border-hi'}`}
-            >
-              {label}
-            </button>
+            <FilterChip key={id} value={id} active={capFilter === id} onClick={setCapFilter} label={label} />
           ))}
         </div>
 
@@ -688,7 +635,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
               <tr className="border-b border-border bg-surface sticky top-0 z-10">
                 <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider w-8">#</th>
                 <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider">Stock</th>
-                <SortableHeader
+                <SortableTh
                   label="Confidence" sortK="confidence_score" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort}
                   tooltip={
                     <InfoTooltip title="Confidence Score" align="left">
@@ -710,9 +657,9 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                   </span>
                 </th>
                 <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider">LTP</th>
-                <SortableHeader label="±%" sortK="change_pct" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
-                <SortableHeader label="P/E" sortK="pe_ratio"  currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
-                <SortableHeader
+                <SortableTh label="±%" sortK="change_pct" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
+                <SortableTh label="P/E" sortK="pe_ratio"  currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
+                <SortableTh
                   label="Val." sortK="valuation_percentile" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort}
                   tooltip={
                     <InfoTooltip title="Valuation Percentile" align="left">

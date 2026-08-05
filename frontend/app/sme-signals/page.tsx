@@ -37,11 +37,11 @@ function CrossBadge({ cross }: { cross: 'golden' | 'death' | null }) {
   if (cross == null) return <span className="text-muted text-[10px]">—</span>;
   return cross === 'golden' ? (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border bg-buy/12 text-buy border-buy/25">
-      ⚡ Golden
+      ↑ Golden
     </span>
   ) : (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border bg-sell/12 text-sell border-sell/25">
-      💀 Death
+      ↓ Death
     </span>
   );
 }
@@ -57,8 +57,10 @@ function RegimeBadge({ inGolden }: { inGolden: boolean }) {
 }
 
 function ExchangeBadge({ exchange }: { exchange: string }) {
+  // BSE -> hold, NSE -> buy (design.md §2).
+  const tone = exchange === 'BSE' ? 'text-hold border-hold/20 bg-hold/10' : 'text-buy border-buy/20 bg-buy/10';
   return (
-    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded border text-muted border-border bg-surface">
+    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${tone}`}>
       {exchange}
     </span>
   );
@@ -95,7 +97,7 @@ function VolumeSpikeBadge() {
       title="Today's volume is more than 2x its trailing 20-day average — a cross with real participation behind it"
       className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-bold border bg-accent/12 text-accent border-accent/25"
     >
-      🔥 Spike
+      Spike
     </span>
   );
 }
@@ -450,8 +452,8 @@ export default function SmeSignalsPage() {
                   {(
                     [
                       { value: 'all',    label: 'All'      },
-                      { value: 'golden', label: '⚡ Golden' },
-                      { value: 'death',  label: '💀 Death'  },
+                      { value: 'golden', label: '↑ Golden' },
+                      { value: 'death',  label: '↓ Death'  },
                     ] as const
                   ).map(({ value, label }) => (
                     <FilterChip key={value} value={value} active={direction === value} onClick={setDirection} label={label} />
@@ -509,7 +511,7 @@ export default function SmeSignalsPage() {
                 ? 'bg-accent/15 border-accent/40 text-accent'
                 : 'bg-surface border-border text-muted hover:text-tx hover:border-border-hi'}`}
           >
-            🔥 Volume-confirmed only
+            Volume-confirmed only
           </button>
         </div>
 
@@ -557,7 +559,7 @@ export default function SmeSignalsPage() {
                     <SkeletonRows />
                   ) : displayedSignals.length === 0 ? (
                     <tr>
-                      <td colSpan={12} className="px-4 py-16 text-center text-muted text-sm">
+                      <td colSpan={12} className="px-4 py-12 text-center text-muted text-sm">
                         {signals.length === 0
                           ? 'No crossovers found for the selected filters.'
                           : `No ${exchangeFilter} crossovers in the current results.`}

@@ -165,7 +165,16 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
               )}
             </div>
             <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-              <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded bg-accent/10 text-accent border border-accent/20">
+              {/* Exchange tag tone: BSE -> hold, NSE -> buy (design.md §2) — a
+                  dual-listed stock isn't either one, so it falls back to a
+                  neutral tone rather than reusing accent as a data label. */}
+              <span className={`text-[11px] font-mono font-semibold px-2 py-0.5 rounded border ${
+                exchangeQuotes.length > 1
+                  ? 'bg-surface text-muted border-border'
+                  : (s?.exchange ?? 'NSE') === 'BSE'
+                    ? 'bg-hold/10 text-hold border-hold/20'
+                    : 'bg-buy/10 text-buy border-buy/20'
+              }`}>
                 {exchangeQuotes.length > 1 ? 'NSE + BSE' : (s?.exchange ?? 'NSE')}
               </span>
               {s?.industry && <span className="text-xs text-muted">{s.industry}</span>}
@@ -559,7 +568,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                   <div key={i} className="flex items-center justify-between py-2">
                     <span className="text-sm text-tx">{mf.fund}</span>
                     <span className="flex items-center gap-1.5">
-                      <span className="text-sm font-mono font-semibold text-accent">{fmt(mf.holding_pct, 2)}%</span>
+                      <span className="text-sm font-mono font-semibold text-tx">{fmt(mf.holding_pct, 2)}%</span>
                       {delta != null && (
                         <span
                           className={`text-[11px] font-mono ${

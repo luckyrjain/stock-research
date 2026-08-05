@@ -48,13 +48,6 @@ const ACCOUNT_TYPES: PortfolioAccountType[] = ['bank', 'broker', 'amc', 'epfo', 
 const ASSET_TYPES: PortfolioAssetType[] = ['mf', 'stock', 'fd', 'epf', 'ppf', 'cash', 'manual', 'loan'];
 const SECURITY_TYPES = new Set(['mf', 'stock']);
 
-const ACCOUNT_TYPE_ICON: Record<PortfolioAccountType, string> = {
-  bank: '🏦', broker: '📈', amc: '📄', epfo: '🏛️', other: '💼',
-};
-const ASSET_TYPE_ICON: Record<PortfolioAssetType, string> = {
-  mf: '📄', stock: '📈', fd: '🏦', epf: '🏛️', ppf: '🏛️', cash: '💵', manual: '✏️', loan: '⚠️',
-};
-
 function fmtInr(n: number): string {
   return `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 }
@@ -172,7 +165,7 @@ function AddAccountForm({ profileId, onAdded }: { profileId: number; onAdded: ()
       <Field label="Type">
         <select value={type} onChange={e => setType(e.target.value as PortfolioAccountType)}
           className="px-3 py-2 rounded-lg border border-border bg-surface text-sm text-tx">
-          {ACCOUNT_TYPES.map(t => <option key={t} value={t}>{ACCOUNT_TYPE_ICON[t]} {t}</option>)}
+          {ACCOUNT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
         </select>
       </Field>
       <button onClick={submit} className="px-4 py-2 rounded-lg bg-accent text-bg text-sm font-semibold">
@@ -217,7 +210,7 @@ function AddAssetForm({ accountId, onAdded }: { accountId: number; onAdded: () =
       <Field label="Type">
         <select value={type} onChange={e => setType(e.target.value as PortfolioAssetType)}
           className="px-2 py-1.5 rounded-lg border border-border bg-bg text-xs text-tx">
-          {ASSET_TYPES.map(t => <option key={t} value={t}>{ASSET_TYPE_ICON[t]} {t}</option>)}
+          {ASSET_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
         </select>
       </Field>
       <Field label="Name">
@@ -273,7 +266,7 @@ function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () =
   return (
     <div className="flex items-center justify-between py-1.5 pl-4 border-b border-border last:border-0 text-sm">
       <span className="text-tx">
-        <span aria-hidden="true">{ASSET_TYPE_ICON[asset.type]}</span> {asset.name}
+        {asset.name}
         {asset.symbol && <span className="text-muted"> ({asset.symbol})</span>}
         <span className="text-muted"> · {asset.type}</span>
         {alsoTracked && (
@@ -761,7 +754,7 @@ function AccountBlock({ account, assets, connections, onChanged, onPoll }: {
     <div className="bg-card border border-border rounded-xl p-4">
       <div className="flex items-center justify-between mb-2 pb-2 border-b border-border">
         <p className="text-sm font-semibold text-tx">
-          <span aria-hidden="true">{ACCOUNT_TYPE_ICON[account.type]}</span> {account.name}
+          {account.name}
           {' '}
           <span className="text-muted font-normal">· {account.type}{account.institution ? ` · ${account.institution}` : ''}</span>
           {assets.length > 0 && (
@@ -1088,7 +1081,6 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
             <div className="flex flex-wrap gap-x-6 gap-y-1">
               {entries.map(([type, val]) => (
                 <span key={type} className="text-sm text-muted">
-                  <span aria-hidden="true">{ASSET_TYPE_ICON[type as PortfolioAssetType] ?? '💼'}</span>{' '}
                   {type} <span className="text-tx/60">({Math.round((Math.abs(val) / scale) * 100)}%)</span>:{' '}
                   <span className={`font-mono font-semibold ${val < 0 ? 'text-sell' : 'text-tx'}`}>{fmtInr(val)}</span>
                 </span>

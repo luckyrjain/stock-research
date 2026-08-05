@@ -315,11 +315,11 @@ export default function PortfolioPage() {
             )}
 
             {/* Table */}
-            <div className="rounded-xl border border-border bg-card overflow-hidden">
+            <div className="rounded-xl border border-border overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-border bg-surface/60">
+                    <tr className="border-b border-border bg-surface">
                       <th className="text-left px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Symbol</th>
                       <th className="text-right px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Shares</th>
                       <th className="text-right px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Entry</th>
@@ -345,13 +345,13 @@ export default function PortfolioPage() {
                   <tbody>
                     {sortedRows.map(row => (
                       <tr key={row.position.symbol} className="border-b border-border/60 last:border-0 hover:bg-surface/40 transition-colors">
-                        <td className="px-4 py-3">
+                        <td className="px-4 py-4">
                           <Link href={`/?symbol=${encodeURIComponent(row.position.symbol)}`} className="font-semibold text-tx hover:text-accent transition-colors">
                             {row.position.symbol}
                           </Link>
                           <div className="text-[10px] text-muted/70 truncate max-w-[10rem]">{row.position.company}</div>
                         </td>
-                        <td className="px-4 py-3 text-right">
+                        <td className="px-4 py-4 text-right">
                           <input
                             type="number"
                             min={0}
@@ -371,14 +371,14 @@ export default function PortfolioPage() {
                             className="w-16 px-1.5 py-1 rounded-md border border-border bg-surface text-tx text-xs text-right font-mono"
                           />
                         </td>
-                        <td className="px-4 py-3 text-right font-mono">{fmtPrice(row.position.entry_price)}</td>
-                        <td className="px-4 py-3 text-right font-mono">{fmtPrice(row.current)}</td>
-                        <td className="px-4 py-3 text-right font-mono text-muted">
+                        <td className="px-4 py-4 text-right font-mono">{fmtPrice(row.position.entry_price)}</td>
+                        <td className="px-4 py-4 text-right font-mono">{fmtPrice(row.current)}</td>
+                        <td className="px-4 py-4 text-right font-mono text-muted">
                           {row.currentValue != null ? fmtInr(row.currentValue) : '—'}
                         </td>
-                        <td className={`px-4 py-3 text-right font-mono font-semibold ${pnlColor(row.pnl)}`}>{fmtPct(row.pnl)}</td>
-                        <td className="px-4 py-3 text-right font-mono text-muted">{daysHeld(row.position.bought_at)}d</td>
-                        <td className="px-4 py-3">
+                        <td className={`px-4 py-4 text-right font-mono font-semibold ${pnlColor(row.pnl)}`}>{fmtPct(row.pnl)}</td>
+                        <td className="px-4 py-4 text-right font-mono text-muted">{daysHeld(row.position.bought_at)}d</td>
+                        <td className="px-4 py-4">
                           {row.atTarget ? (
                             <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border bg-buy/12 text-buy border-buy/25">
                               At target
@@ -391,7 +391,7 @@ export default function PortfolioPage() {
                             <span className="text-muted text-[10px]">Holding</span>
                           )}
                         </td>
-                        <td className="px-4 py-3">
+                        <td className="px-4 py-4">
                           <button
                             type="button"
                             onClick={() => removePosition(row.position.symbol)}

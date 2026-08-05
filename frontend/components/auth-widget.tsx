@@ -31,7 +31,10 @@ export default function AuthWidget() {
     };
   }, []);
 
-  if (loading) return null;
+  // Invisible placeholder sized like the "Sign in" link (the common
+  // resolved state) rather than `null`, so the nav's right cluster doesn't
+  // visibly shift once the auth check resolves.
+  if (loading) return <span className="text-xs font-semibold invisible" aria-hidden="true">Sign in</span>;
 
   if (!user) {
     return (

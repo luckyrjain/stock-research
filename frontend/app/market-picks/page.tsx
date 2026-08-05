@@ -23,12 +23,6 @@ interface ResearchState {
   ok: boolean | null;
 }
 
-const SOURCE_TYPE_ICON: Record<string, string> = {
-  news:      '📰',
-  brokerage: '🏦',
-  platform:  '📊',
-};
-
 const PIPELINE_STEPS: { id: MarketPicksPhase; label: string; desc: string }[] = [
   { id: 'scanning',      label: 'Scraping',    desc: 'Fetching articles' },
   { id: 'extracting',    label: 'Extracting',  desc: 'AI reading articles' },
@@ -166,8 +160,7 @@ function SourceCard({ s }: { s: SourceState }) {
       ${s.status === 'ok'    ? 'border-buy/30 bg-buy/5' :
         s.status === 'empty' ? 'border-border bg-surface opacity-50' :
         'border-border bg-card'}`}>
-      <div className="flex items-center justify-between mb-1.5">
-        <span className="text-base">{SOURCE_TYPE_ICON[s.type] ?? '🔍'}</span>
+      <div className="flex items-center justify-end mb-1.5">
         {s.status === 'ok' ? (
           <span className="text-buy text-xs font-bold">✓ {s.articles}</span>
         ) : s.status === 'empty' ? (

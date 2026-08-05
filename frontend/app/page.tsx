@@ -99,7 +99,7 @@ function HomePageInner() {
                              bg-accent/10 border border-accent/20 text-accent text-xs font-semibold
                              hover:bg-accent/20 transition-colors"
                 >
-                  📈 This week's top picks →
+                  This week's top picks →
                 </Link>
                 <Link
                   href="/sme-signals"
@@ -107,7 +107,7 @@ function HomePageInner() {
                              bg-accent/10 border border-accent/20 text-accent text-xs font-semibold
                              hover:bg-accent/20 transition-colors"
                 >
-                  ⚡ SME golden cross screener →
+                  SME golden cross screener →
                 </Link>
               </div>
             </div>

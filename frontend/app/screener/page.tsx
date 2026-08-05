@@ -360,11 +360,11 @@ export default function ScreenerPage() {
         </div>
 
         {/* Table */}
-        <div className="rounded-xl border border-border bg-card overflow-hidden">
+        <div className="rounded-xl border border-border overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-border bg-surface/60">
+                <tr className="border-b border-border bg-surface">
                   <th className="w-10 px-4 py-3"></th>
                   <SortableTh label="Symbol" sortK="symbol" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
                   <th className="text-left px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Company</th>
@@ -382,33 +382,33 @@ export default function ScreenerPage() {
                   <SkeletonRows />
                 ) : error ? (
                   <tr>
-                    <td colSpan={10} className="px-4 py-10 text-center text-sell text-sm">{error}</td>
+                    <td colSpan={10} className="px-4 py-12 text-center text-sell text-sm">{error}</td>
                   </tr>
                 ) : stocks.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="px-4 py-10 text-center text-muted text-sm">
+                    <td colSpan={10} className="px-4 py-12 text-center text-muted text-sm">
                       No stocks match these filters, or the screener hasn&apos;t run yet — try &quot;Refresh Data&quot;.
                     </td>
                   </tr>
                 ) : (
                   stocks.map(s => (
                     <tr key={s.symbol} className="border-b border-border/60 last:border-0 hover:bg-surface/40 transition-colors">
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-4">
                         <WatchlistButton symbol={s.symbol} company={s.company_name ?? s.symbol} exchange={s.exchange ?? 'NSE'} size="sm" />
                       </td>
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-4">
                         <Link href={`/?symbol=${encodeURIComponent(s.symbol)}`} className="font-semibold text-tx hover:text-accent transition-colors">
                           {s.symbol}
                         </Link>
                       </td>
-                      <td className="px-4 py-3 text-muted truncate max-w-xs">{s.company_name ?? '—'}</td>
-                      <td className="px-4 py-3 text-muted/70 text-xs whitespace-nowrap">{s.sector ?? '—'}</td>
-                      <td className="px-4 py-3 text-right font-mono">{s.current_price != null ? `₹${s.current_price.toFixed(2)}` : '—'}</td>
-                      <td className="px-4 py-3 text-right font-mono">{fmtNum(s.pe_ratio)}</td>
-                      <td className="px-4 py-3 text-right font-mono">{fmtMarketCap(s.market_cap_cr)}</td>
-                      <td className="px-4 py-3 text-right font-mono">{s.avg_volume_10d != null ? s.avg_volume_10d.toLocaleString('en-IN', { maximumFractionDigits: 0 }) : '—'}</td>
-                      <td className={`px-4 py-3 text-right font-mono font-semibold ${rsiColor(s.rsi14)}`}>{fmtNum(s.rsi14)}</td>
-                      <td className="px-4 py-3"><TrendBadge trend={s.ema_trend} /></td>
+                      <td className="px-4 py-4 text-muted truncate max-w-xs">{s.company_name ?? '—'}</td>
+                      <td className="px-4 py-4 text-muted/70 text-xs whitespace-nowrap">{s.sector ?? '—'}</td>
+                      <td className="px-4 py-4 text-right font-mono">{s.current_price != null ? `₹${s.current_price.toFixed(2)}` : '—'}</td>
+                      <td className="px-4 py-4 text-right font-mono">{fmtNum(s.pe_ratio)}</td>
+                      <td className="px-4 py-4 text-right font-mono">{fmtMarketCap(s.market_cap_cr)}</td>
+                      <td className="px-4 py-4 text-right font-mono">{s.avg_volume_10d != null ? s.avg_volume_10d.toLocaleString('en-IN', { maximumFractionDigits: 0 }) : '—'}</td>
+                      <td className={`px-4 py-4 text-right font-mono font-semibold ${rsiColor(s.rsi14)}`}>{fmtNum(s.rsi14)}</td>
+                      <td className="px-4 py-4"><TrendBadge trend={s.ema_trend} /></td>
                     </tr>
                   ))
                 )}

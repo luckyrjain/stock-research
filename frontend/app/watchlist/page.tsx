@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useWatchlist } from '@/lib/watchlist';
 import SiteNav from '@/components/site-nav';
+import { Skeleton } from '@/components/data-table-ui';
 import type { WatchlistCalendarEntry } from '@/types';
 
 interface LivePrice {
@@ -15,10 +16,6 @@ interface LivePrice {
   // null when the price resolved but yfinance had no previous_close to
   // diff against — a real "change unknown", not a fabricated flat 0%.
   change_pct?: number | null;
-}
-
-function Skeleton({ className }: { className: string }) {
-  return <div className={`bg-border/60 rounded animate-pulse ${className}`} />;
 }
 
 // Pure read-aggregation over each watched symbol's already-cached filings
@@ -67,12 +64,12 @@ function AlertBadges({ entry }: { entry: WatchlistCalendarEntry }) {
           }`}
           title={`₹${entry.price_move.old_price} → ₹${entry.price_move.new_price} since the last stored verdict`}
         >
-          🔔 {entry.price_move.change_pct >= 0 ? '+' : ''}{entry.price_move.change_pct}% since last check
+          {entry.price_move.change_pct >= 0 ? '+' : ''}{entry.price_move.change_pct}% since last check
         </span>
       )}
       {entry.recommendation_change && (
         <span className={`px-2 py-0.5 rounded-full border font-semibold ${REC_TONE[entry.recommendation_change.new_recommendation] ?? 'text-tx border-border bg-surface'}`}>
-          🔔 {entry.recommendation_change.old_recommendation ?? '—'} → {entry.recommendation_change.new_recommendation}
+          {entry.recommendation_change.old_recommendation ?? '—'} → {entry.recommendation_change.new_recommendation}
         </span>
       )}
     </>
@@ -168,7 +165,7 @@ export default function WatchlistPage() {
         <SiteNav active="watchlist" />
 
         <div className="mb-6">
-          <h1 className="text-xl font-black tracking-tight text-tx mb-1.5">Watchlist</h1>
+          <h1 className="text-4xl font-black tracking-tight text-tx mb-1.5">Watchlist</h1>
           <p className="text-muted text-sm max-w-xl leading-relaxed">
             Stocks you&apos;ve starred from stock analysis, Market Picks, or SME Signals, all in one
             place. Tied to this browser only — it won&apos;t follow you to another device yet.
@@ -243,7 +240,11 @@ export default function WatchlistPage() {
                           </span>
                         </td>
                         <td className="px-4 py-4">
-                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded border text-muted border-border bg-surface">
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
+                            item.exchange === 'BSE'
+                              ? 'text-hold border-hold/20 bg-hold/10'
+                              : 'text-buy border-buy/20 bg-buy/10'
+                          }`}>
                             {item.exchange}
                           </span>
                         </td>

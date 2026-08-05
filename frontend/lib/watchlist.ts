@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { useToast } from '@/components/toast';
 
 export interface WatchlistItem {
   symbol: string;
@@ -136,6 +137,7 @@ export async function claimWatchlist(clientId: string): Promise<ClaimResult | nu
  * flow"). The hook itself doesn't need to know which identity is active — the
  * backend resolves that per request. */
 export function useWatchlist() {
+  const { showError } = useToast();
   const [items, setItems] = useState<WatchlistItem[]>(cachedItems ?? []);
   const [loading, setLoading] = useState(cachedItems === null);
 
@@ -172,7 +174,7 @@ export function useWatchlist() {
         const res = await fetch(`/api/watchlist/${encodeURIComponent(symbol)}?client_id=${encodeURIComponent(clientId)}`, {
           method: 'DELETE',
         });
-        if (!res.ok) return;
+        if (!res.ok) { showError("Couldn't update your watchlist — try again."); return; }
         const data = await res.json() as { items: WatchlistItem[] };
         if (myGeneration !== generation) return;
         cachedItems = data.items;
@@ -182,7 +184,7 @@ export function useWatchlist() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ client_id: clientId, symbol, company: item.company, exchange: item.exchange }),
         });
-        if (!res.ok) return;
+        if (!res.ok) { showError("Couldn't update your watchlist — try again."); return; }
         const data = await res.json() as { items: WatchlistItem[] };
         if (myGeneration !== generation) return;
         cachedItems = data.items;
@@ -191,8 +193,9 @@ export function useWatchlist() {
     } catch {
       // Backend unreachable — leave state as-is rather than optimistically
       // flipping the star to something that didn't actually save.
+      showError("Couldn't reach the server — your watchlist wasn't updated.");
     }
-  }, []);
+  }, [showError]);
 
   const remove = useCallback(async (symbol: string) => {
     const clientId = getClientId();
@@ -201,15 +204,16 @@ export function useWatchlist() {
       const res = await fetch(`/api/watchlist/${encodeURIComponent(symbol.toUpperCase())}?client_id=${encodeURIComponent(clientId)}`, {
         method: 'DELETE',
       });
-      if (!res.ok) return;
+      if (!res.ok) { showError("Couldn't remove from your watchlist — try again."); return; }
       const data = await res.json() as { items: WatchlistItem[] };
       if (myGeneration !== generation) return;
       cachedItems = data.items;
       notify();
     } catch {
-      // silently ignore — the row just won't disappear; user can retry
+      // silently ignore in state — the row just won't disappear; user can retry
+      showError("Couldn't reach the server — try again.");
     }
-  }, []);
+  }, [showError]);
 
   return { items, loading, isWatched, toggle, remove };
 }

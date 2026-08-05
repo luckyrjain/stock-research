@@ -164,7 +164,7 @@ function ComparePageInner() {
         <SiteNav active="compare" wrap />
 
         <div className="mb-6">
-          <h1 className="text-xl font-black tracking-tight text-tx mb-1.5">Compare Stocks</h1>
+          <h1 className="text-4xl font-black tracking-tight text-tx mb-1.5">Compare Stocks</h1>
           <p className="text-muted text-sm max-w-xl leading-relaxed">
             Two full stock analysis reports, side by side. Each runs the same pipeline you&apos;d
             get from analysing them one at a time.
