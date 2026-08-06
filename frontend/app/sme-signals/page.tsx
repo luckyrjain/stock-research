@@ -175,6 +175,10 @@ function SkeletonRows() {
 export default function SmeSignalsPage() {
   const [data,       setData]       = useState<SmeSignalsResponse | null>(null);
   const [loading,    setLoading]    = useState(true);
+  // STATE-01 (design.md): separate from `loading`, which still gates the
+  // skeleton for first load — a manual reload keeps existing content and
+  // only needs this for the button's own label/disabled state.
+  const [reloading,  setReloading]  = useState(false);
   const [error,      setError]      = useState<string | null>(null);
   const [lookback,   setLookback]   = useState<Lookback>(5);
   const [direction,  setDirection]  = useState<Direction>('all');
@@ -231,6 +235,7 @@ export default function SmeSignalsPage() {
     const ac = new AbortController();
     abortRef.current = ac;
     if (!silent) setLoading(true);
+    if (silent) setReloading(true);
     setError(null);
     try {
       const qs = new URLSearchParams({ lookback: String(lb), direction: dir, view: v });
@@ -238,18 +243,21 @@ export default function SmeSignalsPage() {
       const json = await res.json() as SmeSignalsResponse & { error?: string };
       if (!res.ok) {
         setError(json.error ?? `Error ${res.status}`);
-        setData(null);
+        // STATE-01 (design.md): a silent (background poll / manual reload)
+        // failure keeps the last good render instead of wiping it to an
+        // error state — only the non-silent path (nothing good yet) clears.
+        if (!silent) setData(null);
       } else {
         setData(json);
       }
     } catch (e) {
       if ((e as Error).name === 'AbortError') return;
       setError('Could not reach the backend. Is the server running?');
-      setData(null);
+      if (!silent) setData(null);
     } finally {
       // Whoever owns the latest request clears loading — a silent poll that
       // aborted a non-silent fetch must clear it too, or the skeleton sticks.
-      if (abortRef.current === ac) setLoading(false);
+      if (abortRef.current === ac) { setLoading(false); setReloading(false); }
     }
   }, []);
 
@@ -341,11 +349,11 @@ export default function SmeSignalsPage() {
           {refreshing ? 'Refreshing data…' : '⟳ Refresh Data'}
         </button>
         <button
-          onClick={() => fetchSignals(lookback, direction, view)}
-          disabled={loading}
+          onClick={() => fetchSignals(lookback, direction, view, data != null)}
+          disabled={loading || reloading}
           className="text-xs text-muted hover:text-tx transition-colors disabled:opacity-40"
         >
-          {loading ? 'Loading…' : '↺ Reload'}
+          {loading ? 'Loading…' : reloading ? 'Reloading…' : '↺ Reload'}
         </button>
       </>}
     >

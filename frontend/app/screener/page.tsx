@@ -157,6 +157,11 @@ export default function ScreenerPage() {
 
   const [offset, setOffset] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
+  // STATE-01 (design.md): a refetch must not replace visible content with
+  // skeletons — separate from `loading`, which still gates the skeleton for
+  // the one case that should show it (first load, nothing to keep yet).
+  // Purely a button-label/disabled concern for a manual reload.
+  const [reloading, setReloading] = useState(false);
 
   const fetchStocks = useCallback(async (opts: { silent?: boolean; targetOffset?: number; append?: boolean } = {}) => {
     const { silent = false, targetOffset = 0, append = false } = opts;
@@ -164,6 +169,7 @@ export default function ScreenerPage() {
     const ac = new AbortController();
     abortRef.current = ac;
     if (!silent && !append) setLoading(true);
+    if (silent && !append) setReloading(true);
     if (append) setLoadingMore(true);
     setError(null);
     try {
@@ -184,7 +190,10 @@ export default function ScreenerPage() {
       const json = await res.json() as ScreenerResponse & { error?: string };
       if (!res.ok) {
         setError(json.error ?? `Error ${res.status}`);
-        if (!append) setData(null);
+        // A silent (background poll / manual reload) failure keeps the last
+        // good render rather than wiping it to an error state — only the
+        // non-silent path (nothing good on screen yet) clears to null.
+        if (!append && !silent) setData(null);
       } else if (append) {
         // Appends the next page onto the already-loaded rows rather than
         // replacing them — a filter/sort change always goes through the
@@ -196,9 +205,9 @@ export default function ScreenerPage() {
     } catch (e) {
       if ((e as Error).name === 'AbortError') return;
       setError('Could not reach the backend. Is the server running?');
-      if (!append) setData(null);
+      if (!append && !silent) setData(null);
     } finally {
-      if (abortRef.current === ac) { setLoading(false); setLoadingMore(false); }
+      if (abortRef.current === ac) { setLoading(false); setLoadingMore(false); setReloading(false); }
     }
   }, [industry, emaTrend, rsiFilter, debouncedPeMax, debouncedMarketCapMin, sortKey, sortDir]);
 
@@ -281,11 +290,11 @@ export default function ScreenerPage() {
           {refreshing ? 'Refreshing data…' : '⟳ Refresh Data'}
         </button>
         <button
-          onClick={() => { setOffset(0); fetchStocks({ targetOffset: 0 }); }}
-          disabled={loading}
+          onClick={() => { setOffset(0); fetchStocks({ silent: data != null, targetOffset: 0 }); }}
+          disabled={loading || reloading}
           className="text-xs text-muted hover:text-tx transition-colors disabled:opacity-40"
         >
-          {loading ? 'Loading…' : '↺ Reload'}
+          {loading ? 'Loading…' : reloading ? 'Reloading…' : '↺ Reload'}
         </button>
       </>}
     >
