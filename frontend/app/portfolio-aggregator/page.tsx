@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, type ReactNode } from 'react';
 import Link from 'next/link';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
 import { Skeleton } from '@/components/data-table-ui';
 import { usePositions } from '@/lib/positions';
 import { getClientId } from '@/lib/watchlist';
@@ -1147,8 +1147,7 @@ export default function PortfolioAggregatorPage() {
   }
 
   return (
-    <main className="max-w-5xl mx-auto px-4 py-8">
-      <SiteNav active="portfolio-aggregator" />
+    <PageShell active="portfolio-aggregator" maxWidth="max-w-5xl">
       {profile === undefined ? (
         <p className="text-sm text-muted text-center mt-12">Loading…</p>
       ) : profile === null ? (
@@ -1156,6 +1155,6 @@ export default function PortfolioAggregatorPage() {
       ) : (
         <ProfileView profile={profile} onSwitch={switchProfile} />
       )}
-    </main>
+    </PageShell>
   );
 }

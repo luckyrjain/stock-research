@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/lib/auth';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
 import { Skeleton } from '@/components/data-table-ui';
 import type { ApiKey, ApiKeysResponse, ApiUsage, CreatedApiKey } from '@/types';
 
@@ -100,10 +100,7 @@ export default function ApiKeysPage() {
   }
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-3xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav active="api-keys" wrap />
+    <PageShell active="api-keys" wrap maxWidth="max-w-3xl">
 
         <div className="mb-6">
           <h1 className="text-xl font-black tracking-tight text-tx mb-1.5">API Keys</h1>
@@ -268,7 +265,6 @@ export default function ApiKeysPage() {
             )}
           </>
         )}
-      </div>
-    </main>
+    </PageShell>
   );
 }

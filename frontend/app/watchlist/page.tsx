@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useWatchlist } from '@/lib/watchlist';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
 import { Skeleton } from '@/components/data-table-ui';
 import { fmtPrice } from '@/lib/format';
 import { REC_TONE_4TIER, exchangeTone } from '@/lib/tone';
@@ -155,10 +155,7 @@ export default function WatchlistPage() {
   );
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav active="watchlist" />
+    <PageShell active="watchlist" maxWidth="max-w-5xl">
 
         <div className="mb-6">
           <h1 className="text-4xl font-black tracking-tight text-tx mb-1.5">Watchlist</h1>
@@ -271,7 +268,6 @@ export default function WatchlistPage() {
             </div>
           </div>
         )}
-      </div>
-    </main>
+    </PageShell>
   );
 }

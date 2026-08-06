@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import type { ScreenerResponse, ScreenerStock } from '@/types';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
 import WatchlistButton from '@/components/watchlist-button';
 import SectorHeatmap from '@/components/sector-heatmap';
 import { Skeleton, FilterChip, SortableTh } from '@/components/data-table-ui';
@@ -267,30 +267,28 @@ export default function ScreenerPage() {
     : null;
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-6xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav
-          active="screener"
-          wrap
-          right={<>
-            <button
-              onClick={startRefresh}
-              disabled={refreshing}
-              className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-accent/40 text-accent
-                         hover:bg-accent/10 transition-colors disabled:opacity-40"
-            >
-              {refreshing ? 'Refreshing data…' : '⟳ Refresh Data'}
-            </button>
-            <button
-              onClick={() => { setOffset(0); fetchStocks({ targetOffset: 0 }); }}
-              disabled={loading}
-              className="text-xs text-muted hover:text-tx transition-colors disabled:opacity-40"
-            >
-              {loading ? 'Loading…' : '↺ Reload'}
-            </button>
-          </>}
-        />
+    <PageShell
+      active="screener"
+      wrap
+      maxWidth="max-w-6xl"
+      right={<>
+        <button
+          onClick={startRefresh}
+          disabled={refreshing}
+          className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-accent/40 text-accent
+                     hover:bg-accent/10 transition-colors disabled:opacity-40"
+        >
+          {refreshing ? 'Refreshing data…' : '⟳ Refresh Data'}
+        </button>
+        <button
+          onClick={() => { setOffset(0); fetchStocks({ targetOffset: 0 }); }}
+          disabled={loading}
+          className="text-xs text-muted hover:text-tx transition-colors disabled:opacity-40"
+        >
+          {loading ? 'Loading…' : '↺ Reload'}
+        </button>
+      </>}
+    >
 
         {/* Header */}
         <div className="mb-8 animate-fade-up">
@@ -435,7 +433,6 @@ export default function ScreenerPage() {
             )}
           </div>
         )}
-      </div>
-    </main>
+    </PageShell>
   );
 }

@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'rea
 import Link from 'next/link';
 import type { SmeSignal, SmeCrossEvent, SmeSignalHistoryResponse, SmeSignalsResponse } from '@/types';
 import EmaChart from '@/components/ema-chart';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
 import WatchlistButton from '@/components/watchlist-button';
 import InfoTooltip from '@/components/info-tooltip';
 import { Skeleton, FilterChip, SortableTh } from '@/components/data-table-ui';
@@ -327,30 +327,28 @@ export default function SmeSignalsPage() {
     : null;
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav
-          active="sme-signals"
-          wrap
-          right={<>
-            <button
-              onClick={startRefresh}
-              disabled={refreshing}
-              className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-accent/40 text-accent
-                         hover:bg-accent/10 transition-colors disabled:opacity-40"
-            >
-              {refreshing ? 'Refreshing data…' : '⟳ Refresh Data'}
-            </button>
-            <button
-              onClick={() => fetchSignals(lookback, direction, view)}
-              disabled={loading}
-              className="text-xs text-muted hover:text-tx transition-colors disabled:opacity-40"
-            >
-              {loading ? 'Loading…' : '↺ Reload'}
-            </button>
-          </>}
-        />
+    <PageShell
+      active="sme-signals"
+      wrap
+      maxWidth="max-w-5xl"
+      right={<>
+        <button
+          onClick={startRefresh}
+          disabled={refreshing}
+          className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-accent/40 text-accent
+                     hover:bg-accent/10 transition-colors disabled:opacity-40"
+        >
+          {refreshing ? 'Refreshing data…' : '⟳ Refresh Data'}
+        </button>
+        <button
+          onClick={() => fetchSignals(lookback, direction, view)}
+          disabled={loading}
+          className="text-xs text-muted hover:text-tx transition-colors disabled:opacity-40"
+        >
+          {loading ? 'Loading…' : '↺ Reload'}
+        </button>
+      </>}
+    >
 
         {/* Header */}
         <div className="mb-8 animate-fade-up">
@@ -748,7 +746,6 @@ export default function SmeSignalsPage() {
           </p>
         )}
 
-      </div>
-    </main>
+    </PageShell>
   );
 }

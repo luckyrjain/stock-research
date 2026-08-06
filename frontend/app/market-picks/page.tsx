@@ -9,7 +9,7 @@ import type {
 } from '@/types';
 import MarketPicksDashboard from '@/components/market-picks-dashboard';
 import PositionsStrip from '@/components/positions-strip';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
 
 interface SourceState {
   name: string;
@@ -345,20 +345,18 @@ export default function MarketPicksPage() {
   const researchDone = research.filter(r => r.ok !== null).length;
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav
-          active="market-picks"
-          right={isRunning && (
-            <button
-              onClick={() => { esRef.current?.close(); setPhase('idle'); }}
-              className="text-xs text-muted hover:text-tx transition-colors"
-            >
-              Cancel
-            </button>
-          )}
-        />
+    <PageShell
+      active="market-picks"
+      maxWidth="max-w-5xl"
+      right={isRunning && (
+        <button
+          onClick={() => { esRef.current?.close(); setPhase('idle'); }}
+          className="text-xs text-muted hover:text-tx transition-colors"
+        >
+          Cancel
+        </button>
+      )}
+    >
 
         <PositionsStrip />
 
@@ -678,7 +676,6 @@ export default function MarketPicksPage() {
             </button>
           </div>
         )}
-      </div>
-    </main>
+    </PageShell>
   );
 }

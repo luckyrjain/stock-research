@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { usePositions, type Position } from '@/lib/positions';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
 import { Skeleton } from '@/components/data-table-ui';
 import { fmtPrice, fmtChangePct as fmtPct } from '@/lib/format';
 
@@ -162,10 +162,7 @@ export default function PortfolioPage() {
   const totalPnlPct = pricedInvested > 0 ? (totalPnl / pricedInvested) * 100 : null;
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav active="portfolio" wrap />
+    <PageShell active="portfolio" wrap maxWidth="max-w-5xl">
 
         {/* Header */}
         <div className="mb-8 animate-fade-up">
@@ -402,7 +399,6 @@ export default function PortfolioPage() {
             </div>
           </>
         )}
-      </div>
-    </main>
+    </PageShell>
   );
 }

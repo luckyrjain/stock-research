@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import type { MarketPicksHistoryResponse, MarketPickTrackRecord, MarketPicksDailySnapshot } from '@/types';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
 import { Skeleton } from '@/components/data-table-ui';
 import { fmtChangePct as fmtPct } from '@/lib/format';
 import { REC_TONE_4TIER } from '@/lib/tone';
@@ -85,10 +85,7 @@ export default function MarketPicksHistoryPage() {
     : null;
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav active="track-record" />
+    <PageShell active="track-record" maxWidth="max-w-5xl">
 
         <div className="mb-6">
           <h1 className="text-xl font-black tracking-tight text-tx mb-1.5">Pick Track Record</h1>
@@ -387,7 +384,6 @@ export default function MarketPicksHistoryPage() {
             </div>
           </div>
         )}
-      </div>
-    </main>
+    </PageShell>
   );
 }

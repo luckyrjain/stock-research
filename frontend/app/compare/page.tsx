@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import ProgressTracker    from '@/components/progress-tracker';
 import ResultsDashboard   from '@/components/results-dashboard';
-import SiteNav            from '@/components/site-nav';
+import PageShell          from '@/components/page-shell';
 import CompareDiffTable   from '@/components/compare-diff-table';
 import { useStockAnalysis } from '@/lib/useStockAnalysis';
 import type { Report } from '@/types';
@@ -158,10 +158,7 @@ function ComparePageInner() {
   };
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-[1600px] mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav active="compare" wrap />
+    <PageShell active="compare" wrap maxWidth="max-w-[1600px]">
 
         <div className="mb-6">
           <h1 className="text-4xl font-black tracking-tight text-tx mb-1.5">Compare Stocks</h1>
@@ -217,8 +214,7 @@ function ComparePageInner() {
             </div>
           </>
         )}
-      </div>
-    </main>
+    </PageShell>
   );
 }
 

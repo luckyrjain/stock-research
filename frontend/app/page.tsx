@@ -6,7 +6,7 @@ import { useSearchParams } from 'next/navigation';
 import TickerSearch     from '@/components/ticker-search';
 import ProgressTracker  from '@/components/progress-tracker';
 import ResultsDashboard from '@/components/results-dashboard';
-import SiteNav          from '@/components/site-nav';
+import PageShell        from '@/components/page-shell';
 import { useStockAnalysis } from '@/lib/useStockAnalysis';
 
 // Matches api.py's _is_isin(). A deep-linked ISIN (used for BSE SME stocks,
@@ -72,14 +72,7 @@ function HomePageInner() {
   }, [searchParams, handleAnalyse]);
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
-
-        {/* Nav is always mounted, idle or not — a first-time visitor
-            previously couldn't sign in or discover Screener/Watchlist/
-            Portfolio/Compare at all until they'd already run an analysis,
-            since only the non-idle branch rendered it. */}
-        <SiteNav />
+    <PageShell maxWidth="max-w-5xl">
 
         {isIdle ? (
           <div className="max-w-2xl mx-auto pt-8">
@@ -173,8 +166,7 @@ function HomePageInner() {
           </>
         )}
 
-      </div>
-    </main>
+    </PageShell>
   );
 }
 
