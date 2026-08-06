@@ -173,15 +173,20 @@ export default function ApiKeysPage() {
               <button
                 type="submit"
                 disabled={creating}
-                className="px-4 py-2.5 rounded-lg bg-accent text-bg text-sm font-semibold
+                className="flex items-center gap-1.5 px-4 py-2.5 rounded-lg bg-accent text-bg text-sm font-semibold
                            hover:bg-accent/90 transition-colors disabled:opacity-50 shrink-0"
               >
+                {creating && <span aria-hidden="true" className="animate-spin-slow">⟳</span>}
                 {creating ? 'Creating…' : 'Create key'}
               </button>
             </form>
 
+            {/* Form-level failure (the create-key request itself failed) — the
+                Error banner (FORM-07), not a bare paragraph or a toast. */}
             {error && (
-              <p role="alert" className="text-sell text-xs mb-4">{error}</p>
+              <div role="alert" className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-4">
+                {error}
+              </div>
             )}
 
             {justCreated && (

@@ -56,15 +56,20 @@ export default function LoginPage() {
                            placeholder:text-muted/60 focus:ring-2 focus:ring-accent/50"
               />
             </div>
+            {/* Form-level failure (the send-link request itself failed) — the
+                Error banner (FORM-07), not a bare paragraph or a toast. */}
             {status === 'error' && (
-              <p role="alert" className="text-sell text-xs">{error}</p>
+              <div role="alert" className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm">
+                {error}
+              </div>
             )}
             <button
               type="submit"
               disabled={status === 'sending'}
-              className="w-full px-4 py-2.5 rounded-lg bg-accent text-bg text-sm font-semibold
+              className="w-full flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-lg bg-accent text-bg text-sm font-semibold
                          hover:bg-accent/90 transition-colors disabled:opacity-50"
             >
+              {status === 'sending' && <span aria-hidden="true" className="animate-spin-slow">⟳</span>}
               {status === 'sending' ? 'Sending…' : 'Send sign-in link'}
             </button>
             <p className="text-muted/60 text-xs text-center">
