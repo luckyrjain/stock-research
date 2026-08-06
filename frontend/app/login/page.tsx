@@ -19,7 +19,7 @@ export default function LoginPage() {
       await requestLink(email);
       setStatus('sent');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong.');
+      setError(err instanceof Error ? err.message : "Couldn't send the sign-in link. Check your connection and try again.");
       setStatus('error');
     }
   }

@@ -64,7 +64,7 @@ export default function ApiKeysPage() {
       // instant a second creation attempt starts, permanently losing it if
       // that attempt then fails. `copied` is reset alongside it: it's tied
       // to whichever key is currently shown, so a fresh key must not
-      // inherit an unrelated "Copied!" state left over from a previous one.
+      // inherit an unrelated "Copied" state left over from a previous one.
       setJustCreated(data as CreatedApiKey);
       setCopied(false);
       setLabel('');
@@ -205,7 +205,7 @@ export default function ApiKeysPage() {
                     className="shrink-0 px-3 py-2 rounded-lg text-xs font-semibold border border-border
                                text-muted hover:text-accent hover:border-accent/40 transition-colors"
                   >
-                    {copied ? 'Copied!' : 'Copy'}
+                    {copied ? 'Copied' : 'Copy'}
                   </button>
                 </div>
               </div>

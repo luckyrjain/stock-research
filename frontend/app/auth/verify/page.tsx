@@ -74,7 +74,7 @@ function VerifyInner() {
     } catch {
       if (mountedRef.current) {
         setStatus('error');
-        setError('Something went wrong. Please try again.');
+        setError("Couldn't complete sign-in. Check your connection and try again.");
       }
     }
   }
