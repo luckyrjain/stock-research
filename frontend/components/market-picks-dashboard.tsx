@@ -31,6 +31,7 @@ interface Props {
   generatedAt: string;
   fromCache?: boolean;
   onRescan: () => void;
+  rescanning?: boolean;
   pricesLastUpdated?: Date | null;
 }
 
@@ -382,7 +383,7 @@ function ExpandedRow({ pick }: { pick: MarketPick }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function MarketPicksDashboard({ picks, generatedAt, fromCache, onRescan, pricesLastUpdated }: Props) {
+export default function MarketPicksDashboard({ picks, generatedAt, fromCache, onRescan, rescanning, pricesLastUpdated }: Props) {
   const { isPositioned, positions } = usePositions();
   const [concentratedSectors, setConcentratedSectors] = useState<string[]>([]);
   const [expanded,   setExpanded]   = useState<Set<string>>(new Set());
@@ -515,12 +516,15 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
         <div className="shrink-0">
           <button
             onClick={onRescan}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors
+            disabled={rescanning}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors disabled:opacity-50
               ${fromCache
                 ? 'border-accent/30 text-accent hover:bg-accent/10'
                 : 'border-border text-muted hover:text-tx hover:border-border-hi'}`}
           >
-            ↺ {fromCache ? 'Fresh scan' : 'Rescan'}
+            {rescanning
+              ? <><span aria-hidden="true" className="animate-spin-slow">⟳</span> Scanning…</>
+              : <>↺ {fromCache ? 'Fresh scan' : 'Rescan'}</>}
           </button>
         </div>
       </div>

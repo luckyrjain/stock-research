@@ -20,6 +20,7 @@ import QuarterlyTrendCard from './quarterly-trend-card';
 interface Props {
   report: Report;
   onHardRefresh?: () => void;
+  refreshing?: boolean;
 }
 
 type FactorValue = string | number | null | undefined;
@@ -71,7 +72,7 @@ function summaryBullets(text: string): string[] {
   return sentences.map(s => s.trim()).filter(s => s.length > 5);
 }
 
-export default function ResultsDashboard({ report, onHardRefresh }: Props) {
+export default function ResultsDashboard({ report, onHardRefresh, refreshing }: Props) {
   const { analysis: a, signals: sig, stock_info: s, research: r, news, holdings: h, filings, filings_summary: fs, mf_holdings_trend: mfTrend } = report;
 
   const peers = usePeerComparison(report.symbol);
@@ -200,10 +201,13 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
               {onHardRefresh && (
                 <button
                   onClick={onHardRefresh}
+                  disabled={refreshing}
                   className="flex items-center gap-1 text-[11px] font-medium text-muted
-                    hover:text-tx transition-colors duration-150"
+                    hover:text-tx transition-colors duration-150 disabled:opacity-50"
                 >
-                  <span>↺</span><span>Refresh</span>
+                  {refreshing
+                    ? <><span aria-hidden="true" className="animate-spin-slow">⟳</span><span>Refreshing…</span></>
+                    : <><span>↺</span><span>Refresh</span></>}
                 </button>
               )}
             </div>

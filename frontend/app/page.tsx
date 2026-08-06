@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useEffect, useState, Suspense } from 'react';
+import { useRef, useEffect, useState, useCallback, Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import TickerSearch     from '@/components/ticker-search';
@@ -18,7 +18,7 @@ const ISIN_RE = /^[A-Z]{2}[A-Z0-9]{9}[0-9]$/;
 
 function HomePageInner() {
   const {
-    phase, taskStatus, report, error, currentSymbol,
+    phase, taskStatus, report, error, currentSymbol, refreshing,
     isRunning, isIdle,
     handleAnalyse, handleHardRefresh,
   } = useStockAnalysis();
@@ -35,18 +35,9 @@ function HomePageInner() {
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
 
-  // Deep link: /?symbol=TCS auto-starts analysis (used by SME signals page links)
-  useEffect(() => {
-    const sym = searchParams.get('symbol')?.toUpperCase();
-    if (!sym || sym === lastDeepLinkedSymbol.current) return;
-    lastDeepLinkedSymbol.current = sym;
-
-    if (!ISIN_RE.test(sym)) {
-      handleAnalyse(sym);
-      return;
-    }
-
+  const resolveSymbol = useCallback((sym: string) => {
     setResolving(true);
+    setResolveError(null);
     fetch(`/api/validate/${encodeURIComponent(sym)}`)
       .then(res => res.json())
       .then((data: { valid?: boolean; symbol?: string }) => {
@@ -69,7 +60,21 @@ function HomePageInner() {
       .finally(() => {
         if (lastDeepLinkedSymbol.current === sym) setResolving(false);
       });
-  }, [searchParams, handleAnalyse]);
+  }, [handleAnalyse]);
+
+  // Deep link: /?symbol=TCS auto-starts analysis (used by SME signals page links)
+  useEffect(() => {
+    const sym = searchParams.get('symbol')?.toUpperCase();
+    if (!sym || sym === lastDeepLinkedSymbol.current) return;
+    lastDeepLinkedSymbol.current = sym;
+
+    if (!ISIN_RE.test(sym)) {
+      handleAnalyse(sym);
+      return;
+    }
+
+    resolveSymbol(sym);
+  }, [searchParams, handleAnalyse, resolveSymbol]);
 
   return (
     <PageShell maxWidth="max-w-5xl">
@@ -109,8 +114,17 @@ function HomePageInner() {
               <p className="text-center text-muted text-xs mb-4">Resolving listing…</p>
             )}
             {resolveError && (
-              <div className="mb-6 px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm text-center">
-                {resolveError}
+              <div className="mb-6 px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm flex items-center justify-between gap-4">
+                <span>{resolveError}</span>
+                {lastDeepLinkedSymbol.current && (
+                  <button
+                    onClick={() => resolveSymbol(lastDeepLinkedSymbol.current!)}
+                    className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
+                      border border-sell/40 text-sell hover:bg-sell/10 transition-colors duration-150"
+                  >
+                    Try Again
+                  </button>
+                )}
               </div>
             )}
 
@@ -161,7 +175,7 @@ function HomePageInner() {
             )}
 
             {phase === 'done' && report && (
-              <ResultsDashboard report={report} onHardRefresh={handleHardRefresh} />
+              <ResultsDashboard report={report} onHardRefresh={handleHardRefresh} refreshing={refreshing} />
             )}
           </>
         )}

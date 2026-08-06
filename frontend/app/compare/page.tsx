@@ -37,7 +37,7 @@ function parseSymbols(raw: string): string[] {
 
 function CompareColumn({ symbol, onReport }: { symbol: string; onReport: (symbol: string, report: Report | null) => void }) {
   const {
-    phase, taskStatus, report, error,
+    phase, taskStatus, report, error, refreshing,
     handleAnalyse, handleHardRefresh,
   } = useStockAnalysis();
 
@@ -96,7 +96,7 @@ function CompareColumn({ symbol, onReport }: { symbol: string; onReport: (symbol
       )}
 
       {phase === 'done' && report && (
-        <ResultsDashboard report={report} onHardRefresh={handleHardRefresh} />
+        <ResultsDashboard report={report} onHardRefresh={handleHardRefresh} refreshing={refreshing} />
       )}
     </div>
   );
