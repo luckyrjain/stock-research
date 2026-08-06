@@ -65,7 +65,11 @@ const config: Config = {
       },
     },
   },
-  plugins: [],
+  // @tailwindcss/container-queries, admitted under PAGE-04 (design.md) so
+  // ResultsDashboard's internal grids can reflow on their own column width
+  // rather than the window's — the prerequisite for lifting /compare's
+  // two-symbol cap. A second plugin requires an amendment (META-01).
+  plugins: [require('@tailwindcss/container-queries')],
 };
 
 export default config;

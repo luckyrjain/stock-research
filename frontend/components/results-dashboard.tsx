@@ -110,7 +110,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
   const primaryExchange = s?.primary_exchange ?? s?.exchange ?? 'NSE';
 
   return (
-    <div className="animate-fade-up space-y-5">
+    <div className="@container animate-fade-up space-y-5">
 
       {/* Every configured LLM provider failed (or returned unparseable
           output past its guardrail retry) — this is crew.py's generic
@@ -227,10 +227,15 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
       />
 
       {/* ── 2. Main grid: thesis (60%) + metrics (40%) ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
+      {/* PAGE-04 (design.md): reflows on this container's own width (@5xl =
+          1024px, matching the retired viewport lg: breakpoint) rather than
+          the window's — the fix for /compare's columns compressing into an
+          unreadable 5-col grid instead of staying single-column until each
+          column itself is actually wide enough. */}
+      <div className="grid grid-cols-1 @5xl:grid-cols-5 gap-5">
 
         {/* Investment Thesis — summary + bull/bear as one card */}
-        <div className="lg:col-span-3">
+        <div className="@5xl:col-span-3">
           <Card title="Investment Thesis" className="h-full">
             {report.degraded ? (
               // crew.py's _safe_analysis_fallback() fills summary/bull_factors/
@@ -293,7 +298,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
         </div>
 
         {/* Key Metrics sidebar */}
-        <div className="lg:col-span-2 space-y-4">
+        <div className="@5xl:col-span-2 space-y-4">
           <Card title="Key Metrics">
             <div className="grid grid-cols-3 gap-2 mb-4">
               {[
