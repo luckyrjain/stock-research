@@ -26,18 +26,26 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" className={`${inter.variable} ${mono.variable}`}>
       <body className="font-sans">
         <ToastProvider>
-          <ServiceWorkerRegistration />
-          {children}
-          {/* Rendered at full `muted` (6.12:1 on bg), not the /50 it used to be
-              (2.06:1 with the old #6b7fa8 token). A disclaimer is only worth
-              anything if it is legible — this was the least readable text in
-              the product. */}
-          <footer className="max-w-6xl mx-auto px-6 py-6 text-[11px] text-muted text-center">
-            AlphaPulse is <strong className="font-semibold">not registered with SEBI</strong> as a
-            Research Analyst or Investment Adviser. It generates recommendations with AI models from
-            public data for informational purposes only. Nothing here is investment advice — verify
-            independently and consult a SEBI-registered adviser before trading.
-          </footer>
+          {/* #app-content is a real, addressable wrapper (not just body's
+              children) so a modal can set inert="" on it while open (A11Y-11)
+              without also inert-ing itself — the modal portals into
+              #modal-root below, a sibling, specifically so it sits outside
+              the subtree that goes inert. */}
+          <div id="app-content">
+            <ServiceWorkerRegistration />
+            {children}
+            {/* Rendered at full `muted` (6.12:1 on bg), not the /50 it used to be
+                (2.06:1 with the old #6b7fa8 token). A disclaimer is only worth
+                anything if it is legible — this was the least readable text in
+                the product. */}
+            <footer className="max-w-6xl mx-auto px-6 py-6 text-[11px] text-muted text-center">
+              AlphaPulse is <strong className="font-semibold">not registered with SEBI</strong> as a
+              Research Analyst or Investment Adviser. It generates recommendations with AI models from
+              public data for informational purposes only. Nothing here is investment advice — verify
+              independently and consult a SEBI-registered adviser before trading.
+            </footer>
+          </div>
+          <div id="modal-root" />
         </ToastProvider>
       </body>
     </html>

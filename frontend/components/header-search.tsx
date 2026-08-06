@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useId, useState } from 'react';
+import { useCallback, useId, useRef, useState } from 'react';
 import ConsolidatedCard from './consolidated-card';
 
 // Small ticker lookup shared across every page's nav bar — on submit it opens
@@ -12,11 +12,20 @@ export default function HeaderSearch() {
   const [value, setValue]   = useState('');
   const [symbol, setSymbol] = useState<string | null>(null);
   const inputId = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const submit = useCallback(() => {
     const sym = value.trim().toUpperCase().replace(/[^A-Z0-9&-]/g, '');
     if (sym) setSymbol(sym);
   }, [value]);
+
+  // A11Y-11: focus returns to the trigger on close — this input is what
+  // opened the modal, whether the user is still on it or tabbed into the
+  // panel since.
+  const closeModal = useCallback(() => {
+    setSymbol(null);
+    inputRef.current?.focus();
+  }, []);
 
   return (
     <>
@@ -28,6 +37,7 @@ export default function HeaderSearch() {
           Look up a stock across all AlphaPulse modes
         </label>
         <input
+          ref={inputRef}
           id={inputId}
           value={value}
           onChange={e => setValue(e.target.value)}
@@ -40,7 +50,7 @@ export default function HeaderSearch() {
                      outline-none focus:border-accent transition-colors"
         />
       </form>
-      {symbol && <ConsolidatedCard symbol={symbol} onClose={() => setSymbol(null)} />}
+      {symbol && <ConsolidatedCard symbol={symbol} onClose={closeModal} />}
     </>
   );
 }

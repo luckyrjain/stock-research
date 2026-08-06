@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import type { ConsolidatedView } from '@/types';
 import { REC_TONE_4TIER, REC_TONE_UNKNOWN } from '@/lib/tone';
@@ -53,11 +54,15 @@ function SectionSkeleton() {
 // either. Renders as a centered modal per design.md's "glass card... for
 // modals" guidance, reusing the fixed-backdrop + Escape-to-close popover
 // pattern already established by InfoTooltip.
+const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export default function ConsolidatedCard({ symbol, onClose }: Props) {
   const [data, setData]       = useState<ConsolidatedView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState(false);
+  const [modalRoot, setModalRoot] = useState<HTMLElement | null>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -75,19 +80,53 @@ export default function ConsolidatedCard({ symbol, onClose }: Props) {
     return () => { cancelled = true; };
   }, [symbol]);
 
+  // Portals into #modal-root (a sibling of #app-content in app/layout.tsx)
+  // rather than rendering in place, so #app-content can go inert below
+  // without also inert-ing this modal.
+  useEffect(() => {
+    setModalRoot(document.getElementById('modal-root'));
+  }, []);
+
+  // A11Y-11: background inert while the modal is open — Tab can't reach it,
+  // a screen reader can't see it. Paired with the manual Tab-wrap trap below
+  // since inert alone stops Tab from *entering* the background but doesn't
+  // make focus *cycle* at the panel's own edges.
+  useEffect(() => {
+    const appContent = document.getElementById('app-content');
+    appContent?.setAttribute('inert', '');
+    return () => { appContent?.removeAttribute('inert'); };
+  }, []);
+
   useEffect(() => {
     closeBtnRef.current?.focus();
-    const onKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { onClose(); return; }
+      if (e.key !== 'Tab' || !panelRef.current) return;
+      const focusables = panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [onClose]);
 
-  return (
+  if (!modalRoot) return null;
+
+  return createPortal(
     <div
       className="fixed inset-0 z-40 flex items-start justify-center px-4 pt-24 sm:pt-32 bg-bg/80 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-label={`AlphaPulse view for ${symbol}`}
@@ -217,6 +256,7 @@ export default function ConsolidatedCard({ symbol, onClose }: Props) {
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    modalRoot,
   );
 }
