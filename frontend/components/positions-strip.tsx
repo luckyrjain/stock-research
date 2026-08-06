@@ -22,6 +22,9 @@ function pnlPct(entry: number | null, current: number | null): number | null {
 export default function PositionsStrip() {
   const { positions, removePosition } = usePositions();
   const [prices, setPrices] = useState<Record<string, LivePrice>>({});
+  // Stale/degraded (state 5, design.md §17): a poll that's been failing
+  // must not render identically to one that's fresh.
+  const [pricesStale, setPricesStale] = useState(false);
 
   const symbolsKey = positions.map(p => p.symbol).join(',');
 
@@ -32,12 +35,14 @@ export default function PositionsStrip() {
     const fetchPrices = async () => {
       try {
         const res = await fetch(`/api/prices?symbols=${encodeURIComponent(symbolsKey)}`);
-        if (!res.ok) return;
+        if (!res.ok) { if (!cancelled) setPricesStale(true); return; }
         const data = await res.json() as { prices: Record<string, LivePrice> };
-        if (!cancelled) setPrices(data.prices);
+        if (!cancelled) { setPrices(data.prices); setPricesStale(false); }
       } catch {
-        // silently ignore — stale/missing price is fine, same convention as
-        // the rest of Market Picks' price polling
+        // silently ignore in state — same convention as the rest of Market
+        // Picks' price polling — but still mark prices stale rather than
+        // leaving them looking fresh indefinitely.
+        if (!cancelled) setPricesStale(true);
       }
     };
 
@@ -53,6 +58,11 @@ export default function PositionsStrip() {
       <div className="flex items-center gap-2 mb-2.5">
         <h2 className="text-xs font-bold text-muted uppercase tracking-widest">Your Positions</h2>
         <span className="text-[10px] text-muted/60">{positions.length} tracked</span>
+        {pricesStale && (
+          <span className="text-[10px] text-hold/80" title="The live-price refresh has been failing — prices below may be outdated">
+            · prices may be outdated
+          </span>
+        )}
         <Link href="/portfolio" className="ml-auto text-[10px] font-semibold text-accent hover:underline">
           View full portfolio →
         </Link>

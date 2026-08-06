@@ -110,6 +110,14 @@ export default function ScreenerPage() {
   const [rsiFilter,  setRsiFilter]  = useState<RsiFilter>('all');
   const [peMax,      setPeMax]      = useState('');
   const [marketCapMin, setMarketCapMin] = useState('');
+  const isFiltered = industry !== 'all' || emaTrend !== 'all' || rsiFilter !== 'all' || peMax.trim() !== '' || marketCapMin.trim() !== '';
+  const clearFilters = useCallback(() => {
+    setIndustry('all');
+    setEmaTrend('all');
+    setRsiFilter('all');
+    setPeMax('');
+    setMarketCapMin('');
+  }, []);
   // fetchStocks fires on every change to these — debounce the text inputs
   // (same 420ms as ticker-search.tsx) so a typed value doesn't fire one
   // GET /api/screener request per keystroke against its 60/min rate limit.
@@ -214,7 +222,11 @@ export default function ScreenerPage() {
   useEffect(() => {
     if (!hydrated) return;
     setOffset(0);
-    fetchStocks({ targetOffset: 0 });
+    // STATE-01 (design.md): only the very first load (nothing on screen
+    // yet) shows the skeleton — a filter/sort change while stocks are
+    // already showing keeps that table visible instead of wiping it.
+    fetchStocks({ silent: data != null, targetOffset: 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchStocks, hydrated]);
 
   const loadMore = useCallback(() => {
@@ -368,7 +380,7 @@ export default function ScreenerPage() {
         </div>
 
         {/* Table */}
-        <div className="rounded-xl border border-border overflow-hidden">
+        <div className="rounded-xl border border-border overflow-hidden" aria-busy={loading}>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -396,6 +408,13 @@ export default function ScreenerPage() {
                   <tr>
                     <td colSpan={10} className="px-4 py-12 text-center text-muted text-sm">
                       No stocks match these filters, or the screener hasn&apos;t run yet — try &quot;Refresh Data&quot;.
+                      {isFiltered && (
+                        <div>
+                          <button onClick={clearFilters} className="mt-2 text-xs text-accent hover:underline">
+                            Clear filters
+                          </button>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ) : (

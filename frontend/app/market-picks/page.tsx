@@ -482,7 +482,7 @@ export default function MarketPicksPage() {
 
         {/* ── Active pipeline phases ── */}
         {isRunning && (
-          <div className="animate-fade-up">
+          <div className="animate-fade-up" aria-busy="true">
             <PipelineStepper phase={phase} />
 
             {/* Scanning */}

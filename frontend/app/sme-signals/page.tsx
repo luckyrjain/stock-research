@@ -187,6 +187,13 @@ export default function SmeSignalsPage() {
   const [exchangeFilter, setExchangeFilter] = useState<ExchangeFilter>('all');
   const [rsiFilter, setRsiFilter] = useState<RsiFilter>('all');
   const [volumeSpikeOnly, setVolumeSpikeOnly] = useState(false);
+  const isFiltered = direction !== 'all' || exchangeFilter !== 'all' || rsiFilter !== 'all' || volumeSpikeOnly;
+  const clearFilters = useCallback(() => {
+    setDirection('all');
+    setExchangeFilter('all');
+    setRsiFilter('all');
+    setVolumeSpikeOnly(false);
+  }, []);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   // Expand/collapse state is keyed by "<symbol>::<trade_date>", not bare
@@ -262,7 +269,12 @@ export default function SmeSignalsPage() {
   }, []);
 
   useEffect(() => {
-    fetchSignals(lookback, direction, view);
+    // STATE-01 (design.md): only the very first load (nothing on screen
+    // yet) shows the skeleton — a Period/Direction/View change while
+    // signals are already showing keeps that table visible instead of
+    // wiping it.
+    fetchSignals(lookback, direction, view, data != null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lookback, direction, view, fetchSignals]);
 
   // Track server-side refresh state; poll while a refresh runs, reload when done.
@@ -542,7 +554,7 @@ export default function SmeSignalsPage() {
 
         {/* Table */}
         {!error && (
-          <div className="rounded-xl border border-border overflow-hidden">
+          <div className="rounded-xl border border-border overflow-hidden" aria-busy={loading}>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -570,6 +582,13 @@ export default function SmeSignalsPage() {
                         {signals.length === 0
                           ? 'No crossovers found for the selected filters.'
                           : `No ${exchangeFilter} crossovers in the current results.`}
+                        {isFiltered && (
+                          <div>
+                            <button onClick={clearFilters} className="mt-2 text-xs text-accent hover:underline">
+                              Clear filters
+                            </button>
+                          </div>
+                        )}
                         {!data?.last_run && (
                           <div className="mt-2 text-xs text-muted/60">
                             Make sure you&apos;ve run{' '}

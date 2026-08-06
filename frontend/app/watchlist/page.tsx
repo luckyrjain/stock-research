@@ -128,6 +128,13 @@ export default function WatchlistPage() {
   const [pricesLoading, setPricesLoading] = useState(true);
   const calendarEntries = useWatchlistCalendar(items.map(i => i.symbol));
 
+  // Stale/degraded (state 5, design.md §17): a poll that's been failing
+  // must not render identically to one that's fresh — `pricesStale` flips
+  // true on a failed poll (once at least one has ever succeeded) and back
+  // to false the moment one succeeds again.
+  const [pricesUpdatedAt, setPricesUpdatedAt] = useState<Date | null>(null);
+  const [pricesStale, setPricesStale] = useState(false);
+
   useEffect(() => {
     if (items.length === 0) { setPricesLoading(false); return; }
     const symbols = items.map(i => i.symbol).join(',');
@@ -135,11 +142,16 @@ export default function WatchlistPage() {
     const fetchPrices = async () => {
       try {
         const res = await fetch(`/api/prices?symbols=${encodeURIComponent(symbols)}`);
-        if (!res.ok) return;
+        if (!res.ok) { setPricesStale(true); return; }
         const data = await res.json() as { prices: Record<string, LivePrice> };
         setPrices(data.prices);
+        setPricesUpdatedAt(new Date());
+        setPricesStale(false);
       } catch {
-        // silently ignore — stale/missing price is fine, the row just shows "—"
+        // Row still shows "—" for a symbol with no price yet — but once
+        // there IS a price on screen, a failed poll marks it stale rather
+        // than silently leaving it looking fresh forever.
+        setPricesStale(true);
       } finally {
         setPricesLoading(false);
       }
@@ -168,7 +180,7 @@ export default function WatchlistPage() {
         <CalendarStrip entries={calendarEntries} />
 
         {loading || (pricesLoading && items.length > 0) ? (
-          <div className="rounded-xl border border-border overflow-hidden">
+          <div className="rounded-xl border border-border overflow-hidden" aria-busy="true">
             <div className="divide-y divide-border/60">
               {Array.from({ length: 3 }).map((_, i) => (
                 <div key={i} className="px-4 py-4 flex items-center gap-4">
@@ -198,6 +210,22 @@ export default function WatchlistPage() {
             </div>
           </div>
         ) : (
+          <>
+            {pricesUpdatedAt && (
+              <div className="flex justify-end mb-2">
+                {pricesStale ? (
+                  <span className="flex items-center gap-1 text-[10px] text-hold/80" title="The live-price refresh has been failing — prices below may be outdated">
+                    <span className="w-1.5 h-1.5 rounded-full bg-hold inline-block" />
+                    Prices may be outdated · last updated {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-[10px] text-buy/70">
+                    <span className="w-1.5 h-1.5 rounded-full bg-buy animate-pulse inline-block" />
+                    LTP {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                  </span>
+                )}
+              </div>
+            )}
           <div className="rounded-xl border border-border overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -267,6 +295,7 @@ export default function WatchlistPage() {
               </table>
             </div>
           </div>
+          </>
         )}
     </PageShell>
   );

@@ -318,7 +318,7 @@ export default function MarketPicksHistoryPage() {
         )}
 
         {!error && !selectedDate && (
-          <div className="rounded-xl border border-border overflow-hidden">
+          <div className="rounded-xl border border-border overflow-hidden" aria-busy={loading}>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>

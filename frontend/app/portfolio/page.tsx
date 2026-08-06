@@ -67,6 +67,10 @@ export default function PortfolioPage() {
   const { positions, loading, removePosition, updateShares } = usePositions();
   const [prices, setPrices] = useState<Record<string, LivePrice>>({});
   const [sortDesc, setSortDesc] = useState(true);
+  // Stale/degraded (state 5, design.md §17): a poll that's been failing
+  // must not render identically to one that's fresh.
+  const [pricesUpdatedAt, setPricesUpdatedAt] = useState<Date | null>(null);
+  const [pricesStale, setPricesStale] = useState(false);
 
   const symbolsKey = positions.map(p => p.symbol).join(',');
 
@@ -77,11 +81,18 @@ export default function PortfolioPage() {
     const fetchPrices = async () => {
       try {
         const res = await fetch(`/api/prices?symbols=${encodeURIComponent(symbolsKey)}`);
-        if (!res.ok) return;
+        if (!res.ok) { if (!cancelled) setPricesStale(true); return; }
         const data = await res.json() as { prices: Record<string, LivePrice> };
-        if (!cancelled) setPrices(data.prices);
+        if (!cancelled) {
+          setPrices(data.prices);
+          setPricesUpdatedAt(new Date());
+          setPricesStale(false);
+        }
       } catch {
-        // silently ignore — stale/missing price is fine, same convention as PositionsStrip
+        // silently ignore in state — same convention as PositionsStrip —
+        // but still mark the on-screen prices stale rather than leaving
+        // them looking fresh indefinitely.
+        if (!cancelled) setPricesStale(true);
       }
     };
 
@@ -182,7 +193,7 @@ export default function PortfolioPage() {
         </div>
 
         {loading ? (
-          <div className="rounded-xl border border-border overflow-hidden">
+          <div className="rounded-xl border border-border overflow-hidden" aria-busy="true">
             <div className="divide-y divide-border/60">
               {Array.from({ length: 3 }).map((_, i) => (
                 <div key={i} className="px-4 py-4 flex items-center gap-4">
@@ -204,6 +215,21 @@ export default function PortfolioPage() {
           </div>
         ) : (
           <>
+            {pricesUpdatedAt && (
+              <div className="flex justify-end mb-2">
+                {pricesStale ? (
+                  <span className="flex items-center gap-1 text-[10px] text-hold/80" title="The live-price refresh has been failing — prices below may be outdated">
+                    <span className="w-1.5 h-1.5 rounded-full bg-hold inline-block" />
+                    Prices may be outdated · last updated {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-[10px] text-buy/70">
+                    <span className="w-1.5 h-1.5 rounded-full bg-buy animate-pulse inline-block" />
+                    LTP {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                  </span>
+                )}
+              </div>
+            )}
             {/* Aggregate stats */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
               <div className="rounded-xl border border-border bg-card px-4 py-3">

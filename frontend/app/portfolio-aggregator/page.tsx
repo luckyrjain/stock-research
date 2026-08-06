@@ -6,6 +6,7 @@ import PageShell from '@/components/page-shell';
 import { Skeleton } from '@/components/data-table-ui';
 import { usePositions } from '@/lib/positions';
 import { getClientId } from '@/lib/watchlist';
+import { useToast } from '@/components/toast';
 import type {
   PortfolioProfile, PortfolioAccount, PortfolioAccountType,
   PortfolioAsset, PortfolioAssetType, PortfolioNetWorth,
@@ -52,6 +53,22 @@ function fmtInr(n: number): string {
   return `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 }
 
+// A success/failure status message must not render identically regardless
+// of outcome (design.md §17 state 4 — "never a silent failure", extended
+// here to "never an indistinguishable one"). The success/neutral cases are
+// a small, fixed, enumerable set of literal strings this file itself
+// produces; every caught exception message or backend-supplied error string
+// (last_sync_error, e.message) is an error by default — which is correct at
+// every call site, since those only ever get set inside a catch block.
+function msgTone(m: string): 'success' | 'neutral' | 'error' {
+  if (m === 'Connected.' || m === 'Syncing…' || m.startsWith('Synced ') || m.startsWith('Valued ')) return 'success';
+  if (m.startsWith('Enter ')) return 'neutral';
+  return 'error';
+}
+const MSG_TONE_CLASS: Record<ReturnType<typeof msgTone>, string> = {
+  success: 'text-buy', neutral: 'text-muted', error: 'text-sell',
+};
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api/portfolio/${path}`, {
     ...init,
@@ -66,9 +83,16 @@ function ProfilePicker({ onSelect }: { onSelect: (p: PortfolioProfile) => void }
   const [profiles, setProfiles] = useState<PortfolioProfile[] | null>(null);
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
+  // A failed fetch must not render identically to "you genuinely have zero
+  // profiles" (design.md §17 state 4) — `profiles` stays null on failure so
+  // the misleading empty state below never renders; this is what does.
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    api<{ profiles: PortfolioProfile[] }>('profiles').then(d => setProfiles(d.profiles)).catch(() => setProfiles([]));
+    setLoadError(null);
+    api<{ profiles: PortfolioProfile[] }>('profiles')
+      .then(d => setProfiles(d.profiles))
+      .catch(e => setLoadError(e instanceof Error ? e.message : 'Could not load your profiles.'));
   }, []);
   useEffect(load, [load]);
 
@@ -89,8 +113,21 @@ function ProfilePicker({ onSelect }: { onSelect: (p: PortfolioProfile) => void }
     <div className="max-w-md mx-auto mt-12 bg-card border border-border rounded-xl p-6">
       <h1 className="text-lg font-bold text-tx mb-1">Net Worth</h1>
       <p className="text-sm text-muted mb-5">Pick a profile to continue, or create a new one.</p>
-      {profiles === null ? (
-        <p className="text-sm text-muted">Loading…</p>
+      {loadError ? (
+        <div className="px-4 py-3 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-5
+                        flex items-start justify-between gap-4">
+          <span>{loadError}</span>
+          <button onClick={load} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
+                                             border border-sell/40 hover:bg-sell/10 transition-colors">
+            Retry
+          </button>
+        </div>
+      ) : profiles === null ? (
+        <div className="flex flex-col gap-2 mb-5" aria-busy="true">
+          {Array.from({ length: 2 }).map((_, i) => (
+            <Skeleton key={i} className="h-9 w-full rounded-lg" />
+          ))}
+        </div>
       ) : (
         <div className="flex flex-col gap-2 mb-5">
           {profiles.map(p => (
@@ -458,7 +495,7 @@ function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
             change API key
           </button>
         )}
-        {msg && <span className="text-xs text-muted">{msg}</span>}
+        {msg && <span className={`text-xs ${MSG_TONE_CLASS[msgTone(msg)]}`}>{msg}</span>}
       </span>
       {!otpRequired && (showCreds || !connection || !connection.connected || connection.sync_status === 'error') && (
         <span className="flex items-center gap-2 flex-wrap">
@@ -640,7 +677,7 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
             change API key
           </button>
         )}
-        {msg && <span className="text-xs text-muted">{msg}</span>}
+        {msg && <span className={`text-xs ${MSG_TONE_CLASS[msgTone(msg)]}`}>{msg}</span>}
       </span>
       {showCreds && (
         <span className="flex items-center gap-2">
@@ -734,6 +771,7 @@ function AccountBlock({ account, assets, connections, onChanged, onPoll }: {
   account: PortfolioAccount; assets: PortfolioAsset[]; connections: BrokerConnection[]; onChanged: () => void; onPoll: () => void;
 }) {
   const [showAdd, setShowAdd] = useState(false);
+  const { showError } = useToast();
 
   async function removeAccount() {
     if (!confirm(`Delete account "${account.name}"? This can't be undone.`)) return;
@@ -741,10 +779,9 @@ function AccountBlock({ account, assets, connections, onChanged, onPoll }: {
       await api(`accounts/${account.id}`, { method: 'DELETE' });
       onChanged();
     } catch {
-      // 422 when the account still has assets — surfaced via the browser's
-      // own confirm-alert pattern this app already uses elsewhere in the
-      // absence of a toast system.
-      alert('Delete every asset in this account first.');
+      // 422 when the account still has assets — a background mutation
+      // failure, so a toast (design.md §17 state 4), not a browser alert().
+      showError('Delete every asset in this account first.');
     }
   }
 
@@ -976,16 +1013,27 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
   // networth is still null (data condition also false), so the whole
   // card rendered nothing for that stretch instead of skeleton or data.
   const [netWorthLoaded, setNetWorthLoaded] = useState(false);
+  // A fetch failure must not render identically to a genuine "zero
+  // accounts"/"zero net worth" (design.md §17 state 4) — both branches
+  // below used to have no .catch() at all, so a real failure silently
+  // rendered as "No accounts yet" / an empty net-worth card.
+  const [accountsError, setAccountsError] = useState<string | null>(null);
+  const [networthError, setNetworthError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
+    setAccountsError(null);
+    setNetworthError(null);
     api<{ accounts: PortfolioAccount[] }>(`accounts?profile_id=${profile.id}`).then(async d => {
       setAccounts(d.accounts);
       const entries = await Promise.all(
         d.accounts.map(async acc => [acc.id, (await api<{ assets: PortfolioAsset[] }>(`assets?account_id=${acc.id}`)).assets] as const),
       );
       setAssetsByAccount(Object.fromEntries(entries));
-    }).finally(() => setLoaded(true));
-    api<PortfolioNetWorth>(`networth?profile_id=${profile.id}`).then(setNetworth).finally(() => setNetWorthLoaded(true));
+    }).catch(e => setAccountsError(e instanceof Error ? e.message : 'Could not load your accounts.'))
+      .finally(() => setLoaded(true));
+    api<PortfolioNetWorth>(`networth?profile_id=${profile.id}`).then(setNetworth)
+      .catch(e => setNetworthError(e instanceof Error ? e.message : 'Could not load your net worth.'))
+      .finally(() => setNetWorthLoaded(true));
     api<{ connections: BrokerConnection[] }>(`broker/connections?profile_id=${profile.id}`)
       .then(d => setConnections(d.connections))
       .catch(() => setConnections([]));
@@ -1013,7 +1061,7 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
           <p className="text-xs text-muted">Personal net worth — banks, brokers, FDs, EPF/PPF, loans.</p>
         </div>
         <div className="flex items-center gap-3">
-          {refreshMsg && <span className="text-xs text-muted">{refreshMsg}</span>}
+          {refreshMsg && <span className={`text-xs ${MSG_TONE_CLASS[msgTone(refreshMsg)]}`}>{refreshMsg}</span>}
           <button
             onClick={async () => {
               setRefreshing(true);
@@ -1052,8 +1100,18 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
       {showImportCas && <ImportCasForm accounts={accounts} onImported={() => { refresh(); setShowImportCas(false); }} />}
       {showImportCsv && <ImportCsvForm accounts={accounts} onImported={() => { refresh(); setShowImportCsv(false); }} />}
 
+      {networthError && (
+        <div className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-6
+                        flex items-start justify-between gap-4">
+          <span>{networthError}</span>
+          <button onClick={refresh} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
+                                                 border border-sell/40 hover:bg-sell/10 transition-colors">
+            Retry
+          </button>
+        </div>
+      )}
       {!networth && !netWorthLoaded && (
-        <div className="bg-card border border-border rounded-xl p-5 mb-6">
+        <div className="bg-card border border-border rounded-xl p-5 mb-6" aria-busy="true">
           <Skeleton className="h-3 w-24 mb-3" />
           <Skeleton className="h-8 w-40 mb-3" />
           <Skeleton className="h-3 w-full" />
@@ -1101,8 +1159,18 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
         <div className="mb-4"><AddAccountForm profileId={profile.id} onAdded={() => { refresh(); setShowAddAccount(false); }} /></div>
       )}
 
+      {accountsError && (
+        <div className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-3
+                        flex items-start justify-between gap-4">
+          <span>{accountsError}</span>
+          <button onClick={refresh} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
+                                                 border border-sell/40 hover:bg-sell/10 transition-colors">
+            Retry
+          </button>
+        </div>
+      )}
       {!loaded ? (
-        <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-3" aria-busy="true">
           {[0, 1].map(i => <Skeleton key={i} className="h-16 w-full" />)}
         </div>
       ) : (
@@ -1117,7 +1185,7 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
               onPoll={pollConnections}
             />
           ))}
-          {accounts.length === 0 && <p className="text-sm text-muted">No accounts yet — add one above.</p>}
+          {accounts.length === 0 && !accountsError && <p className="text-sm text-muted">No accounts yet — add one above.</p>}
         </div>
       )}
     </div>
@@ -1126,15 +1194,24 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
 
 export default function PortfolioAggregatorPage() {
   const [profile, setProfile] = useState<PortfolioProfile | null | undefined>(undefined);
+  // A fetch failure while resolving a STORED profile id must not be treated
+  // as "no profile" (design.md §17 state 4) — that would silently drop the
+  // user back to profile selection even though their profile still exists,
+  // just because of a transient network blip. `profile` stays undefined
+  // (loading) on failure so the picker/dashboard never falsely render;
+  // this error banner does instead, with a real retry.
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadProfile = useCallback(() => {
+    setLoadError(null);
     const stored = localStorage.getItem(PROFILE_KEY);
     if (!stored) { setProfile(null); return; }
     const id = Number(stored);
     api<{ profiles: PortfolioProfile[] }>('profiles')
       .then(d => setProfile(d.profiles.find(p => p.id === id) ?? null))
-      .catch(() => setProfile(null));
+      .catch(e => setLoadError(e instanceof Error ? e.message : 'Could not load your profile.'));
   }, []);
+  useEffect(loadProfile, [loadProfile]);
 
   function select(p: PortfolioProfile) {
     localStorage.setItem(PROFILE_KEY, String(p.id));
@@ -1148,8 +1225,17 @@ export default function PortfolioAggregatorPage() {
 
   return (
     <PageShell active="portfolio-aggregator" maxWidth="max-w-5xl">
-      {profile === undefined ? (
-        <p className="text-sm text-muted text-center mt-12">Loading…</p>
+      {loadError ? (
+        <div className="max-w-md mx-auto mt-12 px-5 py-4 rounded-xl bg-sell/10 border border-sell/30
+                        text-sell text-sm flex items-start justify-between gap-4">
+          <span>{loadError}</span>
+          <button onClick={loadProfile} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
+                                                     border border-sell/40 hover:bg-sell/10 transition-colors">
+            Retry
+          </button>
+        </div>
+      ) : profile === undefined ? (
+        <p className="text-sm text-muted text-center mt-12" aria-busy="true">Loading…</p>
       ) : profile === null ? (
         <ProfilePicker onSelect={select} />
       ) : (
