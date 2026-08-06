@@ -24,16 +24,28 @@ export default function InfoTooltip({ title, children, className = '', align = '
 
   return (
     <span className={`relative inline-flex ${className}`}>
+      {/* Visual circle stays 14x14 (w-3.5 h-3.5); the button itself is
+          unsized and padded out to a 44px hit area with a canceling negative
+          margin (A11Y-14) — padding on the fixed-size circle itself would
+          shrink its content box under border-box sizing instead of growing
+          the hit area, so the padding has to live on this wrapping button
+          and the hover state has to reach the inner circle via group-hover. */}
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
         aria-label={`About ${title}`}
         aria-expanded={open}
         aria-controls={panelId}
-        className="w-3.5 h-3.5 rounded-full border border-muted/40 text-muted/70 text-[9px] font-bold leading-none
-                   flex items-center justify-center hover:text-tx hover:border-muted transition-colors shrink-0"
+        className="group p-3 -m-3 shrink-0 flex items-center justify-center"
       >
-        i
+        <span
+          aria-hidden="true"
+          className="w-3.5 h-3.5 rounded-full border border-muted/40 text-muted/70 text-[9px] font-bold leading-none
+                     flex items-center justify-center transition-colors
+                     group-hover:text-tx group-hover:border-muted"
+        >
+          i
+        </span>
       </button>
       {open && (
         <>

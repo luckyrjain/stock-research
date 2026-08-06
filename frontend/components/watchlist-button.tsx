@@ -26,8 +26,8 @@ export default function WatchlistButton({ symbol, company, exchange, size = 'md'
       aria-label={watched ? `Remove ${symbol} from watchlist` : `Add ${symbol} to watchlist`}
       title={watched ? 'Remove from watchlist' : 'Add to watchlist'}
       className={`leading-none transition-colors duration-150 ${textSize}
-        ${size === 'sm' ? 'p-1.5 -m-1.5' : ''}
-        ${watched ? 'text-hold hover:text-hold/70' : 'text-muted/40 hover:text-hold'}
+        ${size === 'sm' ? 'p-3 -m-3' : ''}
+        ${watched ? 'text-hold hover:text-hold/70' : 'text-muted/60 hover:text-hold'}
         ${className}`}
     >
       {watched ? '★' : '☆'}

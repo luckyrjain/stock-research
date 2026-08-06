@@ -66,7 +66,7 @@ export default function VerdictTimeline({ symbol }: { symbol: string }) {
             ].filter(Boolean).join(' · ');
             return (
               <div key={h.date} className="flex items-center gap-1.5 shrink-0">
-                {i > 0 && <span className="text-muted/30 text-xs">→</span>}
+                {i > 0 && <span className="text-muted/60 text-xs">→</span>}
                 <span
                   title={tooltip}
                   className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold border whitespace-nowrap ${cls} ${

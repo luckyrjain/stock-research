@@ -118,12 +118,12 @@ function TrendBadge({ trend, delta }: { trend: MarketPick['trend']; delta: numbe
 
 function ConcentrationBadge({ sector, concentratedSectors }: { sector: string; concentratedSectors: string[] }) {
   if (!concentratedSectors.includes(sector)) return null;
-  // No dedicated "warning" design token exists in this codebase (same gap
-  // sme-signals' own illiquid badge already works around) — accent is reused
-  // here rather than inventing a new Tailwind color for one badge.
+  // hold is the caution token (COLOR-01, design.md) — no separate `warning`
+  // token exists, and this badge IS a caution ("you're already concentrated
+  // here"), so it belongs on `hold`, not `accent`.
   return (
     <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold
-                     bg-accent/15 text-accent border border-accent/30"
+                     bg-hold/12 text-hold border border-hold/25"
           title={`You already hold ${sector} stocks above your concentration threshold in your tracked positions`}>
       Concentrated
     </span>
@@ -147,7 +147,7 @@ function RankBadge({ rank }: { rank: number }) {
       </div>
     );
   }
-  return <span className="text-xs font-semibold text-muted/50 tabular-nums pl-1">{rank}</span>;
+  return <span className="text-xs font-semibold text-muted/60 tabular-nums pl-1">{rank}</span>;
 }
 
 function SourcesPopover({ sources }: { sources: PickSource[] }) {
@@ -553,11 +553,11 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
             value={search}
             onChange={e => setSearch(e.target.value)}
             className="w-full bg-card border border-border rounded-xl pl-9 pr-8 py-2 text-sm text-tx
-                       placeholder:text-muted/50 focus:outline-none focus:border-accent/40 transition-colors"
+                       placeholder:text-muted/60 focus:border-accent/40 transition-colors"
           />
           {search && (
             <button onClick={() => setSearch('')}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted/50 hover:text-muted text-xs">
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted/60 hover:text-muted text-xs">
               ✕
             </button>
           )}
@@ -619,7 +619,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
             value={sectorFilter}
             onChange={e => setSectorFilter(e.target.value)}
             className="bg-card border border-border rounded-xl px-3 py-2 text-xs text-tx
-                       focus:outline-none focus:border-accent/40 transition-colors"
+                       focus:border-accent/40 transition-colors"
           >
             <option value="all">All sectors</option>
             {sectors.map(s => <option key={s} value={s}>{s}</option>)}
@@ -753,7 +753,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                             )}
                           </div>
                           {pick.ranking_reasons?.[0] && (
-                            <div className="text-[10px] text-muted/45 mt-1 truncate leading-tight">
+                            <div className="text-[10px] text-muted/60 mt-1 truncate leading-tight">
                               {pick.ranking_reasons[0]}
                             </div>
                           )}
@@ -815,7 +815,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                       {/* Expand chevron */}
                       <td className="px-4 py-4 text-right">
                         <svg
-                          className={`w-4 h-4 text-muted/50 inline-block transition-transform duration-200
+                          className={`w-4 h-4 text-muted/60 inline-block transition-transform duration-200
                             ${isOpen ? 'rotate-180' : ''}`}
                           fill="none" stroke="currentColor" viewBox="0 0 24 24"
                         >

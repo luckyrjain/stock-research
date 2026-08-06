@@ -130,7 +130,7 @@ function CrossOutcomeSummary({ events }: { events: SmeCrossEvent[] }) {
           <span className={`font-mono text-xs font-semibold ${retColor(e.ret_20d_pct)}`}>
             {fmtRet(e.ret_20d_pct)}
           </span>
-          {i < trail.length - 1 && <span className="text-muted/40 ml-1">,</span>}
+          {i < trail.length - 1 && <span className="text-muted/60 ml-1">,</span>}
         </span>
       ))}
     </div>
@@ -742,7 +742,7 @@ export default function SmeSignalsPage() {
 
         {/* Footer hint */}
         {!loading && !error && signals.length > 0 && (
-          <p className="text-[10px] text-muted/50 mt-3">
+          <p className="text-[10px] text-muted/60 mt-3">
             Click a symbol to run full analysis. A BSE listing without an ISIN on record can&apos;t be resolved to an analyzable ticker yet.
           </p>
         )}

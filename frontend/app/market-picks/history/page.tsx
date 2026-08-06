@@ -189,7 +189,7 @@ export default function MarketPicksHistoryPage() {
               disabled={availableDates.length === 0}
               onChange={e => setSelectedDate(e.target.value || null)}
               className="bg-card border border-border rounded-xl px-3 py-2 text-xs text-tx
-                         focus:outline-none focus:border-accent/40 transition-colors disabled:opacity-50"
+                         focus:border-accent/40 transition-colors disabled:opacity-50"
             />
             <button
               type="button"
@@ -360,7 +360,7 @@ export default function MarketPicksHistoryPage() {
                         <td className="px-4 py-4">
                           <div className="flex items-center gap-1.5">
                             <RecBadge rec={s.recommendation_then} />
-                            <span className="text-muted/50 text-[10px]">→</span>
+                            <span className="text-muted/60 text-[10px]">→</span>
                             <RecBadge rec={s.recommendation_now} />
                           </div>
                         </td>

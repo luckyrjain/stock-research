@@ -131,7 +131,7 @@ function HomePageInner() {
                 mock report, which would risk being mistaken for a real
                 recommendation on a product whose whole premise is trustworthy
                 data. */}
-            <p className="text-center text-muted/50 text-xs mt-4">
+            <p className="text-center text-muted/60 text-xs mt-4">
               New here?{' '}
               <button
                 type="button"

@@ -179,7 +179,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
               </span>
               {s?.industry && <span className="text-xs text-muted">{s.industry}</span>}
               {s?.sector && s.sector !== s.industry && (
-                <span className="text-xs text-muted/50">· {s.sector}</span>
+                <span className="text-xs text-muted/60">· {s.sector}</span>
               )}
               {report.generated_at && (
                 <span className="text-xs text-muted/60">· {formatAge(report.generated_at)}</span>

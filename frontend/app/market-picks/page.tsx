@@ -425,7 +425,7 @@ export default function MarketPicksPage() {
 
               {/* Right: sample pick card */}
               <div>
-                <div className="text-[10px] font-bold text-muted/40 uppercase tracking-[0.15em] mb-3">
+                <div className="text-[10px] font-bold text-muted/60 uppercase tracking-[0.15em] mb-3">
                   Sample output
                 </div>
                 <SamplePickCard />
@@ -541,7 +541,7 @@ export default function MarketPicksPage() {
                                   border transition-all duration-200
                         ${v.ok
                           ? 'bg-buy/10 border-buy/30 text-buy'
-                          : 'bg-surface border-border text-muted/50 line-through'}`}>
+                          : 'bg-surface border-border text-muted/60 line-through'}`}>
                       {v.ok ? '✓' : '✗'} {v.symbol}
                     </div>
                   ))}

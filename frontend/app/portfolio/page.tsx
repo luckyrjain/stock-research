@@ -171,7 +171,7 @@ export default function PortfolioPage() {
 
   return (
     <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-4xl mx-auto px-4 pt-8 pb-16">
+      <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
 
         <SiteNav active="portfolio" wrap />
 
@@ -239,7 +239,7 @@ export default function PortfolioPage() {
                 <div className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1">At Target / Stop</div>
                 <div className="text-xl font-black text-tx">
                   <span className="text-buy">{atTargetCount}</span>
-                  <span className="text-muted/40 mx-0.5">/</span>
+                  <span className="text-muted/60 mx-0.5">/</span>
                   <span className="text-sell">{atStopCount}</span>
                 </div>
               </div>
@@ -397,7 +397,7 @@ export default function PortfolioPage() {
                             onClick={() => removePosition(row.position.symbol)}
                             aria-label={`Remove ${row.position.symbol} from your positions`}
                             title="Remove from your positions"
-                            className="text-muted/50 hover:text-sell transition-colors text-sm leading-none"
+                            className="text-muted/60 hover:text-sell transition-colors text-sm leading-none"
                           >
                             ×
                           </button>

@@ -84,7 +84,7 @@ export default function PositionsStrip() {
                   onClick={() => removePosition(pos.symbol)}
                   aria-label={`Remove ${pos.symbol} from your positions`}
                   title="Remove from your positions"
-                  className="text-muted/50 hover:text-sell transition-colors text-sm leading-none shrink-0"
+                  className="text-muted/60 hover:text-sell transition-colors text-sm leading-none shrink-0"
                 >
                   ×
                 </button>

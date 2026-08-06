@@ -53,7 +53,7 @@ export default function LoginPage() {
                 onChange={e => setEmail(e.target.value)}
                 placeholder="you@example.com"
                 className="w-full px-4 py-2.5 rounded-lg bg-surface border border-border text-tx text-sm
-                           placeholder:text-muted/50 focus:outline-none focus:ring-2 focus:ring-accent/50"
+                           placeholder:text-muted/60 focus:ring-2 focus:ring-accent/50"
               />
             </div>
             {status === 'error' && (

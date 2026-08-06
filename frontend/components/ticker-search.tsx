@@ -100,7 +100,7 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
             aria-describedby={suggestionsId}
             className={`w-full pr-12 bg-card border-2 rounded-xl
               font-mono font-bold tracking-[2px] uppercase
-              text-tx placeholder:text-muted/50 placeholder:font-normal placeholder:tracking-normal
+              text-tx placeholder:text-muted/60 placeholder:font-normal placeholder:tracking-normal
               outline-none transition-all duration-200
               focus:shadow-[0_0_0_4px]
               disabled:opacity-40 disabled:cursor-not-allowed

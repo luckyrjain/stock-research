@@ -65,7 +65,7 @@ export function SortableTh<K extends string>({ label, sortK, currentKey, current
                      ${align === 'right' ? 'flex-row-reverse' : ''}`}
         >
           {label}
-          <span className={`text-[9px] transition-colors ${active ? 'text-accent' : 'text-muted/25 group-hover:text-muted/60'}`}>
+          <span className={`text-[9px] transition-colors ${active ? 'text-accent' : 'text-muted/60 group-hover:text-tx'}`}>
             {active ? (currentDir === 'desc' ? '↓' : '↑') : '↕'}
           </span>
         </button>
