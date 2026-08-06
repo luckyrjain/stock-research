@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import type { ConsolidatedView } from '@/types';
@@ -64,11 +64,11 @@ export default function ConsolidatedCard({ symbol, onClose }: Props) {
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  const load = useCallback(() => {
     setLoading(true);
     setError(false);
     setData(null);
+    let cancelled = false;
     fetch(`/api/consolidated/${encodeURIComponent(symbol)}`)
       .then(res => {
         if (!res.ok) throw new Error('request failed');
@@ -79,6 +79,8 @@ export default function ConsolidatedCard({ symbol, onClose }: Props) {
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [symbol]);
+
+  useEffect(load, [load]);
 
   // Portals into #modal-root (a sibling of #app-content in app/layout.tsx)
   // rather than rendering in place, so #app-content can go inert below
@@ -149,11 +151,18 @@ export default function ConsolidatedCard({ symbol, onClose }: Props) {
           </button>
         </div>
 
-        <div className="p-5 space-y-4">
+        <div className="p-5 space-y-4" aria-busy={loading}>
           {loading && <SectionSkeleton />}
 
           {!loading && error && (
-            <p className="text-sm text-sell">Couldn&apos;t reach AlphaPulse. Try again in a moment.</p>
+            <div role="alert" className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm
+                                         flex items-start justify-between gap-4">
+              <span>Couldn&apos;t reach AlphaPulse.</span>
+              <button onClick={load} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
+                                                  border border-sell/40 hover:bg-sell/10 transition-colors">
+                Retry
+              </button>
+            </div>
           )}
 
           {!loading && !error && data && (
