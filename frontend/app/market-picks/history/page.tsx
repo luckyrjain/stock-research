@@ -4,34 +4,22 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import type { MarketPicksHistoryResponse, MarketPickTrackRecord, MarketPicksDailySnapshot } from '@/types';
 import SiteNav from '@/components/site-nav';
+import { Skeleton } from '@/components/data-table-ui';
+import { fmtChangePct as fmtPct } from '@/lib/format';
+import { REC_TONE_4TIER } from '@/lib/tone';
 
 function RecBadge({ rec }: { rec: string | null }) {
   if (!rec) return <span className="text-muted text-xs">—</span>;
-  const cls: Record<string, string> = {
-    BUY:       'bg-buy/12 text-buy border-buy/25',
-    WATCHLIST: 'bg-buy/8 text-buy/75 border-buy/15',
-    HOLD:      'bg-hold/12 text-hold border-hold/25',
-    SELL:      'bg-sell/12 text-sell border-sell/25',
-  };
   return (
-    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold border ${cls[rec] ?? cls.HOLD}`}>
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold border ${REC_TONE_4TIER[rec] ?? REC_TONE_4TIER.HOLD}`}>
       {rec}
     </span>
   );
 }
 
-function Skeleton({ className }: { className: string }) {
-  return <div className={`bg-border/60 rounded animate-pulse ${className}`} />;
-}
-
 function pctColor(v: number | null): string {
   if (v == null) return 'text-tx';
   return v >= 0 ? 'text-buy' : 'text-sell';
-}
-
-function fmtPct(v: number | null): string {
-  if (v == null) return '—';
-  return `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
 }
 
 const TIER_ORDER = ['BUY', 'WATCHLIST', 'HOLD', 'SELL'];

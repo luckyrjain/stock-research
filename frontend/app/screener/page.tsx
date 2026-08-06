@@ -6,7 +6,8 @@ import type { ScreenerResponse, ScreenerStock } from '@/types';
 import SiteNav from '@/components/site-nav';
 import WatchlistButton from '@/components/watchlist-button';
 import SectorHeatmap from '@/components/sector-heatmap';
-import { Skeleton, FilterChip, SortableTh, fmtMarketCap } from '@/components/data-table-ui';
+import { Skeleton, FilterChip, SortableTh } from '@/components/data-table-ui';
+import { fmtCr } from '@/lib/format';
 
 type EmaTrendFilter = 'all' | 'bullish' | 'bearish';
 type SortKey = 'symbol' | 'current_price' | 'pe_ratio' | 'market_cap_cr' | 'avg_volume_10d' | 'rsi14';
@@ -405,7 +406,7 @@ export default function ScreenerPage() {
                       <td className="px-4 py-4 text-muted/70 text-xs whitespace-nowrap">{s.sector ?? '—'}</td>
                       <td className="px-4 py-4 text-right font-mono">{s.current_price != null ? `₹${s.current_price.toFixed(2)}` : '—'}</td>
                       <td className="px-4 py-4 text-right font-mono">{fmtNum(s.pe_ratio)}</td>
-                      <td className="px-4 py-4 text-right font-mono">{fmtMarketCap(s.market_cap_cr)}</td>
+                      <td className="px-4 py-4 text-right font-mono">{fmtCr(s.market_cap_cr)}</td>
                       <td className="px-4 py-4 text-right font-mono">{s.avg_volume_10d != null ? s.avg_volume_10d.toLocaleString('en-IN', { maximumFractionDigits: 0 }) : '—'}</td>
                       <td className={`px-4 py-4 text-right font-mono font-semibold ${rsiColor(s.rsi14)}`}>{fmtNum(s.rsi14)}</td>
                       <td className="px-4 py-4"><TrendBadge trend={s.ema_trend} /></td>

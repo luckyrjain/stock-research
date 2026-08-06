@@ -74,9 +74,3 @@ export function SortableTh<K extends string>({ label, sortK, currentKey, current
     </th>
   );
 }
-
-export function fmtMarketCap(v: number | null): string {
-  if (v == null) return '—';
-  if (v >= 1_000) return `₹${(v / 1_000).toFixed(2)}k Cr`;
-  return `₹${v.toFixed(0)} Cr`;
-}

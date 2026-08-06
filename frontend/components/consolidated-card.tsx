@@ -3,21 +3,15 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import type { ConsolidatedView } from '@/types';
+import { REC_TONE_4TIER, REC_TONE_UNKNOWN } from '@/lib/tone';
 
 interface Props {
   symbol: string;
   onClose: () => void;
 }
 
-const REC_BADGE: Record<string, string> = {
-  BUY:       'bg-buy/12 text-buy border-buy/25',
-  WATCHLIST: 'bg-buy/8 text-buy/75 border-buy/15',
-  HOLD:      'bg-hold/12 text-hold border-hold/25',
-  SELL:      'bg-sell/12 text-sell border-sell/25',
-};
-
 function RecBadge({ rec }: { rec: string }) {
-  const cls = REC_BADGE[rec] ?? 'bg-muted/10 text-muted border-muted/20';
+  const cls = REC_TONE_4TIER[rec] ?? REC_TONE_UNKNOWN;
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border tracking-wide ${cls}`}>
       {rec}

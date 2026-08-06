@@ -7,7 +7,8 @@ import WatchlistButton from './watchlist-button';
 import PositionButton from './position-button';
 import { usePositions } from '@/lib/positions';
 import { getClientId } from '@/lib/watchlist';
-import { safeExternalHref } from './dashboard-format';
+import { safeExternalHref, fmtPrice } from '@/lib/format';
+import { REC_TONE_4TIER, REC_LABEL_4TIER } from '@/lib/tone';
 import { SortableTh, FilterChip } from './data-table-ui';
 
 type SortKey    = 'confidence_score' | 'change_pct' | 'pe_ratio' | 'valuation_percentile';
@@ -33,13 +34,6 @@ interface Props {
   pricesLastUpdated?: Date | null;
 }
 
-// ── Formatters ────────────────────────────────────────────────────────────────
-
-function fmtPrice(n: number | null | undefined): string {
-  if (n == null) return '—';
-  return `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
-}
-
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 function ConfidenceBar({ score }: { score: number }) {
@@ -61,19 +55,10 @@ function ConfidenceBar({ score }: { score: number }) {
 }
 
 function SignalBadge({ verdict }: { verdict: MarketPick['recommendation'] }) {
-  const cfg: Record<MarketPick['recommendation'], string> = {
-    BUY:       'bg-buy/12 text-buy border-buy/25',
-    WATCHLIST: 'bg-buy/8 text-buy/75 border-buy/15',
-    HOLD:      'bg-hold/12 text-hold border-hold/25',
-    SELL:      'bg-sell/12 text-sell border-sell/25',
-  };
-  const labels: Record<MarketPick['recommendation'], string> = {
-    BUY: 'BUY', WATCHLIST: 'WATCH', HOLD: 'HOLD', SELL: 'SELL',
-  };
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold
-                      border tracking-wide ${cfg[verdict]}`}>
-      {labels[verdict]}
+                      border tracking-wide ${REC_TONE_4TIER[verdict]}`}>
+      {REC_LABEL_4TIER[verdict]}
     </span>
   );
 }
@@ -226,8 +211,7 @@ function SourcesPopover({ sources }: { sources: PickSource[] }) {
 }
 
 function TradeBox({ pick }: { pick: MarketPick }) {
-  const p = (n: number | null) =>
-    n != null ? `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '—';
+  const p = fmtPrice;
 
   // Numeric, not pre-formatted -- current_price is live (refreshed every
   // 30s by the page's LTP-polling effect) while target_price is static, so

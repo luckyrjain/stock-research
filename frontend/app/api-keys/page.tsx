@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/lib/auth';
 import SiteNav from '@/components/site-nav';
+import { Skeleton } from '@/components/data-table-ui';
 import type { ApiKey, ApiKeysResponse, ApiUsage, CreatedApiKey } from '@/types';
 
 function fmtDate(iso: string | null): string {
@@ -213,8 +214,8 @@ export default function ApiKeysPage() {
                 <div className="divide-y divide-border/60">
                   {Array.from({ length: 2 }).map((_, i) => (
                     <div key={i} className="px-4 py-4 flex items-center gap-4">
-                      <div className="h-4 w-32 bg-border/60 rounded animate-pulse" />
-                      <div className="h-4 w-20 bg-border/60 rounded animate-pulse ml-auto" />
+                      <Skeleton className="h-4 w-32" />
+                      <Skeleton className="h-4 w-20 ml-auto" />
                     </div>
                   ))}
                 </div>

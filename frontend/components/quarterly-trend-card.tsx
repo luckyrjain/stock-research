@@ -3,7 +3,7 @@
 import type { QuarterlyTrend } from '@/types';
 import Sparkline from './sparkline';
 import { Card } from './dashboard-primitives';
-import { fmt } from './dashboard-format';
+import { fmt } from '@/lib/format';
 
 // Two mini-sparklines (Revenue, EPS) over the last few quarters — reuses the
 // Sparkline component built for the price-history strip in the hero, just

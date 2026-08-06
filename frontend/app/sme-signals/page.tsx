@@ -7,7 +7,9 @@ import EmaChart from '@/components/ema-chart';
 import SiteNav from '@/components/site-nav';
 import WatchlistButton from '@/components/watchlist-button';
 import InfoTooltip from '@/components/info-tooltip';
-import { Skeleton, FilterChip, SortableTh, fmtMarketCap } from '@/components/data-table-ui';
+import { Skeleton, FilterChip, SortableTh } from '@/components/data-table-ui';
+import { fmtCr, fmtChangePct } from '@/lib/format';
+import { exchangeTone } from '@/lib/tone';
 
 // ── Filter types ──────────────────────────────────────────────────────────────
 
@@ -57,10 +59,8 @@ function RegimeBadge({ inGolden }: { inGolden: boolean }) {
 }
 
 function ExchangeBadge({ exchange }: { exchange: string }) {
-  // BSE -> hold, NSE -> buy (design.md §2).
-  const tone = exchange === 'BSE' ? 'text-hold border-hold/20 bg-hold/10' : 'text-buy border-buy/20 bg-buy/10';
   return (
-    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${tone}`}>
+    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${exchangeTone(exchange)}`}>
       {exchange}
     </span>
   );
@@ -102,9 +102,10 @@ function VolumeSpikeBadge() {
   );
 }
 
+// "pending" (not "—") — this specific null means the 20-trading-day forward
+// window hasn't elapsed yet, a different reason than "data unavailable".
 function fmtRet(v: number | null): string {
-  if (v == null) return 'pending';
-  return `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+  return v == null ? 'pending' : fmtChangePct(v);
 }
 
 function retColor(v: number | null): string {
@@ -698,7 +699,7 @@ export default function SmeSignalsPage() {
                         {/* Market cap */}
                         <td className="px-4 py-4 text-right">
                           <span className="font-mono tabular-nums text-xs text-muted">
-                            {fmtMarketCap(s.market_cap_cr)}
+                            {fmtCr(s.market_cap_cr)}
                           </span>
                         </td>
 

@@ -3,15 +3,11 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePositions } from '@/lib/positions';
+import { fmtPrice } from '@/lib/format';
 
 interface LivePrice {
   price: number;
   change_pct: number | null;
-}
-
-function fmtPrice(n: number | null): string {
-  if (n == null) return '—';
-  return `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 }
 
 function pnlPct(entry: number | null, current: number | null): number | null {

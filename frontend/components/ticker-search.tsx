@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback, useId } from 'react';
 import type { ValidationResult } from '@/types';
+import { exchangeTone } from '@/lib/tone';
 
 interface Props {
   onAnalyse: (symbol: string) => void;
@@ -119,10 +120,7 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
         {status === 'valid' && result && (
           <div className="flex items-center gap-2 w-full">
             <span className="text-sm font-medium text-tx">{result.company}</span>
-            <span className={`text-[11px] font-mono font-semibold px-2 py-0.5 rounded border
-              ${result.exchange === 'BSE'
-                ? 'bg-hold/10 text-hold border-hold/20'
-                : 'bg-buy/10 text-buy border-buy/20'}`}>
+            <span className={`text-[11px] font-mono font-semibold px-2 py-0.5 rounded border ${exchangeTone(result.exchange)}`}>
               {result.exchange ?? 'NSE'}
             </span>
           </div>
@@ -154,10 +152,7 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
                 <div className="flex items-center gap-2">
                   <span className="font-mono font-semibold text-accent">{s.symbol}</span>
                   {s.exchange && (
-                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border
-                      ${s.exchange === 'BSE'
-                        ? 'bg-hold/10 text-hold border-hold/20'
-                        : 'bg-buy/10 text-buy border-buy/20'}`}>
+                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${exchangeTone(s.exchange)}`}>
                       {s.exchange}
                     </span>
                   )}

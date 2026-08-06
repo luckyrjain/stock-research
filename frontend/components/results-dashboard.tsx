@@ -5,7 +5,8 @@ import type { MfHoldingsStakeDelta, Report, StockInfo } from '@/types';
 import InfoTooltip from './info-tooltip';
 import WatchlistButton from './watchlist-button';
 import { Card, MetricRow, ExchangeTable, RangeBar } from './dashboard-primitives';
-import { fmt, fmtCr, fmtVolume, fmtRatio, formatAge, formatDataAge, oldestDataFreshness, DATA_FRESHNESS_LABELS, humanizeMetaKey, formatMetaValue, normalizeRatioKey, safeExternalHref } from './dashboard-format';
+import { fmt, fmtCr, fmtVolume, fmtRatio, formatAge, formatDataAge, oldestDataFreshness, DATA_FRESHNESS_LABELS, humanizeMetaKey, formatMetaValue, normalizeRatioKey, safeExternalHref } from '@/lib/format';
+import { REC_CONFIG_3TIER, CONFIDENCE_TONE, SENTIMENT_TONE, valuationTone, exchangeTone } from '@/lib/tone';
 import { usePeerComparison, PeerTable, SimilarStocksRail } from './peer-comparison-card';
 import { useFinancials, FinancialStatementsCard, ConcallsCard } from './financial-statements-card';
 import { InsiderActivityCard } from './insider-activity-card';
@@ -24,28 +25,9 @@ interface Props {
 type FactorValue = string | number | null | undefined;
 type FactorShape = string | Record<string, FactorValue>;
 
-// `badge` is the solid-fill verdict pill in the hero. Its text is `text-bg`
-// (the near-black #0b1120), not white: against these deliberately bright
-// fills, white measures 1.85:1 on buy and 2.03:1 on hold — failing even the
-// 3:1 WCAG bar for large text, on the single most prominent element in the
-// product. Dark text measures 10.2:1 / 9.3:1 / 5.1:1 on buy / hold / sell.
-// Applied to all three (not just the two that failed) so the verdict pill
-// reads consistently rather than flipping ink colour by outcome.
-// `text`/`bg`/`border` below are the tinted variants over a dark surface and
-// are unaffected — text-buy on card is 8.7:1.
-const REC_CONFIG = {
-  BUY:  { bg: 'bg-buy/10',  border: 'border-buy/30',  text: 'text-buy',  badge: 'bg-buy  text-bg', strip: 'bg-buy'  },
-  SELL: { bg: 'bg-sell/10', border: 'border-sell/30', text: 'text-sell', badge: 'bg-sell text-bg', strip: 'bg-sell' },
-  HOLD: { bg: 'bg-hold/10', border: 'border-hold/30', text: 'text-hold', badge: 'bg-hold text-bg', strip: 'bg-hold' },
-};
-
-const CONF_COLOR: Record<string, string> = {
-  HIGH: 'text-buy', MEDIUM: 'text-hold', LOW: 'text-sell',
-};
-
-const SENT_COLOR: Record<string, string> = {
-  Positive: 'text-buy', Neutral: 'text-muted', Negative: 'text-sell',
-};
+const REC_CONFIG = REC_CONFIG_3TIER;
+const CONF_COLOR = CONFIDENCE_TONE;
+const SENT_COLOR = SENTIMENT_TONE;
 
 function formatScalar(value: FactorValue) {
   if (value == null || value === '') return null;
@@ -104,7 +86,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
   }, [peers]);
 
   // The true bottleneck on "how fresh is everything on this page" — see
-  // dashboard-format.ts::oldestDataFreshness. report.generated_at alone
+  // lib/format.ts::oldestDataFreshness. report.generated_at alone
   // (rendered below as formatAge) is stamped fresh on every report
   // assembly regardless of whether anything was actually refetched, so a
   // long-TTL task (shareholding/mf_holdings, 168h) could otherwise read as
@@ -169,11 +151,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                   dual-listed stock isn't either one, so it falls back to a
                   neutral tone rather than reusing accent as a data label. */}
               <span className={`text-[11px] font-mono font-semibold px-2 py-0.5 rounded border ${
-                exchangeQuotes.length > 1
-                  ? 'bg-surface text-muted border-border'
-                  : (s?.exchange ?? 'NSE') === 'BSE'
-                    ? 'bg-hold/10 text-hold border-hold/20'
-                    : 'bg-buy/10 text-buy border-buy/20'
+                exchangeQuotes.length > 1 ? 'bg-surface text-muted border-border' : exchangeTone(s?.exchange ?? 'NSE')
               }`}>
                 {exchangeQuotes.length > 1 ? 'NSE + BSE' : (s?.exchange ?? 'NSE')}
               </span>
@@ -406,18 +384,12 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
             <Card title="Valuation">
               {!report.degraded && a?.valuation && (
                 <>
-                  <p className={`text-sm font-semibold mb-1 ${
-                    a.valuation.verdict === 'Undervalued' ? 'text-buy' :
-                    a.valuation.verdict === 'Overvalued'  ? 'text-sell' : 'text-hold'
-                  }`}>{a.valuation.verdict}</p>
+                  <p className={`text-sm font-semibold mb-1 ${valuationTone(a.valuation.verdict)}`}>{a.valuation.verdict}</p>
                   <p className="text-sm text-muted leading-relaxed">{a.valuation.comment}</p>
                 </>
               )}
               {financials?.dcf && (
-                <div className={`mt-3 pt-3 border-t border-border text-xs ${
-                  financials.dcf.verdict === 'Undervalued' ? 'text-buy' :
-                  financials.dcf.verdict === 'Overvalued'  ? 'text-sell' : 'text-hold'
-                }`}>
+                <div className={`mt-3 pt-3 border-t border-border text-xs ${valuationTone(financials.dcf.verdict)}`}>
                   <div className="flex items-center gap-1.5 mb-1">
                     <span className="font-semibold">DCF Estimate: {financials.dcf.verdict}</span>
                     <InfoTooltip title="DCF Estimate" align="left">

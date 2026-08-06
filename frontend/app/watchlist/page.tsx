@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { useWatchlist } from '@/lib/watchlist';
 import SiteNav from '@/components/site-nav';
 import { Skeleton } from '@/components/data-table-ui';
+import { fmtPrice } from '@/lib/format';
+import { REC_TONE_4TIER, exchangeTone } from '@/lib/tone';
 import type { WatchlistCalendarEntry } from '@/types';
 
 interface LivePrice {
@@ -42,12 +44,6 @@ function useWatchlistCalendar(symbols: string[]): WatchlistCalendarEntry[] {
   return entries;
 }
 
-const REC_TONE: Record<string, string> = {
-  BUY:  'text-buy border-buy/40 bg-buy/10',
-  SELL: 'text-sell border-sell/40 bg-sell/10',
-  HOLD: 'text-hold border-hold/40 bg-hold/10',
-};
-
 // The headline fix this section exists for: watchlist_alerts.py's daily
 // digest already computes a same-day recommendation-change / price-move
 // flag and emails it once a day — previously that was the ONLY way to learn
@@ -68,7 +64,7 @@ function AlertBadges({ entry }: { entry: WatchlistCalendarEntry }) {
         </span>
       )}
       {entry.recommendation_change && (
-        <span className={`px-2 py-0.5 rounded-full border font-semibold ${REC_TONE[entry.recommendation_change.new_recommendation] ?? 'text-tx border-border bg-surface'}`}>
+        <span className={`px-2 py-0.5 rounded-full border font-semibold ${REC_TONE_4TIER[entry.recommendation_change.new_recommendation] ?? 'text-tx border-border bg-surface'}`}>
           {entry.recommendation_change.old_recommendation ?? '—'} → {entry.recommendation_change.new_recommendation}
         </span>
       )}
@@ -240,17 +236,13 @@ export default function WatchlistPage() {
                           </span>
                         </td>
                         <td className="px-4 py-4">
-                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
-                            item.exchange === 'BSE'
-                              ? 'text-hold border-hold/20 bg-hold/10'
-                              : 'text-buy border-buy/20 bg-buy/10'
-                          }`}>
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${exchangeTone(item.exchange)}`}>
                             {item.exchange}
                           </span>
                         </td>
                         <td className="px-4 py-4 text-right">
                           <span className="font-mono tabular-nums text-xs text-tx">
-                            {live?.price != null ? `₹${live.price.toFixed(2)}` : '—'}
+                            {fmtPrice(live?.price)}
                           </span>
                         </td>
                         <td className="px-4 py-4 text-right">

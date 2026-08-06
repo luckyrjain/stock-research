@@ -4,20 +4,12 @@ import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { usePositions, type Position } from '@/lib/positions';
 import SiteNav from '@/components/site-nav';
+import { Skeleton } from '@/components/data-table-ui';
+import { fmtPrice, fmtChangePct as fmtPct } from '@/lib/format';
 
 interface LivePrice {
   price: number;
   change_pct: number | null;
-}
-
-function fmtPrice(n: number | null): string {
-  if (n == null) return '—';
-  return `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
-}
-
-function fmtPct(n: number | null): string {
-  if (n == null) return '—';
-  return `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`;
 }
 
 function pnlColor(n: number | null): string {
@@ -197,9 +189,9 @@ export default function PortfolioPage() {
             <div className="divide-y divide-border/60">
               {Array.from({ length: 3 }).map((_, i) => (
                 <div key={i} className="px-4 py-4 flex items-center gap-4">
-                  <div className="h-4 w-16 bg-border/60 rounded animate-pulse" />
-                  <div className="h-4 w-32 bg-border/60 rounded animate-pulse" />
-                  <div className="h-4 w-16 ml-auto bg-border/60 rounded animate-pulse" />
+                  <Skeleton className="h-4 w-16" />
+                  <Skeleton className="h-4 w-32" />
+                  <Skeleton className="h-4 w-16 ml-auto" />
                 </div>
               ))}
             </div>
