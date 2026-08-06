@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { expectNoA11yViolations } from './fixtures';
 
 const USER = { id: 1, email: 'trader@example.com', tier: 'free' };
 
@@ -12,6 +13,8 @@ test.describe('Login page', () => {
 
     await expect(page.getByText('Check your email')).toBeVisible();
     await expect(page.getByText('trader@example.com')).toBeVisible();
+    // ENF-03 (design.md §19): landmark/label/contrast/heading-order gate.
+    await expectNoA11yViolations(page);
   });
 
   test('shows an error message when the request fails', async ({ page }) => {

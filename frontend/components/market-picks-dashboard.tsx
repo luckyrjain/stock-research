@@ -484,11 +484,14 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
       {/* ── Header ── */}
       <div className="flex items-start justify-between mb-5 gap-4">
         <div>
-          <h2 className="text-xl font-black text-tx tracking-tight">
+          {/* PAGE-03 (design.md): one <h1> per page — the idle hero's own
+              <h1> (market-picks/page.tsx) unmounts once results are showing,
+              so this becomes the page's only heading at that point. */}
+          <h1 className="text-xl font-black text-tx tracking-tight">
             {isFiltered
               ? <>{displayed.length} <span className="text-muted font-normal text-base">of {picks.length} stocks</span></>
               : <>{picks.length} stocks found this week</>}
-          </h2>
+          </h1>
           <div className="flex items-center gap-2.5 mt-1 flex-wrap">
             <p className="text-xs text-muted">
               {fromCache ? 'Cached · ' : 'Last scan: '}{genDate}

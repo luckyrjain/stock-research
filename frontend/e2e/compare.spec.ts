@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { sseAnalysisBody, SSE_HEADERS } from './fixtures';
+import { sseAnalysisBody, SSE_HEADERS, expectNoA11yViolations } from './fixtures';
 
 function mockAddOnCards(page: import('@playwright/test').Page, symbol: string) {
   return Promise.all([
@@ -44,6 +44,8 @@ test.describe('Compare page', () => {
     await expect(page.getByText('BUY', { exact: true }).first()).toBeVisible();
     await expect(page.getByRole('link', { name: 'TCS' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'INFY' })).toBeVisible();
+    // ENF-03 (design.md §19): landmark/label/contrast/heading-order gate.
+    await expectNoA11yViolations(page);
   });
 
   test('caps input at two symbols and normalizes casing', async ({ page }) => {

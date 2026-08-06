@@ -27,8 +27,12 @@ export default function LoginPage() {
   return (
     <main className="min-h-screen bg-bg text-tx flex items-center justify-center px-4">
       <div className="w-full max-w-sm">
-        <Link href="/" className="block text-center mb-8 text-xl font-black tracking-tight text-tx">
-          Alpha<span className="text-accent">Pulse</span>
+        <Link href="/" className="block text-center mb-8">
+          {/* PAGE-03 (design.md): one <h1> per page — this wordmark IS the
+              page's title here, same role the home hero's own <h1> plays. */}
+          <h1 className="text-xl font-black tracking-tight text-tx">
+            Alpha<span className="text-accent">Pulse</span>
+          </h1>
         </Link>
 
         {status === 'sent' ? (
