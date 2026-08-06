@@ -113,9 +113,15 @@ re-measuring both.
   MUST be able to click it — the one exception is the EMA20 chart line, which is legend-labelled.
   Where an "attention, but not good/bad" tone is needed on data, `hold` is used
   (`results-dashboard.tsx` marks elevated volume `text-hold`, with a comment saying exactly this).
-- **COLOR-03** — Tinted-surface opacity comes from the ladder only: fill `/5 /8 /10 /12 /20 /30`,
-  border `/15 /20 /25 /30 /40`. Off-ladder values (`/7`, `/35`) are rejected — arbitrary steps are
-  invisible individually and incoherent in aggregate.
+- **COLOR-03** — Tinted-surface opacity comes from the ladder only: fill `/5 /8 /10 /12 /15 /20
+  /30`, border `/15 /20 /25 /30 /40`. Off-ladder values (`/7`, `/35`) are rejected — arbitrary
+  steps are invisible individually and incoherent in aggregate. `/15` fill is the active-state tint
+  on chips, badges, and step circles (`FilterChip`, `SourcesPopover`'s type badge, the Market Picks
+  progress stepper) — common enough to be its own rung, not an off-ladder value. Two categories
+  outside the ladder's scope entirely, not exceptions to it: a `hover:` opacity that darkens/lightens
+  an already-solid fill on interaction (a state transition, not a base tint), and a thin progress/
+  connector line's own fill (`h-px` stepper connectors, chart strokes) — governed by §7's
+  signal-toned-fill convention, not this one.
 - **COLOR-04** — `sell` and `accent` were lightened in Revision 2 so every token clears AA on every
   surface. Hue and saturation held exactly; only HSL lightness moved, by 5 and 4 points.
 

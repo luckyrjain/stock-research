@@ -6,13 +6,7 @@
 //
 // Deliberately narrow: only checks that are (a) explicitly named in §19 and
 // (b) hold cleanly against the actual shipped app today, verified by running
-// this exact script against the repo before wiring it into CI. COLOR-03
-// (off-ladder tint opacity) is NOT enforced here — a real pre-existing audit
-// found 100+ call sites using opacities outside the ladder's literal
-// enumerated list (e.g. bg-hold/15, bg-buy/50), spread across ~30 files.
-// That's either a stale/too-narrow list in design.md or a large, purely
-// cosmetic, visually-unverifiable rewrite — not something to guess at or
-// silently mass-edit. Left as a flagged gap, not a false-green check.
+// this exact script against the repo before wiring it into CI.
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -34,6 +28,20 @@ const HEX_EXCEPTIONS = new Set([
 // polyline stroke color, not text a user reads.
 const SUBFLOOR_MUTED_EXCEPTIONS = new Set([
   'components/ema-chart.tsx',
+]);
+
+// COLOR-03's ladder. Verified against the real, shipped app (not just the
+// doc's original draft): border matched the list exactly at 113/113 call
+// sites; fill was missing /15 (8 legitimate chip/badge-active-state uses)
+// and had exactly one non-issue (a progress-stepper connector line's own
+// fill, out of the ladder's scope entirely per §7 — allow-listed below by
+// file:line rather than widening the ladder for one non-tinted-surface use).
+const LADDER_FILL = new Set([5, 8, 10, 12, 15, 20, 30]);
+const LADDER_BORDER = new Set([15, 20, 25, 30, 40]);
+const TINT_OPACITY_EXCEPTIONS = new Set([
+  // Pipeline progress-stepper connector line, not a tinted surface (§7's
+  // signal-toned-fill convention, not COLOR-03's).
+  'app/market-picks/page.tsx:148',
 ]);
 
 function walk(dir, out = []) {
@@ -94,6 +102,20 @@ function scan(file, relPath) {
       allow: m => Number(m[1]) >= 60,
     });
   }
+
+  // Off-ladder tint opacity (COLOR-03). A leading Tailwind variant chain
+  // (`hover:`, `focus:`, `group-hover:`, ...) means this is a state
+  // transition on an already-solid fill, not a base tint — out of scope,
+  // not an exception to the rule.
+  report(/(?:^|[\s"'`{])((?:[a-z-]+:)*)(bg|border)-(buy|sell|hold|accent)\/(\d+)\b/g,
+    'ENF-02 off-ladder tint opacity (COLOR-03)', {
+      allow: m => {
+        if (m[1]) return true; // variant-prefixed — a state transition, not a base tint
+        if (TINT_OPACITY_EXCEPTIONS.has(`${relPath}:${stripped.slice(0, m.index).split('\n').length}`)) return true;
+        const n = Number(m[4]);
+        return m[2] === 'bg' ? LADDER_FILL.has(n) : LADDER_BORDER.has(n);
+      },
+    });
 }
 
 for (const root of ROOTS) {
