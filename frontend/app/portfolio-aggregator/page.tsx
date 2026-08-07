@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, type ReactNode } from 'react';
+import { useEffect, useState, useCallback, useRef, type ReactNode } from 'react';
 import Link from 'next/link';
 import PageShell from '@/components/page-shell';
 import { Skeleton } from '@/components/data-table-ui';
@@ -59,7 +59,8 @@ function fmtInr(n: number): string {
 // a small, fixed, enumerable set of literal strings this file itself
 // produces; every caught exception message or backend-supplied error string
 // (last_sync_error, e.message) is an error by default — which is correct at
-// every call site, since those only ever get set inside a catch block.
+// every call site: those strings only ever come from a caught exception or
+// a backend-reported sync failure, never a success path.
 function msgTone(m: string): 'success' | 'neutral' | 'error' {
   if (m === 'Connected.' || m === 'Syncing…' || m.startsWith('Synced ') || m.startsWith('Valued ')) return 'success';
   if (m.startsWith('Enter ')) return 'neutral';
@@ -357,6 +358,12 @@ function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
   // identity changes, so a stale in-progress login from a different
   // account/connection can never bleed into this one.
   const [otpRequired, setOtpRequired] = useState(false);
+  // Guards the completion-refresh below against firing more than once per
+  // sync: `onPoll` (the 2s-interval poller while syncing) only refetches
+  // `connections` to stay under the read-rate-limit, so a real refresh()
+  // must run once when the job finishes — but connections' own object
+  // identity changes on every unrelated refresh too, not just this one.
+  const handledSyncRef = useRef<string | null>(null);
   const [otp, setOtp] = useState('');
 
   useEffect(() => {
@@ -455,11 +462,22 @@ function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
       const archived = r.holdings_archived ? `, ${r.holdings_archived} archived` : '';
       setMsg(`Synced ${r.holdings_synced} holdings, ${r.trades_synced} trades${archived}.`);
       setBusy(false);
+      // The lightweight onPoll used while syncing only refetches
+      // `connections` (rate-limit reasons — see onPoll's own comment) —
+      // accounts/assets/net-worth are still whatever they were before this
+      // sync started until a real refresh runs. `last_synced_at` is a
+      // stable per-sync key, so this only fires once per completed sync,
+      // not on every later unrelated refresh that also touches `connection`.
+      const key = `${connection.id}:${connection.last_synced_at}`;
+      if (handledSyncRef.current !== key) {
+        handledSyncRef.current = key;
+        onSynced();
+      }
     } else if (connection?.sync_status === 'error' && connection.last_sync_error) {
       setMsg(connection.last_sync_error);
       setBusy(false);
     }
-  }, [connection?.sync_status, connection?.last_sync_summary, connection?.last_sync_error]);
+  }, [connection?.sync_status, connection?.last_sync_summary, connection?.last_sync_error, connection?.id, connection?.last_synced_at, onSynced]);
 
   const syncing = busy || connection?.sync_status === 'syncing';
 
@@ -568,6 +586,9 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
   const [showCreds, setShowCreds] = useState(!connection);
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
+  // Guards the completion-refresh below against firing more than once per
+  // sync — see HdfcBrokerRow's identical ref for the full reasoning.
+  const handledSyncRef = useRef<string | null>(null);
 
   async function connect() {
     setBusy(true);
@@ -618,10 +639,14 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
     }
   }
 
-  // Polls the parent's connections list (via onSynced, the same refetch
-  // every other mutation here already triggers) while a background sync is
-  // in flight, so "Syncing…" actually clears once the job finishes —
-  // stops itself the moment sync_status leaves "syncing".
+  // Polls the parent's connections list via the lightweight `onPoll`
+  // (connections only, not a full refresh() — that blew through the
+  // portfolio_agg_read rate limit at 2s intervals, see pollConnections'
+  // own comment) while a background sync is in flight, so "Syncing…"
+  // actually clears once the job finishes — stops itself the moment
+  // sync_status leaves "syncing". The status-resolution effect below
+  // runs one real refresh() when the job completes, since polling alone
+  // never touches accounts/assets/net-worth.
   useEffect(() => {
     if (connection?.sync_status !== 'syncing') return;
     const id = setInterval(onPoll, 2000);
@@ -634,11 +659,19 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
       const archived = r.holdings_archived ? `, ${r.holdings_archived} archived` : '';
       setMsg(`Synced ${r.holdings_synced} holdings, ${r.trades_synced} trades${archived}.`);
       setBusy(false);
+      // See HdfcBrokerRow's identical effect for why this is needed: onPoll
+      // only refetches `connections` while syncing, so a real refresh has
+      // to run once here or accounts/assets/net-worth stay stale.
+      const key = `${connection.id}:${connection.last_synced_at}`;
+      if (handledSyncRef.current !== key) {
+        handledSyncRef.current = key;
+        onSynced();
+      }
     } else if (connection?.sync_status === 'error' && connection.last_sync_error) {
       setMsg(connection.last_sync_error);
       setBusy(false);
     }
-  }, [connection?.sync_status, connection?.last_sync_summary, connection?.last_sync_error]);
+  }, [connection?.sync_status, connection?.last_sync_summary, connection?.last_sync_error, connection?.id, connection?.last_synced_at, onSynced]);
 
   const syncing = busy || connection?.sync_status === 'syncing';
 
@@ -1019,10 +1052,12 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
   // rendered as "No accounts yet" / an empty net-worth card.
   const [accountsError, setAccountsError] = useState<string | null>(null);
   const [networthError, setNetworthError] = useState<string | null>(null);
+  const [connectionsError, setConnectionsError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     setAccountsError(null);
     setNetworthError(null);
+    setConnectionsError(null);
     api<{ accounts: PortfolioAccount[] }>(`accounts?profile_id=${profile.id}`).then(async d => {
       setAccounts(d.accounts);
       const entries = await Promise.all(
@@ -1034,9 +1069,12 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
     api<PortfolioNetWorth>(`networth?profile_id=${profile.id}`).then(setNetworth)
       .catch(e => setNetworthError(e instanceof Error ? e.message : 'Could not load your net worth.'))
       .finally(() => setNetWorthLoaded(true));
+    // A failure here must not render identically to "no broker connected"
+    // (design.md §17 state 4) — same class of bug as accounts/networth
+    // above, just one that a prior audit pass over this file missed.
     api<{ connections: BrokerConnection[] }>(`broker/connections?profile_id=${profile.id}`)
       .then(d => setConnections(d.connections))
-      .catch(() => setConnections([]));
+      .catch(e => setConnectionsError(e instanceof Error ? e.message : 'Could not load your broker connections.'));
   }, [profile.id]);
 
   // Lighter than refresh() — used by the 2s sync-status poll below, which
@@ -1048,7 +1086,12 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
   const pollConnections = useCallback(() => {
     api<{ connections: BrokerConnection[] }>(`broker/connections?profile_id=${profile.id}`)
       .then(d => setConnections(d.connections))
-      .catch(() => setConnections([]));
+      .catch(() => {
+        // Keeps the last good connections list rather than wiping it to []
+        // (STATE-01) — this fires every 2s while a sync is active, so a
+        // transient blip shouldn't make "Connected"/sync status disappear;
+        // it'll self-heal on the next successful tick.
+      });
   }, [profile.id]);
 
   useEffect(refresh, [refresh]);
@@ -1159,10 +1202,10 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
         <div className="mb-4"><AddAccountForm profileId={profile.id} onAdded={() => { refresh(); setShowAddAccount(false); }} /></div>
       )}
 
-      {accountsError && (
+      {(accountsError || connectionsError) && (
         <div className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-3
                         flex items-start justify-between gap-4">
-          <span>{accountsError}</span>
+          <span>{accountsError || connectionsError}</span>
           <button onClick={refresh} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
                                                  border border-sell/40 hover:bg-sell/10 transition-colors">
             Retry

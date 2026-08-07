@@ -13,7 +13,7 @@ function initStatus(): Record<TaskName, TaskStatus> {
 // The per-symbol SSE analysis pipeline (open EventSource, track task-by-task
 // progress, land on a done/error phase), extracted from the home page so
 // /compare can run one of these per column without duplicating the state
-// machine. Behavior is unchanged from the original home-page implementation.
+// machine, plus STATE-01 background-refresh support (see `refreshing` below).
 export function useStockAnalysis() {
   const { showError } = useToast();
   const [phase, setPhase]                 = useState<Phase>('idle');

@@ -278,7 +278,9 @@ fits", which produced five widths across twelve pages and could not be enforced.
 - **PAGE-01** — A page MUST use one of the three widths with `mx-auto px-4 pt-8 pb-16`.
   `max-w-4xl` and `max-w-2xl` are retired *as page containers*; the home idle block keeps
   `max-w-2xl` as a nested measure constraint, which is a different thing and stays legal.
-  `/compare` remains the one unconstrained page (§9).
+  `/compare` is the one exception, at a wider fourth `PageShell` tier (`max-w-[1600px]`, see
+  **PAGE-04**) rather than one of the three above — it renders two full side-by-side
+  `ResultsDashboard`s and needs the extra room the standard tiers don't give it.
 - **PAGE-02** — Every page MUST render the same shell: skip link → `<SiteNav>` inside `<header>` →
   exactly one `<main id="main">` → the global `<footer>` disclaimer. This lives in a `PageShell`
   component so it cannot be got wrong; it delivers A11Y-12 and A11Y-13 for free.
@@ -430,8 +432,8 @@ There is no `<Button>` component. Four shipped shapes:
 
 **Primary CTA** (`ticker-search.tsx`, the only one) — `rounded-xl font-semibold tracking-wide
 bg-accent text-bg hover:opacity-90 active:scale-[.98] transition-all duration-150
-disabled:opacity-30 disabled:cursor-not-allowed disabled:shadow-none shadow-accent
-hover:shadow-accent-lg`, sized `px-10 py-3.5 text-[15px]` or `px-7 py-2.5 text-sm` (compact). The
+disabled:opacity-30 disabled:cursor-not-allowed disabled:shadow-none shadow-accent-glow
+hover:shadow-accent-glow-lg`, sized `px-10 py-3.5 text-[15px]` or `px-7 py-2.5 text-sm` (compact). The
 glow is tokenised under `boxShadow` — a Tailwind arbitrary value can't read `theme.colors.accent`,
 which is exactly how the original rotted unnoticed (§12.1).
 
@@ -869,7 +871,7 @@ Real inconsistencies in the shipped code, listed so they aren't mistaken for pre
 
 1. ~~**Stale raw hex in the primary CTA.**~~ **Fixed.** `ticker-search.tsx` hardcoded
    `#6c71f040`/`#6c71f060` — a retired accent — so the app's one primary CTA glowed in a dead brand
-   colour. Now `shadow-accent` / `hover:shadow-accent-lg`, tokenised under `boxShadow`.
+   colour. Now `shadow-accent-glow` / `hover:shadow-accent-glow-lg`, tokenised under `boxShadow`.
 2. ~~**No global focus indicator.**~~ **Fixed.** See §10.
 3. ~~**`muted` fails AA; white-on-solid-fill text fails contrast.**~~ **Fixed.** `muted` raised
    `#6b7fa8` → `#8093bd`; every solid tone fill moved from `text-white` to `text-bg`.
@@ -924,8 +926,8 @@ surface from the page, and does nothing else.
 - **SHADOW-02** — Floating surfaces use exactly one of: `shadow-lg` (dropdown menus);
   `shadow-2xl shadow-black/60` (popovers, modal panel, toasts); `shadow-lg shadow-black/40`
   (chart hover tooltips).
-- **SHADOW-03** — Colored shadow is reserved for the primary CTA glow (`shadow-accent` /
-  `hover:shadow-accent-lg`). No other element MAY glow. Signal-toned glows (`shadow-buy`,
+- **SHADOW-03** — Colored shadow is reserved for the primary CTA glow (`shadow-accent-glow` /
+  `hover:shadow-accent-glow-lg`). No other element MAY glow. Signal-toned glows (`shadow-buy`,
   `shadow-sell`) are forbidden: a glowing row implies urgency the data doesn't support.
 
 ---
@@ -1048,8 +1050,10 @@ document, with no new runtime dependency.
   values (**COLOR-05**), `text-white`, `dark:`, `motion-reduce:`, `focus:outline-none`, and
   z-indexes outside §13.
 - **ENF-03** — An axe pass in the existing Playwright suite, one per route, failing on landmark,
-  label, contrast, and heading-order violations. The only mechanism that keeps A11Y-11…17 from
-  re-entering a NOT IMPLEMENTED list.
+  label, and heading-order violations (`ENF_03_RULES` in `e2e/fixtures.ts`). `color-contrast` is
+  deliberately excluded from the scanned rule set — contrast is a design-token property, checked
+  once at the palette level (**COLOR-05**), not per-render. The only mechanism that keeps
+  A11Y-11…17 from re-entering a NOT IMPLEMENTED list.
 - **ENF-04** — A unit test asserting the exported tone maps (**SRC-01**) equal the strings in §2,
   so a color change has to be a deliberate two-file edit.
 

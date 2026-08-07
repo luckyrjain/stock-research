@@ -38,10 +38,14 @@ const SUBFLOOR_MUTED_EXCEPTIONS = new Set([
 // file:line rather than widening the ladder for one non-tinted-surface use).
 const LADDER_FILL = new Set([5, 8, 10, 12, 15, 20, 30]);
 const LADDER_BORDER = new Set([15, 20, 25, 30, 40]);
+// Keyed by file + the exact class token, not file:line — a line-number key
+// drifted stale within one PR (a comment added above it shifted the line by
+// one, and nothing re-ran the lint script before merging) and silently broke
+// this exception. Content-based is what actually needs to stay in sync.
 const TINT_OPACITY_EXCEPTIONS = new Set([
   // Pipeline progress-stepper connector line, not a tinted surface (§7's
   // signal-toned-fill convention, not COLOR-03's).
-  'app/market-picks/page.tsx:148',
+  'app/market-picks/page.tsx:bg-buy/50',
 ]);
 
 function walk(dir, out = []) {
@@ -111,7 +115,7 @@ function scan(file, relPath) {
     'ENF-02 off-ladder tint opacity (COLOR-03)', {
       allow: m => {
         if (m[1]) return true; // variant-prefixed — a state transition, not a base tint
-        if (TINT_OPACITY_EXCEPTIONS.has(`${relPath}:${stripped.slice(0, m.index).split('\n').length}`)) return true;
+        if (TINT_OPACITY_EXCEPTIONS.has(`${relPath}:${m[2]}-${m[3]}/${m[4]}`)) return true;
         const n = Number(m[4]);
         return m[2] === 'bg' ? LADDER_FILL.has(n) : LADDER_BORDER.has(n);
       },
