@@ -1575,9 +1575,36 @@ async def get_shareholding_breakdown(request: Request, symbol: str):
             # cached fact.
             return {"unavailable": False, **{k: v for k, v in cached.items() if k != "_meta"}}
 
-        from tools.nse_tools import get_shareholding_detail as _fetch
+        from tools.nse_tools import _NO_SHAREHOLDING_RECORDS_MSG
+        from tools.nse_tools import get_shareholding_detail as _fetch_nse
 
-        raw = json.loads(_fetch.run(symbol=sym))
+        raw = json.loads(_fetch_nse.run(symbol=sym))
+        # _NO_SHAREHOLDING_RECORDS_MSG is the ONE specific error
+        # tools.nse_tools._fetch_shareholding_xbrl raises when NSE's own
+        # master endpoint returns zero records — a BSE-only stock (not
+        # NSE-listed at all) always hits exactly this, and it is not a
+        # transient failure, so it's worth trying BSE's own filing before
+        # giving up (see tools/bse_shareholding.py's module docstring).
+        # Deliberately NOT triggered by any other NSE error (a network
+        # blip, a malformed XBRL doc, etc.) — those are worth a plain
+        # retry on an NSE-listed stock, not an extra live BSE round-trip.
+        if raw.get("error") == _NO_SHAREHOLDING_RECORDS_MSG:
+            # Only attempted when the securities master actually resolves
+            # this symbol to a BSE scrip code — never guessed from the
+            # symbol string itself.
+            from tools import bse_shareholding
+            from tools.securities_master import get_full_securities_master
+
+            bse_row = next(
+                (s for s in get_full_securities_master(_get_db_engine())
+                 if s.get("exchange") == "BSE" and s.get("symbol") == sym and s.get("code")),
+                None,
+            )
+            if bse_row:
+                raw = json.loads(bse_shareholding.get_shareholding_detail(bse_row["code"]))
+                if not raw.get("error"):
+                    raw["symbol"] = sym  # BSE's own payload carries the scrip code, not the trading symbol
+
         if raw.get("error"):
             # Not cached — same "retry on next request, don't lock a
             # transient failure in for the full TTL" convention as

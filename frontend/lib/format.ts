@@ -1,15 +1,57 @@
-// Small, pure formatting helpers shared across several ResultsDashboard cards
-// (and, for safeExternalHref below, market-picks-dashboard.tsx too — the
-// same link-safety concern isn't specific to one dashboard). Anything used
-// by only one card lives with that card instead (see e.g.
-// insider-activity-card.tsx's fmtActivityDate, street-consensus-card.tsx's
-// fmtConsensusDate).
+// Canonical number/currency/date formatting module (SRC-01, design.md §16) —
+// components MUST import from here rather than calling toFixed/toLocaleString
+// directly. Anything used by only one card still lives with that card instead
+// (see e.g. insider-activity-card.tsx's fmtActivityDate, street-consensus-
+// card.tsx's fmtConsensusDate) — this module is for values rendered in more
+// than one place, or that the §16 table names explicitly.
 
 import type { DataFreshness } from '@/types';
 
 export function fmt(n: number | null | undefined, decimals = 2) {
   if (n == null) return '—';
   return n.toLocaleString('en-IN', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+
+// NUM-02: price is always 2dp, Indian grouping, no space after ₹ — whether
+// the value is ₹4.00 or ₹42,318.75. Precision is fixed per value type, never
+// per value, so columns stay aligned.
+export function fmtPrice(n: number | null | undefined): string {
+  if (n == null) return '—';
+  return `₹${fmt(n, 2)}`;
+}
+
+// NUM-03: sign always shown, exactly zero is neutral (no sign, no tone) —
+// the caller applies text-buy/text-sell/text-muted based on the same sign
+// check. Minus is U+2212 (−), not a hyphen, so it aligns in `font-mono`.
+export function fmtChangePct(n: number | null | undefined, decimals = 1): string {
+  if (n == null) return '—';
+  if (n === 0) return '0.0%';
+  return n > 0 ? `+${fmt(n, decimals)}%` : `−${fmt(Math.abs(n), decimals)}%`;
+}
+
+// A ratio (P/E etc.) is 1dp; negative earnings render as missing, never as a
+// negative P/E (NUM-02 table).
+export function fmtRatioNum(n: number | null | undefined): string {
+  if (n == null || n < 0) return '—';
+  return fmt(n, 1);
+}
+
+// Lakh above 1,00,000, raw with Indian grouping below (§16 Volume row).
+export function fmtVolumeLakh(n: number | null | undefined): string {
+  if (n == null) return '—';
+  if (n >= 1_00_000) return `${fmt(n / 1_00_000, 1)} L`;
+  return fmtVolume(n);
+}
+
+// Always IST, always labelled, 24h — pair with a real <time dateTime> in the
+// caller (NUM-04's "as-of time in the same visual block" applies to prices
+// specifically; this is the general-purpose renderer for any such timestamp).
+export function fmtTimestampIST(iso: string): string {
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return '—';
+  const datePart = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
+  const timePart = d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' });
+  return `${datePart}, ${timePart} IST`;
 }
 
 export function fmtCr(n: number | null | undefined) {

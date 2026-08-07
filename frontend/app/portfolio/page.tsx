@@ -3,21 +3,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { usePositions, type Position } from '@/lib/positions';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
+import { Skeleton } from '@/components/data-table-ui';
+import { fmtPrice, fmtChangePct as fmtPct } from '@/lib/format';
 
 interface LivePrice {
   price: number;
   change_pct: number | null;
-}
-
-function fmtPrice(n: number | null): string {
-  if (n == null) return '—';
-  return `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
-}
-
-function fmtPct(n: number | null): string {
-  if (n == null) return '—';
-  return `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`;
 }
 
 function pnlColor(n: number | null): string {
@@ -75,6 +67,10 @@ export default function PortfolioPage() {
   const { positions, loading, removePosition, updateShares } = usePositions();
   const [prices, setPrices] = useState<Record<string, LivePrice>>({});
   const [sortDesc, setSortDesc] = useState(true);
+  // Stale/degraded (state 5, design.md §17): a poll that's been failing
+  // must not render identically to one that's fresh.
+  const [pricesUpdatedAt, setPricesUpdatedAt] = useState<Date | null>(null);
+  const [pricesStale, setPricesStale] = useState(false);
 
   const symbolsKey = positions.map(p => p.symbol).join(',');
 
@@ -85,11 +81,18 @@ export default function PortfolioPage() {
     const fetchPrices = async () => {
       try {
         const res = await fetch(`/api/prices?symbols=${encodeURIComponent(symbolsKey)}`);
-        if (!res.ok) return;
+        if (!res.ok) { if (!cancelled) setPricesStale(true); return; }
         const data = await res.json() as { prices: Record<string, LivePrice> };
-        if (!cancelled) setPrices(data.prices);
+        if (!cancelled) {
+          setPrices(data.prices);
+          setPricesUpdatedAt(new Date());
+          setPricesStale(false);
+        }
       } catch {
-        // silently ignore — stale/missing price is fine, same convention as PositionsStrip
+        // silently ignore in state — same convention as PositionsStrip —
+        // but still mark the on-screen prices stale rather than leaving
+        // them looking fresh indefinitely.
+        if (!cancelled) setPricesStale(true);
       }
     };
 
@@ -170,10 +173,7 @@ export default function PortfolioPage() {
   const totalPnlPct = pricedInvested > 0 ? (totalPnl / pricedInvested) * 100 : null;
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-4xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav active="portfolio" wrap />
+    <PageShell active="portfolio" wrap maxWidth="max-w-5xl">
 
         {/* Header */}
         <div className="mb-8 animate-fade-up">
@@ -193,13 +193,13 @@ export default function PortfolioPage() {
         </div>
 
         {loading ? (
-          <div className="rounded-xl border border-border overflow-hidden">
+          <div className="rounded-xl border border-border overflow-hidden" aria-busy="true">
             <div className="divide-y divide-border/60">
               {Array.from({ length: 3 }).map((_, i) => (
                 <div key={i} className="px-4 py-4 flex items-center gap-4">
-                  <div className="h-4 w-16 bg-border/60 rounded animate-pulse" />
-                  <div className="h-4 w-32 bg-border/60 rounded animate-pulse" />
-                  <div className="h-4 w-16 ml-auto bg-border/60 rounded animate-pulse" />
+                  <Skeleton className="h-4 w-16" />
+                  <Skeleton className="h-4 w-32" />
+                  <Skeleton className="h-4 w-16 ml-auto" />
                 </div>
               ))}
             </div>
@@ -215,6 +215,21 @@ export default function PortfolioPage() {
           </div>
         ) : (
           <>
+            {pricesUpdatedAt && (
+              <div className="flex justify-end mb-2">
+                {pricesStale ? (
+                  <span className="flex items-center gap-1 text-[10px] text-hold/80" title="The live-price refresh has been failing — prices below may be outdated">
+                    <span className="w-1.5 h-1.5 rounded-full bg-hold inline-block" />
+                    Prices may be outdated · last updated {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-[10px] text-buy/70">
+                    <span className="w-1.5 h-1.5 rounded-full bg-buy animate-pulse inline-block" />
+                    LTP {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                  </span>
+                )}
+              </div>
+            )}
             {/* Aggregate stats */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
               <div className="rounded-xl border border-border bg-card px-4 py-3">
@@ -239,7 +254,7 @@ export default function PortfolioPage() {
                 <div className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1">At Target / Stop</div>
                 <div className="text-xl font-black text-tx">
                   <span className="text-buy">{atTargetCount}</span>
-                  <span className="text-muted/40 mx-0.5">/</span>
+                  <span className="text-muted/60 mx-0.5">/</span>
                   <span className="text-sell">{atStopCount}</span>
                 </div>
               </div>
@@ -315,11 +330,11 @@ export default function PortfolioPage() {
             )}
 
             {/* Table */}
-            <div className="rounded-xl border border-border bg-card overflow-hidden">
+            <div className="rounded-xl border border-border overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-border bg-surface/60">
+                    <tr className="border-b border-border bg-surface">
                       <th className="text-left px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Symbol</th>
                       <th className="text-right px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Shares</th>
                       <th className="text-right px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Entry</th>
@@ -345,13 +360,13 @@ export default function PortfolioPage() {
                   <tbody>
                     {sortedRows.map(row => (
                       <tr key={row.position.symbol} className="border-b border-border/60 last:border-0 hover:bg-surface/40 transition-colors">
-                        <td className="px-4 py-3">
+                        <td className="px-4 py-4">
                           <Link href={`/?symbol=${encodeURIComponent(row.position.symbol)}`} className="font-semibold text-tx hover:text-accent transition-colors">
                             {row.position.symbol}
                           </Link>
                           <div className="text-[10px] text-muted/70 truncate max-w-[10rem]">{row.position.company}</div>
                         </td>
-                        <td className="px-4 py-3 text-right">
+                        <td className="px-4 py-4 text-right">
                           <input
                             type="number"
                             min={0}
@@ -371,14 +386,14 @@ export default function PortfolioPage() {
                             className="w-16 px-1.5 py-1 rounded-md border border-border bg-surface text-tx text-xs text-right font-mono"
                           />
                         </td>
-                        <td className="px-4 py-3 text-right font-mono">{fmtPrice(row.position.entry_price)}</td>
-                        <td className="px-4 py-3 text-right font-mono">{fmtPrice(row.current)}</td>
-                        <td className="px-4 py-3 text-right font-mono text-muted">
+                        <td className="px-4 py-4 text-right font-mono">{fmtPrice(row.position.entry_price)}</td>
+                        <td className="px-4 py-4 text-right font-mono">{fmtPrice(row.current)}</td>
+                        <td className="px-4 py-4 text-right font-mono text-muted">
                           {row.currentValue != null ? fmtInr(row.currentValue) : '—'}
                         </td>
-                        <td className={`px-4 py-3 text-right font-mono font-semibold ${pnlColor(row.pnl)}`}>{fmtPct(row.pnl)}</td>
-                        <td className="px-4 py-3 text-right font-mono text-muted">{daysHeld(row.position.bought_at)}d</td>
-                        <td className="px-4 py-3">
+                        <td className={`px-4 py-4 text-right font-mono font-semibold ${pnlColor(row.pnl)}`}>{fmtPct(row.pnl)}</td>
+                        <td className="px-4 py-4 text-right font-mono text-muted">{daysHeld(row.position.bought_at)}d</td>
+                        <td className="px-4 py-4">
                           {row.atTarget ? (
                             <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border bg-buy/12 text-buy border-buy/25">
                               At target
@@ -391,13 +406,13 @@ export default function PortfolioPage() {
                             <span className="text-muted text-[10px]">Holding</span>
                           )}
                         </td>
-                        <td className="px-4 py-3">
+                        <td className="px-4 py-4">
                           <button
                             type="button"
                             onClick={() => removePosition(row.position.symbol)}
                             aria-label={`Remove ${row.position.symbol} from your positions`}
                             title="Remove from your positions"
-                            className="text-muted/50 hover:text-sell transition-colors text-sm leading-none"
+                            className="text-muted/60 hover:text-sell transition-colors text-sm leading-none"
                           >
                             ×
                           </button>
@@ -410,7 +425,6 @@ export default function PortfolioPage() {
             </div>
           </>
         )}
-      </div>
-    </main>
+    </PageShell>
   );
 }

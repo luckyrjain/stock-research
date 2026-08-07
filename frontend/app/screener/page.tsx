@@ -3,10 +3,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import type { ScreenerResponse, ScreenerStock } from '@/types';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
 import WatchlistButton from '@/components/watchlist-button';
 import SectorHeatmap from '@/components/sector-heatmap';
-import { Skeleton, FilterChip, SortableTh, fmtMarketCap } from '@/components/data-table-ui';
+import { Skeleton, FilterChip, SortableTh } from '@/components/data-table-ui';
+import { fmtCr, fmtPrice } from '@/lib/format';
 
 type EmaTrendFilter = 'all' | 'bullish' | 'bearish';
 type SortKey = 'symbol' | 'current_price' | 'pe_ratio' | 'market_cap_cr' | 'avg_volume_10d' | 'rsi14';
@@ -109,6 +110,14 @@ export default function ScreenerPage() {
   const [rsiFilter,  setRsiFilter]  = useState<RsiFilter>('all');
   const [peMax,      setPeMax]      = useState('');
   const [marketCapMin, setMarketCapMin] = useState('');
+  const isFiltered = industry !== 'all' || emaTrend !== 'all' || rsiFilter !== 'all' || peMax.trim() !== '' || marketCapMin.trim() !== '';
+  const clearFilters = useCallback(() => {
+    setIndustry('all');
+    setEmaTrend('all');
+    setRsiFilter('all');
+    setPeMax('');
+    setMarketCapMin('');
+  }, []);
   // fetchStocks fires on every change to these — debounce the text inputs
   // (same 420ms as ticker-search.tsx) so a typed value doesn't fire one
   // GET /api/screener request per keystroke against its 60/min rate limit.
@@ -156,6 +165,11 @@ export default function ScreenerPage() {
 
   const [offset, setOffset] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
+  // STATE-01 (design.md): a refetch must not replace visible content with
+  // skeletons — separate from `loading`, which still gates the skeleton for
+  // the one case that should show it (first load, nothing to keep yet).
+  // Purely a button-label/disabled concern for a manual reload.
+  const [reloading, setReloading] = useState(false);
 
   const fetchStocks = useCallback(async (opts: { silent?: boolean; targetOffset?: number; append?: boolean } = {}) => {
     const { silent = false, targetOffset = 0, append = false } = opts;
@@ -163,6 +177,7 @@ export default function ScreenerPage() {
     const ac = new AbortController();
     abortRef.current = ac;
     if (!silent && !append) setLoading(true);
+    if (silent && !append) setReloading(true);
     if (append) setLoadingMore(true);
     setError(null);
     try {
@@ -183,7 +198,10 @@ export default function ScreenerPage() {
       const json = await res.json() as ScreenerResponse & { error?: string };
       if (!res.ok) {
         setError(json.error ?? `Error ${res.status}`);
-        if (!append) setData(null);
+        // A silent (background poll / manual reload) failure keeps the last
+        // good render rather than wiping it to an error state — only the
+        // non-silent path (nothing good on screen yet) clears to null.
+        if (!append && !silent) setData(null);
       } else if (append) {
         // Appends the next page onto the already-loaded rows rather than
         // replacing them — a filter/sort change always goes through the
@@ -195,16 +213,20 @@ export default function ScreenerPage() {
     } catch (e) {
       if ((e as Error).name === 'AbortError') return;
       setError('Could not reach the backend. Is the server running?');
-      if (!append) setData(null);
+      if (!append && !silent) setData(null);
     } finally {
-      if (abortRef.current === ac) { setLoading(false); setLoadingMore(false); }
+      if (abortRef.current === ac) { setLoading(false); setLoadingMore(false); setReloading(false); }
     }
   }, [industry, emaTrend, rsiFilter, debouncedPeMax, debouncedMarketCapMin, sortKey, sortDir]);
 
   useEffect(() => {
     if (!hydrated) return;
     setOffset(0);
-    fetchStocks({ targetOffset: 0 });
+    // STATE-01 (design.md): only the very first load (nothing on screen
+    // yet) shows the skeleton — a filter/sort change while stocks are
+    // already showing keeps that table visible instead of wiping it.
+    fetchStocks({ silent: data != null, targetOffset: 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchStocks, hydrated]);
 
   const loadMore = useCallback(() => {
@@ -266,30 +288,28 @@ export default function ScreenerPage() {
     : null;
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-6xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav
-          active="screener"
-          wrap
-          right={<>
-            <button
-              onClick={startRefresh}
-              disabled={refreshing}
-              className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-accent/40 text-accent
-                         hover:bg-accent/10 transition-colors disabled:opacity-40"
-            >
-              {refreshing ? 'Refreshing data…' : '⟳ Refresh Data'}
-            </button>
-            <button
-              onClick={() => { setOffset(0); fetchStocks({ targetOffset: 0 }); }}
-              disabled={loading}
-              className="text-xs text-muted hover:text-tx transition-colors disabled:opacity-40"
-            >
-              {loading ? 'Loading…' : '↺ Reload'}
-            </button>
-          </>}
-        />
+    <PageShell
+      active="screener"
+      wrap
+      maxWidth="max-w-6xl"
+      right={<>
+        <button
+          onClick={startRefresh}
+          disabled={refreshing}
+          className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-accent/40 text-accent
+                     hover:bg-accent/10 transition-colors disabled:opacity-40"
+        >
+          {refreshing ? 'Refreshing data…' : '⟳ Refresh Data'}
+        </button>
+        <button
+          onClick={() => { setOffset(0); fetchStocks({ silent: data != null, targetOffset: 0 }); }}
+          disabled={loading || reloading}
+          className="text-xs text-muted hover:text-tx transition-colors disabled:opacity-40"
+        >
+          {loading ? 'Loading…' : reloading ? 'Reloading…' : '↺ Reload'}
+        </button>
+      </>}
+    >
 
         {/* Header */}
         <div className="mb-8 animate-fade-up">
@@ -360,11 +380,11 @@ export default function ScreenerPage() {
         </div>
 
         {/* Table */}
-        <div className="rounded-xl border border-border bg-card overflow-hidden">
+        <div className="rounded-xl border border-border overflow-hidden" aria-busy={loading}>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-border bg-surface/60">
+                <tr className="border-b border-border bg-surface">
                   <th className="w-10 px-4 py-3"></th>
                   <SortableTh label="Symbol" sortK="symbol" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
                   <th className="text-left px-4 py-3 text-[10px] font-bold text-muted uppercase tracking-wider">Company</th>
@@ -382,33 +402,40 @@ export default function ScreenerPage() {
                   <SkeletonRows />
                 ) : error ? (
                   <tr>
-                    <td colSpan={10} className="px-4 py-10 text-center text-sell text-sm">{error}</td>
+                    <td colSpan={10} className="px-4 py-12 text-center text-sell text-sm">{error}</td>
                   </tr>
                 ) : stocks.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="px-4 py-10 text-center text-muted text-sm">
+                    <td colSpan={10} className="px-4 py-12 text-center text-muted text-sm">
                       No stocks match these filters, or the screener hasn&apos;t run yet — try &quot;Refresh Data&quot;.
+                      {isFiltered && (
+                        <div>
+                          <button onClick={clearFilters} className="mt-2 text-xs text-accent hover:underline">
+                            Clear filters
+                          </button>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ) : (
                   stocks.map(s => (
                     <tr key={s.symbol} className="border-b border-border/60 last:border-0 hover:bg-surface/40 transition-colors">
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-4">
                         <WatchlistButton symbol={s.symbol} company={s.company_name ?? s.symbol} exchange={s.exchange ?? 'NSE'} size="sm" />
                       </td>
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-4">
                         <Link href={`/?symbol=${encodeURIComponent(s.symbol)}`} className="font-semibold text-tx hover:text-accent transition-colors">
                           {s.symbol}
                         </Link>
                       </td>
-                      <td className="px-4 py-3 text-muted truncate max-w-xs">{s.company_name ?? '—'}</td>
-                      <td className="px-4 py-3 text-muted/70 text-xs whitespace-nowrap">{s.sector ?? '—'}</td>
-                      <td className="px-4 py-3 text-right font-mono">{s.current_price != null ? `₹${s.current_price.toFixed(2)}` : '—'}</td>
-                      <td className="px-4 py-3 text-right font-mono">{fmtNum(s.pe_ratio)}</td>
-                      <td className="px-4 py-3 text-right font-mono">{fmtMarketCap(s.market_cap_cr)}</td>
-                      <td className="px-4 py-3 text-right font-mono">{s.avg_volume_10d != null ? s.avg_volume_10d.toLocaleString('en-IN', { maximumFractionDigits: 0 }) : '—'}</td>
-                      <td className={`px-4 py-3 text-right font-mono font-semibold ${rsiColor(s.rsi14)}`}>{fmtNum(s.rsi14)}</td>
-                      <td className="px-4 py-3"><TrendBadge trend={s.ema_trend} /></td>
+                      <td className="px-4 py-4 text-muted truncate max-w-xs">{s.company_name ?? '—'}</td>
+                      <td className="px-4 py-4 text-muted/70 text-xs whitespace-nowrap">{s.sector ?? '—'}</td>
+                      <td className="px-4 py-4 text-right font-mono">{fmtPrice(s.current_price)}</td>
+                      <td className="px-4 py-4 text-right font-mono">{fmtNum(s.pe_ratio)}</td>
+                      <td className="px-4 py-4 text-right font-mono">{fmtCr(s.market_cap_cr)}</td>
+                      <td className="px-4 py-4 text-right font-mono">{s.avg_volume_10d != null ? s.avg_volume_10d.toLocaleString('en-IN', { maximumFractionDigits: 0 }) : '—'}</td>
+                      <td className={`px-4 py-4 text-right font-mono font-semibold ${rsiColor(s.rsi14)}`}>{fmtNum(s.rsi14)}</td>
+                      <td className="px-4 py-4"><TrendBadge trend={s.ema_trend} /></td>
                     </tr>
                   ))
                 )}
@@ -434,7 +461,6 @@ export default function ScreenerPage() {
             )}
           </div>
         )}
-      </div>
-    </main>
+    </PageShell>
   );
 }

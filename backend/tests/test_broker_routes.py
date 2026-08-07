@@ -489,42 +489,28 @@ class BrokerRoutesTest(unittest.TestCase):
         self.assertEqual(mock_sync.call_args_list[0].kwargs.get("api_key"), "key-A")
         self.assertEqual(mock_sync.call_args_list[1].kwargs.get("api_key"), "key-B")
 
-    # ── multi-broker dispatch (HDFC Securities, Paytm Money) ────────────────
-    # Not a full repeat of every zerodha case above — just enough per broker
-    # to prove _broker_sync_module() actually dispatches to the right sync
-    # module with the credentials registered for that specific connection.
+    # ── multi-broker dispatch (Paytm Money) ──────────────────────────────────
+    # Not a full repeat of every zerodha case above — just enough to prove
+    # _broker_sync_module() actually dispatches to the right sync module
+    # with the credentials registered for that specific connection. HDFC
+    # Securities has its own real, non-redirect flow — see the dedicated
+    # login-start/verify-otp tests further down.
 
-    @patch("portfolio.hdfc_sync.get_login_url")
-    def test_login_url_success_hdfc_securities(self, mock_login_url) -> None:
-        mock_login_url.return_value = "https://developer.hdfcsec.com/login?api_key=my-hdfc-key"
+    def test_login_url_rejects_hdfc_securities(self) -> None:
         pid = self._mk_profile()
         acc = self._mk_account(pid)
         resp = self._register_credentials("hdfc_securities", acc, "my-hdfc-key", "my-hdfc-secret")
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn("hdfcsec.com", resp.json()["login_url"])
-        mock_login_url.assert_called_once_with("my-hdfc-key")
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("login-start", resp.json()["detail"])
 
-    @patch("portfolio.hdfc_sync.exchange_request_token")
-    @patch("portfolio.hdfc_sync.get_login_url")
-    def test_connect_success_hdfc_securities(self, mock_login_url, mock_exchange) -> None:
-        mock_login_url.return_value = "https://developer.hdfcsec.com/login?v=3"
-        mock_exchange.return_value = {"access_token": "hdfc-access-token"}
+    def test_connect_rejects_hdfc_securities(self) -> None:
         pid = self._mk_profile()
         acc = self._mk_account(pid)
-        self._register_credentials("hdfc_securities", acc, "my-hdfc-key", "my-hdfc-secret")
-
         resp = client.post("/api/portfolio/broker/hdfc_securities/connect", json={
             "account_id": acc, "request_token": "rt",
         })
-        self.assertEqual(resp.status_code, 200, resp.text)
-        mock_exchange.assert_called_once_with("my-hdfc-key", "my-hdfc-secret", "rt")
-
-        with self.engine.connect() as conn:
-            row = conn.execute(
-                select(broker_connections).where(broker_connections.c.account_id == acc)
-            ).mappings().first()
-            self.assertEqual(row["broker"], "hdfc_securities")
-            self.assertNotIn("hdfc-access-token", row["access_token_enc"])
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("verify-otp", resp.json()["detail"])
 
     @patch("portfolio.paytm_sync.get_login_url")
     def test_login_url_success_paytm_money(self, mock_login_url) -> None:
@@ -615,6 +601,124 @@ class BrokerRoutesTest(unittest.TestCase):
         body_str = str(resp.json())
         self.assertNotIn("secret-token", body_str)
         self.assertNotIn("my-api-secret", body_str)
+
+    # ── HDFC Securities' real login (no redirect — see portfolio/hdfc_sync.py's
+    # own module docstring for the 5-step flow this drives) ─────────────────
+
+    def _login_start(self, acc: int, api_key=None, api_secret=None, username="hdfcuser", password="pw"):
+        body = {"account_id": acc, "username": username, "password": password}
+        if api_key:
+            body["api_key"] = api_key
+            body["api_secret"] = api_secret
+        return client.post("/api/portfolio/broker/hdfc_securities/login-start", json=body)
+
+    @patch("portfolio.hdfc_sync.submit_credentials")
+    @patch("portfolio.hdfc_sync.start_login")
+    def test_login_start_success_registers_credentials_and_stores_pending_token(
+        self, mock_start_login, mock_submit_creds,
+    ) -> None:
+        mock_start_login.return_value = {"token_id": "tok-1"}
+        mock_submit_creds.return_value = {"status": "ok"}
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+
+        resp = self._login_start(acc, api_key="my-hdfc-key", api_secret="my-hdfc-secret")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json(), {"otp_required": True})
+        mock_start_login.assert_called_once_with("my-hdfc-key")
+        mock_submit_creds.assert_called_once_with("my-hdfc-key", "tok-1", "hdfcuser", "pw")
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(broker_connections).where(broker_connections.c.account_id == acc)
+            ).mappings().first()
+            self.assertEqual(row["pending_token_id"], "tok-1")
+            self.assertIsNone(row["access_token_enc"])
+
+    def test_login_start_without_credentials_and_none_registered_is_404(self) -> None:
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        resp = self._login_start(acc)
+        self.assertEqual(resp.status_code, 404)
+
+    @patch("portfolio.hdfc_sync.start_login")
+    def test_login_start_hdfc_rejection_surfaces_as_422(self, mock_start_login) -> None:
+        mock_start_login.return_value = {"error": "invalid api_key"}
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        resp = self._login_start(acc, api_key="bad-key", api_secret="bad-secret")
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("invalid api_key", resp.json()["detail"])
+
+    @patch("portfolio.hdfc_sync.get_access_token")
+    @patch("portfolio.hdfc_sync.authorise")
+    @patch("portfolio.hdfc_sync.submit_otp")
+    @patch("portfolio.hdfc_sync.submit_credentials")
+    @patch("portfolio.hdfc_sync.start_login")
+    def test_verify_otp_success_stores_access_token_and_clears_pending(
+        self, mock_start_login, mock_submit_creds, mock_submit_otp, mock_authorise, mock_get_token,
+    ) -> None:
+        mock_start_login.return_value = {"token_id": "tok-1"}
+        mock_submit_creds.return_value = {"status": "ok"}
+        mock_submit_otp.return_value = {"request_token": "req-1"}
+        mock_authorise.return_value = {"status": "ok"}
+        mock_get_token.return_value = {"access_token": "hdfc-access-token"}
+
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        self._login_start(acc, api_key="my-hdfc-key", api_secret="my-hdfc-secret")
+
+        resp = client.post("/api/portfolio/broker/hdfc_securities/verify-otp", json={
+            "account_id": acc, "otp": "123456",
+        })
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json(), {"connected": True, "account_id": acc, "broker": "hdfc_securities"})
+        mock_submit_otp.assert_called_once_with("my-hdfc-key", "tok-1", "123456")
+        mock_authorise.assert_called_once_with("my-hdfc-key", "tok-1", "req-1")
+        mock_get_token.assert_called_once_with("my-hdfc-key", "my-hdfc-secret", "req-1")
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(broker_connections).where(broker_connections.c.account_id == acc)
+            ).mappings().first()
+            self.assertIsNone(row["pending_token_id"])
+            self.assertIsNotNone(row["access_token_enc"])
+            self.assertNotIn("hdfc-access-token", row["access_token_enc"])
+
+    def test_verify_otp_without_login_start_is_404(self) -> None:
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        resp = client.post("/api/portfolio/broker/hdfc_securities/verify-otp", json={
+            "account_id": acc, "otp": "123456",
+        })
+        self.assertEqual(resp.status_code, 404)
+
+    @patch("portfolio.hdfc_sync.submit_otp")
+    @patch("portfolio.hdfc_sync.submit_credentials")
+    @patch("portfolio.hdfc_sync.start_login")
+    def test_verify_otp_wrong_otp_clears_pending_token_not_credentials(
+        self, mock_start_login, mock_submit_creds, mock_submit_otp,
+    ) -> None:
+        mock_start_login.return_value = {"token_id": "tok-1"}
+        mock_submit_creds.return_value = {"status": "ok"}
+        mock_submit_otp.return_value = {"error": "invalid OTP"}
+
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        self._login_start(acc, api_key="my-hdfc-key", api_secret="my-hdfc-secret")
+
+        resp = client.post("/api/portfolio/broker/hdfc_securities/verify-otp", json={
+            "account_id": acc, "otp": "000000",
+        })
+        self.assertEqual(resp.status_code, 422)
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(broker_connections).where(broker_connections.c.account_id == acc)
+            ).mappings().first()
+            self.assertIsNone(row["pending_token_id"])
+            self.assertEqual(row["api_key"], "my-hdfc-key")  # credentials untouched by an OTP failure
+            self.assertIsNone(row["access_token_enc"])
 
 
 if __name__ == "__main__":

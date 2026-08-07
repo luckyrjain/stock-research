@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { getClientId } from '@/lib/watchlist';
+import { useToast } from '@/components/toast';
 
 export interface Position {
   symbol: string;
@@ -105,6 +106,7 @@ export async function claimPositions(clientId: string): Promise<{ claimed: numbe
  * the live MarketPick the user acted on, so P&L math stays correct even if
  * a later pipeline run changes those levels. */
 export function usePositions() {
+  const { showError } = useToast();
   const [positions, setPositions] = useState<Position[]>(cachedPositions ?? []);
   const [loading, setLoading] = useState(cachedPositions === null);
 
@@ -141,7 +143,7 @@ export function usePositions() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ client_id: clientId, ...pos, symbol }),
       });
-      if (!res.ok) return;
+      if (!res.ok) { showError("Couldn't save this position — try again."); return; }
       const data = await res.json() as { items: Position[] };
       if (myGeneration !== generation) return;
       cachedPositions = data.items;
@@ -149,8 +151,9 @@ export function usePositions() {
     } catch {
       // Backend unreachable — leave state as-is, same convention as
       // useWatchlist()'s toggle()/remove().
+      showError("Couldn't reach the server — this position wasn't saved.");
     }
-  }, []);
+  }, [showError]);
 
   const removePosition = useCallback(async (symbol: string) => {
     const clientId = getClientId();
@@ -159,15 +162,16 @@ export function usePositions() {
       const res = await fetch(`/api/positions/${encodeURIComponent(symbol.toUpperCase())}?client_id=${encodeURIComponent(clientId)}`, {
         method: 'DELETE',
       });
-      if (!res.ok) return;
+      if (!res.ok) { showError("Couldn't remove this position — try again."); return; }
       const data = await res.json() as { items: Position[] };
       if (myGeneration !== generation) return;
       cachedPositions = data.items;
       notify();
     } catch {
-      // silently ignore — the row just won't disappear; user can retry
+      // silently ignore in state — the row just won't disappear; user can retry
+      showError("Couldn't reach the server — try again.");
     }
-  }, []);
+  }, [showError]);
 
   // Filled in after the fact, typically from the Portfolio page — asking for
   // a share count at "I bought this" click-time would add friction to what's

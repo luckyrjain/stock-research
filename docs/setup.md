@@ -401,9 +401,9 @@ by the same Alembic step as everything else above).
   # .env
   PORTFOLIO_ENCRYPTION_KEY=...
   ```
-  Generate a key with:
+  Generate a key with (the venv's own python — `cryptography` isn't on a bare system `python3`):
   ```bash
-  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+  .venv/bin/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
   ```
   **There is no per-broker env var to set.** Each broker "app" (`api_key`/`api_secret`) is
   registered under one specific broker login (developers.kite.trade for Zerodha,
@@ -414,6 +414,12 @@ by the same Alembic step as everything else above).
   (`api_secret` and the resulting access token are Fernet-encrypted, `api_key` is plaintext —
   see `docs/database.md`). Re-registering a broker account's credentials clears any previously
   obtained access token, so a stale connection never silently reports itself as still live.
+
+  **HDFC Securities' connect flow is different from Zerodha/Paytm Money's** — it never redirects
+  the browser to HDFC's own login page. This app itself prompts for and submits the HDFC
+  username/password directly to HDFC's own API (never stored — see `backend/portfolio/hdfc_sync.py`'s
+  module docstring), then a second prompt for the OTP HDFC sends out-of-band. Both prompts are
+  inline in the `/portfolio-aggregator` UI (`HdfcBrokerRow`), never a page navigation.
 
 ## Account & magic-link auth
 

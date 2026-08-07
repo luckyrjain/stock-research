@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { expectNoA11yViolations } from './fixtures';
 
 const FIXTURE_STOCKS = [
   {
@@ -35,6 +36,8 @@ test.describe('Screener page', () => {
     await expect(page.getByText('↑ Bullish')).toBeVisible();
     await expect(page.getByText('↓ Bearish')).toBeVisible();
     await expect(page.getByText('500 stocks monitored')).toBeVisible();
+    // ENF-03 (design.md §19): landmark/label/contrast/heading-order gate.
+    await expectNoA11yViolations(page);
   });
 
   test('shows the empty state when no stocks match', async ({ page }) => {

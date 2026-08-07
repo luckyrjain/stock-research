@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import type { StreetConsensus } from '@/types';
 import InfoTooltip from './info-tooltip';
 import { Card } from './dashboard-primitives';
-import { safeExternalHref } from './dashboard-format';
+import { safeExternalHref } from '@/lib/format';
 
 function fmtConsensusDate(publishedAt: string | null): string | null {
   if (!publishedAt) return null;

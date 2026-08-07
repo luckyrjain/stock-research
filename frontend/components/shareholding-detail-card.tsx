@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import type { ShareholdingDetail } from '@/types';
 import InfoTooltip from './info-tooltip';
 import { Card } from './dashboard-primitives';
-import { fmt } from './dashboard-format';
+import { fmt } from '@/lib/format';
 
 function useShareholdingDetail(symbol: string): ShareholdingDetail | null {
   const [detail, setDetail] = useState<ShareholdingDetail | null>(null);

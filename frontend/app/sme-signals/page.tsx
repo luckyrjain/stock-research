@@ -4,10 +4,12 @@ import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'rea
 import Link from 'next/link';
 import type { SmeSignal, SmeCrossEvent, SmeSignalHistoryResponse, SmeSignalsResponse } from '@/types';
 import EmaChart from '@/components/ema-chart';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
 import WatchlistButton from '@/components/watchlist-button';
 import InfoTooltip from '@/components/info-tooltip';
-import { Skeleton, FilterChip, SortableTh, fmtMarketCap } from '@/components/data-table-ui';
+import { Skeleton, FilterChip, SortableTh } from '@/components/data-table-ui';
+import { fmtCr, fmtChangePct } from '@/lib/format';
+import { exchangeTone } from '@/lib/tone';
 
 // ── Filter types ──────────────────────────────────────────────────────────────
 
@@ -37,11 +39,11 @@ function CrossBadge({ cross }: { cross: 'golden' | 'death' | null }) {
   if (cross == null) return <span className="text-muted text-[10px]">—</span>;
   return cross === 'golden' ? (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border bg-buy/12 text-buy border-buy/25">
-      ⚡ Golden
+      ↑ Golden
     </span>
   ) : (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border bg-sell/12 text-sell border-sell/25">
-      💀 Death
+      ↓ Death
     </span>
   );
 }
@@ -58,7 +60,7 @@ function RegimeBadge({ inGolden }: { inGolden: boolean }) {
 
 function ExchangeBadge({ exchange }: { exchange: string }) {
   return (
-    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded border text-muted border-border bg-surface">
+    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${exchangeTone(exchange)}`}>
       {exchange}
     </span>
   );
@@ -95,14 +97,15 @@ function VolumeSpikeBadge() {
       title="Today's volume is more than 2x its trailing 20-day average — a cross with real participation behind it"
       className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-bold border bg-accent/12 text-accent border-accent/25"
     >
-      🔥 Spike
+      Spike
     </span>
   );
 }
 
+// "pending" (not "—") — this specific null means the 20-trading-day forward
+// window hasn't elapsed yet, a different reason than "data unavailable".
 function fmtRet(v: number | null): string {
-  if (v == null) return 'pending';
-  return `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+  return v == null ? 'pending' : fmtChangePct(v);
 }
 
 function retColor(v: number | null): string {
@@ -128,7 +131,7 @@ function CrossOutcomeSummary({ events }: { events: SmeCrossEvent[] }) {
           <span className={`font-mono text-xs font-semibold ${retColor(e.ret_20d_pct)}`}>
             {fmtRet(e.ret_20d_pct)}
           </span>
-          {i < trail.length - 1 && <span className="text-muted/40 ml-1">,</span>}
+          {i < trail.length - 1 && <span className="text-muted/60 ml-1">,</span>}
         </span>
       ))}
     </div>
@@ -172,6 +175,10 @@ function SkeletonRows() {
 export default function SmeSignalsPage() {
   const [data,       setData]       = useState<SmeSignalsResponse | null>(null);
   const [loading,    setLoading]    = useState(true);
+  // STATE-01 (design.md): separate from `loading`, which still gates the
+  // skeleton for first load — a manual reload keeps existing content and
+  // only needs this for the button's own label/disabled state.
+  const [reloading,  setReloading]  = useState(false);
   const [error,      setError]      = useState<string | null>(null);
   const [lookback,   setLookback]   = useState<Lookback>(5);
   const [direction,  setDirection]  = useState<Direction>('all');
@@ -180,6 +187,13 @@ export default function SmeSignalsPage() {
   const [exchangeFilter, setExchangeFilter] = useState<ExchangeFilter>('all');
   const [rsiFilter, setRsiFilter] = useState<RsiFilter>('all');
   const [volumeSpikeOnly, setVolumeSpikeOnly] = useState(false);
+  const isFiltered = direction !== 'all' || exchangeFilter !== 'all' || rsiFilter !== 'all' || volumeSpikeOnly;
+  const clearFilters = useCallback(() => {
+    setDirection('all');
+    setExchangeFilter('all');
+    setRsiFilter('all');
+    setVolumeSpikeOnly(false);
+  }, []);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   // Expand/collapse state is keyed by "<symbol>::<trade_date>", not bare
@@ -228,6 +242,7 @@ export default function SmeSignalsPage() {
     const ac = new AbortController();
     abortRef.current = ac;
     if (!silent) setLoading(true);
+    if (silent) setReloading(true);
     setError(null);
     try {
       const qs = new URLSearchParams({ lookback: String(lb), direction: dir, view: v });
@@ -235,23 +250,31 @@ export default function SmeSignalsPage() {
       const json = await res.json() as SmeSignalsResponse & { error?: string };
       if (!res.ok) {
         setError(json.error ?? `Error ${res.status}`);
-        setData(null);
+        // STATE-01 (design.md): a silent (background poll / manual reload)
+        // failure keeps the last good render instead of wiping it to an
+        // error state — only the non-silent path (nothing good yet) clears.
+        if (!silent) setData(null);
       } else {
         setData(json);
       }
     } catch (e) {
       if ((e as Error).name === 'AbortError') return;
       setError('Could not reach the backend. Is the server running?');
-      setData(null);
+      if (!silent) setData(null);
     } finally {
       // Whoever owns the latest request clears loading — a silent poll that
       // aborted a non-silent fetch must clear it too, or the skeleton sticks.
-      if (abortRef.current === ac) setLoading(false);
+      if (abortRef.current === ac) { setLoading(false); setReloading(false); }
     }
   }, []);
 
   useEffect(() => {
-    fetchSignals(lookback, direction, view);
+    // STATE-01 (design.md): only the very first load (nothing on screen
+    // yet) shows the skeleton — a Period/Direction/View change while
+    // signals are already showing keeps that table visible instead of
+    // wiping it.
+    fetchSignals(lookback, direction, view, data != null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lookback, direction, view, fetchSignals]);
 
   // Track server-side refresh state; poll while a refresh runs, reload when done.
@@ -324,30 +347,28 @@ export default function SmeSignalsPage() {
     : null;
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav
-          active="sme-signals"
-          wrap
-          right={<>
-            <button
-              onClick={startRefresh}
-              disabled={refreshing}
-              className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-accent/40 text-accent
-                         hover:bg-accent/10 transition-colors disabled:opacity-40"
-            >
-              {refreshing ? 'Refreshing data…' : '⟳ Refresh Data'}
-            </button>
-            <button
-              onClick={() => fetchSignals(lookback, direction, view)}
-              disabled={loading}
-              className="text-xs text-muted hover:text-tx transition-colors disabled:opacity-40"
-            >
-              {loading ? 'Loading…' : '↺ Reload'}
-            </button>
-          </>}
-        />
+    <PageShell
+      active="sme-signals"
+      wrap
+      maxWidth="max-w-5xl"
+      right={<>
+        <button
+          onClick={startRefresh}
+          disabled={refreshing}
+          className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-accent/40 text-accent
+                     hover:bg-accent/10 transition-colors disabled:opacity-40"
+        >
+          {refreshing ? 'Refreshing data…' : '⟳ Refresh Data'}
+        </button>
+        <button
+          onClick={() => fetchSignals(lookback, direction, view, data != null)}
+          disabled={loading || reloading}
+          className="text-xs text-muted hover:text-tx transition-colors disabled:opacity-40"
+        >
+          {loading ? 'Loading…' : reloading ? 'Reloading…' : '↺ Reload'}
+        </button>
+      </>}
+    >
 
         {/* Header */}
         <div className="mb-8 animate-fade-up">
@@ -450,8 +471,8 @@ export default function SmeSignalsPage() {
                   {(
                     [
                       { value: 'all',    label: 'All'      },
-                      { value: 'golden', label: '⚡ Golden' },
-                      { value: 'death',  label: '💀 Death'  },
+                      { value: 'golden', label: '↑ Golden' },
+                      { value: 'death',  label: '↓ Death'  },
                     ] as const
                   ).map(({ value, label }) => (
                     <FilterChip key={value} value={value} active={direction === value} onClick={setDirection} label={label} />
@@ -509,7 +530,7 @@ export default function SmeSignalsPage() {
                 ? 'bg-accent/15 border-accent/40 text-accent'
                 : 'bg-surface border-border text-muted hover:text-tx hover:border-border-hi'}`}
           >
-            🔥 Volume-confirmed only
+            Volume-confirmed only
           </button>
         </div>
 
@@ -533,7 +554,7 @@ export default function SmeSignalsPage() {
 
         {/* Table */}
         {!error && (
-          <div className="rounded-xl border border-border overflow-hidden">
+          <div className="rounded-xl border border-border overflow-hidden" aria-busy={loading}>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -557,10 +578,17 @@ export default function SmeSignalsPage() {
                     <SkeletonRows />
                   ) : displayedSignals.length === 0 ? (
                     <tr>
-                      <td colSpan={12} className="px-4 py-16 text-center text-muted text-sm">
+                      <td colSpan={12} className="px-4 py-12 text-center text-muted text-sm">
                         {signals.length === 0
                           ? 'No crossovers found for the selected filters.'
                           : `No ${exchangeFilter} crossovers in the current results.`}
+                        {isFiltered && (
+                          <div>
+                            <button onClick={clearFilters} className="mt-2 text-xs text-accent hover:underline">
+                              Clear filters
+                            </button>
+                          </div>
+                        )}
                         {!data?.last_run && (
                           <div className="mt-2 text-xs text-muted/60">
                             Make sure you&apos;ve run{' '}
@@ -696,7 +724,7 @@ export default function SmeSignalsPage() {
                         {/* Market cap */}
                         <td className="px-4 py-4 text-right">
                           <span className="font-mono tabular-nums text-xs text-muted">
-                            {fmtMarketCap(s.market_cap_cr)}
+                            {fmtCr(s.market_cap_cr)}
                           </span>
                         </td>
 
@@ -740,12 +768,11 @@ export default function SmeSignalsPage() {
 
         {/* Footer hint */}
         {!loading && !error && signals.length > 0 && (
-          <p className="text-[10px] text-muted/50 mt-3">
+          <p className="text-[10px] text-muted/60 mt-3">
             Click a symbol to run full analysis. A BSE listing without an ISIN on record can&apos;t be resolved to an analyzable ticker yet.
           </p>
         )}
 
-      </div>
-    </main>
+    </PageShell>
   );
 }

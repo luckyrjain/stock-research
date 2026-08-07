@@ -19,7 +19,7 @@ export default function LoginPage() {
       await requestLink(email);
       setStatus('sent');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong.');
+      setError(err instanceof Error ? err.message : "Couldn't send the sign-in link. Check your connection and try again.");
       setStatus('error');
     }
   }
@@ -27,8 +27,12 @@ export default function LoginPage() {
   return (
     <main className="min-h-screen bg-bg text-tx flex items-center justify-center px-4">
       <div className="w-full max-w-sm">
-        <Link href="/" className="block text-center mb-8 text-xl font-black tracking-tight text-tx">
-          Alpha<span className="text-accent">Pulse</span>
+        <Link href="/" className="block text-center mb-8">
+          {/* PAGE-03 (design.md): one <h1> per page — this wordmark IS the
+              page's title here, same role the home hero's own <h1> plays. */}
+          <h1 className="text-xl font-black tracking-tight text-tx">
+            Alpha<span className="text-accent">Pulse</span>
+          </h1>
         </Link>
 
         {status === 'sent' ? (
@@ -53,18 +57,23 @@ export default function LoginPage() {
                 onChange={e => setEmail(e.target.value)}
                 placeholder="you@example.com"
                 className="w-full px-4 py-2.5 rounded-lg bg-surface border border-border text-tx text-sm
-                           placeholder:text-muted/50 focus:outline-none focus:ring-2 focus:ring-accent/50"
+                           placeholder:text-muted/60 focus:ring-2 focus:ring-accent/50"
               />
             </div>
+            {/* Form-level failure (the send-link request itself failed) — the
+                Error banner (FORM-07), not a bare paragraph or a toast. */}
             {status === 'error' && (
-              <p role="alert" className="text-sell text-xs">{error}</p>
+              <div role="alert" className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm">
+                {error}
+              </div>
             )}
             <button
               type="submit"
               disabled={status === 'sending'}
-              className="w-full px-4 py-2.5 rounded-lg bg-accent text-bg text-sm font-semibold
+              className="w-full flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-lg bg-accent text-bg text-sm font-semibold
                          hover:bg-accent/90 transition-colors disabled:opacity-50"
             >
+              {status === 'sending' && <span aria-hidden="true" className="animate-spin-slow">⟳</span>}
               {status === 'sending' ? 'Sending…' : 'Send sign-in link'}
             </button>
             <p className="text-muted/60 text-xs text-center">

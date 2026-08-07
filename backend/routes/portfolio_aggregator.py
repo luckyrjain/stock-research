@@ -168,6 +168,32 @@ class BrokerConnectIn(BaseModel):
 
 class BrokerSyncIn(BaseModel):
     account_id: int
+    # Optional — the browser's own anonymous identity (lib/watchlist.ts's
+    # getClientId(), same one Watchlist/Positions already use), passed only
+    # so synced holdings can also be mirrored into `positions` (see
+    # portfolio/broker_sync_common.py's upsert_position_from_holding). Never
+    # stored on accounts/profiles themselves — Portfolio Aggregator has no
+    # owner concept otherwise and this doesn't add one.
+    client_id: str | None = None
+
+
+class HdfcLoginStartIn(BaseModel):
+    account_id: int
+    # Same both-or-neither shape as BrokerLoginUrlIn — first-time setup
+    # supplies the app credentials, a retry after a failed/expired login
+    # attempt reuses what's already registered.
+    api_key: str | None = Field(default=None, min_length=1, max_length=255)
+    api_secret: str | None = Field(default=None, min_length=1, max_length=255)
+    # HDFC's own broker login — never persisted (see hdfc_sync.py's module
+    # docstring: passed straight through to HDFC's /login/validate and
+    # discarded once this request returns).
+    username: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=255)
+
+
+class HdfcVerifyOtpIn(BaseModel):
+    account_id: int
+    otp: str = Field(min_length=1, max_length=20)
 
 
 @router.get("/profiles")
@@ -593,8 +619,17 @@ async def broker_login_url(request: Request, broker: str, body: BrokerLoginUrlIn
     - **Resume/retry** — body omits both. Reuses whatever was already
       registered (a request_token expiring, or the user closing the tab
       mid-handshake, shouldn't force re-typing a secret every retry) —
-      404 if nothing was ever registered for this (account, broker)."""
+      404 if nothing was ever registered for this (account, broker).
+
+    **Not for hdfc_securities** — HDFC's real login has no browser redirect
+    at all, so it doesn't fit this endpoint's contract; see
+    POST /broker/hdfc_securities/login-start instead."""
     _require_supported_broker(broker)
+    if broker == "hdfc_securities":
+        raise HTTPException(
+            status_code=422,
+            detail="hdfc_securities has no redirect login — use POST /broker/hdfc_securities/login-start instead",
+        )
     if bool(body.api_key) != bool(body.api_secret):
         raise HTTPException(status_code=422, detail="provide both api_key and api_secret, or neither to reuse saved credentials")
 
@@ -667,7 +702,13 @@ async def broker_login_url(request: Request, broker: str, body: BrokerLoginUrlIn
 
 @router.post("/broker/{broker}/connect")
 async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
+    """**Not for hdfc_securities** — see POST /broker/hdfc_securities/verify-otp instead."""
     _require_supported_broker(broker)
+    if broker == "hdfc_securities":
+        raise HTTPException(
+            status_code=422,
+            detail="hdfc_securities has no request_token exchange — use POST /broker/hdfc_securities/verify-otp instead",
+        )
 
     def _sync() -> dict:
         import datetime as _dt
@@ -716,9 +757,212 @@ async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
             conn.execute(
                 update(broker_connections)
                 .where(broker_connections.c.id == conn_row.id)
-                .values(access_token_enc=token_enc, token_obtained_at=now)
+                # See the identical comment on the hdfc_securities verify-otp
+                # handler above — a fresh token invalidates whatever the
+                # previous token's last sync attempt recorded.
+                .values(access_token_enc=token_enc, token_obtained_at=now, sync_status="idle", last_sync_error=None)
             )
         return {"connected": True, "account_id": body.account_id, "broker": broker}
+
+    return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
+
+
+@router.post("/broker/hdfc_securities/login-start")
+async def hdfc_login_start(request: Request, body: HdfcLoginStartIn):
+    """Steps 1-2 of HDFC's real login (see portfolio/hdfc_sync.py's module
+    docstring for the full 5-step flow) — registers app credentials (same
+    both-or-neither semantics as the generic login-url endpoint) if
+    supplied, then calls HDFC's own /login (get a token_id) and
+    /login/validate (username/password) in sequence. `username`/`password`
+    are never written anywhere — passed straight through to HDFC's own
+    endpoint and discarded once this request returns.
+
+    `200 {"otp_required": true}` on success (the frontend's next step is
+    always an OTP prompt) · `404` no credentials registered and none
+    supplied · `422` exactly one of api_key/api_secret supplied, or HDFC
+    rejected the login/credentials step · `503` PORTFOLIO_ENCRYPTION_KEY
+    unset (first-time/replace mode only)."""
+    if bool(body.api_key) != bool(body.api_secret):
+        raise HTTPException(status_code=422, detail="provide both api_key and api_secret, or neither to reuse saved credentials")
+
+    def _sync() -> dict:
+        import api
+        from core.crypto import EncryptionNotConfigured, encrypt
+        from db.models import accounts, broker_connections
+        from portfolio import hdfc_sync
+        from sqlalchemy import insert, select, update
+
+        with api._get_db_engine().begin() as conn:
+            account = conn.execute(
+                select(accounts.c.id, accounts.c.profile_id, accounts.c.type)
+                .where(accounts.c.id == body.account_id)
+            ).first()
+            if account is None:
+                raise HTTPException(status_code=404, detail="account not found")
+            if account.type != "broker":
+                raise HTTPException(status_code=422, detail="account.type must be 'broker' to connect a broker API")
+
+            existing = conn.execute(
+                select(broker_connections.c.id, broker_connections.c.api_key).where(
+                    broker_connections.c.account_id == body.account_id,
+                    broker_connections.c.broker == "hdfc_securities",
+                )
+            ).first()
+
+            if body.api_key:
+                try:
+                    api_secret_enc = encrypt(body.api_secret)
+                except EncryptionNotConfigured as exc:
+                    raise HTTPException(status_code=503, detail=str(exc))
+                api_key = body.api_key
+                if existing:
+                    conn.execute(
+                        update(broker_connections)
+                        .where(broker_connections.c.id == existing.id)
+                        .values(
+                            api_key=api_key, api_secret_enc=api_secret_enc,
+                            access_token_enc=None, token_obtained_at=None, pending_token_id=None,
+                            sync_status="idle", last_sync_summary=None, last_sync_error=None,
+                        )
+                    )
+                else:
+                    conn.execute(
+                        insert(broker_connections).values(
+                            profile_id=account.profile_id, account_id=body.account_id,
+                            broker="hdfc_securities", api_key=api_key, api_secret_enc=api_secret_enc,
+                        )
+                    )
+            else:
+                if existing is None or not existing.api_key:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="no hdfc_securities app credentials registered for this account yet — provide api_key/api_secret",
+                    )
+                api_key = existing.api_key
+
+            login = hdfc_sync.start_login(api_key)
+            if "error" in login:
+                raise HTTPException(status_code=422, detail=login["error"])
+            token_id = login["token_id"]
+
+            creds = hdfc_sync.submit_credentials(api_key, token_id, body.username, body.password)
+            if "error" in creds:
+                raise HTTPException(status_code=422, detail=creds["error"])
+
+            conn.execute(
+                update(broker_connections)
+                .where(
+                    broker_connections.c.account_id == body.account_id,
+                    broker_connections.c.broker == "hdfc_securities",
+                )
+                .values(pending_token_id=token_id)
+            )
+        return {"otp_required": True}
+
+    return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
+
+
+@router.post("/broker/hdfc_securities/verify-otp")
+async def hdfc_verify_otp(request: Request, body: HdfcVerifyOtpIn):
+    """Steps 3-5 of HDFC's real login: OTP verification (returns
+    request_token), consent, then the actual access-token exchange —
+    chained together here since none of the last two need further user
+    input once the OTP is in. Clears `pending_token_id` in every case
+    (success or failure) — it's single-use, scoped to one login attempt.
+
+    `200 {"connected": true, "account_id", "broker"}` · `404` no
+    login-start call in progress for this account (call it first) · `422`
+    HDFC rejected the OTP, consent, or token exchange, or the stored app
+    secret couldn't be decrypted · `503` PORTFOLIO_ENCRYPTION_KEY unset."""
+    def _sync() -> dict:
+        import datetime as _dt
+
+        import api
+        from core.crypto import EncryptionNotConfigured, decrypt, encrypt
+        from db.models import broker_connections
+        from portfolio import hdfc_sync
+        from sqlalchemy import select, update
+
+        engine = api._get_db_engine()
+
+        with engine.connect() as conn:
+            conn_row = conn.execute(
+                select(
+                    broker_connections.c.id, broker_connections.c.api_key,
+                    broker_connections.c.api_secret_enc, broker_connections.c.pending_token_id,
+                ).where(
+                    broker_connections.c.account_id == body.account_id,
+                    broker_connections.c.broker == "hdfc_securities",
+                )
+            ).first()
+        if conn_row is None or not conn_row.pending_token_id:
+            raise HTTPException(
+                status_code=404,
+                detail="no hdfc_securities login in progress for this account — call login-start first",
+            )
+
+        # `pending_token_id` is cleared in its own committed transaction,
+        # separate from the multi-step HDFC flow below — that flow raises
+        # HTTPException on any failure, and raising inside `engine.begin()`
+        # rolls back everything written in that same transaction, which
+        # would silently undo the clear on every failure path (caught by
+        # test_verify_otp_wrong_otp_clears_pending_token_not_credentials).
+        # Single-use, scoped to one login attempt either way — clearing it
+        # immediately, before HDFC has even answered the OTP, is correct
+        # regardless of what happens next.
+        with engine.begin() as conn:
+            conn.execute(
+                update(broker_connections)
+                .where(broker_connections.c.id == conn_row.id)
+                .values(pending_token_id=None)
+            )
+
+        otp_result = hdfc_sync.submit_otp(conn_row.api_key, conn_row.pending_token_id, body.otp)
+        if "error" in otp_result:
+            raise HTTPException(status_code=422, detail=otp_result["error"])
+        request_token = otp_result["request_token"]
+
+        authorise_result = hdfc_sync.authorise(conn_row.api_key, conn_row.pending_token_id, request_token)
+        if "error" in authorise_result:
+            raise HTTPException(status_code=422, detail=authorise_result["error"])
+
+        try:
+            api_secret = decrypt(conn_row.api_secret_enc)
+        except EncryptionNotConfigured as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+        except Exception:
+            raise HTTPException(
+                status_code=422,
+                detail="stored app secret could not be decrypted — re-register this broker's API key/secret",
+            )
+
+        token_result = hdfc_sync.get_access_token(conn_row.api_key, api_secret, request_token)
+        if "error" in token_result:
+            raise HTTPException(status_code=422, detail=token_result["error"])
+
+        try:
+            token_enc = encrypt(token_result["access_token"])
+        except EncryptionNotConfigured as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+        with engine.begin() as conn:
+            conn.execute(
+                update(broker_connections)
+                .where(broker_connections.c.id == conn_row.id)
+                # A fresh token invalidates whatever the *previous* token's
+                # last sync attempt recorded — without clearing these, the
+                # frontend's poll immediately re-displays the stale
+                # last_sync_error right after showing "Connected.", making a
+                # successful reconnect look like it failed again. `idle`
+                # matches what a connection has before its first-ever sync
+                # (see BrokerConnection.sync_status's own comment).
+                .values(
+                    access_token_enc=token_enc, token_obtained_at=now, pending_token_id=None,
+                    sync_status="idle", last_sync_error=None,
+                )
+            )
+        return {"connected": True, "account_id": body.account_id, "broker": "hdfc_securities"}
 
     return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
 
@@ -755,6 +999,37 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
     account_id = body.account_id
     lock_name = f"broker_sync:{account_id}:{broker}"
     rate_key = f"broker_sync_rl:{account_id}:{broker}"
+
+    # Resolved once, synchronously, in the request/response cycle — not
+    # inside _run_and_release below, which runs on a background thread
+    # pool after this function returns, where re-reading `request` would be
+    # unsafe. A signed-in session always wins over `client_id` (see
+    # routes/watchlist.py::resolve_owner's own docstring) so a synced
+    # holding lands under the SAME column GET /api/positions actually reads
+    # for that caller — writing it under client_id unconditionally would
+    # make it invisible to a signed-in user's own /portfolio page, since
+    # that page reads positions by user_id, not client_id, once signed in.
+    # Never raises past this point: a missing/malformed client_id and no
+    # session just means "don't mirror this sync into positions," not "the
+    # sync itself fails" — position-mirroring is purely additive.
+    #
+    # Disclosed limitation: the web UI's own proxy for this whole feature
+    # (frontend/app/api/portfolio/[...path]/route.ts) deliberately never
+    # forwards the session cookie — Portfolio Aggregator is anonymous/
+    # client_id-only by design (see that proxy's own comment). So in
+    # practice, through the actual web UI, `token` here is always None and
+    # this always resolves to the client_id path; the session-preferring
+    # branch only matters for a caller hitting this endpoint directly with
+    # a bearer token. Implemented correctly regardless, rather than
+    # skipped, since it's this endpoint's own contract to get right
+    # independent of which caller happens to exercise it today.
+    owner = None
+    try:
+        import api
+        from routes.watchlist import resolve_owner
+        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
+    except ValueError:
+        pass
 
     def _prepare() -> dict:
         import api
@@ -828,6 +1103,7 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
             mod = _broker_sync_module(broker)
             result = mod.sync_account(
                 api._get_db_engine(), account_id, prepared["access_token"], api_key=prepared["api_key"],
+                owner=owner,
             )
             if "error" in result:
                 error = result["error"]

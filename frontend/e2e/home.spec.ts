@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { sseAnalysisBody, SSE_HEADERS, validationResult } from './fixtures';
+import { sseAnalysisBody, SSE_HEADERS, validationResult, expectNoA11yViolations } from './fixtures';
 
 test.describe('Home page', () => {
   test('shows the search UI and entry points into the other modes', async ({ page }) => {
@@ -20,6 +20,8 @@ test.describe('Home page', () => {
     await expect(page.getByRole('link', { name: 'Watchlist' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'API Keys' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Sign in' })).toBeVisible();
+    // ENF-03 (design.md §19): landmark/label/contrast/heading-order gate.
+    await expectNoA11yViolations(page);
   });
 
   test('nav collapses into a hamburger menu on a phone-width viewport', async ({ page }) => {

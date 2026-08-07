@@ -3,7 +3,10 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useWatchlist } from '@/lib/watchlist';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
+import { Skeleton } from '@/components/data-table-ui';
+import { fmtPrice } from '@/lib/format';
+import { REC_TONE_4TIER, exchangeTone } from '@/lib/tone';
 import type { WatchlistCalendarEntry } from '@/types';
 
 interface LivePrice {
@@ -15,10 +18,6 @@ interface LivePrice {
   // null when the price resolved but yfinance had no previous_close to
   // diff against — a real "change unknown", not a fabricated flat 0%.
   change_pct?: number | null;
-}
-
-function Skeleton({ className }: { className: string }) {
-  return <div className={`bg-border/60 rounded animate-pulse ${className}`} />;
 }
 
 // Pure read-aggregation over each watched symbol's already-cached filings
@@ -45,12 +44,6 @@ function useWatchlistCalendar(symbols: string[]): WatchlistCalendarEntry[] {
   return entries;
 }
 
-const REC_TONE: Record<string, string> = {
-  BUY:  'text-buy border-buy/40 bg-buy/10',
-  SELL: 'text-sell border-sell/40 bg-sell/10',
-  HOLD: 'text-hold border-hold/40 bg-hold/10',
-};
-
 // The headline fix this section exists for: watchlist_alerts.py's daily
 // digest already computes a same-day recommendation-change / price-move
 // flag and emails it once a day — previously that was the ONLY way to learn
@@ -67,12 +60,12 @@ function AlertBadges({ entry }: { entry: WatchlistCalendarEntry }) {
           }`}
           title={`₹${entry.price_move.old_price} → ₹${entry.price_move.new_price} since the last stored verdict`}
         >
-          🔔 {entry.price_move.change_pct >= 0 ? '+' : ''}{entry.price_move.change_pct}% since last check
+          {entry.price_move.change_pct >= 0 ? '+' : ''}{entry.price_move.change_pct}% since last check
         </span>
       )}
       {entry.recommendation_change && (
-        <span className={`px-2 py-0.5 rounded-full border font-semibold ${REC_TONE[entry.recommendation_change.new_recommendation] ?? 'text-tx border-border bg-surface'}`}>
-          🔔 {entry.recommendation_change.old_recommendation ?? '—'} → {entry.recommendation_change.new_recommendation}
+        <span className={`px-2 py-0.5 rounded-full border font-semibold ${REC_TONE_4TIER[entry.recommendation_change.new_recommendation] ?? 'text-tx border-border bg-surface'}`}>
+          {entry.recommendation_change.old_recommendation ?? '—'} → {entry.recommendation_change.new_recommendation}
         </span>
       )}
     </>
@@ -135,6 +128,13 @@ export default function WatchlistPage() {
   const [pricesLoading, setPricesLoading] = useState(true);
   const calendarEntries = useWatchlistCalendar(items.map(i => i.symbol));
 
+  // Stale/degraded (state 5, design.md §17): a poll that's been failing
+  // must not render identically to one that's fresh — `pricesStale` flips
+  // true on a failed poll (once at least one has ever succeeded) and back
+  // to false the moment one succeeds again.
+  const [pricesUpdatedAt, setPricesUpdatedAt] = useState<Date | null>(null);
+  const [pricesStale, setPricesStale] = useState(false);
+
   useEffect(() => {
     if (items.length === 0) { setPricesLoading(false); return; }
     const symbols = items.map(i => i.symbol).join(',');
@@ -142,11 +142,16 @@ export default function WatchlistPage() {
     const fetchPrices = async () => {
       try {
         const res = await fetch(`/api/prices?symbols=${encodeURIComponent(symbols)}`);
-        if (!res.ok) return;
+        if (!res.ok) { setPricesStale(true); return; }
         const data = await res.json() as { prices: Record<string, LivePrice> };
         setPrices(data.prices);
+        setPricesUpdatedAt(new Date());
+        setPricesStale(false);
       } catch {
-        // silently ignore — stale/missing price is fine, the row just shows "—"
+        // Row still shows "—" for a symbol with no price yet — but once
+        // there IS a price on screen, a failed poll marks it stale rather
+        // than silently leaving it looking fresh forever.
+        setPricesStale(true);
       } finally {
         setPricesLoading(false);
       }
@@ -162,13 +167,10 @@ export default function WatchlistPage() {
   );
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav active="watchlist" />
+    <PageShell active="watchlist" maxWidth="max-w-5xl">
 
         <div className="mb-6">
-          <h1 className="text-xl font-black tracking-tight text-tx mb-1.5">Watchlist</h1>
+          <h1 className="text-4xl font-black tracking-tight text-tx mb-1.5">Watchlist</h1>
           <p className="text-muted text-sm max-w-xl leading-relaxed">
             Stocks you&apos;ve starred from stock analysis, Market Picks, or SME Signals, all in one
             place. Tied to this browser only — it won&apos;t follow you to another device yet.
@@ -178,7 +180,7 @@ export default function WatchlistPage() {
         <CalendarStrip entries={calendarEntries} />
 
         {loading || (pricesLoading && items.length > 0) ? (
-          <div className="rounded-xl border border-border overflow-hidden">
+          <div className="rounded-xl border border-border overflow-hidden" aria-busy="true">
             <div className="divide-y divide-border/60">
               {Array.from({ length: 3 }).map((_, i) => (
                 <div key={i} className="px-4 py-4 flex items-center gap-4">
@@ -208,6 +210,22 @@ export default function WatchlistPage() {
             </div>
           </div>
         ) : (
+          <>
+            {pricesUpdatedAt && (
+              <div className="flex justify-end mb-2">
+                {pricesStale ? (
+                  <span className="flex items-center gap-1 text-[10px] text-hold/80" title="The live-price refresh has been failing — prices below may be outdated">
+                    <span className="w-1.5 h-1.5 rounded-full bg-hold inline-block" />
+                    Prices may be outdated · last updated {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-[10px] text-buy/70">
+                    <span className="w-1.5 h-1.5 rounded-full bg-buy animate-pulse inline-block" />
+                    LTP {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                  </span>
+                )}
+              </div>
+            )}
           <div className="rounded-xl border border-border overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -243,13 +261,13 @@ export default function WatchlistPage() {
                           </span>
                         </td>
                         <td className="px-4 py-4">
-                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded border text-muted border-border bg-surface">
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${exchangeTone(item.exchange)}`}>
                             {item.exchange}
                           </span>
                         </td>
                         <td className="px-4 py-4 text-right">
                           <span className="font-mono tabular-nums text-xs text-tx">
-                            {live?.price != null ? `₹${live.price.toFixed(2)}` : '—'}
+                            {fmtPrice(live?.price)}
                           </span>
                         </td>
                         <td className="px-4 py-4 text-right">
@@ -277,8 +295,8 @@ export default function WatchlistPage() {
               </table>
             </div>
           </div>
+          </>
         )}
-      </div>
-    </main>
+    </PageShell>
   );
 }

@@ -74,7 +74,7 @@ function VerifyInner() {
     } catch {
       if (mountedRef.current) {
         setStatus('error');
-        setError('Something went wrong. Please try again.');
+        setError("Couldn't complete sign-in. Check your connection and try again.");
       }
     }
   }
@@ -95,8 +95,11 @@ function VerifyInner() {
   return (
     <main className="min-h-screen bg-bg text-tx flex items-center justify-center px-4">
       <div className="w-full max-w-sm text-center">
-        <Link href="/" className="block mb-8 text-xl font-black tracking-tight text-tx">
-          Alpha<span className="text-accent">Pulse</span>
+        <Link href="/" className="block mb-8">
+          {/* PAGE-03 (design.md): one <h1> per page — same role as login's. */}
+          <h1 className="text-xl font-black tracking-tight text-tx">
+            Alpha<span className="text-accent">Pulse</span>
+          </h1>
         </Link>
 
         {status === 'error' ? (

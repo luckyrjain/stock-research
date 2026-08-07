@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { expectNoA11yViolations } from './fixtures';
 
 const FIXTURE_SIGNALS = [
   {
@@ -33,6 +34,8 @@ test.describe('SME Signals page', () => {
     await expect(page.getByRole('link', { name: 'SMEONE' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'SMETWO' })).toBeVisible();
     await expect(page.getByText('65%')).toBeVisible(); // Golden Follow-Through stat
+    // ENF-03 (design.md §19): landmark/label/contrast/heading-order gate.
+    await expectNoA11yViolations(page);
 
     // Regression coverage for the deep gap analysis finding: this page was
     // previously the one complex page with zero InfoTooltip usage, despite

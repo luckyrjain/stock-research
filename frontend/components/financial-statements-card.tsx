@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import type { Concall, FinancialStatement, FinancialStatementsResponse } from '@/types';
 import InfoTooltip from './info-tooltip';
 import { Card } from './dashboard-primitives';
-import { fmt, safeExternalHref } from './dashboard-format';
+import { fmt, safeExternalHref } from '@/lib/format';
 
 export function useFinancials(symbol: string): FinancialStatementsResponse | null {
   const [data, setData] = useState<FinancialStatementsResponse | null>(null);

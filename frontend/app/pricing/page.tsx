@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
 
 // Purely informational — there is no self-serve checkout or payment
 // processing anywhere in this app (see CLAUDE.md's "Tiers + usage
@@ -36,10 +36,7 @@ const TIERS = [
 
 export default function PricingPage() {
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-3xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav extraLabel="Pricing" wrap />
+    <PageShell extraLabel="Pricing" wrap maxWidth="max-w-3xl">
 
         <div className="mb-8">
           <h1 className="text-xl font-black tracking-tight text-tx mb-1.5">Pricing</h1>
@@ -91,7 +88,6 @@ export default function PricingPage() {
           Manage your keys and see your current usage on the{' '}
           <Link href="/api-keys" className="text-accent hover:underline font-medium">API Keys</Link> page.
         </p>
-      </div>
-    </main>
+    </PageShell>
   );
 }

@@ -5,7 +5,8 @@ import type { MfHoldingsStakeDelta, Report, StockInfo } from '@/types';
 import InfoTooltip from './info-tooltip';
 import WatchlistButton from './watchlist-button';
 import { Card, MetricRow, ExchangeTable, RangeBar } from './dashboard-primitives';
-import { fmt, fmtCr, fmtVolume, fmtRatio, formatAge, formatDataAge, oldestDataFreshness, DATA_FRESHNESS_LABELS, humanizeMetaKey, formatMetaValue, normalizeRatioKey, safeExternalHref } from './dashboard-format';
+import { fmt, fmtCr, fmtVolume, fmtRatio, formatAge, formatDataAge, oldestDataFreshness, DATA_FRESHNESS_LABELS, humanizeMetaKey, formatMetaValue, normalizeRatioKey, safeExternalHref } from '@/lib/format';
+import { REC_CONFIG_3TIER, CONFIDENCE_TONE, SENTIMENT_TONE, valuationTone, exchangeTone } from '@/lib/tone';
 import { usePeerComparison, PeerTable, SimilarStocksRail } from './peer-comparison-card';
 import { useFinancials, FinancialStatementsCard, ConcallsCard } from './financial-statements-card';
 import { InsiderActivityCard } from './insider-activity-card';
@@ -19,33 +20,15 @@ import QuarterlyTrendCard from './quarterly-trend-card';
 interface Props {
   report: Report;
   onHardRefresh?: () => void;
+  refreshing?: boolean;
 }
 
 type FactorValue = string | number | null | undefined;
 type FactorShape = string | Record<string, FactorValue>;
 
-// `badge` is the solid-fill verdict pill in the hero. Its text is `text-bg`
-// (the near-black #0b1120), not white: against these deliberately bright
-// fills, white measures 1.85:1 on buy and 2.03:1 on hold — failing even the
-// 3:1 WCAG bar for large text, on the single most prominent element in the
-// product. Dark text measures 10.2:1 / 9.3:1 / 5.1:1 on buy / hold / sell.
-// Applied to all three (not just the two that failed) so the verdict pill
-// reads consistently rather than flipping ink colour by outcome.
-// `text`/`bg`/`border` below are the tinted variants over a dark surface and
-// are unaffected — text-buy on card is 8.7:1.
-const REC_CONFIG = {
-  BUY:  { bg: 'bg-buy/10',  border: 'border-buy/30',  text: 'text-buy',  badge: 'bg-buy  text-bg', strip: 'bg-buy'  },
-  SELL: { bg: 'bg-sell/10', border: 'border-sell/30', text: 'text-sell', badge: 'bg-sell text-bg', strip: 'bg-sell' },
-  HOLD: { bg: 'bg-hold/10', border: 'border-hold/30', text: 'text-hold', badge: 'bg-hold text-bg', strip: 'bg-hold' },
-};
-
-const CONF_COLOR: Record<string, string> = {
-  HIGH: 'text-buy', MEDIUM: 'text-hold', LOW: 'text-sell',
-};
-
-const SENT_COLOR: Record<string, string> = {
-  Positive: 'text-buy', Neutral: 'text-muted', Negative: 'text-sell',
-};
+const REC_CONFIG = REC_CONFIG_3TIER;
+const CONF_COLOR = CONFIDENCE_TONE;
+const SENT_COLOR = SENTIMENT_TONE;
 
 function formatScalar(value: FactorValue) {
   if (value == null || value === '') return null;
@@ -89,7 +72,7 @@ function summaryBullets(text: string): string[] {
   return sentences.map(s => s.trim()).filter(s => s.length > 5);
 }
 
-export default function ResultsDashboard({ report, onHardRefresh }: Props) {
+export default function ResultsDashboard({ report, onHardRefresh, refreshing }: Props) {
   const { analysis: a, signals: sig, stock_info: s, research: r, news, holdings: h, filings, filings_summary: fs, mf_holdings_trend: mfTrend } = report;
 
   const peers = usePeerComparison(report.symbol);
@@ -104,7 +87,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
   }, [peers]);
 
   // The true bottleneck on "how fresh is everything on this page" — see
-  // dashboard-format.ts::oldestDataFreshness. report.generated_at alone
+  // lib/format.ts::oldestDataFreshness. report.generated_at alone
   // (rendered below as formatAge) is stamped fresh on every report
   // assembly regardless of whether anything was actually refetched, so a
   // long-TTL task (shareholding/mf_holdings, 168h) could otherwise read as
@@ -128,7 +111,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
   const primaryExchange = s?.primary_exchange ?? s?.exchange ?? 'NSE';
 
   return (
-    <div className="animate-fade-up space-y-5">
+    <div className="@container animate-fade-up space-y-5">
 
       {/* Every configured LLM provider failed (or returned unparseable
           output past its guardrail retry) — this is crew.py's generic
@@ -165,12 +148,17 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
               )}
             </div>
             <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-              <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded bg-accent/10 text-accent border border-accent/20">
+              {/* Exchange tag tone: BSE -> hold, NSE -> buy (design.md §2) — a
+                  dual-listed stock isn't either one, so it falls back to a
+                  neutral tone rather than reusing accent as a data label. */}
+              <span className={`text-[11px] font-mono font-semibold px-2 py-0.5 rounded border ${
+                exchangeQuotes.length > 1 ? 'bg-surface text-muted border-border' : exchangeTone(s?.exchange ?? 'NSE')
+              }`}>
                 {exchangeQuotes.length > 1 ? 'NSE + BSE' : (s?.exchange ?? 'NSE')}
               </span>
               {s?.industry && <span className="text-xs text-muted">{s.industry}</span>}
               {s?.sector && s.sector !== s.industry && (
-                <span className="text-xs text-muted/50">· {s.sector}</span>
+                <span className="text-xs text-muted/60">· {s.sector}</span>
               )}
               {report.generated_at && (
                 <span className="text-xs text-muted/60">· {formatAge(report.generated_at)}</span>
@@ -213,10 +201,13 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
               {onHardRefresh && (
                 <button
                   onClick={onHardRefresh}
+                  disabled={refreshing}
                   className="flex items-center gap-1 text-[11px] font-medium text-muted
-                    hover:text-tx transition-colors duration-150"
+                    hover:text-tx transition-colors duration-150 disabled:opacity-50"
                 >
-                  <span>↺</span><span>Refresh</span>
+                  {refreshing
+                    ? <><span aria-hidden="true" className="animate-spin-slow">⟳</span><span>Refreshing…</span></>
+                    : <><span>↺</span><span>Refresh</span></>}
                 </button>
               )}
             </div>
@@ -232,7 +223,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
       </div>
 
       <ValuationSummaryStrip
-        llmVerdict={a?.valuation?.verdict}
+        llmVerdict={report.degraded ? undefined : a?.valuation?.verdict}
         dcf={financials?.dcf}
         peerPePercentile={percentileByNormalizedKey['pe']}
         absoluteAnchor={peers?.absolute_anchor ?? null}
@@ -240,57 +231,78 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
       />
 
       {/* ── 2. Main grid: thesis (60%) + metrics (40%) ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
+      {/* PAGE-04 (design.md): reflows on this container's own width (@5xl =
+          1024px, matching the retired viewport lg: breakpoint) rather than
+          the window's — the fix for /compare's columns compressing into an
+          unreadable 5-col grid instead of staying single-column until each
+          column itself is actually wide enough. */}
+      <div className="grid grid-cols-1 @5xl:grid-cols-5 gap-5">
 
         {/* Investment Thesis — summary + bull/bear as one card */}
-        <div className="lg:col-span-3">
+        <div className="@5xl:col-span-3">
           <Card title="Investment Thesis" className="h-full">
-            {(() => {
-              const text    = a?.summary ?? '';
-              const bullets = summaryBullets(text);
-              return bullets.length > 1 ? (
-                <ul className="space-y-2 mb-5">
-                  {bullets.map((b, i) => (
-                    <li key={i} className="flex gap-2 text-sm text-tx leading-relaxed">
-                      <span className={`${cfg.text} shrink-0 mt-px`}>›</span>
-                      <span>{b}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-sm text-tx leading-relaxed mb-5">{text || 'Analysis pending.'}</p>
-              );
-            })()}
+            {report.degraded ? (
+              // crew.py's _safe_analysis_fallback() fills summary/bull_factors/
+              // bear_factors with generic filler text ("Market data was fetched
+              // successfully.", etc.) so the JSON schema stays satisfiable —
+              // never real analysis. Rendering those as if they were genuine
+              // bull/bear factors was actively misleading (the degraded banner
+              // above explained the situation but this card contradicted it
+              // by looking like a normal report). No results, shown as such.
+              <p className="text-sm text-muted leading-relaxed">
+                No analysis available for this run — see the notice above. Market data, ratios, and
+                shareholding elsewhere on this page are real and unaffected.
+              </p>
+            ) : (
+              <>
+                {(() => {
+                  const text    = a?.summary ?? '';
+                  const bullets = summaryBullets(text);
+                  return bullets.length > 1 ? (
+                    <ul className="space-y-2 mb-5">
+                      {bullets.map((b, i) => (
+                        <li key={i} className="flex gap-2 text-sm text-tx leading-relaxed">
+                          <span className={`${cfg.text} shrink-0 mt-px`}>›</span>
+                          <span>{b}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-sm text-tx leading-relaxed mb-5">{text || 'Analysis pending.'}</p>
+                  );
+                })()}
 
-            <div className="grid grid-cols-2 gap-5 pt-4 border-t border-border">
-              <div>
-                <p className="text-[11px] font-semibold text-buy tracking-[1px] uppercase mb-3">Bull Case</p>
-                <ul className="space-y-2">
-                  {(a?.bull_factors ?? []).map((f, i) => (
-                    <li key={i} className="flex gap-2 text-sm text-tx">
-                      <span className="text-buy mt-0.5 shrink-0">▲</span>
-                      <span>{formatFactor(f)}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-              <div>
-                <p className="text-[11px] font-semibold text-sell tracking-[1px] uppercase mb-3">Bear Case</p>
-                <ul className="space-y-2">
-                  {(a?.bear_factors ?? []).map((f, i) => (
-                    <li key={i} className="flex gap-2 text-sm text-tx">
-                      <span className="text-sell mt-0.5 shrink-0">▼</span>
-                      <span>{formatFactor(f)}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
+                <div className="grid grid-cols-2 gap-5 pt-4 border-t border-border">
+                  <div>
+                    <p className="text-[11px] font-semibold text-buy tracking-[1px] uppercase mb-3">Bull Case</p>
+                    <ul className="space-y-2">
+                      {(a?.bull_factors ?? []).map((f, i) => (
+                        <li key={i} className="flex gap-2 text-sm text-tx">
+                          <span className="text-buy mt-0.5 shrink-0">▲</span>
+                          <span>{formatFactor(f)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-semibold text-sell tracking-[1px] uppercase mb-3">Bear Case</p>
+                    <ul className="space-y-2">
+                      {(a?.bear_factors ?? []).map((f, i) => (
+                        <li key={i} className="flex gap-2 text-sm text-tx">
+                          <span className="text-sell mt-0.5 shrink-0">▼</span>
+                          <span>{formatFactor(f)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </>
+            )}
           </Card>
         </div>
 
         {/* Key Metrics sidebar */}
-        <div className="lg:col-span-2 space-y-4">
+        <div className="@5xl:col-span-2 space-y-4">
           <Card title="Key Metrics">
             <div className="grid grid-cols-3 gap-2 mb-4">
               {[
@@ -372,18 +384,21 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
 
           <StreetConsensusCard consensus={streetConsensus} />
 
-          {a?.valuation && (
+          {/* a?.valuation is always present even when degraded (fallback
+              fills a generic "Fairly Valued"/filler comment) — only render
+              the LLM verdict/comment when the analysis is real. The DCF
+              sub-block below is deterministic, not LLM-derived, so it's
+              unaffected and can carry the card alone under degraded. */}
+          {(!report.degraded ? a?.valuation : financials?.dcf) && (
             <Card title="Valuation">
-              <p className={`text-sm font-semibold mb-1 ${
-                a.valuation.verdict === 'Undervalued' ? 'text-buy' :
-                a.valuation.verdict === 'Overvalued'  ? 'text-sell' : 'text-hold'
-              }`}>{a.valuation.verdict}</p>
-              <p className="text-sm text-muted leading-relaxed">{a.valuation.comment}</p>
+              {!report.degraded && a?.valuation && (
+                <>
+                  <p className={`text-sm font-semibold mb-1 ${valuationTone(a.valuation.verdict)}`}>{a.valuation.verdict}</p>
+                  <p className="text-sm text-muted leading-relaxed">{a.valuation.comment}</p>
+                </>
+              )}
               {financials?.dcf && (
-                <div className={`mt-3 pt-3 border-t border-border text-xs ${
-                  financials.dcf.verdict === 'Undervalued' ? 'text-buy' :
-                  financials.dcf.verdict === 'Overvalued'  ? 'text-sell' : 'text-hold'
-                }`}>
+                <div className={`mt-3 pt-3 border-t border-border text-xs ${valuationTone(financials.dcf.verdict)}`}>
                   <div className="flex items-center gap-1.5 mb-1">
                     <span className="font-semibold">DCF Estimate: {financials.dcf.verdict}</span>
                     <InfoTooltip title="DCF Estimate" align="left">
@@ -452,7 +467,9 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
       </div>
 
       {/* ── 3. Key Risks ── */}
-      {(a?.key_risks ?? []).length > 0 && (
+      {/* key_risks is also fallback filler under degraded — see the
+          Investment Thesis card's comment above. */}
+      {!report.degraded && (a?.key_risks ?? []).length > 0 && (
         <Card title="Key Risks">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {(a?.key_risks ?? []).map((risk, i) => (
@@ -466,8 +483,11 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
       )}
 
       {/* ── 4. Narrative row: context cards ── */}
+      {/* business_quality/institutional_trend/news_highlights are also
+          fallback filler under degraded — see the Investment Thesis card's
+          comment above. */}
       {(() => {
-        const narrativeCards = [
+        const narrativeCards = report.degraded ? [] : [
           a?.business_quality && (
             <Card key="bq" title="Business Quality">
               <p className="text-sm text-tx leading-relaxed">{a.business_quality}</p>
@@ -529,7 +549,7 @@ export default function ResultsDashboard({ report, onHardRefresh }: Props) {
                   <div key={i} className="flex items-center justify-between py-2">
                     <span className="text-sm text-tx">{mf.fund}</span>
                     <span className="flex items-center gap-1.5">
-                      <span className="text-sm font-mono font-semibold text-accent">{fmt(mf.holding_pct, 2)}%</span>
+                      <span className="text-sm font-mono font-semibold text-tx">{fmt(mf.holding_pct, 2)}%</span>
                       {delta != null && (
                         <span
                           className={`text-[11px] font-mono ${

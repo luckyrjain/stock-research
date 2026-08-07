@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback, useId } from 'react';
 import type { ValidationResult } from '@/types';
+import { exchangeTone } from '@/lib/tone';
 
 interface Props {
   onAnalyse: (symbol: string) => void;
@@ -11,7 +12,7 @@ interface Props {
 
 export default function TickerSearch({ onAnalyse, disabled, compact = false }: Props) {
   const [value, setValue]           = useState('');
-  const [status, setStatus]         = useState<'idle' | 'loading' | 'valid' | 'invalid' | 'warn'>('idle');
+  const [status, setStatus]         = useState<'idle' | 'loading' | 'valid' | 'invalid' | 'warn' | 'error'>('idle');
   const [result, setResult]         = useState<ValidationResult | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const validSymbol = useRef<string | null>(null);
@@ -36,7 +37,9 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
         validSymbol.current = null;
       }
     } catch {
-      setStatus('idle');
+      // Never a silent failure (design.md §17 state 4) — a network error
+      // used to reset to 'idle', rendering identically to an empty input.
+      setStatus('error');
     }
   }, []);
 
@@ -62,6 +65,7 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
   const borderColor =
     status === 'valid'   ? 'border-buy   focus:border-buy   shadow-buy/10'   :
     status === 'invalid' ? 'border-sell  focus:border-sell  shadow-sell/10'  :
+    status === 'error'   ? 'border-sell  focus:border-sell  shadow-sell/10'  :
     status === 'warn'    ? 'border-hold  focus:border-hold  shadow-hold/10'  :
     'border-border focus:border-accent shadow-accent/10';
 
@@ -69,12 +73,14 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
     status === 'loading' ? 'Checking symbol…' :
     status === 'valid'   ? 'Symbol found' :
     status === 'invalid' ? 'Symbol not found' :
+    status === 'error'   ? 'Could not check symbol — connection error' :
     status === 'warn'    ? 'Symbol suspended or delisted' : '';
 
   const statusIcon =
     status === 'loading' ? <span aria-hidden="true" className="animate-spin-slow inline-block text-muted">⟳</span> :
     status === 'valid'   ? <span aria-hidden="true" className="text-buy">✓</span> :
     status === 'invalid' ? <span aria-hidden="true" className="text-sell">✕</span> :
+    status === 'error'   ? <span aria-hidden="true" className="text-sell">✕</span> :
     status === 'warn'    ? <span aria-hidden="true" className="text-hold">⚠</span> : null;
 
   return (
@@ -100,7 +106,7 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
             aria-describedby={suggestionsId}
             className={`w-full pr-12 bg-card border-2 rounded-xl
               font-mono font-bold tracking-[2px] uppercase
-              text-tx placeholder:text-muted/50 placeholder:font-normal placeholder:tracking-normal
+              text-tx placeholder:text-muted/60 placeholder:font-normal placeholder:tracking-normal
               outline-none transition-all duration-200
               focus:shadow-[0_0_0_4px]
               disabled:opacity-40 disabled:cursor-not-allowed
@@ -119,10 +125,7 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
         {status === 'valid' && result && (
           <div className="flex items-center gap-2 w-full">
             <span className="text-sm font-medium text-tx">{result.company}</span>
-            <span className={`text-[11px] font-mono font-semibold px-2 py-0.5 rounded border
-              ${result.exchange === 'BSE'
-                ? 'bg-hold/10 text-hold border-hold/20'
-                : 'bg-buy/10 text-buy border-buy/20'}`}>
+            <span className={`text-[11px] font-mono font-semibold px-2 py-0.5 rounded border ${exchangeTone(result.exchange)}`}>
               {result.exchange ?? 'NSE'}
             </span>
           </div>
@@ -134,6 +137,18 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
         )}
         {status === 'invalid' && (
           <p className="text-sm text-muted w-full">Symbol not found on NSE / BSE</p>
+        )}
+        {status === 'error' && (
+          <p className="text-sm text-sell w-full flex items-center justify-between gap-2">
+            <span>Couldn&apos;t check this symbol — connection error.</span>
+            <button
+              type="button"
+              onClick={() => validate(value)}
+              className="shrink-0 text-xs font-semibold text-sell hover:underline"
+            >
+              Retry
+            </button>
+          </p>
         )}
 
         {/* Suggestions — shown on invalid/warn AND as "also try" alternatives when valid */}
@@ -154,10 +169,7 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
                 <div className="flex items-center gap-2">
                   <span className="font-mono font-semibold text-accent">{s.symbol}</span>
                   {s.exchange && (
-                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border
-                      ${s.exchange === 'BSE'
-                        ? 'bg-hold/10 text-hold border-hold/20'
-                        : 'bg-buy/10 text-buy border-buy/20'}`}>
+                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${exchangeTone(s.exchange)}`}>
                       {s.exchange}
                     </span>
                   )}

@@ -9,7 +9,8 @@ import type {
 } from '@/types';
 import MarketPicksDashboard from '@/components/market-picks-dashboard';
 import PositionsStrip from '@/components/positions-strip';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
+import { useToast } from '@/components/toast';
 
 interface SourceState {
   name: string;
@@ -22,12 +23,6 @@ interface ResearchState {
   symbol: string;
   ok: boolean | null;
 }
-
-const SOURCE_TYPE_ICON: Record<string, string> = {
-  news:      '📰',
-  brokerage: '🏦',
-  platform:  '📊',
-};
 
 const PIPELINE_STEPS: { id: MarketPicksPhase; label: string; desc: string }[] = [
   { id: 'scanning',      label: 'Scraping',    desc: 'Fetching articles' },
@@ -166,8 +161,7 @@ function SourceCard({ s }: { s: SourceState }) {
       ${s.status === 'ok'    ? 'border-buy/30 bg-buy/5' :
         s.status === 'empty' ? 'border-border bg-surface opacity-50' :
         'border-border bg-card'}`}>
-      <div className="flex items-center justify-between mb-1.5">
-        <span className="text-base">{SOURCE_TYPE_ICON[s.type] ?? '🔍'}</span>
+      <div className="flex items-center justify-end mb-1.5">
         {s.status === 'ok' ? (
           <span className="text-buy text-xs font-bold">✓ {s.articles}</span>
         ) : s.status === 'empty' ? (
@@ -191,7 +185,13 @@ function ShimmerPill() {
 }
 
 export default function MarketPicksPage() {
+  const { showError } = useToast();
   const [phase, setPhase]       = useState<MarketPicksPhase>('idle');
+  // STATE-01 (design.md): a Rescan of already-loaded picks keeps the table
+  // visible instead of replacing it with the multi-phase pipeline UI —
+  // `rescanning` is the in-place indicator for that case; `phase` never
+  // leaves 'done' during a background rescan.
+  const [rescanning, setRescanning] = useState(false);
   const [sources, setSources]   = useState<SourceState[]>([]);
   const [research, setResearch] = useState<ResearchState[]>([]);
   const [articleCount, setArticleCount]   = useState(0);
@@ -209,6 +209,8 @@ export default function MarketPicksPage() {
 
   const esRef   = useRef<EventSource | null>(null);
   const doneRef = useRef(false);
+  const rescanningRef = useRef(false);
+  const picksRef = useRef<MarketPick[]>([]);
 
   // Cache metadata only — no pipeline run — so the idle hero can show a true
   // last-run time and the next scheduled cron refresh instead of an
@@ -249,19 +251,32 @@ export default function MarketPicksPage() {
 
   const startScan = useCallback((force = false) => {
     esRef.current?.close();
-    setPicks([]);
-    setSources([]);
-    setResearch([]);
-    setValidated([]);
-    setFromCache(false);
-    setArticleCount(0);
-    setTotalBatches(0);
-    setBatchDone(0);
-    setExtractFound(0);
-    setUniquePicks(0);
-    setError(null);
+
+    // STATE-01: a Rescan of picks already on screen keeps them there —
+    // no wipe, no pipeline-progress UI taking over the page — instead of a
+    // fresh first scan (nothing to keep yet), which resets everything as
+    // before.
+    const isBackgroundRescan = force && picksRef.current.length > 0;
+    rescanningRef.current = isBackgroundRescan;
+
+    if (isBackgroundRescan) {
+      setRescanning(true);
+    } else {
+      setPicks([]);
+      picksRef.current = [];
+      setSources([]);
+      setResearch([]);
+      setValidated([]);
+      setFromCache(false);
+      setArticleCount(0);
+      setTotalBatches(0);
+      setBatchDone(0);
+      setExtractFound(0);
+      setUniquePicks(0);
+      setError(null);
+      setPhase('scanning');
+    }
     doneRef.current = false;
-    setPhase('scanning');
 
     const es = new EventSource(force ? '/api/market-picks?force=true' : '/api/market-picks');
     esRef.current = es;
@@ -269,6 +284,26 @@ export default function MarketPicksPage() {
     es.onmessage = (e) => {
       let msg: MarketPicksSSEMessage;
       try { msg = JSON.parse(e.data); } catch { return; }
+
+      // The pipeline-progress states below only apply to the visible,
+      // non-background UI — a rescan runs the same pipeline server-side but
+      // doesn't drive any of this page's progress rendering.
+      if (rescanningRef.current) {
+        if (msg.event === 'done') {
+          doneRef.current = true;
+          setPicks(msg.picks);
+          picksRef.current = msg.picks;
+          setGeneratedAt(msg.generated_at);
+          setFromCache(msg.from_cache ?? false);
+          setRescanning(false);
+          es.close();
+        } else if (msg.event === 'error') {
+          showError(`Rescan failed: ${msg.message}`);
+          setRescanning(false);
+          es.close();
+        }
+        return;
+      }
 
       switch (msg.event) {
         case 'picks_start':
@@ -315,6 +350,7 @@ export default function MarketPicksPage() {
         case 'done':
           doneRef.current = true;
           setPicks(msg.picks);
+          picksRef.current = msg.picks;
           setGeneratedAt(msg.generated_at);
           setFromCache(msg.from_cache ?? false);
           setPhase('done');
@@ -330,12 +366,17 @@ export default function MarketPicksPage() {
 
     es.onerror = () => {
       if (!doneRef.current) {
-        setError('Connection to server lost. Please try again.');
-        setPhase('error');
+        if (rescanningRef.current) {
+          showError('Rescan failed — connection to server lost.');
+          setRescanning(false);
+        } else {
+          setError('Connection to server lost. Please try again.');
+          setPhase('error');
+        }
       }
       es.close();
     };
-  }, []);
+  }, [showError]);
 
   const isRunning = PHASE_ORDER.indexOf(phase) >= 0 && phase !== 'idle' && phase !== 'done' && phase !== 'error';
 
@@ -352,20 +393,18 @@ export default function MarketPicksPage() {
   const researchDone = research.filter(r => r.ok !== null).length;
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav
-          active="market-picks"
-          right={isRunning && (
-            <button
-              onClick={() => { esRef.current?.close(); setPhase('idle'); }}
-              className="text-xs text-muted hover:text-tx transition-colors"
-            >
-              Cancel
-            </button>
-          )}
-        />
+    <PageShell
+      active="market-picks"
+      maxWidth="max-w-5xl"
+      right={isRunning && (
+        <button
+          onClick={() => { esRef.current?.close(); setPhase('idle'); }}
+          className="text-xs text-muted hover:text-tx transition-colors"
+        >
+          Cancel
+        </button>
+      )}
+    >
 
         <PositionsStrip />
 
@@ -432,7 +471,7 @@ export default function MarketPicksPage() {
 
               {/* Right: sample pick card */}
               <div>
-                <div className="text-[10px] font-bold text-muted/40 uppercase tracking-[0.15em] mb-3">
+                <div className="text-[10px] font-bold text-muted/60 uppercase tracking-[0.15em] mb-3">
                   Sample output
                 </div>
                 <SamplePickCard />
@@ -443,7 +482,7 @@ export default function MarketPicksPage() {
 
         {/* ── Active pipeline phases ── */}
         {isRunning && (
-          <div className="animate-fade-up">
+          <div className="animate-fade-up" aria-busy="true">
             <PipelineStepper phase={phase} />
 
             {/* Scanning */}
@@ -548,7 +587,7 @@ export default function MarketPicksPage() {
                                   border transition-all duration-200
                         ${v.ok
                           ? 'bg-buy/10 border-buy/30 text-buy'
-                          : 'bg-surface border-border text-muted/50 line-through'}`}>
+                          : 'bg-surface border-border text-muted/60 line-through'}`}>
                       {v.ok ? '✓' : '✗'} {v.symbol}
                     </div>
                   ))}
@@ -673,6 +712,7 @@ export default function MarketPicksPage() {
             generatedAt={generatedAt}
             fromCache={fromCache}
             onRescan={() => startScan(true)}
+            rescanning={rescanning}
             pricesLastUpdated={pricesLastUpdated}
           />
         )}
@@ -685,7 +725,6 @@ export default function MarketPicksPage() {
             </button>
           </div>
         )}
-      </div>
-    </main>
+    </PageShell>
   );
 }

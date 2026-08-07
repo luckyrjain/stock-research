@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { expectNoA11yViolations } from './fixtures';
 
 const USER = { id: 1, email: 'trader@example.com', tier: 'free' };
 
@@ -12,6 +13,8 @@ test.describe('Login page', () => {
 
     await expect(page.getByText('Check your email')).toBeVisible();
     await expect(page.getByText('trader@example.com')).toBeVisible();
+    // ENF-03 (design.md §19): landmark/label/contrast/heading-order gate.
+    await expectNoA11yViolations(page);
   });
 
   test('shows an error message when the request fails', async ({ page }) => {
@@ -178,9 +181,9 @@ test.describe('API keys page', () => {
     await expect(page.getByText('ap_live_key1')).toBeVisible();
 
     await page.getByRole('button', { name: 'Copy', exact: true }).click();
-    await expect(page.getByRole('button', { name: 'Copied!' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Copied', exact: true })).toBeVisible();
 
-    // Create a second key immediately, well before the real 2s "Copied!"
+    // Create a second key immediately, well before the real 2s "Copied"
     // reset timer would naturally fire.
     await page.getByRole('button', { name: 'Create key' }).click();
     await expect(page.getByText('ap_live_key2')).toBeVisible();
@@ -192,7 +195,7 @@ test.describe('API keys page', () => {
     // own and reset `copied` "for free," making the assertion pass
     // regardless of whether the actual fix (resetting `copied` when a NEW
     // key is created) is present.
-    const copiedCount = await page.getByRole('button', { name: 'Copied!' }).count();
+    const copiedCount = await page.getByRole('button', { name: 'Copied', exact: true }).count();
     expect(copiedCount).toBe(0);
   });
 

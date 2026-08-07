@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import type { PriceHistory } from '@/types';
 import Sparkline from './sparkline';
-import { fmt } from './dashboard-format';
+import { fmt } from '@/lib/format';
 
 export default function PriceSparkline({ symbol }: { symbol: string }) {
   const [history, setHistory] = useState<PriceHistory | null>(null);

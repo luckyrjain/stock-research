@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { expectNoA11yViolations } from './fixtures';
 
 test.describe('Watchlist page', () => {
   test('renders a starred stock with its live price', async ({ page }) => {
@@ -17,7 +18,12 @@ test.describe('Watchlist page', () => {
 
     await expect(page.getByRole('link', { name: 'TCS' })).toBeVisible();
     await expect(page.getByText('Tata Consultancy Services')).toBeVisible();
-    await expect(page.getByText('₹3456.78')).toBeVisible();
+    // Indian grouping (NUM-02, design.md) via lib/format.ts's fmtPrice —
+    // not "₹3456.78" (no separator), the format this page rendered before
+    // it moved onto the shared formatter.
+    await expect(page.getByText('₹3,456.78')).toBeVisible();
+    // ENF-03 (design.md §19): landmark/label/contrast/heading-order gate.
+    await expectNoA11yViolations(page);
   });
 
   test('shows the empty state with no starred stocks', async ({ page }) => {

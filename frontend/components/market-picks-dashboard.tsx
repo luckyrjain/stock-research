@@ -7,7 +7,9 @@ import WatchlistButton from './watchlist-button';
 import PositionButton from './position-button';
 import { usePositions } from '@/lib/positions';
 import { getClientId } from '@/lib/watchlist';
-import { safeExternalHref } from './dashboard-format';
+import { safeExternalHref, fmtPrice } from '@/lib/format';
+import { REC_TONE_4TIER, REC_LABEL_4TIER } from '@/lib/tone';
+import { SortableTh, FilterChip } from './data-table-ui';
 
 type SortKey    = 'confidence_score' | 'change_pct' | 'pe_ratio' | 'valuation_percentile';
 type ConfFilter = 'all' | 'high' | 'medium' | 'low';
@@ -29,14 +31,8 @@ interface Props {
   generatedAt: string;
   fromCache?: boolean;
   onRescan: () => void;
+  rescanning?: boolean;
   pricesLastUpdated?: Date | null;
-}
-
-// ── Formatters ────────────────────────────────────────────────────────────────
-
-function fmtPrice(n: number | null | undefined): string {
-  if (n == null) return '—';
-  return `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -60,19 +56,10 @@ function ConfidenceBar({ score }: { score: number }) {
 }
 
 function SignalBadge({ verdict }: { verdict: MarketPick['recommendation'] }) {
-  const cfg: Record<MarketPick['recommendation'], string> = {
-    BUY:       'bg-buy/12 text-buy border-buy/25',
-    WATCHLIST: 'bg-buy/8 text-buy/75 border-buy/15',
-    HOLD:      'bg-hold/12 text-hold border-hold/25',
-    SELL:      'bg-sell/12 text-sell border-sell/25',
-  };
-  const labels: Record<MarketPick['recommendation'], string> = {
-    BUY: 'BUY', WATCHLIST: 'WATCH', HOLD: 'HOLD', SELL: 'SELL',
-  };
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold
-                      border tracking-wide ${cfg[verdict]}`}>
-      {labels[verdict]}
+                      border tracking-wide ${REC_TONE_4TIER[verdict]}`}>
+      {REC_LABEL_4TIER[verdict]}
     </span>
   );
 }
@@ -117,12 +104,12 @@ function TrendBadge({ trend, delta }: { trend: MarketPick['trend']; delta: numbe
 
 function ConcentrationBadge({ sector, concentratedSectors }: { sector: string; concentratedSectors: string[] }) {
   if (!concentratedSectors.includes(sector)) return null;
-  // No dedicated "warning" design token exists in this codebase (same gap
-  // sme-signals' own illiquid badge already works around) — accent is reused
-  // here rather than inventing a new Tailwind color for one badge.
+  // hold is the caution token (COLOR-01, design.md) — no separate `warning`
+  // token exists, and this badge IS a caution ("you're already concentrated
+  // here"), so it belongs on `hold`, not `accent`.
   return (
     <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold
-                     bg-accent/15 text-accent border border-accent/30"
+                     bg-hold/12 text-hold border border-hold/25"
           title={`You already hold ${sector} stocks above your concentration threshold in your tracked positions`}>
       Concentrated
     </span>
@@ -146,7 +133,7 @@ function RankBadge({ rank }: { rank: number }) {
       </div>
     );
   }
-  return <span className="text-xs font-semibold text-muted/50 tabular-nums pl-1">{rank}</span>;
+  return <span className="text-xs font-semibold text-muted/60 tabular-nums pl-1">{rank}</span>;
 }
 
 function SourcesPopover({ sources }: { sources: PickSource[] }) {
@@ -225,8 +212,7 @@ function SourcesPopover({ sources }: { sources: PickSource[] }) {
 }
 
 function TradeBox({ pick }: { pick: MarketPick }) {
-  const p = (n: number | null) =>
-    n != null ? `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '—';
+  const p = fmtPrice;
 
   // Numeric, not pre-formatted -- current_price is live (refreshed every
   // 30s by the page's LTP-polling effect) while target_price is static, so
@@ -395,43 +381,9 @@ function ExpandedRow({ pick }: { pick: MarketPick }) {
   );
 }
 
-function SortableHeader({ label, sortK, currentKey, currentDir, onSort, tooltip }: {
-  label: string;
-  sortK: SortKey;
-  currentKey: SortKey | null;
-  currentDir: 'asc' | 'desc';
-  onSort: (k: SortKey) => void;
-  tooltip?: React.ReactNode;
-}) {
-  const active = currentKey === sortK;
-  return (
-    <th
-      aria-sort={active ? (currentDir === 'desc' ? 'descending' : 'ascending') : 'none'}
-      className="p-0 text-left text-[10px] font-bold text-muted uppercase tracking-wider whitespace-nowrap"
-    >
-      <div className="flex items-center gap-1">
-        {/* Button owns the original cell padding so the full header area stays
-            clickable/hoverable, not just the label+arrow's own tight bounding box. */}
-        <button
-          type="button"
-          onClick={() => onSort(sortK)}
-          className="flex items-center gap-1 px-4 py-3 uppercase tracking-wider
-                     cursor-pointer hover:text-tx transition-colors select-none group"
-        >
-          {label}
-          <span className={`text-[9px] transition-colors ${active ? 'text-accent' : 'text-muted/25 group-hover:text-muted/60'}`}>
-            {active ? (currentDir === 'desc' ? '↓' : '↑') : '↕'}
-          </span>
-        </button>
-        {tooltip && <span className="pr-4">{tooltip}</span>}
-      </div>
-    </th>
-  );
-}
-
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function MarketPicksDashboard({ picks, generatedAt, fromCache, onRescan, pricesLastUpdated }: Props) {
+export default function MarketPicksDashboard({ picks, generatedAt, fromCache, onRescan, rescanning, pricesLastUpdated }: Props) {
   const { isPositioned, positions } = usePositions();
   const [concentratedSectors, setConcentratedSectors] = useState<string[]>([]);
   const [expanded,   setExpanded]   = useState<Set<string>>(new Set());
@@ -533,11 +485,14 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
       {/* ── Header ── */}
       <div className="flex items-start justify-between mb-5 gap-4">
         <div>
-          <h2 className="text-xl font-black text-tx tracking-tight">
+          {/* PAGE-03 (design.md): one <h1> per page — the idle hero's own
+              <h1> (market-picks/page.tsx) unmounts once results are showing,
+              so this becomes the page's only heading at that point. */}
+          <h1 className="text-xl font-black text-tx tracking-tight">
             {isFiltered
               ? <>{displayed.length} <span className="text-muted font-normal text-base">of {picks.length} stocks</span></>
               : <>{picks.length} stocks found this week</>}
-          </h2>
+          </h1>
           <div className="flex items-center gap-2.5 mt-1 flex-wrap">
             <p className="text-xs text-muted">
               {fromCache ? 'Cached · ' : 'Last scan: '}{genDate}
@@ -561,18 +516,21 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
         <div className="shrink-0">
           <button
             onClick={onRescan}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors
+            disabled={rescanning}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors disabled:opacity-50
               ${fromCache
                 ? 'border-accent/30 text-accent hover:bg-accent/10'
                 : 'border-border text-muted hover:text-tx hover:border-border-hi'}`}
           >
-            ↺ {fromCache ? 'Fresh scan' : 'Rescan'}
+            {rescanning
+              ? <><span aria-hidden="true" className="animate-spin-slow">⟳</span> Scanning…</>
+              : <>↺ {fromCache ? 'Fresh scan' : 'Rescan'}</>}
           </button>
         </div>
       </div>
 
       {/* ── Filters: search + confidence chips ── */}
-      <div className="flex flex-col sm:flex-row gap-3 mb-5">
+      <div className="flex flex-col sm:flex-row flex-wrap gap-3 mb-5">
         {/* Search */}
         <div className="relative flex-1 max-w-[280px]">
           <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted/60 pointer-events-none"
@@ -586,11 +544,11 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
             value={search}
             onChange={e => setSearch(e.target.value)}
             className="w-full bg-card border border-border rounded-xl pl-9 pr-8 py-2 text-sm text-tx
-                       placeholder:text-muted/50 focus:outline-none focus:border-accent/40 transition-colors"
+                       placeholder:text-muted/60 focus:border-accent/40 transition-colors"
           />
           {search && (
             <button onClick={() => setSearch('')}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted/50 hover:text-muted text-xs">
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted/60 hover:text-muted text-xs">
               ✕
             </button>
           )}
@@ -612,7 +570,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                           border transition-colors
                 ${confFilter === id
                   ? active
-                  : 'bg-transparent border-border text-muted hover:text-tx hover:border-border-hi'}`}
+                  : 'bg-surface border-border text-muted hover:text-tx hover:border-border-hi'}`}
             >
               {dot && <span className={`w-1.5 h-1.5 rounded-full inline-block
                 ${dot} ${confFilter === id ? '' : 'opacity-50'}`} />}
@@ -629,17 +587,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
             { id: 'medium', label: 'Medium' },
             { id: 'long',   label: 'Long' },
           ] as const).map(({ id, label }) => (
-            <button
-              key={id}
-              onClick={() => setHorizonFilter(id)}
-              aria-pressed={horizonFilter === id}
-              className={`px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-colors
-                ${horizonFilter === id
-                  ? 'bg-accent/10 border-accent/30 text-accent'
-                  : 'bg-transparent border-border text-muted hover:text-tx hover:border-border-hi'}`}
-            >
-              {label}
-            </button>
+            <FilterChip key={id} value={id} active={horizonFilter === id} onClick={setHorizonFilter} label={label} />
           ))}
         </div>
 
@@ -651,17 +599,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
             { id: 'mid',   label: 'Mid' },
             { id: 'small', label: 'Small' },
           ] as const).map(({ id, label }) => (
-            <button
-              key={id}
-              onClick={() => setCapFilter(id)}
-              aria-pressed={capFilter === id}
-              className={`px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-colors
-                ${capFilter === id
-                  ? 'bg-accent/10 border-accent/30 text-accent'
-                  : 'bg-transparent border-border text-muted hover:text-tx hover:border-border-hi'}`}
-            >
-              {label}
-            </button>
+            <FilterChip key={id} value={id} active={capFilter === id} onClick={setCapFilter} label={label} />
           ))}
         </div>
 
@@ -672,7 +610,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
             value={sectorFilter}
             onChange={e => setSectorFilter(e.target.value)}
             className="bg-card border border-border rounded-xl px-3 py-2 text-xs text-tx
-                       focus:outline-none focus:border-accent/40 transition-colors"
+                       focus:border-accent/40 transition-colors"
           >
             <option value="all">All sectors</option>
             {sectors.map(s => <option key={s} value={s}>{s}</option>)}
@@ -688,7 +626,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
               <tr className="border-b border-border bg-surface sticky top-0 z-10">
                 <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider w-8">#</th>
                 <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider">Stock</th>
-                <SortableHeader
+                <SortableTh
                   label="Confidence" sortK="confidence_score" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort}
                   tooltip={
                     <InfoTooltip title="Confidence Score" align="left">
@@ -710,9 +648,9 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                   </span>
                 </th>
                 <th className="px-4 py-3 text-left text-[10px] font-bold text-muted uppercase tracking-wider">LTP</th>
-                <SortableHeader label="±%" sortK="change_pct" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
-                <SortableHeader label="P/E" sortK="pe_ratio"  currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
-                <SortableHeader
+                <SortableTh label="±%" sortK="change_pct" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
+                <SortableTh label="P/E" sortK="pe_ratio"  currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
+                <SortableTh
                   label="Val." sortK="valuation_percentile" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort}
                   tooltip={
                     <InfoTooltip title="Valuation Percentile" align="left">
@@ -806,7 +744,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                             )}
                           </div>
                           {pick.ranking_reasons?.[0] && (
-                            <div className="text-[10px] text-muted/45 mt-1 truncate leading-tight">
+                            <div className="text-[10px] text-muted/60 mt-1 truncate leading-tight">
                               {pick.ranking_reasons[0]}
                             </div>
                           )}
@@ -868,7 +806,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                       {/* Expand chevron */}
                       <td className="px-4 py-4 text-right">
                         <svg
-                          className={`w-4 h-4 text-muted/50 inline-block transition-transform duration-200
+                          className={`w-4 h-4 text-muted/60 inline-block transition-transform duration-200
                             ${isOpen ? 'rotate-180' : ''}`}
                           fill="none" stroke="currentColor" viewBox="0 0 24 24"
                         >
