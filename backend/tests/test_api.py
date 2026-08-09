@@ -1507,7 +1507,17 @@ class ShareholdingDetailEndpointTest(unittest.TestCase):
             "promoters": [{"name": "Cosmopolitan Investments Private Limited", "holding_pct": 25.59}],
             "shareholder_categories": [],
         })
+        # api._get_db_engine() must be mocked too, not just get_full_securities_
+        # master() — the endpoint calls get_full_securities_master(_get_db_engine())
+        # inline, so the real _get_db_engine() still runs to produce that argument
+        # even though the function receiving it is mocked. Regression test: this
+        # was missing, so the test only ever passed by accident when an earlier
+        # test in the same process had already populated api._DB_ENGINE's module-
+        # level cache (via a real or fake DATABASE_URL) — on a fresh process (a
+        # clean CI runner with no DATABASE_URL set at all, or this test simply
+        # running first) it failed with a bare KeyError('DATABASE_URL') instead.
         with patch("tools.nse_tools.get_shareholding_detail", nse_tool), \
+             patch("api._get_db_engine", return_value=MagicMock()), \
              patch("tools.securities_master.get_full_securities_master",
                    return_value=[{"symbol": "AGVENTURES", "exchange": "BSE", "code": "506579"}]), \
              patch("tools.bse_shareholding.get_shareholding_detail", return_value=bse_result) as bse_tool:
