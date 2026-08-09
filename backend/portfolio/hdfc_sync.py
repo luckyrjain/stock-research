@@ -120,8 +120,23 @@ def submit_credentials(api_key: str, token_id: str, username: str, password: str
     is only ever in-flight here — never logged, never persisted (see
     routes/portfolio_aggregator.py's login-start, which reads it out of the
     request body and never writes it to broker_connections). Returns the
-    raw response body, or {"error": ...}; the caller only needs to know
-    this didn't fail, the actual OTP prompt is a fixed next step."""
+    raw response body on an HTTP-200 response, or {"error": ...} only on a
+    network failure or an HTTP error status.
+
+    **Not independently confirmed, and unlike submit_otp()/get_access_token()
+    this one can't fail safe** — this step's success/failure response shape
+    was never verified against a real rejected-credentials response, so
+    unlike its siblings (which check a specific expected field and degrade
+    to {"error": ...} when it's missing), this function has no known field
+    to check and simply returns whatever body HDFC sent. If HDFC rejects
+    wrong username/password with an HTTP-200 response (a common REST
+    convention `resp.raise_for_status()` doesn't catch), that rejection is
+    NOT detected here — the caller (routes/portfolio_aggregator.py's
+    hdfc_login_start) only checks for an `"error"` key, so a
+    differently-shaped rejection body sails through as if credentials were
+    accepted, and the resulting OTP prompt can never succeed. Spot-check a
+    real wrong-password response against this endpoint before relying on
+    this in production."""
     try:
         resp = requests.post(
             f"{_API_BASE}/login/validate",
@@ -168,7 +183,15 @@ def authorise(api_key: str, token_id: str, request_token: str) -> dict:
     """Step 4: GET /authorise?consent=true. No user input needed — this is
     a fixed continuation once the OTP step returns a request_token, so
     routes/portfolio_aggregator.py's verify-otp calls this and
-    get_access_token() back to back. Returns {"error": ...} on failure."""
+    get_access_token() back to back. Returns {"error": ...} on a network
+    failure or HTTP error status only — like submit_credentials(), this
+    step's success/failure response shape was never independently confirmed,
+    so an HTTP-200 rejection here isn't detected at this layer. Lower risk
+    than submit_credentials() in practice: the very next call,
+    get_access_token(), independently checks for its own expected
+    `accessToken` field and still degrades to a clean {"error": ...} if the
+    consent step silently failed upstream — the failure is just attributed
+    to the wrong step, not swallowed entirely."""
     try:
         resp = requests.get(
             f"{_API_BASE}/authorise",

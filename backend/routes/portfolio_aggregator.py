@@ -792,6 +792,15 @@ async def hdfc_login_start(request: Request, body: HdfcLoginStartIn):
         from portfolio import hdfc_sync
         from sqlalchemy import insert, select, update
 
+        # Credential registration is its own committed transaction, separate
+        # from the two blocking HDFC network calls below — same reasoning as
+        # hdfc_verify_otp()'s own pending_token_id-cleared-first restructure
+        # (see that handler's comment): holding a transaction open across an
+        # outbound HTTP call to a third party ties up a pooled DB connection
+        # and a row lock on this account's broker_connections row for as
+        # long as HDFC takes to respond (up to hdfc_sync._TIMEOUT per call),
+        # for no benefit — nothing here needs the credential write and the
+        # HDFC calls to commit atomically together.
         with api._get_db_engine().begin() as conn:
             account = conn.execute(
                 select(accounts.c.id, accounts.c.profile_id, accounts.c.type)
@@ -840,15 +849,16 @@ async def hdfc_login_start(request: Request, body: HdfcLoginStartIn):
                     )
                 api_key = existing.api_key
 
-            login = hdfc_sync.start_login(api_key)
-            if "error" in login:
-                raise HTTPException(status_code=422, detail=login["error"])
-            token_id = login["token_id"]
+        login = hdfc_sync.start_login(api_key)
+        if "error" in login:
+            raise HTTPException(status_code=422, detail=login["error"])
+        token_id = login["token_id"]
 
-            creds = hdfc_sync.submit_credentials(api_key, token_id, body.username, body.password)
-            if "error" in creds:
-                raise HTTPException(status_code=422, detail=creds["error"])
+        creds = hdfc_sync.submit_credentials(api_key, token_id, body.username, body.password)
+        if "error" in creds:
+            raise HTTPException(status_code=422, detail=creds["error"])
 
+        with api._get_db_engine().begin() as conn:
             conn.execute(
                 update(broker_connections)
                 .where(
@@ -1000,43 +1010,45 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
     lock_name = f"broker_sync:{account_id}:{broker}"
     rate_key = f"broker_sync_rl:{account_id}:{broker}"
 
-    # Resolved once, synchronously, in the request/response cycle — not
-    # inside _run_and_release below, which runs on a background thread
-    # pool after this function returns, where re-reading `request` would be
-    # unsafe. A signed-in session always wins over `client_id` (see
-    # routes/watchlist.py::resolve_owner's own docstring) so a synced
-    # holding lands under the SAME column GET /api/positions actually reads
-    # for that caller — writing it under client_id unconditionally would
-    # make it invisible to a signed-in user's own /portfolio page, since
-    # that page reads positions by user_id, not client_id, once signed in.
-    # Never raises past this point: a missing/malformed client_id and no
-    # session just means "don't mirror this sync into positions," not "the
-    # sync itself fails" — position-mirroring is purely additive.
-    #
-    # Disclosed limitation: the web UI's own proxy for this whole feature
-    # (frontend/app/api/portfolio/[...path]/route.ts) deliberately never
-    # forwards the session cookie — Portfolio Aggregator is anonymous/
-    # client_id-only by design (see that proxy's own comment). So in
-    # practice, through the actual web UI, `token` here is always None and
-    # this always resolves to the client_id path; the session-preferring
-    # branch only matters for a caller hitting this endpoint directly with
-    # a bearer token. Implemented correctly regardless, rather than
-    # skipped, since it's this endpoint's own contract to get right
-    # independent of which caller happens to exercise it today.
-    owner = None
-    try:
-        import api
-        from routes.watchlist import resolve_owner
-        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
-    except ValueError:
-        pass
-
     def _prepare() -> dict:
         import api
         from core import rate_limiter
         from core.crypto import EncryptionNotConfigured, decrypt
         from db.models import broker_connections
         from sqlalchemy import select, update
+
+        # Resolved here, inside the executor thread _prepare() already runs
+        # on via run_owned_db_call() below — resolve_owner() does a real DB
+        # query when a bearer token is present (routes/watchlist.py's own
+        # docstring: "runs inside the same executor thread as the caller's
+        # other DB work"), so calling it directly in this async handler
+        # would block the event loop for every other concurrent request on
+        # this worker. A signed-in session always wins over `client_id` (see
+        # routes/watchlist.py::resolve_owner's own docstring) so a synced
+        # holding lands under the SAME column GET /api/positions actually reads
+        # for that caller — writing it under client_id unconditionally would
+        # make it invisible to a signed-in user's own /portfolio page, since
+        # that page reads positions by user_id, not client_id, once signed in.
+        # Never raises past this point: a missing/malformed client_id and no
+        # session just means "don't mirror this sync into positions," not "the
+        # sync itself fails" — position-mirroring is purely additive.
+        #
+        # Disclosed limitation: the web UI's own proxy for this whole feature
+        # (frontend/app/api/portfolio/[...path]/route.ts) deliberately never
+        # forwards the session cookie — Portfolio Aggregator is anonymous/
+        # client_id-only by design (see that proxy's own comment). So in
+        # practice, through the actual web UI, `token` here is always None and
+        # this always resolves to the client_id path; the session-preferring
+        # branch only matters for a caller hitting this endpoint directly with
+        # a bearer token. Implemented correctly regardless, rather than
+        # skipped, since it's this endpoint's own contract to get right
+        # independent of which caller happens to exercise it today.
+        owner = None
+        try:
+            from routes.watchlist import resolve_owner
+            owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
+        except ValueError:
+            pass
 
         if not rate_limiter.is_allowed(
             rate_key, _BROKER_SYNC_RATE_LIMIT_MAX_CALLS, _BROKER_SYNC_RATE_LIMIT_WINDOW_SECONDS,
@@ -1077,7 +1089,7 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
                     )
                     .values(sync_status="syncing", last_sync_error=None)
                 )
-            return {"access_token": access_token, "api_key": conn_row.api_key}
+            return {"access_token": access_token, "api_key": conn_row.api_key, "owner": owner}
         except Exception:
             rate_limiter.release_lock(lock_name)
             raise
@@ -1103,7 +1115,7 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
             mod = _broker_sync_module(broker)
             result = mod.sync_account(
                 api._get_db_engine(), account_id, prepared["access_token"], api_key=prepared["api_key"],
-                owner=owner,
+                owner=prepared["owner"],
             )
             if "error" in result:
                 error = result["error"]

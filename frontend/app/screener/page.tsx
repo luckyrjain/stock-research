@@ -7,7 +7,7 @@ import PageShell from '@/components/page-shell';
 import WatchlistButton from '@/components/watchlist-button';
 import SectorHeatmap from '@/components/sector-heatmap';
 import { Skeleton, FilterChip, SortableTh } from '@/components/data-table-ui';
-import { fmtCr, fmtPrice } from '@/lib/format';
+import { fmtCr, fmtPrice, fmtVolume } from '@/lib/format';
 
 type EmaTrendFilter = 'all' | 'bullish' | 'bearish';
 type SortKey = 'symbol' | 'current_price' | 'pe_ratio' | 'market_cap_cr' | 'avg_volume_10d' | 'rsi14';
@@ -400,6 +400,27 @@ export default function ScreenerPage() {
               <tbody>
                 {loading ? (
                   <SkeletonRows />
+                ) : stocks.length > 0 ? (
+                  stocks.map(s => (
+                    <tr key={s.symbol} className="border-b border-border/60 last:border-0 hover:bg-surface/40 transition-colors">
+                      <td className="px-4 py-4">
+                        <WatchlistButton symbol={s.symbol} company={s.company_name ?? s.symbol} exchange={s.exchange ?? 'NSE'} size="sm" />
+                      </td>
+                      <td className="px-4 py-4">
+                        <Link href={`/?symbol=${encodeURIComponent(s.symbol)}`} className="font-semibold text-tx hover:text-accent transition-colors">
+                          {s.symbol}
+                        </Link>
+                      </td>
+                      <td className="px-4 py-4 text-muted truncate max-w-xs">{s.company_name ?? '—'}</td>
+                      <td className="px-4 py-4 text-muted/70 text-xs whitespace-nowrap">{s.sector ?? '—'}</td>
+                      <td className="px-4 py-4 text-right font-mono">{fmtPrice(s.current_price)}</td>
+                      <td className="px-4 py-4 text-right font-mono">{fmtNum(s.pe_ratio)}</td>
+                      <td className="px-4 py-4 text-right font-mono">{fmtCr(s.market_cap_cr)}</td>
+                      <td className="px-4 py-4 text-right font-mono">{fmtVolume(s.avg_volume_10d)}</td>
+                      <td className={`px-4 py-4 text-right font-mono font-semibold ${rsiColor(s.rsi14)}`}>{fmtNum(s.rsi14)}</td>
+                      <td className="px-4 py-4"><TrendBadge trend={s.ema_trend} /></td>
+                    </tr>
+                  ))
                 ) : error ? (
                   <tr>
                     <td colSpan={10} className="px-4 py-12 text-center text-sell text-sm">{error}</td>
@@ -417,34 +438,24 @@ export default function ScreenerPage() {
                       )}
                     </td>
                   </tr>
-                ) : (
-                  stocks.map(s => (
-                    <tr key={s.symbol} className="border-b border-border/60 last:border-0 hover:bg-surface/40 transition-colors">
-                      <td className="px-4 py-4">
-                        <WatchlistButton symbol={s.symbol} company={s.company_name ?? s.symbol} exchange={s.exchange ?? 'NSE'} size="sm" />
-                      </td>
-                      <td className="px-4 py-4">
-                        <Link href={`/?symbol=${encodeURIComponent(s.symbol)}`} className="font-semibold text-tx hover:text-accent transition-colors">
-                          {s.symbol}
-                        </Link>
-                      </td>
-                      <td className="px-4 py-4 text-muted truncate max-w-xs">{s.company_name ?? '—'}</td>
-                      <td className="px-4 py-4 text-muted/70 text-xs whitespace-nowrap">{s.sector ?? '—'}</td>
-                      <td className="px-4 py-4 text-right font-mono">{fmtPrice(s.current_price)}</td>
-                      <td className="px-4 py-4 text-right font-mono">{fmtNum(s.pe_ratio)}</td>
-                      <td className="px-4 py-4 text-right font-mono">{fmtCr(s.market_cap_cr)}</td>
-                      <td className="px-4 py-4 text-right font-mono">{s.avg_volume_10d != null ? s.avg_volume_10d.toLocaleString('en-IN', { maximumFractionDigits: 0 }) : '—'}</td>
-                      <td className={`px-4 py-4 text-right font-mono font-semibold ${rsiColor(s.rsi14)}`}>{fmtNum(s.rsi14)}</td>
-                      <td className="px-4 py-4"><TrendBadge trend={s.ema_trend} /></td>
-                    </tr>
-                  ))
-                )}
+                ) : null}
               </tbody>
             </table>
           </div>
+          {error && stocks.length > 0 && (
+            <div className="px-4 py-2 border-t border-sell/20 bg-sell/10 text-xs text-sell flex items-center justify-between gap-4">
+              <span>{error} — showing the last loaded data.</span>
+              <button
+                onClick={() => fetchStocks({ silent: true, targetOffset: offset })}
+                className="shrink-0 text-xs font-semibold hover:underline"
+              >
+                Retry
+              </button>
+            </div>
+          )}
         </div>
 
-        {!loading && !error && data && (
+        {!loading && data && stocks.length > 0 && (
           <div className="flex flex-col items-center gap-2 mt-4">
             <p className="text-xs text-muted">
               Showing {stocks.length} of {data.total} matching stock{data.total === 1 ? '' : 's'}

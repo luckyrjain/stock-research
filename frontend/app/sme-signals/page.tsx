@@ -545,15 +545,23 @@ export default function SmeSignalsPage() {
           </div>
         )}
 
-        {/* Error */}
-        {error && (
+        {/* Error — only blocking (replaces the table) when there's nothing
+            already loaded to fall back to; a background-poll/reload failure
+            with a populated table keeps the last good render instead (see
+            the stale banner below the table) — STATE-01 (design.md). */}
+        {error && signals.length === 0 && (
           <div className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-6">
             {error}
           </div>
         )}
 
-        {/* Table */}
-        {!error && (
+        {/* Table — hidden only in the exact case the error banner above
+            covers instead (error with nothing loaded at all). Loading and
+            genuinely-empty-with-no-error both still render it (skeleton
+            rows / the tbody's own empty-state row handle those), and a
+            stale-but-populated state renders it too (see the stale banner
+            below the table). */}
+        {!(error && signals.length === 0) && (
           <div className="rounded-xl border border-border overflow-hidden" aria-busy={loading}>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -763,11 +771,22 @@ export default function SmeSignalsPage() {
                 </tbody>
               </table>
             </div>
+            {error && signals.length > 0 && (
+              <div className="px-4 py-2 border-t border-sell/20 bg-sell/10 text-xs text-sell flex items-center justify-between gap-4">
+                <span>{error} — showing the last loaded data.</span>
+                <button
+                  onClick={() => fetchSignals(lookback, direction, view, true)}
+                  className="shrink-0 text-xs font-semibold hover:underline"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
           </div>
         )}
 
         {/* Footer hint */}
-        {!loading && !error && signals.length > 0 && (
+        {!loading && signals.length > 0 && (
           <p className="text-[10px] text-muted/60 mt-3">
             Click a symbol to run full analysis. A BSE listing without an ISIN on record can&apos;t be resolved to an analyzable ticker yet.
           </p>

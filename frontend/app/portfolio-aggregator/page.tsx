@@ -7,6 +7,7 @@ import { Skeleton } from '@/components/data-table-ui';
 import { usePositions } from '@/lib/positions';
 import { getClientId } from '@/lib/watchlist';
 import { useToast } from '@/components/toast';
+import { fmtInr, fmtTimestampIST } from '@/lib/format';
 import type {
   PortfolioProfile, PortfolioAccount, PortfolioAccountType,
   PortfolioAsset, PortfolioAssetType, PortfolioNetWorth,
@@ -48,10 +49,6 @@ const PENDING_BROKER_CONNECT_KEY = 'portfolio_pending_broker_connect';
 const ACCOUNT_TYPES: PortfolioAccountType[] = ['bank', 'broker', 'amc', 'epfo', 'other'];
 const ASSET_TYPES: PortfolioAssetType[] = ['mf', 'stock', 'fd', 'epf', 'ppf', 'cash', 'manual', 'loan'];
 const SECURITY_TYPES = new Set(['mf', 'stock']);
-
-function fmtInr(n: number): string {
-  return `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
-}
 
 // A success/failure status message must not render identically regardless
 // of outcome (design.md §17 state 4 — "never a silent failure", extended
@@ -284,19 +281,28 @@ function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () =
   const [value, setValue] = useState(String(asset.value ?? ''));
   const { isPositioned } = usePositions();
   const alsoTracked = asset.symbol ? isPositioned(asset.symbol) : false;
+  const { showError } = useToast();
 
   async function saveValue() {
     const v = parseFloat(value);
     if (Number.isNaN(v)) return;
-    await api(`assets/${asset.id}/valuations`, { method: 'POST', body: JSON.stringify({ value: v }) });
-    setEditing(false);
-    onChanged();
+    try {
+      await api(`assets/${asset.id}/valuations`, { method: 'POST', body: JSON.stringify({ value: v }) });
+      setEditing(false);
+      onChanged();
+    } catch (e) {
+      showError(e instanceof Error ? e.message : 'Could not save this value.');
+    }
   }
 
   async function remove() {
     if (!confirm(`Delete "${asset.name}"? This can't be undone.`)) return;
-    await api(`assets/${asset.id}`, { method: 'DELETE' });
-    onChanged();
+    try {
+      await api(`assets/${asset.id}`, { method: 'DELETE' });
+      onChanged();
+    } catch (e) {
+      showError(e instanceof Error ? e.message : 'Could not delete this asset.');
+    }
   }
 
   const signed = asset.type === 'loan' ? -(asset.value ?? 0) : (asset.value ?? 0);
@@ -499,7 +505,7 @@ function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
       <span className="flex items-center gap-2 flex-wrap">
         {connection?.connected && (
           <span className="text-xs text-muted">
-            {label} connected{connection.last_synced_at ? ` · last synced ${new Date(connection.last_synced_at).toLocaleString('en-IN')}` : ' · never synced'}
+            {label} connected{connection.last_synced_at ? ` · last synced ${fmtTimestampIST(connection.last_synced_at)}` : ' · never synced'}
           </span>
         )}
         {connection && !connection.connected && (
@@ -711,7 +717,7 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
         )}
         {connection?.connected && (
           <span className="text-xs text-muted">
-            {broker.label} connected{connection.last_synced_at ? ` · last synced ${new Date(connection.last_synced_at).toLocaleString('en-IN')}` : ' · never synced'}
+            {broker.label} connected{connection.last_synced_at ? ` · last synced ${fmtTimestampIST(connection.last_synced_at)}` : ' · never synced'}
           </span>
         )}
         {connection && !connection.connected && (
@@ -786,13 +792,22 @@ function BrokerConnectControls({ account, connections, onSynced, onPoll }: {
   // doing that synchronously (before the async onSynced()/refresh() has
   // actually landed the new connection in `connections`) briefly removed
   // this broker from BOTH the "adding" slot and `registered` for one
-  // render, which React sees as the component disappearing and remounting
-  // at a different tree position: local state (the "Connected." message)
-  // was lost right after the user saw it. `addingBroker` above already
-  // derives to undefined the moment this broker's connection actually
-  // shows up in `registered` — `unregistered` stops containing it — so no
-  // explicit clearing is needed; the id lingering in state until then is
-  // harmless.
+  // render, which React sees as the component disappearing entirely for
+  // that render. `addingBroker` above already derives to undefined the
+  // moment this broker's connection actually shows up in `registered` —
+  // `unregistered` stops containing it — so no explicit clearing is
+  // needed to avoid that specific one-render gap.
+  //
+  // Note this does NOT make the transition remount-free: the "adding" row
+  // renders one tree level deeper (nested inside the bordered wrapper span
+  // below) than the "registered" row (a direct child of `registered.map`
+  // in the outer span) — React only matches keys within the same parent's
+  // children, so the key match doesn't span that structural difference,
+  // and BrokerRow/HdfcBrokerRow still remounts (losing its local "Connected."
+  // message) the instant `addingBroker` flips to undefined. Harmless in
+  // practice — the row immediately re-renders with the correct, permanent
+  // "connected · last synced …" line either way — just not the full state
+  // continuity this comment used to claim.
   function renderBroker(broker: { id: string; label: string; experimental?: boolean }) {
     const connection = connections.find(c => c.broker === broker.id);
     return broker.id === 'hdfc_securities' ? (
@@ -1086,10 +1101,21 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
     setConnectionsError(null);
     api<{ accounts: PortfolioAccount[] }>(`accounts?profile_id=${profile.id}`).then(async d => {
       setAccounts(d.accounts);
-      const entries = await Promise.all(
+      // allSettled, not all — a single account's assets fetch failing must
+      // not discard every other account's already-successful fetch (Promise.all
+      // rejects the whole batch on the first failure, which would leave
+      // assetsByAccount never updated at all, so every account — including
+      // the ones whose fetch actually succeeded — would fall back to `?? []`
+      // below and render a false "No assets yet" instead of an error).
+      const results = await Promise.allSettled(
         d.accounts.map(async acc => [acc.id, (await api<{ assets: PortfolioAsset[] }>(`assets?account_id=${acc.id}`)).assets] as const),
       );
-      setAssetsByAccount(Object.fromEntries(entries));
+      const entries = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+      setAssetsByAccount(prev => ({ ...prev, ...Object.fromEntries(entries) }));
+      const failed = results.filter(r => r.status === 'rejected').length;
+      if (failed > 0) {
+        setAccountsError(`Could not load assets for ${failed} of ${d.accounts.length} account${d.accounts.length === 1 ? '' : 's'}.`);
+      }
     }).catch(e => setAccountsError(e instanceof Error ? e.message : 'Could not load your accounts.'))
       .finally(() => setLoaded(true));
     api<PortfolioNetWorth>(`networth?profile_id=${profile.id}`).then(setNetworth)

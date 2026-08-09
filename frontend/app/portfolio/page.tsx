@@ -220,12 +220,12 @@ export default function PortfolioPage() {
                 {pricesStale ? (
                   <span className="flex items-center gap-1 text-[10px] text-hold/80" title="The live-price refresh has been failing — prices below may be outdated">
                     <span className="w-1.5 h-1.5 rounded-full bg-hold inline-block" />
-                    Prices may be outdated · last updated {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                    Prices may be outdated · last updated {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })} IST
                   </span>
                 ) : (
                   <span className="flex items-center gap-1 text-[10px] text-buy/70">
                     <span className="w-1.5 h-1.5 rounded-full bg-buy animate-pulse inline-block" />
-                    LTP {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                    LTP {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })} IST
                   </span>
                 )}
               </div>

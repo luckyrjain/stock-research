@@ -441,6 +441,68 @@ class BrokerRoutesTest(unittest.TestCase):
         self.assertEqual(conn["sync_status"], "error")
         self.assertEqual(conn["last_sync_error"], "session expired")
 
+    @patch("portfolio.portfolio_valuation.refresh_valuations")
+    @patch("portfolio.kite_sync.sync_account")
+    @patch("portfolio.kite_sync.exchange_request_token")
+    @patch("portfolio.kite_sync.get_login_url")
+    def test_sync_resolves_owner_from_client_id_and_passes_it_through(
+        self, mock_login_url, mock_exchange, mock_sync, _mock_refresh,
+    ) -> None:
+        """Regression test: resolve_owner() used to run synchronously in the
+        async broker_sync() handler itself, directly on the event loop,
+        rather than inside _prepare() (which run_owned_db_call() already
+        offloads to an executor thread) — see routes/portfolio_aggregator.py's
+        broker_sync() for the fix. This only proves the owner still reaches
+        sync_account() correctly after that move, not the event-loop-blocking
+        behavior itself (not practically observable from a synchronous
+        TestClient call)."""
+        mock_login_url.return_value = "https://kite.trade/connect/login?v=3"
+        mock_exchange.return_value = {"access_token": "token-1"}
+        mock_sync.return_value = {"holdings_synced": 1, "trades_synced": 0}
+
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        self._register_credentials("zerodha", acc, "k", "s")
+        client.post("/api/portfolio/broker/zerodha/connect",
+                     json={"account_id": acc, "request_token": "rt"})
+
+        client_id = "11111111-1111-1111-1111-111111111111"
+        resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc, "client_id": client_id})
+        self.assertEqual(resp.status_code, 202)
+
+        conn = self._wait_for_sync_status(pid, "zerodha", acc)
+        self.assertEqual(conn["sync_status"], "success")
+        mock_sync.assert_called_once()
+        self.assertEqual(mock_sync.call_args.kwargs["owner"], ("client", client_id))
+
+    @patch("portfolio.portfolio_valuation.refresh_valuations")
+    @patch("portfolio.kite_sync.sync_account")
+    @patch("portfolio.kite_sync.exchange_request_token")
+    @patch("portfolio.kite_sync.get_login_url")
+    def test_sync_with_no_client_id_and_no_session_passes_no_owner(
+        self, mock_login_url, mock_exchange, mock_sync, _mock_refresh,
+    ) -> None:
+        """A malformed/missing client_id and no session must not fail the
+        sync itself — position-mirroring is purely additive (see
+        broker_sync()'s own comment) — sync_account() just gets owner=None."""
+        mock_login_url.return_value = "https://kite.trade/connect/login?v=3"
+        mock_exchange.return_value = {"access_token": "token-1"}
+        mock_sync.return_value = {"holdings_synced": 1, "trades_synced": 0}
+
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        self._register_credentials("zerodha", acc, "k", "s")
+        client.post("/api/portfolio/broker/zerodha/connect",
+                     json={"account_id": acc, "request_token": "rt"})
+
+        resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
+        self.assertEqual(resp.status_code, 202)
+
+        conn = self._wait_for_sync_status(pid, "zerodha", acc)
+        self.assertEqual(conn["sync_status"], "success")
+        mock_sync.assert_called_once()
+        self.assertIsNone(mock_sync.call_args.kwargs["owner"])
+
     # ── the actual bug this redesign fixes: credentials are per-account,
     # not a shared global — two accounts connecting the same broker must
     # never cross-contaminate each other's api_key/api_secret/access_token.
@@ -719,6 +781,50 @@ class BrokerRoutesTest(unittest.TestCase):
             self.assertIsNone(row["pending_token_id"])
             self.assertEqual(row["api_key"], "my-hdfc-key")  # credentials untouched by an OTP failure
             self.assertIsNone(row["access_token_enc"])
+
+    def _mk_connected_hdfc_account(self, pid: int) -> int:
+        acc = self._mk_account(pid)
+        with patch("portfolio.hdfc_sync.start_login", return_value={"token_id": "tok-1"}), \
+             patch("portfolio.hdfc_sync.submit_credentials", return_value={"status": "ok"}), \
+             patch("portfolio.hdfc_sync.submit_otp", return_value={"request_token": "req-1"}), \
+             patch("portfolio.hdfc_sync.authorise", return_value={"status": "ok"}), \
+             patch("portfolio.hdfc_sync.get_access_token", return_value={"access_token": "hdfc-access-token"}):
+            self._login_start(acc, api_key="my-hdfc-key", api_secret="my-hdfc-secret")
+            resp = client.post("/api/portfolio/broker/hdfc_securities/verify-otp", json={"account_id": acc, "otp": "123456"})
+            self.assertEqual(resp.status_code, 200, resp.text)
+        return acc
+
+    @patch("portfolio.portfolio_valuation.refresh_valuations")
+    @patch("portfolio.hdfc_sync.sync_account")
+    def test_hdfc_partial_sync_failure_surfaces_error_and_keeps_synced_counts(
+        self, mock_sync, mock_refresh,
+    ) -> None:
+        """Regression test for the route-layer half of the HDFC partial-sync
+        fix (hdfc_sync.py's sync_account() can return a dict carrying BOTH
+        real synced counts AND an "error" key — e.g. holdings synced fine,
+        tradebook fetch failed). The route must: surface sync_status="error"
+        with the real counts still in last_sync_summary (not just the bare
+        error string), and still call refresh_valuations() since real
+        holdings data landed — see broker_sync()'s own comment for why this
+        must not be gated on "no error"."""
+        mock_sync.return_value = {
+            "holdings_synced": 3, "holdings_skipped": 0, "holdings_archived": 0,
+            "trades_synced": 0, "trades_skipped": 0, "trades_duplicate": 0,
+            "error": "tradebook fetch failed (holdings synced normally): network blip",
+        }
+
+        pid = self._mk_profile()
+        acc = self._mk_connected_hdfc_account(pid)
+
+        resp = client.post("/api/portfolio/broker/hdfc_securities/sync", json={"account_id": acc})
+        self.assertEqual(resp.status_code, 202)
+
+        conn = self._wait_for_sync_status(pid, "hdfc_securities", acc)
+        self.assertEqual(conn["sync_status"], "error")
+        self.assertEqual(conn["last_sync_error"], "tradebook fetch failed (holdings synced normally): network blip")
+        self.assertIsNotNone(conn["last_sync_summary"])
+        self.assertEqual(conn["last_sync_summary"]["holdings_synced"], 3)
+        mock_refresh.assert_called_once()
 
 
 if __name__ == "__main__":
