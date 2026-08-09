@@ -1,9 +1,9 @@
-// Canonical tone-mapping module (SRC-01, design.md §2) — a class string that
+// Canonical tone-mapping module (SRC-01, design.md's "Color" section) — a class string that
 // encodes a *semantic mapping* (verdict -> tone, status -> chip, sentiment ->
 // color) MUST live here and be imported, never re-declared per call site.
 
 // 4-tier (Market Picks, Consolidated card, Track Record) — identical across
-// every caller. WATCHLIST is a dimmer BUY, not its own hue (design.md §2):
+// every caller. WATCHLIST is a dimmer BUY, not its own hue (design.md's Color section):
 // deliberately the same green at lower opacity, since it's a lower-
 // conviction bullish tier. Never give it accent or hold.
 export const REC_TONE_4TIER: Record<string, string> = {
@@ -17,7 +17,7 @@ export const REC_LABEL_4TIER: Record<string, string> = {
   BUY: 'BUY', WATCHLIST: 'WATCH', HOLD: 'HOLD', SELL: 'SELL',
 };
 
-// unknown falls back to this (design.md §2's 4-tier table, and
+// unknown falls back to this (design.md's Color-section 4-tier table, and
 // verdict-timeline.tsx's own fallback for a null/unrecognized recommendation).
 export const REC_TONE_UNKNOWN = 'bg-muted/10 text-muted border-muted/20';
 export const REC_TONE_UNKNOWN_TIMELINE = 'bg-card-hi text-muted border-border';
@@ -34,7 +34,7 @@ export const REC_CONFIG_3TIER = {
   HOLD: { bg: 'bg-hold/10', border: 'border-hold/30', text: 'text-hold', badge: 'bg-hold text-bg', strip: 'bg-hold' },
 } as const;
 
-// Confidence HIGH/MEDIUM/LOW -> buy/hold/sell (design.md §2's "Other semantic
+// Confidence HIGH/MEDIUM/LOW -> buy/hold/sell (design.md's Color-section "Other semantic
 // mappings" line).
 export const CONFIDENCE_TONE: Record<string, string> = {
   HIGH: 'text-buy', MEDIUM: 'text-hold', LOW: 'text-sell',
@@ -52,7 +52,7 @@ export function valuationTone(verdict: string | null | undefined): string {
   return 'text-hold';
 }
 
-// Exchange tag: BSE -> hold, NSE -> buy (design.md §2). The one caller with a
+// Exchange tag: BSE -> hold, NSE -> buy (design.md's Color section). The one caller with a
 // third "both" state (a dual-listed stock's hero badge) isn't a tone this
 // module defines — accent is never a data label (COLOR-02), so that caller
 // falls back to a neutral surface/muted tone itself rather than getting a

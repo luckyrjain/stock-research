@@ -37,7 +37,7 @@ function formatDate(d: string): string {
   return parsed.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
 }
 
-// Vector SVG sparkline per design.md §7 — stroke color tracks buy/sell (rising/falling).
+// Vector SVG sparkline (design.md's "Data visualization" section) — stroke color tracks buy/sell (rising/falling).
 // When `dates` is supplied, hovering/tapping the chart shows the date + value at
 // that point — previously PriceHistory.dates was fetched everywhere this component
 // was used but never actually read, so no chart in the app was inspectable.

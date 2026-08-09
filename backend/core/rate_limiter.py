@@ -245,36 +245,53 @@ def release_slot(name: str) -> None:
 
 # ── Single-run locks ──────────────────────────────────────────────────────────
 
-_memory_locks: dict[str, bool] = {}
+_memory_locks: dict[str, float] = {}  # name -> monotonic expiry time
 _memory_locks_lock = threading.Lock()
 
 
-def _try_acquire_lock_memory(name: str) -> bool:
+def _try_acquire_lock_memory(name: str, ttl_seconds: float) -> bool:
+    now = time.monotonic()
     with _memory_locks_lock:
-        if _memory_locks.get(name):
+        expiry = _memory_locks.get(name)
+        if expiry is not None and expiry > now:
             return False
-        _memory_locks[name] = True
+        _memory_locks[name] = now + ttl_seconds
         return True
 
 
 def _release_lock_memory(name: str) -> None:
+    # Sets an already-expired timestamp rather than popping the key — the
+    # key's mere PRESENCE in this dict is what is_locked()'s Redis-outage
+    # fallback uses to tell "this name has been through the memory path at
+    # least once, so memory is the source of truth for it" apart from "Redis
+    # was the source of truth and this peek just blipped" (see that
+    # function's own comment). Popping the key on release made a genuinely
+    # released lock indistinguishable from a never-touched one, which made
+    # is_locked() fail closed (report "still locked") right after a real
+    # release during a sustained Redis outage.
     with _memory_locks_lock:
-        _memory_locks[name] = False
+        _memory_locks[name] = 0.0
 
 
 def try_acquire_lock(name: str, ttl_seconds: float) -> bool:
     """Non-blocking: True if `name` wasn't already locked (and now is),
     False if another caller already holds it. `ttl_seconds` bounds how long
-    a Redis-held lock can survive a crash that skips release_lock() — the
-    in-memory fallback has no such expiry (a process crash there already
-    resets all in-memory state, so a TTL would be redundant)."""
+    a lock can survive without its matching release_lock() ever being
+    called — not just a Redis-side crash-recovery bound (as this docstring
+    used to claim the in-memory fallback didn't need): a caller can hold a
+    lock across a genuinely long gap with no crash at all, e.g. a lock
+    acquired by one HTTP request and released by a LATER one the user might
+    simply never send (an abandoned mid-flow login attempt — see
+    routes/portfolio_aggregator.py's hdfc_login_start()). The in-memory
+    fallback tracks its own expiry (`time.monotonic()`-based) for exactly
+    this reason, not just to mirror Redis's `ex` option."""
     client = _get_redis_client()
     if client is not None:
         try:
             return bool(client.set(f"lock:{name}", "1", nx=True, ex=int(ttl_seconds)))
         except Exception as exc:  # pylint: disable=broad-exception-caught
             _warn_redis_failure("redis_lock_acquire_failed", exc)
-    return _try_acquire_lock_memory(name)
+    return _try_acquire_lock_memory(name, ttl_seconds)
 
 
 def release_lock(name: str) -> None:
@@ -291,7 +308,8 @@ def release_lock(name: str) -> None:
 def is_locked(name: str) -> bool:
     client = _get_redis_client()
     if client is None:
-        return _memory_locks.get(name, False)
+        expiry = _memory_locks.get(name)
+        return expiry is not None and expiry > time.monotonic()
     try:
         return bool(client.exists(f"lock:{name}"))
     except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -323,5 +341,5 @@ def is_locked(name: str) -> bool:
         # transient Redis blip, self-correcting on the next successful
         # read, which is safer than the reverse.
         if name in _memory_locks:
-            return _memory_locks[name]
+            return _memory_locks[name] > time.monotonic()
         return True

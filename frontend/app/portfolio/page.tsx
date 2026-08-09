@@ -67,7 +67,7 @@ export default function PortfolioPage() {
   const { positions, loading, removePosition, updateShares } = usePositions();
   const [prices, setPrices] = useState<Record<string, LivePrice>>({});
   const [sortDesc, setSortDesc] = useState(true);
-  // Stale/degraded (state 5, design.md §17): a poll that's been failing
+  // Stale/degraded (state 5, design.md's five-states rule): a poll that's been failing
   // must not render identically to one that's fresh.
   const [pricesUpdatedAt, setPricesUpdatedAt] = useState<Date | null>(null);
   const [pricesStale, setPricesStale] = useState(false);

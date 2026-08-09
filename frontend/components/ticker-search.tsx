@@ -37,7 +37,7 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
         validSymbol.current = null;
       }
     } catch {
-      // Never a silent failure (design.md §17 state 4) — a network error
+      // Never a silent failure (design.md's five-states rule, state 4) — a network error
       // used to reset to 'idle', rendering identically to an empty input.
       setStatus('error');
     }

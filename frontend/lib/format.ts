@@ -1,9 +1,10 @@
-// Canonical number/currency/date formatting module (SRC-01, design.md §16) —
-// components MUST import from here rather than calling toFixed/toLocaleString
-// directly. Anything used by only one card still lives with that card instead
-// (see e.g. insider-activity-card.tsx's fmtActivityDate, street-consensus-
-// card.tsx's fmtConsensusDate) — this module is for values rendered in more
-// than one place, or that the §16 table names explicitly.
+// Canonical number/currency/date formatting module (SRC-01, design.md's
+// "Numbers, currency, dates" section) — components MUST import from here
+// rather than calling toFixed/toLocaleString directly. Anything used by only
+// one card still lives with that card instead (see e.g. insider-activity-
+// card.tsx's fmtActivityDate, street-consensus-card.tsx's fmtConsensusDate)
+// — this module is for values rendered in more than one place, or that
+// design.md's own table names explicitly.
 
 import type { DataFreshness } from '@/types';
 
@@ -36,7 +37,7 @@ export function fmtRatioNum(n: number | null | undefined): string {
   return fmt(n, 1);
 }
 
-// Lakh above 1,00,000, raw with Indian grouping below (§16 Volume row).
+// Lakh above 1,00,000, raw with Indian grouping below (design.md's Volume row).
 export function fmtVolumeLakh(n: number | null | undefined): string {
   if (n == null) return '—';
   if (n >= 1_00_000) return `${fmt(n / 1_00_000, 1)} L`;

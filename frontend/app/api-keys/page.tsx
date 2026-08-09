@@ -26,7 +26,7 @@ export default function ApiKeysPage() {
   const [justCreated, setJustCreated] = useState<CreatedApiKey | null>(null);
   const [copied, setCopied] = useState(false);
   // A fetch failure must not render identically to "you have no keys"
-  // (design.md §17 state 4) — `loadError` gates that empty state below.
+  // (design.md's five-states rule, state 4) — `loadError` gates that empty state below.
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const loadKeys = useCallback(async (opts: { silent?: boolean } = {}) => {

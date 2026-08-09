@@ -22,7 +22,7 @@ function pnlPct(entry: number | null, current: number | null): number | null {
 export default function PositionsStrip() {
   const { positions, removePosition } = usePositions();
   const [prices, setPrices] = useState<Record<string, LivePrice>>({});
-  // Stale/degraded (state 5, design.md §17): a poll that's been failing
+  // Stale/degraded (state 5, design.md's five-states rule): a poll that's been failing
   // must not render identically to one that's fresh.
   const [pricesStale, setPricesStale] = useState(false);
 

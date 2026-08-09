@@ -284,6 +284,10 @@ fits", which produced five widths across twelve pages and could not be enforced.
 - **PAGE-02** — Every page MUST render the same shell: skip link → `<SiteNav>` inside `<header>` →
   exactly one `<main id="main">` → the global `<footer>` disclaimer. This lives in a `PageShell`
   component so it cannot be got wrong; it delivers A11Y-12 and A11Y-13 for free.
+  **Disclosed exception**: `/login` and `/auth/verify` deliberately don't use `PageShell` — a full
+  nav bar during an unauthenticated sign-in flow is its own product decision, not made here. Both
+  still carry a bare `<main id="main">` (no skip link, since there's no nav to skip past) so the
+  `id="main"` anchor stays consistent app-wide even where the rest of the shell doesn't apply.
 - **PAGE-03** — One `<h1>` per page, headings descend without skipping, and a card title is *not* a
   heading unless it introduces a landmark region.
 - **PAGE-04** — `/compare` is **not** capped at two symbols. Before the cap is raised,
@@ -358,9 +362,12 @@ primary row tinted `bg-accent/5` and tagged `Primary`. Every quote carries its a
 
 **`Skeleton`** — `bg-border/60 rounded animate-pulse` + a caller-supplied size class. This is the
 loading placeholder for the app, imported from here and nowhere re-declared (**SRC-02**, closes
-§12.6). **`FilterChip`** — `px-3 py-1.5 rounded-full text-[11px] font-semibold border
-transition-colors`, active `bg-accent/15 border-accent/40 text-accent`, inactive `bg-surface
-border-border text-muted hover:text-tx hover:border-border-hi`, and always `aria-pressed`.
+§12.6). **`FilterChip`** — `px-3 py-1.5 rounded-full text-[11px] border transition-colors`, active
+`bg-accent/15 border-accent/40 text-accent font-bold`, inactive `bg-surface border-border
+text-muted font-semibold hover:text-tx hover:border-border-hi` — the active/inactive weight split
+(rather than a shared `font-semibold`) restores a second selection channel now that raising `muted`
+to AA made it read *brighter* than `accent` (§12.3's contrast fix), which otherwise left selection
+carried by hue alone. Always `aria-pressed`.
 **`SortableTh`** — a `<th>` carrying `aria-sort`, wrapping a full-padding `<button>` with a
 `↑`/`↓`/`↕` indicator (`text-accent` when active, `text-muted/60` when not).
 
@@ -515,7 +522,7 @@ panel:
 
 The trigger carries `aria-expanded` + `aria-controls={panelId}` (`useId()`), and a document-level
 `Escape` listener closes it. `InfoTooltip`'s trigger is a `w-3.5 h-3.5 rounded-full border
-border-muted/60 text-muted/70 text-[9px] font-bold` circle containing `i`, labelled
+border-muted/40 text-muted/70 text-[9px] font-bold` circle containing `i`, labelled
 `aria-label={`About ${title}`}` and padded to a 44px target (**A11Y-14**); the panel is a
 `text-[11px] font-bold text-tx` title over `text-[11px] text-muted leading-relaxed space-y-1` body,
 with `align="left"` when a centered panel would overflow.
@@ -884,8 +891,11 @@ Real inconsistencies in the shipped code, listed so they aren't mistaken for pre
    `/portfolio` + `/api-keys` all import from `data-table-ui.tsx`.
 7. ~~**No `warning` token.**~~ **Resolved in Revision 2** — **COLOR-01** rules that none is added
    and `ConcentrationBadge` moves from `accent` to `hold`.
-8. ~~**`§`-numbered references in code.**~~ **Fixed in Revision 2** — **SRC-04**; comments cite rule
-   IDs, so renumbering a section can no longer invalidate a reference.
+8. ~~**`§`-numbered references in code.**~~ **Fixed** — **SRC-04**; comments cite a rule ID where
+   one exists, or the section's name (never its number) where it doesn't, so renumbering a section
+   can no longer invalidate a reference. (This entry itself was marked "Fixed" prematurely once
+   before — the code hadn't actually been touched — caught by a later review pass; genuinely fixed
+   now.)
 
 ### Still open
 
@@ -1040,8 +1050,9 @@ risk as the color.
 ## 19. Enforcement
 
 A rule nothing checks is a preference. `tsc --noEmit` and Playwright are the gates today, and
-neither can see a hex literal or a missing `aria-pressed`. Four additions cover most of this
-document, with no new runtime dependency.
+neither can see a hex literal or a missing `aria-pressed`. Three of the four additions below ship
+today, with no new runtime dependency; the fourth is NOT IMPLEMENTED (disclosed, not silently
+assumed done — this doc was caught overclaiming it once already, see §12.8's own note).
 
 - **ENF-01** — A CI grep for `#[0-9a-fA-F]{3,8}` across `app/` and `components/`, allow-listing the
   four exception files in §2. Ten lines; catches the exact class of bug that let the CTA glow in a
@@ -1054,8 +1065,12 @@ document, with no new runtime dependency.
   deliberately excluded from the scanned rule set — contrast is a design-token property, checked
   once at the palette level (**COLOR-05**), not per-render. The only mechanism that keeps
   A11Y-11…17 from re-entering a NOT IMPLEMENTED list.
-- **ENF-04** — A unit test asserting the exported tone maps (**SRC-01**) equal the strings in §2,
-  so a color change has to be a deliberate two-file edit.
+- **ENF-04** *(NOT IMPLEMENTED)* — A unit test asserting the exported tone maps (**SRC-01**) equal
+  a reference table in this doc, so a color change has to be a deliberate two-file edit. This repo
+  has no unit-test runner (no jest/vitest in `frontend/package.json`; Playwright e2e is the only
+  test tooling — see `frontend/CLAUDE.md`), and this doc doesn't yet define the exact reference
+  table ENF-04 would check the tone maps against — both a real dependency decision and a doc
+  addition, not attempted in this pass rather than silently assumed solved.
 
 ---
 

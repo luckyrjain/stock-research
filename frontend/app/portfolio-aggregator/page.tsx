@@ -51,7 +51,7 @@ const ASSET_TYPES: PortfolioAssetType[] = ['mf', 'stock', 'fd', 'epf', 'ppf', 'c
 const SECURITY_TYPES = new Set(['mf', 'stock']);
 
 // A success/failure status message must not render identically regardless
-// of outcome (design.md §17 state 4 — "never a silent failure", extended
+// of outcome (design.md's five-states rule, state 4 — "never a silent failure", extended
 // here to "never an indistinguishable one"). The success/neutral cases are
 // a small, fixed, enumerable set of literal strings this file itself
 // produces; every caught exception message or backend-supplied error string
@@ -82,7 +82,7 @@ function ProfilePicker({ onSelect }: { onSelect: (p: PortfolioProfile) => void }
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
   // A failed fetch must not render identically to "you genuinely have zero
-  // profiles" (design.md §17 state 4) — `profiles` stays null on failure so
+  // profiles" (design.md's five-states rule, state 4) — `profiles` stays null on failure so
   // the misleading empty state below never renders; this is what does.
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -117,7 +117,7 @@ function ProfilePicker({ onSelect }: { onSelect: (p: PortfolioProfile) => void }
       <h1 className="text-lg font-bold text-tx mb-1">Net Worth</h1>
       <p className="text-sm text-muted mb-5">Pick a profile to continue, or create a new one.</p>
       {loadError ? (
-        <div className="px-4 py-3 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-5
+        <div role="alert" className="px-4 py-3 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-5
                         flex items-start justify-between gap-4">
           <span>{loadError}</span>
           <button onClick={load} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
@@ -560,7 +560,7 @@ function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
             change API key
           </button>
         )}
-        {msg && <span className={`text-xs ${MSG_TONE_CLASS[msgTone(msg)]}`}>{msg}</span>}
+        {msg && <span role="status" aria-live="polite" className={`text-xs ${MSG_TONE_CLASS[msgTone(msg)]}`}>{msg}</span>}
       </span>
       {!otpRequired && (showCreds || !connection || !connection.connected || connection.sync_status === 'error') && (
         <span className="flex items-center gap-2 flex-wrap">
@@ -798,7 +798,7 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
             change API key
           </button>
         )}
-        {msg && <span className={`text-xs ${MSG_TONE_CLASS[msgTone(msg)]}`}>{msg}</span>}
+        {msg && <span role="status" aria-live="polite" className={`text-xs ${MSG_TONE_CLASS[msgTone(msg)]}`}>{msg}</span>}
       </span>
       {showCreds && (
         <span className="flex items-center gap-2">
@@ -902,6 +902,12 @@ function AccountBlock({ account, assets, connections, onChanged, onPoll }: {
 }) {
   const [showAdd, setShowAdd] = useState(false);
   const { showError } = useToast();
+  // A successful add unmounts the form (and whatever input inside it had
+  // focus) with nothing to take its place — without this, focus silently
+  // drops to <body> and a keyboard user has to restart Tab navigation from
+  // the top of the page. Returning it to the toggle button that reopens the
+  // form is the closest sensible landing spot.
+  const addToggleRef = useRef<HTMLButtonElement>(null);
 
   async function removeAccount() {
     if (!confirm(`Delete account "${account.name}"? This can't be undone.`)) return;
@@ -910,7 +916,7 @@ function AccountBlock({ account, assets, connections, onChanged, onPoll }: {
       onChanged();
     } catch {
       // 422 when the account still has assets — a background mutation
-      // failure, so a toast (design.md §17 state 4), not a browser alert().
+      // failure, so a toast (design.md's five-states rule, state 4), not a browser alert().
       showError('Delete every asset in this account first.');
     }
   }
@@ -934,7 +940,7 @@ function AccountBlock({ account, assets, connections, onChanged, onPoll }: {
           {account.type === 'broker' && (
             <BrokerConnectControls account={account} connections={connections} onSynced={onChanged} onPoll={onPoll} />
           )}
-          <button onClick={() => setShowAdd(s => !s)} className="text-xs text-accent font-semibold">
+          <button ref={addToggleRef} onClick={() => setShowAdd(s => !s)} className="text-xs text-accent font-semibold">
             {showAdd ? 'Cancel' : '+ Asset'}
           </button>
           <button onClick={removeAccount} className="text-xs text-muted hover:text-sell">delete account</button>
@@ -942,7 +948,11 @@ function AccountBlock({ account, assets, connections, onChanged, onPoll }: {
       </div>
       {assets.map(a => <AssetRow key={a.id} asset={a} onChanged={onChanged} />)}
       {assets.length === 0 && <p className="text-xs text-muted pl-4 py-1">No assets yet.</p>}
-      {showAdd && <div className="mt-2"><AddAssetForm accountId={account.id} onAdded={() => { onChanged(); setShowAdd(false); }} /></div>}
+      {showAdd && (
+        <div className="mt-2">
+          <AddAssetForm accountId={account.id} onAdded={() => { onChanged(); setShowAdd(false); addToggleRef.current?.focus(); }} />
+        </div>
+      )}
     </div>
   );
 }
@@ -1125,6 +1135,9 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
   const [connections, setConnections] = useState<BrokerConnection[]>([]);
   const [networth, setNetworth] = useState<PortfolioNetWorth | null>(null);
   const [showAddAccount, setShowAddAccount] = useState(false);
+  // Same "return focus to the toggle, don't drop it" reasoning as
+  // AccountBlock's own addToggleRef.
+  const addAccountToggleRef = useRef<HTMLButtonElement>(null);
   const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [showImportCas, setShowImportCas] = useState(false);
@@ -1144,7 +1157,7 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
   // card rendered nothing for that stretch instead of skeleton or data.
   const [netWorthLoaded, setNetWorthLoaded] = useState(false);
   // A fetch failure must not render identically to a genuine "zero
-  // accounts"/"zero net worth" (design.md §17 state 4) — both branches
+  // accounts"/"zero net worth" (design.md's five-states rule, state 4) — both branches
   // below used to have no .catch() at all, so a real failure silently
   // rendered as "No accounts yet" / an empty net-worth card.
   const [accountsError, setAccountsError] = useState<string | null>(null);
@@ -1178,7 +1191,7 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
       .catch(e => setNetworthError(e instanceof Error ? e.message : 'Could not load your net worth.'))
       .finally(() => setNetWorthLoaded(true));
     // A failure here must not render identically to "no broker connected"
-    // (design.md §17 state 4) — same class of bug as accounts/networth
+    // (design.md's five-states rule, state 4) — same class of bug as accounts/networth
     // above, just one that a prior audit pass over this file missed.
     api<{ connections: BrokerConnection[] }>(`broker/connections?profile_id=${profile.id}`)
       .then(d => setConnections(d.connections))
@@ -1212,7 +1225,7 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
           <p className="text-xs text-muted">Personal net worth — banks, brokers, FDs, EPF/PPF, loans.</p>
         </div>
         <div className="flex items-center gap-3">
-          {refreshMsg && <span className={`text-xs ${MSG_TONE_CLASS[msgTone(refreshMsg)]}`}>{refreshMsg}</span>}
+          {refreshMsg && <span role="status" aria-live="polite" className={`text-xs ${MSG_TONE_CLASS[msgTone(refreshMsg)]}`}>{refreshMsg}</span>}
           <button
             onClick={async () => {
               setRefreshing(true);
@@ -1252,7 +1265,7 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
       {showImportCsv && <ImportCsvForm accounts={accounts} onImported={() => { refresh(); setShowImportCsv(false); }} />}
 
       {networthError && (
-        <div className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-6
+        <div role="alert" className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-6
                         flex items-start justify-between gap-4">
           <span>{networthError}</span>
           <button onClick={refresh} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
@@ -1302,16 +1315,18 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
 
       <div className="flex items-center justify-between mb-3">
         <p className="text-sm font-semibold text-tx">Accounts</p>
-        <button onClick={() => setShowAddAccount(s => !s)} className="text-sm text-accent font-semibold">
+        <button ref={addAccountToggleRef} onClick={() => setShowAddAccount(s => !s)} className="text-sm text-accent font-semibold">
           {showAddAccount ? 'Cancel' : '+ Add account'}
         </button>
       </div>
       {showAddAccount && (
-        <div className="mb-4"><AddAccountForm profileId={profile.id} onAdded={() => { refresh(); setShowAddAccount(false); }} /></div>
+        <div className="mb-4">
+          <AddAccountForm profileId={profile.id} onAdded={() => { refresh(); setShowAddAccount(false); addAccountToggleRef.current?.focus(); }} />
+        </div>
       )}
 
       {(accountsError || connectionsError) && (
-        <div className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-3
+        <div role="alert" className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-3
                         flex items-start justify-between gap-4">
           <span>{accountsError || connectionsError}</span>
           <button onClick={refresh} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
@@ -1346,7 +1361,7 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
 export default function PortfolioAggregatorPage() {
   const [profile, setProfile] = useState<PortfolioProfile | null | undefined>(undefined);
   // A fetch failure while resolving a STORED profile id must not be treated
-  // as "no profile" (design.md §17 state 4) — that would silently drop the
+  // as "no profile" (design.md's five-states rule, state 4) — that would silently drop the
   // user back to profile selection even though their profile still exists,
   // just because of a transient network blip. `profile` stays undefined
   // (loading) on failure so the picker/dashboard never falsely render;
@@ -1377,7 +1392,7 @@ export default function PortfolioAggregatorPage() {
   return (
     <PageShell active="portfolio-aggregator" maxWidth="max-w-5xl">
       {loadError ? (
-        <div className="max-w-md mx-auto mt-12 px-5 py-4 rounded-xl bg-sell/10 border border-sell/30
+        <div role="alert" className="max-w-md mx-auto mt-12 px-5 py-4 rounded-xl bg-sell/10 border border-sell/30
                         text-sell text-sm flex items-start justify-between gap-4">
           <span>{loadError}</span>
           <button onClick={loadProfile} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold

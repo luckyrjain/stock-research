@@ -148,7 +148,7 @@ export default function ResultsDashboard({ report, onHardRefresh, refreshing }: 
               )}
             </div>
             <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-              {/* Exchange tag tone: BSE -> hold, NSE -> buy (design.md §2) — a
+              {/* Exchange tag tone: BSE -> hold, NSE -> buy (design.md's "Color" section) — a
                   dual-listed stock isn't either one, so it falls back to a
                   neutral tone rather than reusing accent as a data label. */}
               <span className={`text-[11px] font-mono font-semibold px-2 py-0.5 rounded border ${

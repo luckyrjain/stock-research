@@ -25,7 +25,7 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="min-h-screen bg-bg text-tx flex items-center justify-center px-4">
+    <main id="main" className="min-h-screen bg-bg text-tx flex items-center justify-center px-4">
       <div className="w-full max-w-sm">
         <Link href="/" className="block text-center mb-8">
           {/* PAGE-03 (design.md): one <h1> per page — this wordmark IS the

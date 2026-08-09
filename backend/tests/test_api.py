@@ -472,7 +472,7 @@ class MarketPicksForceRateLimitTest(unittest.TestCase):
         # (the weekly cron's HTTP trigger racing a user's "Fresh scan"
         # click) could both proceed, doubling real LLM/scraping cost on
         # the most expensive pipeline in the app.
-        rate_limiter._memory_locks["market_picks_refresh"] = True
+        rate_limiter.try_acquire_lock("market_picks_refresh", 300)
         resp = client.get("/api/market-picks?force=true")
         self.assertEqual(resp.status_code, 409)
 
@@ -2217,7 +2217,7 @@ class SmeRefreshEndpointTest(unittest.TestCase):
 
     def test_already_refreshing_returns_409(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        rate_limiter._memory_locks["sme_refresh"] = True
+        rate_limiter.try_acquire_lock("sme_refresh", 300)
         resp = client.post("/api/sme-signals/refresh")
         self.assertEqual(resp.status_code, 409)
 
@@ -2332,7 +2332,7 @@ class ScreenerEndpointTest(unittest.TestCase):
     def test_refreshing_flag_reflects_lock_state(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         fake_engine = _fake_screener_engine(rows=[], total=0, total_monitored=0, industries=[], last_run=None)
-        rate_limiter._memory_locks["screener_refresh"] = True
+        rate_limiter.try_acquire_lock("screener_refresh", 300)
         try:
             with patch("api._get_db_engine", return_value=fake_engine):
                 resp = client.get("/api/screener")
@@ -2359,7 +2359,7 @@ class ScreenerRefreshEndpointTest(unittest.TestCase):
 
     def test_already_refreshing_returns_409(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        rate_limiter._memory_locks["screener_refresh"] = True
+        rate_limiter.try_acquire_lock("screener_refresh", 300)
         resp = client.post("/api/screener/refresh")
         self.assertEqual(resp.status_code, 409)
 

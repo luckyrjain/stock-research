@@ -16,8 +16,9 @@ const DISMISS_MS = 6000;
 
 /** Floating error notifications for failures that don't warrant taking over
  * the page (a background mutation like a watchlist toggle) — the persistent
- * inline Error banner (design.md §5) stays for failures that block a whole
- * page's content. Reuses that banner's exact tone/classes, just floated,
+ * inline Error banner (design.md's five-states rule, state 4) stays for
+ * failures that block a whole page's content. Reuses that banner's exact
+ * tone/classes, just floated,
  * stacked, and auto-dismissing. */
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);

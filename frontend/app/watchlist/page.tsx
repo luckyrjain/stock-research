@@ -128,7 +128,7 @@ export default function WatchlistPage() {
   const [pricesLoading, setPricesLoading] = useState(true);
   const calendarEntries = useWatchlistCalendar(items.map(i => i.symbol));
 
-  // Stale/degraded (state 5, design.md §17): a poll that's been failing
+  // Stale/degraded (state 5, design.md's five-states rule): a poll that's been failing
   // must not render identically to one that's fresh — `pricesStale` flips
   // true on a failed poll (once at least one has ever succeeded) and back
   // to false the moment one succeeds again.

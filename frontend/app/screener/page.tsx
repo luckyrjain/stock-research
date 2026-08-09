@@ -443,7 +443,7 @@ export default function ScreenerPage() {
             </table>
           </div>
           {error && stocks.length > 0 && (
-            <div className="px-4 py-2 border-t border-sell/20 bg-sell/10 text-xs text-sell flex items-center justify-between gap-4">
+            <div role="alert" className="px-4 py-2 border-t border-sell/20 bg-sell/10 text-xs text-sell flex items-center justify-between gap-4">
               <span>{error} — showing the last loaded data.</span>
               <button
                 // Resets to the first page rather than re-fetching just the

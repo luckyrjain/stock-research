@@ -261,6 +261,33 @@ class LockMemoryTest(_MemoryStateResetMixin, unittest.TestCase):
         rate_limiter.release_lock("job")
         self.assertFalse(rate_limiter.is_locked("job"))
 
+    @patch("core.rate_limiter.time.monotonic")
+    def test_expired_lock_can_be_reacquired_without_release(self, mock_monotonic) -> None:
+        """Regression test: the in-memory fallback used to have no TTL at
+        all — a lock whose matching release_lock() never runs (not a crash,
+        just a caller that legitimately never finishes, e.g. an abandoned
+        HDFC OTP login attempt — see routes/portfolio_aggregator.py's
+        hdfc_login_start()) would stay held forever in a Redis-less
+        deployment. Now it expires like Redis's own `ex` option does."""
+        mock_monotonic.return_value = 1000.0
+        self.assertTrue(rate_limiter.try_acquire_lock("job", ttl_seconds=60))
+        self.assertFalse(rate_limiter.try_acquire_lock("job", ttl_seconds=60))
+
+        mock_monotonic.return_value = 1000.0 + 59
+        self.assertFalse(rate_limiter.try_acquire_lock("job", ttl_seconds=60))
+
+        mock_monotonic.return_value = 1000.0 + 61
+        self.assertTrue(rate_limiter.try_acquire_lock("job", ttl_seconds=60))
+
+    @patch("core.rate_limiter.time.monotonic")
+    def test_is_locked_reflects_ttl_expiry(self, mock_monotonic) -> None:
+        mock_monotonic.return_value = 1000.0
+        rate_limiter.try_acquire_lock("job", ttl_seconds=60)
+        self.assertTrue(rate_limiter.is_locked("job"))
+
+        mock_monotonic.return_value = 1000.0 + 61
+        self.assertFalse(rate_limiter.is_locked("job"))
+
 
 class LockRedisTest(_MemoryStateResetMixin, unittest.TestCase):
     def test_acquire_uses_set_nx(self) -> None:
