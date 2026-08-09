@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { expectNoA11yViolations } from './fixtures';
 
 const POSITION = {
   symbol: 'TCS',
@@ -35,6 +36,8 @@ test.describe('Portfolio page', () => {
     // (3300 - 3000) / 3000 * 100 = +10.0%
     await expect(page.getByText('+10.0%').first()).toBeVisible();
     await expect(page.getByText('100%')).toBeVisible(); // win rate: 1/1 priced positions in profit
+    // ENF-03 (design.md §19): landmark/label/contrast/heading-order gate.
+    await expectNoA11yViolations(page);
   });
 
   test('counts a share-tracked position toward Invested even when its live price is unavailable', async ({ page }) => {

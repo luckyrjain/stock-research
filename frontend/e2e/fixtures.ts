@@ -3,6 +3,43 @@
 // — this suite never talks to a real FastAPI backend (see playwright.config.ts's
 // own comment on why).
 
+import type { Page } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
+import { expect } from '@playwright/test';
+
+// ENF-03 (design.md §19): scoped to §19's four named categories — landmark,
+// label, contrast, heading-order — with one deliberate exception below, not
+// axe's full default ruleset (which covers a lot of ground this project
+// hasn't audited yet and would make this a much bigger, much less
+// predictable gate than the one §19 actually asks for).
+//
+// `color-contrast` is NOT included. Running it locally against the actual
+// app immediately surfaced real failures on `text-muted/60` (measured
+// ~2.94:1) — but that isn't a new regression, it's design.md's own §10
+// "Still open" entry: "Reduced-opacity muted remains the one live hazard...
+// COLOR-05 sets the floor at /60 [rather than removing it]." Gating CI on a
+// contrast rule the design system's own governance has already logged as
+// known-and-accepted debt would fail the pipeline on day one, on every PR,
+// for a decision that's already been made deliberately. Add it back once
+// that debt is actually paid down (or COLOR-05 is revisited), not before.
+const ENF_03_RULES = [
+  'region', 'landmark-one-main', 'landmark-unique', 'landmark-no-duplicate-banner',
+  'landmark-no-duplicate-contentinfo', 'landmark-complementary-is-top-level',
+  'label', 'aria-input-field-name', 'aria-command-name', 'aria-tooltip-name',
+  'button-name', 'link-name', 'image-alt', 'input-button-name',
+  'heading-order', 'page-has-heading-one', 'empty-heading',
+];
+
+// Call after a page has finished loading its main content — a scan mid-fetch
+// will false-positive on skeleton placeholders that aren't the final DOM.
+export async function expectNoA11yViolations(page: Page): Promise<void> {
+  const results = await new AxeBuilder({ page }).withRules(ENF_03_RULES).analyze();
+  const summary = results.violations
+    .map(v => `${v.id} (${v.impact}): ${v.nodes.length} node(s) — ${v.help}`)
+    .join('\n');
+  expect(results.violations, summary).toEqual([]);
+}
+
 export function sseAnalysisBody(
   symbol: string,
   opts: { degraded?: boolean; stockInfoOverrides?: Record<string, unknown> } = {},

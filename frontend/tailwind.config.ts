@@ -18,15 +18,21 @@ const config: Config = {
         // `bg`. Do not darken without re-measuring both.
         muted:      '#8093bd',
         buy:        '#10d98e',  // Vibrant green — gains
-        sell:       '#e05568',  // Muted red — losses (brief: "muted reds")
+        // COLOR-04 (design.md): lightened in Revision 2, hue/saturation held,
+        // only HSL lightness moved (+5pt), so every token clears AA on every
+        // surface. Was #e05568.
+        sell:       '#e46b7b',
         hold:       '#f5a623',
-        accent:     '#4d7fff',  // True blue — matches Midnight Blue theme
+        // COLOR-04 (design.md): lightened in Revision 2 (+4pt lightness, hue/
+        // saturation held) alongside `sell`, same AA-everywhere reasoning.
+        // Was #4d7fff.
+        accent:     '#618eff',
       },
       boxShadow: {
         // Accent glow for the primary CTA. Tokenised because a Tailwind
         // arbitrary value can't read `theme.colors.accent` — the one previous
         // inline use hardcoded #6c71f0, a retired accent, and silently rotted
-        // when the palette moved to #4d7fff.
+        // when the palette moved off it.
         //
         // Named `accent-glow`, NOT `accent`: a boxShadow key that collides with
         // a colors key makes Tailwind emit `.shadow-accent` twice — once as the
@@ -35,8 +41,8 @@ const config: Config = {
         // glow rendered at full opacity at rest and *dimmed* on hover (37.6%),
         // inverting the interaction. `-lg` escaped this only because it isn't
         // also a color name.
-        'accent-glow':    '0 4px 24px #4d7fff40',
-        'accent-glow-lg': '0 6px 28px #4d7fff60',
+        'accent-glow':    '0 4px 24px #618eff40',
+        'accent-glow-lg': '0 6px 28px #618eff60',
       },
       fontFamily: {
         sans: ['var(--font-sans)', 'system-ui', 'sans-serif'],
@@ -59,7 +65,11 @@ const config: Config = {
       },
     },
   },
-  plugins: [],
+  // @tailwindcss/container-queries, admitted under PAGE-04 (design.md) so
+  // ResultsDashboard's internal grids can reflow on their own column width
+  // rather than the window's — the prerequisite for lifting /compare's
+  // two-symbol cap. A second plugin requires an amendment (META-01).
+  plugins: [require('@tailwindcss/container-queries')],
 };
 
 export default config;

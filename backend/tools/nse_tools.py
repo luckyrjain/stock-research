@@ -286,6 +286,15 @@ def get_stock_quote(symbol: str) -> str:
     return json.dumps({"error": last_err or f"No market data found for {sym}", "symbol": sym})
 
 
+# api.py's shareholding-detail endpoint imports this specific string to
+# tell "NSE genuinely has no filing for this symbol" (worth trying BSE's
+# own filing instead — see tools/bse_shareholding.py) apart from any other
+# NSE fetch failure (worth a plain retry, not a BSE round-trip). A shared
+# constant rather than a duplicated literal so a future edit here can't
+# silently stop that gate from firing.
+_NO_SHAREHOLDING_RECORDS_MSG = "No shareholding records found"
+
+
 def _fetch_shareholding_xbrl(symbol: str):
     """Shared first half of get_mf_holdings/get_shareholding_detail — locates
     the most recent shareholding XBRL filing on NSE's corporate-share-
@@ -306,7 +315,7 @@ def _fetch_shareholding_xbrl(symbol: str):
     records = master_resp.json()
 
     if not records:
-        raise ValueError("No shareholding records found")
+        raise ValueError(_NO_SHAREHOLDING_RECORDS_MSG)
 
     # Pick the most recent record — a bare string sort of NSE's raw `date`
     # field would not sort in calendar order if it's in dd-Mon-yyyy form

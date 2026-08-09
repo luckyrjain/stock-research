@@ -1,37 +1,25 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import type { MarketPicksHistoryResponse, MarketPickTrackRecord, MarketPicksDailySnapshot } from '@/types';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
+import { Skeleton } from '@/components/data-table-ui';
+import { fmtChangePct as fmtPct } from '@/lib/format';
+import { REC_TONE_4TIER } from '@/lib/tone';
 
 function RecBadge({ rec }: { rec: string | null }) {
   if (!rec) return <span className="text-muted text-xs">—</span>;
-  const cls: Record<string, string> = {
-    BUY:       'bg-buy/12 text-buy border-buy/25',
-    WATCHLIST: 'bg-buy/8 text-buy/75 border-buy/15',
-    HOLD:      'bg-hold/12 text-hold border-hold/25',
-    SELL:      'bg-sell/12 text-sell border-sell/25',
-  };
   return (
-    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold border ${cls[rec] ?? cls.HOLD}`}>
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold border ${REC_TONE_4TIER[rec] ?? REC_TONE_4TIER.HOLD}`}>
       {rec}
     </span>
   );
 }
 
-function Skeleton({ className }: { className: string }) {
-  return <div className={`bg-border/60 rounded animate-pulse ${className}`} />;
-}
-
 function pctColor(v: number | null): string {
   if (v == null) return 'text-tx';
   return v >= 0 ? 'text-buy' : 'text-sell';
-}
-
-function fmtPct(v: number | null): string {
-  if (v == null) return '—';
-  return `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
 }
 
 const TIER_ORDER = ['BUY', 'WATCHLIST', 'HOLD', 'SELL'];
@@ -49,36 +37,52 @@ export default function MarketPicksHistoryPage() {
   const [dailyLoading, setDailyLoading] = useState(false);
   const [dailyError,   setDailyError]   = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  // "Latest request wins" via a monotonically-increasing token, rather than
+  // an effect-scoped `cancelled` closure — that closure only ever guards the
+  // ONE call the owning effect itself made; a Retry button also calling
+  // loadHistory()/loadDaily() directly (bypassing the effect entirely) got
+  // no cancellation at all, so a slow retry could resolve after a newer
+  // request (e.g. the user stepped to a different date via Prev/Next) and
+  // silently overwrite its result with stale data. A shared ref-based token
+  // covers every caller uniformly.
+  const historyRequestRef = useRef(0);
+  const loadHistory = useCallback(() => {
+    const requestId = ++historyRequestRef.current;
+    setLoading(true);
+    setError(null);
     fetch('/api/market-picks/history')
       .then(async res => {
         const json = await res.json().catch(() => null);
         if (!res.ok) throw new Error((json && json.error) || `Error ${res.status}`);
         return json as MarketPicksHistoryResponse;
       })
-      .then(json => { if (!cancelled) setData(json); })
-      .catch((e: Error) => { if (!cancelled) setError(e.message || 'Could not reach the backend.'); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
+      .then(json => { if (historyRequestRef.current === requestId) setData(json); })
+      .catch((e: Error) => { if (historyRequestRef.current === requestId) setError(e.message || 'Could not reach the backend.'); })
+      .finally(() => { if (historyRequestRef.current === requestId) setLoading(false); });
   }, []);
 
-  useEffect(() => {
-    if (!selectedDate) { setDaily(null); setDailyError(null); return; }
-    let cancelled = false;
+  useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  const dailyRequestRef = useRef(0);
+  const loadDaily = useCallback((date: string) => {
+    const requestId = ++dailyRequestRef.current;
     setDailyLoading(true);
     setDailyError(null);
-    fetch(`/api/market-picks/history?date=${encodeURIComponent(selectedDate)}`)
+    fetch(`/api/market-picks/history?date=${encodeURIComponent(date)}`)
       .then(async res => {
         const json = await res.json().catch(() => null);
         if (!res.ok) throw new Error((json && (json.detail || json.error)) || `Error ${res.status}`);
         return json as MarketPicksDailySnapshot;
       })
-      .then(json => { if (!cancelled) setDaily(json); })
-      .catch((e: Error) => { if (!cancelled) setDailyError(e.message || "Could not load that day's snapshot."); })
-      .finally(() => { if (!cancelled) setDailyLoading(false); });
-    return () => { cancelled = true; };
-  }, [selectedDate]);
+      .then(json => { if (dailyRequestRef.current === requestId) setDaily(json); })
+      .catch((e: Error) => { if (dailyRequestRef.current === requestId) setDailyError(e.message || "Could not load that day's snapshot."); })
+      .finally(() => { if (dailyRequestRef.current === requestId) setDailyLoading(false); });
+  }, []);
+
+  useEffect(() => {
+    if (!selectedDate) { setDaily(null); setDailyError(null); return; }
+    loadDaily(selectedDate);
+  }, [selectedDate, loadDaily]);
 
   const symbols: MarketPickTrackRecord[] = data?.symbols ?? [];
   const availableDates = data?.available_dates ?? [];
@@ -97,10 +101,7 @@ export default function MarketPicksHistoryPage() {
     : null;
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-5xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav active="track-record" />
+    <PageShell active="track-record" maxWidth="max-w-5xl">
 
         <div className="mb-6">
           <h1 className="text-xl font-black tracking-tight text-tx mb-1.5">Pick Track Record</h1>
@@ -168,8 +169,16 @@ export default function MarketPicksHistoryPage() {
         )}
 
         {error && (
-          <div className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-6">
-            {error}
+          <div className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-6
+                          flex items-start justify-between gap-4">
+            <span>{error}</span>
+            <button
+              onClick={loadHistory}
+              className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold border border-sell/40
+                         hover:bg-sell/10 transition-colors"
+            >
+              Retry
+            </button>
           </div>
         )}
 
@@ -189,7 +198,7 @@ export default function MarketPicksHistoryPage() {
               disabled={availableDates.length === 0}
               onChange={e => setSelectedDate(e.target.value || null)}
               className="bg-card border border-border rounded-xl px-3 py-2 text-xs text-tx
-                         focus:outline-none focus:border-accent/40 transition-colors disabled:opacity-50"
+                         focus:border-accent/40 transition-colors disabled:opacity-50"
             />
             <button
               type="button"
@@ -228,9 +237,20 @@ export default function MarketPicksHistoryPage() {
         {!error && selectedDate && (
           <div className="rounded-xl border border-border overflow-hidden mb-6">
             {dailyError ? (
-              <div className="px-5 py-4 text-sell text-sm">{dailyError}</div>
+              <div className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm
+                              flex items-start justify-between gap-4">
+                <span>{dailyError}</span>
+                <button
+                  onClick={() => selectedDate && loadDaily(selectedDate)}
+                  className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold border border-sell/40
+                             hover:bg-sell/10 transition-colors"
+                >
+                  Retry
+                </button>
+              </div>
             ) : (
-              <div className="overflow-x-auto">
+              <div className={`overflow-x-auto ${dailyLoading && daily ? 'opacity-50 transition-opacity' : ''}`}
+                   aria-busy={dailyLoading}>
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-border bg-surface sticky top-0 z-10">
@@ -249,7 +269,11 @@ export default function MarketPicksHistoryPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {dailyLoading ? (
+                    {/* STATE-01 (design.md): only show the skeleton when
+                        there's no previous day's data to keep showing — a
+                        Prev/Next step while `daily` is already populated
+                        dims the existing table (above) instead of wiping it. */}
+                    {dailyLoading && !daily ? (
                       Array.from({ length: 6 }).map((_, i) => (
                         <tr key={i} className="border-b border-border/60">
                           <td className="px-4 py-4"><Skeleton className="h-3.5 w-16" /></td>
@@ -302,7 +326,7 @@ export default function MarketPicksHistoryPage() {
         )}
 
         {!error && !selectedDate && (
-          <div className="rounded-xl border border-border overflow-hidden">
+          <div className="rounded-xl border border-border overflow-hidden" aria-busy={loading}>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -360,7 +384,7 @@ export default function MarketPicksHistoryPage() {
                         <td className="px-4 py-4">
                           <div className="flex items-center gap-1.5">
                             <RecBadge rec={s.recommendation_then} />
-                            <span className="text-muted/50 text-[10px]">→</span>
+                            <span className="text-muted/60 text-[10px]">→</span>
                             <RecBadge rec={s.recommendation_now} />
                           </div>
                         </td>
@@ -399,7 +423,6 @@ export default function MarketPicksHistoryPage() {
             </div>
           </div>
         )}
-      </div>
-    </main>
+    </PageShell>
   );
 }

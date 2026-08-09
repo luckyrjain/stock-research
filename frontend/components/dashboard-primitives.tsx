@@ -1,7 +1,7 @@
 'use client';
 
 import type { StockInfo } from '@/types';
-import { fmt } from './dashboard-format';
+import { fmt } from '@/lib/format';
 import { PercentileBadge } from './peer-comparison-card';
 
 export function Card({ title, children, className = '' }: { title: React.ReactNode; children: React.ReactNode; className?: string }) {

@@ -110,7 +110,7 @@ export default function EmaChart({ series, width = 640, height = 220 }: Props) {
           style={{ left: `${(tooltipLeft / width) * 100}%` }}
         >
           <div className="font-sans text-muted/70 mb-0.5">{fmtDate(hovered.trade_date)}</div>
-          <div className="text-muted/50">Close <span className="text-tx">{fmtVal(hovered.close_price)}</span></div>
+          <div className="text-muted/60">Close <span className="text-tx">{fmtVal(hovered.close_price)}</span></div>
           <div className="text-accent">EMA20 <span className="text-tx">{fmtVal(hovered.ema20)}</span></div>
           <div className="text-hold">EMA50 <span className="text-tx">{fmtVal(hovered.ema50)}</span></div>
           {hovered.cross && (

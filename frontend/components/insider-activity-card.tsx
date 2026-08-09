@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import type { InsiderActivity } from '@/types';
 import InfoTooltip from './info-tooltip';
 import { Card } from './dashboard-primitives';
-import { fmtInr } from './dashboard-format';
+import { fmtInr } from '@/lib/format';
 
 function fmtActivityDate(dateIso: string | null, fallback: string): string {
   if (!dateIso) return fallback;

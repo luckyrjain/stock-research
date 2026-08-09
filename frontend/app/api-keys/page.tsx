@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/lib/auth';
-import SiteNav from '@/components/site-nav';
+import PageShell from '@/components/page-shell';
+import { Skeleton } from '@/components/data-table-ui';
+import { useToast } from '@/components/toast';
 import type { ApiKey, ApiKeysResponse, ApiUsage, CreatedApiKey } from '@/types';
 
 function fmtDate(iso: string | null): string {
@@ -13,6 +15,7 @@ function fmtDate(iso: string | null): string {
 
 export default function ApiKeysPage() {
   const { user, loading: authLoading } = useAuth();
+  const { showError } = useToast();
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [tier, setTier] = useState<'free' | 'pro'>('free');
   const [usage, setUsage] = useState<ApiUsage | null>(null);
@@ -22,19 +25,25 @@ export default function ApiKeysPage() {
   const [error, setError] = useState('');
   const [justCreated, setJustCreated] = useState<CreatedApiKey | null>(null);
   const [copied, setCopied] = useState(false);
+  // A fetch failure must not render identically to "you have no keys"
+  // (design.md's five-states rule, state 4) — `loadError` gates that empty state below.
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  const loadKeys = useCallback(async () => {
-    setKeysLoading(true);
+  const loadKeys = useCallback(async (opts: { silent?: boolean } = {}) => {
+    // STATE-01: a reload after create/revoke keeps the existing table
+    // visible instead of wiping it to skeleton rows — only the very first
+    // load (nothing on screen yet) shows the skeleton.
+    if (!opts.silent) setKeysLoading(true);
+    setLoadError(null);
     try {
       const res = await fetch('/api/api-keys', { cache: 'no-store' });
-      if (!res.ok) { setKeys([]); setUsage(null); return; }
+      if (!res.ok) { setLoadError(`Could not load your keys (error ${res.status}).`); return; }
       const data = await res.json() as Partial<ApiKeysResponse>;
       setKeys(data.keys ?? []);
       setTier(data.tier ?? 'free');
       setUsage(data.usage ?? null);
     } catch {
-      setKeys([]);
-      setUsage(null);
+      setLoadError('Could not reach the backend. Is the server running?');
     } finally {
       setKeysLoading(false);
     }
@@ -63,11 +72,11 @@ export default function ApiKeysPage() {
       // instant a second creation attempt starts, permanently losing it if
       // that attempt then fails. `copied` is reset alongside it: it's tied
       // to whichever key is currently shown, so a fresh key must not
-      // inherit an unrelated "Copied!" state left over from a previous one.
+      // inherit an unrelated "Copied" state left over from a previous one.
       setJustCreated(data as CreatedApiKey);
       setCopied(false);
       setLabel('');
-      await loadKeys();
+      await loadKeys({ silent: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create key.');
     } finally {
@@ -80,9 +89,13 @@ export default function ApiKeysPage() {
     try {
       const res = await fetch(`/api/api-keys/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Could not revoke key.');
-      await loadKeys();
+      await loadKeys({ silent: true });
     } catch {
-      setError('Could not revoke key. Try again.');
+      // A toast, not the create-form's Error banner (FORM-07) — revoking a
+      // row is a background mutation, not a form submission, same
+      // distinction AccountBlock.removeAccount() already draws in
+      // portfolio-aggregator/page.tsx.
+      showError('Could not revoke key. Try again.');
     }
   }
 
@@ -99,10 +112,7 @@ export default function ApiKeysPage() {
   }
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-3xl mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav active="api-keys" wrap />
+    <PageShell active="api-keys" wrap maxWidth="max-w-3xl">
 
         <div className="mb-6">
           <h1 className="text-xl font-black tracking-tight text-tx mb-1.5">API Keys</h1>
@@ -169,21 +179,26 @@ export default function ApiKeysPage() {
                   onChange={e => setLabel(e.target.value)}
                   placeholder="e.g. my trading bot"
                   className="w-full px-4 py-2.5 rounded-lg bg-surface border border-border text-tx text-sm
-                             placeholder:text-muted/50 focus:outline-none focus:ring-2 focus:ring-accent/50"
+                             placeholder:text-muted/60 focus:ring-2 focus:ring-accent/50"
                 />
               </div>
               <button
                 type="submit"
                 disabled={creating}
-                className="px-4 py-2.5 rounded-lg bg-accent text-bg text-sm font-semibold
+                className="flex items-center gap-1.5 px-4 py-2.5 rounded-lg bg-accent text-bg text-sm font-semibold
                            hover:bg-accent/90 transition-colors disabled:opacity-50 shrink-0"
               >
+                {creating && <span aria-hidden="true" className="animate-spin-slow">⟳</span>}
                 {creating ? 'Creating…' : 'Create key'}
               </button>
             </form>
 
+            {/* Form-level failure (the create-key request itself failed) — the
+                Error banner (FORM-07), not a bare paragraph or a toast. */}
             {error && (
-              <p role="alert" className="text-sell text-xs mb-4">{error}</p>
+              <div role="alert" className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-4">
+                {error}
+              </div>
             )}
 
             {justCreated && (
@@ -202,27 +217,43 @@ export default function ApiKeysPage() {
                     className="shrink-0 px-3 py-2 rounded-lg text-xs font-semibold border border-border
                                text-muted hover:text-accent hover:border-accent/40 transition-colors"
                   >
-                    {copied ? 'Copied!' : 'Copy'}
+                    {copied ? 'Copied' : 'Copy'}
                   </button>
                 </div>
               </div>
             )}
 
+            {loadError && (
+              <div role="alert" className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-4
+                                           flex items-start justify-between gap-4">
+                <span>{loadError}</span>
+                <button
+                  onClick={() => loadKeys({ silent: keys.length > 0 })}
+                  className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
+                             border border-sell/40 hover:bg-sell/10 transition-colors"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
             {keysLoading ? (
-              <div className="rounded-xl border border-border overflow-hidden">
+              <div className="rounded-xl border border-border overflow-hidden" aria-busy="true">
                 <div className="divide-y divide-border/60">
                   {Array.from({ length: 2 }).map((_, i) => (
                     <div key={i} className="px-4 py-4 flex items-center gap-4">
-                      <div className="h-4 w-32 bg-border/60 rounded animate-pulse" />
-                      <div className="h-4 w-20 bg-border/60 rounded animate-pulse ml-auto" />
+                      <Skeleton className="h-4 w-32" />
+                      <Skeleton className="h-4 w-20 ml-auto" />
                     </div>
                   ))}
                 </div>
               </div>
             ) : keys.length === 0 ? (
-              <div className="rounded-xl border border-border bg-card px-6 py-10 text-center">
-                <p className="text-sm text-muted">No API keys yet. Create one above to get started.</p>
-              </div>
+              loadError ? null : (
+                <div className="rounded-xl border border-border bg-card px-6 py-10 text-center">
+                  <p className="text-sm text-muted">No API keys yet. Create one above to get started.</p>
+                </div>
+              )
             ) : (
               <div className="rounded-xl border border-border overflow-hidden">
                 <div className="overflow-x-auto">
@@ -267,7 +298,6 @@ export default function ApiKeysPage() {
             )}
           </>
         )}
-      </div>
-    </main>
+    </PageShell>
   );
 }

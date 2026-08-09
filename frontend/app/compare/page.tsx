@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import ProgressTracker    from '@/components/progress-tracker';
 import ResultsDashboard   from '@/components/results-dashboard';
-import SiteNav            from '@/components/site-nav';
+import PageShell          from '@/components/page-shell';
 import CompareDiffTable   from '@/components/compare-diff-table';
 import { useStockAnalysis } from '@/lib/useStockAnalysis';
 import type { Report } from '@/types';
@@ -37,7 +37,7 @@ function parseSymbols(raw: string): string[] {
 
 function CompareColumn({ symbol, onReport }: { symbol: string; onReport: (symbol: string, report: Report | null) => void }) {
   const {
-    phase, taskStatus, report, error,
+    phase, taskStatus, report, error, refreshing,
     handleAnalyse, handleHardRefresh,
   } = useStockAnalysis();
 
@@ -96,7 +96,7 @@ function CompareColumn({ symbol, onReport }: { symbol: string; onReport: (symbol
       )}
 
       {phase === 'done' && report && (
-        <ResultsDashboard report={report} onHardRefresh={handleHardRefresh} />
+        <ResultsDashboard report={report} onHardRefresh={handleHardRefresh} refreshing={refreshing} />
       )}
     </div>
   );
@@ -158,13 +158,10 @@ function ComparePageInner() {
   };
 
   return (
-    <main className="min-h-screen bg-bg text-tx">
-      <div className="max-w-[1600px] mx-auto px-4 pt-8 pb-16">
-
-        <SiteNav active="compare" wrap />
+    <PageShell active="compare" wrap maxWidth="max-w-[1600px]">
 
         <div className="mb-6">
-          <h1 className="text-xl font-black tracking-tight text-tx mb-1.5">Compare Stocks</h1>
+          <h1 className="text-4xl font-black tracking-tight text-tx mb-1.5">Compare Stocks</h1>
           <p className="text-muted text-sm max-w-xl leading-relaxed">
             Two full stock analysis reports, side by side. Each runs the same pipeline you&apos;d
             get from analysing them one at a time.
@@ -180,7 +177,7 @@ function ComparePageInner() {
             spellCheck={false}
             aria-label="Tickers to compare, comma-separated"
             className="flex-1 bg-card border border-border rounded-lg px-3 py-2 text-sm font-mono
-                       uppercase tracking-wide text-tx placeholder:text-muted/50 placeholder:normal-case
+                       uppercase tracking-wide text-tx placeholder:text-muted/60 placeholder:normal-case
                        placeholder:font-sans placeholder:tracking-normal outline-none
                        focus:border-accent transition-colors"
           />
@@ -217,8 +214,7 @@ function ComparePageInner() {
             </div>
           </>
         )}
-      </div>
-    </main>
+    </PageShell>
   );
 }
 

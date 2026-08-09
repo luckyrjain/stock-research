@@ -8,16 +8,16 @@ const PENDING_BROKER_CONNECT_KEY = 'portfolio_pending_broker_connect';
 
 const BROKER_LABELS: Record<string, string> = {
   zerodha: 'Zerodha',
-  hdfc_securities: 'HDFC Securities',
   paytm_money: 'Paytm Money',
 };
 
-// Shared callback destination for every supported broker's own login
-// redirect (Zerodha/HDFC Securities/Paytm Money all register this same URL
-// as their app's redirect URI) — none of them has a way to echo back custom
-// state, so the account + broker being connected were stashed in
-// localStorage right before the browser left for that broker's login page
-// (see BrokerRow.connect() in ../page.tsx), read back here.
+// Shared callback destination for every redirect-based broker's own login
+// (Zerodha/Paytm Money register this same URL as their app's redirect
+// URI) — neither has a way to echo back custom state, so the account +
+// broker being connected were stashed in localStorage right before the
+// browser left for that broker's login page (see BrokerRow.connect() in
+// ../page.tsx), read back here. HDFC Securities never redirects at all
+// (see HdfcBrokerRow in ../page.tsx) and never reaches this page.
 function BrokerCallbackInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -79,8 +79,11 @@ function BrokerCallbackInner() {
   return (
     <main className="min-h-screen bg-bg text-tx flex items-center justify-center px-4">
       <div className="w-full max-w-sm text-center">
-        <Link href="/portfolio-aggregator" className="block mb-8 text-xl font-black tracking-tight text-tx">
-          Alpha<span className="text-accent">Pulse</span>
+        <Link href="/portfolio-aggregator" className="block mb-8">
+          {/* PAGE-03 (design.md): one <h1> per page — same role as login's. */}
+          <h1 className="text-xl font-black tracking-tight text-tx">
+            Alpha<span className="text-accent">Pulse</span>
+          </h1>
         </Link>
         <div className="px-5 py-4 rounded-xl bg-card border border-border text-sm">
           {status === 'connecting' && (

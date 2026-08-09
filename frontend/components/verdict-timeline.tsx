@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import type { VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
-import { fmt } from './dashboard-format';
+import { fmt } from '@/lib/format';
+import { REC_TONE_4TIER, REC_TONE_UNKNOWN_TIMELINE } from '@/lib/tone';
 
 function useVerdictHistory(symbol: string): VerdictHistoryResponse | null {
   const [data, setData] = useState<VerdictHistoryResponse | null>(null);
@@ -19,12 +20,6 @@ function useVerdictHistory(symbol: string): VerdictHistoryResponse | null {
 
   return data;
 }
-
-const TIMELINE_REC_CLS: Record<string, string> = {
-  BUY:  'bg-buy/12 text-buy border-buy/25',
-  HOLD: 'bg-hold/12 text-hold border-hold/25',
-  SELL: 'bg-sell/12 text-sell border-sell/25',
-};
 
 // How today's call compares to past ones for the same stock — a strip of the
 // daily verdict snapshots verdict_history.save_snapshot() writes after every
@@ -53,7 +48,7 @@ export default function VerdictTimeline({ symbol }: { symbol: string }) {
         <div className="flex items-center gap-1.5 min-w-0">
           {history.map((h, i) => {
             const isLast = i === history.length - 1;
-            const cls = (h.recommendation && TIMELINE_REC_CLS[h.recommendation]) || 'bg-card-hi text-muted border-border';
+            const cls = (h.recommendation && REC_TONE_4TIER[h.recommendation]) || REC_TONE_UNKNOWN_TIMELINE;
             const outcomeMark = h.outcome === 'win' ? '✓' : h.outcome === 'loss' ? '✗' : null;
             const tooltip = [
               h.date,
@@ -66,7 +61,7 @@ export default function VerdictTimeline({ symbol }: { symbol: string }) {
             ].filter(Boolean).join(' · ');
             return (
               <div key={h.date} className="flex items-center gap-1.5 shrink-0">
-                {i > 0 && <span className="text-muted/30 text-xs">→</span>}
+                {i > 0 && <span className="text-muted/60 text-xs">→</span>}
                 <span
                   title={tooltip}
                   className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold border whitespace-nowrap ${cls} ${

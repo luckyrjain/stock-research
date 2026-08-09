@@ -472,7 +472,7 @@ class MarketPicksForceRateLimitTest(unittest.TestCase):
         # (the weekly cron's HTTP trigger racing a user's "Fresh scan"
         # click) could both proceed, doubling real LLM/scraping cost on
         # the most expensive pipeline in the app.
-        rate_limiter._memory_locks["market_picks_refresh"] = True
+        rate_limiter.try_acquire_lock("market_picks_refresh", 300)
         resp = client.get("/api/market-picks?force=true")
         self.assertEqual(resp.status_code, 409)
 
@@ -1496,6 +1496,58 @@ class ShareholdingDetailEndpointTest(unittest.TestCase):
         self.assertEqual(body["shareholder_categories"], [])
         mock_record.assert_called_once_with("shareholding_detail", symbol="TCS")
 
+    def test_bse_only_stock_falls_back_to_bse_shareholding(self) -> None:
+        # NSE's exact "not NSE-listed at all" error — the one specific
+        # string api.py gates the BSE fallback on (see its own comment).
+        nse_tool = MagicMock()
+        nse_tool.run.return_value = json.dumps({"error": "No shareholding records found", "symbol": "AGVENTURES"})
+        bse_result = json.dumps({
+            "symbol": "506579",
+            "as_of_date": "2026-07-09T12:57:13.293",
+            "promoters": [{"name": "Cosmopolitan Investments Private Limited", "holding_pct": 25.59}],
+            "shareholder_categories": [],
+        })
+        # api._get_db_engine() must be mocked too, not just get_full_securities_
+        # master() — the endpoint calls get_full_securities_master(_get_db_engine())
+        # inline, so the real _get_db_engine() still runs to produce that argument
+        # even though the function receiving it is mocked. Regression test: this
+        # was missing, so the test only ever passed by accident when an earlier
+        # test in the same process had already populated api._DB_ENGINE's module-
+        # level cache (via a real or fake DATABASE_URL) — on a fresh process (a
+        # clean CI runner with no DATABASE_URL set at all, or this test simply
+        # running first) it failed with a bare KeyError('DATABASE_URL') instead.
+        with patch("tools.nse_tools.get_shareholding_detail", nse_tool), \
+             patch("api._get_db_engine", return_value=MagicMock()), \
+             patch("tools.securities_master.get_full_securities_master",
+                   return_value=[{"symbol": "AGVENTURES", "exchange": "BSE", "code": "506579"}]), \
+             patch("tools.bse_shareholding.get_shareholding_detail", return_value=bse_result) as bse_tool:
+            resp = client.get("/api/shareholding-detail/AGVENTURES")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["unavailable"])
+        # The trading symbol, not BSE's own scrip code — the endpoint's
+        # public contract stays symbol-keyed regardless of which exchange
+        # actually answered.
+        self.assertEqual(body["symbol"], "AGVENTURES")
+        self.assertEqual(body["promoters"][0]["name"], "Cosmopolitan Investments Private Limited")
+        bse_tool.assert_called_once_with("506579")
+
+    def test_generic_nse_error_does_not_trigger_bse_fallback(self) -> None:
+        # A transient NSE failure (network blip, malformed XBRL) on an
+        # NSE-listed stock must not also pay for a live BSE round-trip —
+        # only the exact "not NSE-listed at all" string does (see the test
+        # above). Regression guard: an earlier version of this endpoint
+        # fell back to BSE on ANY NSE error, which broke this very test by
+        # making a real network call during it.
+        nse_tool = MagicMock()
+        nse_tool.run.return_value = json.dumps({"error": "boom", "symbol": "TCS"})
+        with patch("tools.nse_tools.get_shareholding_detail", nse_tool), \
+             patch("tools.securities_master.get_full_securities_master") as master_mock:
+            resp = client.get("/api/shareholding-detail/TCS")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["unavailable"])
+        master_mock.assert_not_called()
+
     def test_a_real_result_never_touches_the_error_counter(self) -> None:
         succeeding_tool = MagicMock()
         succeeding_tool.run.return_value = json.dumps({"symbol": "TCS", "promoters": [], "shareholder_categories": []})
@@ -2175,7 +2227,7 @@ class SmeRefreshEndpointTest(unittest.TestCase):
 
     def test_already_refreshing_returns_409(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        rate_limiter._memory_locks["sme_refresh"] = True
+        rate_limiter.try_acquire_lock("sme_refresh", 300)
         resp = client.post("/api/sme-signals/refresh")
         self.assertEqual(resp.status_code, 409)
 
@@ -2290,7 +2342,7 @@ class ScreenerEndpointTest(unittest.TestCase):
     def test_refreshing_flag_reflects_lock_state(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
         fake_engine = _fake_screener_engine(rows=[], total=0, total_monitored=0, industries=[], last_run=None)
-        rate_limiter._memory_locks["screener_refresh"] = True
+        rate_limiter.try_acquire_lock("screener_refresh", 300)
         try:
             with patch("api._get_db_engine", return_value=fake_engine):
                 resp = client.get("/api/screener")
@@ -2317,7 +2369,7 @@ class ScreenerRefreshEndpointTest(unittest.TestCase):
 
     def test_already_refreshing_returns_409(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        rate_limiter._memory_locks["screener_refresh"] = True
+        rate_limiter.try_acquire_lock("screener_refresh", 300)
         resp = client.post("/api/screener/refresh")
         self.assertEqual(resp.status_code, 409)
 

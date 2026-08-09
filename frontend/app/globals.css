@@ -17,7 +17,8 @@ body {
 }
 
 ::selection {
-  background: #4d7fff40;
+  /* = accent at 25% (COLOR-04, design.md — keep in sync, SRC-03) */
+  background: #618eff40;
   color: #e2e8f4;
 }
 
@@ -42,7 +43,7 @@ body {
    receive focus. Browsers already draw the outline following the element's
    own radius, so it buys nothing even where it wouldn't hurt. */
 :focus-visible {
-  outline: 2px solid #4d7fff;
+  outline: 2px solid #618eff; /* = accent; keep in sync (SRC-03) */
   outline-offset: 2px;
 }
 

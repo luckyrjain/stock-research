@@ -77,6 +77,9 @@ jobs:
       - name: Type-check
         run: npx tsc --noEmit
 
+      - name: Design-system lint (ENF-01/02, design.md §19)
+        run: npm run lint:design
+
       - name: Production build
         # tsc --noEmit alone doesn't catch everything — e.g. a CSS syntax
         # error only surfaces under the production minifier, not tsc or

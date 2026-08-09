@@ -143,6 +143,54 @@ def upsert_holding(conn, asset_id: int, units: Decimal, avg_cost: Decimal | None
         )
 
 
+def upsert_position_from_holding(
+    conn, owner: tuple[str, str | int], symbol: str, exchange: str | None,
+    quantity: Decimal, avg_price: Decimal | None,
+) -> None:
+    """Mirrors a synced broker holding into `positions` (the separate manual
+    "I bought this" tracker's own table) so it shows up on /portfolio too —
+    see routes/portfolio_aggregator.py's broker_sync() for why `owner` only
+    ever comes from the request that kicked off the sync, never stored on
+    accounts/profiles themselves (Portfolio Aggregator has no owner concept
+    at all otherwise).
+
+    `owner` is a resolved routes.watchlist.WatchlistOwner tuple
+    (`("user", user_id)` or `("client", client_id)`), not a raw client_id —
+    written to whichever column GET /api/positions actually reads for that
+    same caller (routes.watchlist.resolve_owner prefers a valid session
+    over client_id). Writing every synced position under client_id
+    unconditionally would make it invisible on /portfolio for anyone
+    signed in, since that page then reads by user_id.
+
+    `owner_type`/`owner_value` are never raw user input interpolated into
+    SQL — `owner_type` is always exactly "user" or "client" (resolve_owner's
+    own return-type guarantee), so the column-name f-string below is a
+    closed-set substitution, same convention as
+    routes/_shared.py::claim_anonymous_rows_sync's own comment about why
+    that's safe.
+
+    Only `entry_price`/`shares`/`exchange` are overwritten on every sync —
+    `target_price`/`stop_loss` (manual, no broker equivalent) and
+    `bought_at` (first-seen timestamp) are left untouched by the `DO
+    UPDATE`, whether this row started as a manual entry or a previous
+    sync's. `company` is left NULL: none of the three brokers' normalized
+    holding dicts carry a company name today (see broker_sync_common's own
+    module docstring for the normalized shape), and guessing one from the
+    symbol isn't worth the drift risk for a field the Positions UI already
+    treats as optional."""
+    owner_type, owner_value = owner
+    column = "user_id" if owner_type == "user" else "client_id"
+    conn.execute(
+        text(
+            f"INSERT INTO positions ({column}, symbol, exchange, entry_price, shares) "
+            f"VALUES (:owner_value, :symbol, :exchange, :entry_price, :shares) "
+            f"ON CONFLICT ({column}, symbol) DO UPDATE SET "
+            f"exchange = EXCLUDED.exchange, entry_price = EXCLUDED.entry_price, shares = EXCLUDED.shares"
+        ),
+        {"owner_value": owner_value, "symbol": symbol, "exchange": exchange, "entry_price": avg_price, "shares": quantity},
+    )
+
+
 def upsert_valuation(conn, asset_id: int, as_of: date, value: Decimal) -> None:
     # Same raw-SQL upsert shape as portfolio_valuation.py::refresh_valuations()
     # — one row per (asset_id, as_of), same-day re-sync updates in place.
@@ -201,7 +249,10 @@ def reconcile_stale_holdings(conn, account_id: int, meta_source: str, seen_symbo
     return archived
 
 
-def sync_holdings(conn, account_id: int, normalized_holdings: list[dict | None], meta_source: str, today: date) -> dict:
+def sync_holdings(
+    conn, account_id: int, normalized_holdings: list[dict | None], meta_source: str, today: date,
+    owner: tuple[str, str | int] | None = None,
+) -> dict:
     """A holdings sync is treated as authoritative for whatever this broker
     connection itself created — a symbol previously synced but absent from
     the latest fetch gets archived (see reconcile_stale_holdings), and a
@@ -218,7 +269,22 @@ def sync_holdings(conn, account_id: int, normalized_holdings: list[dict | None],
     whether the raw/normalized list had any elements: a list full of
     `None`s is non-empty but has nothing usable in `seen_symbols`, and
     running reconciliation against an empty `seen_symbols` set is exactly
-    the "archive everything" failure this guard exists to prevent."""
+    the "archive everything" failure this guard exists to prevent.
+
+    `owner` is optional and purely additive: when present (a resolved
+    routes.watchlist.WatchlistOwner — the request that triggered this sync
+    resolved a valid session or client_id, see
+    routes/portfolio_aggregator.py's broker_sync()), every synced holding
+    is also mirrored into `positions` via upsert_position_from_holding().
+    Omitted entirely (None), this function's behavior is identical to
+    before that feature existed. The mirroring call is wrapped in its own
+    try/except — unlike every DB write above, which is allowed to raise
+    and abort this whole sync's transaction, a bad `positions` write (a
+    constraint this module doesn't control, e.g. an unexpectedly-too-long
+    value) must not roll back an otherwise fully successful holdings sync;
+    this function's own callers (kite_sync.py/paytm_sync.py/hdfc_sync.py's
+    sync_account()) document themselves as "never raises," a contract this
+    optional, best-effort side effect must not break."""
     synced, skipped = 0, 0
     seen_symbols: set[str] = set()
     for h in normalized_holdings:
@@ -230,6 +296,23 @@ def sync_holdings(conn, account_id: int, normalized_holdings: list[dict | None],
         upsert_holding(conn, asset_id, h["quantity"], h.get("avg_price"))
         if h.get("last_price") is not None:
             upsert_valuation(conn, asset_id, today, h["quantity"] * h["last_price"])
+        if owner:
+            try:
+                # A plain try/except around the INSERT alone is not enough:
+                # once a statement fails inside a Postgres transaction, the
+                # whole transaction is aborted and every subsequent
+                # statement on this same `conn` (the rest of this loop,
+                # reconcile_stale_holdings, the trades sync that follows in
+                # the caller's own `with engine.begin()` block) would fail
+                # too — catching the Python exception doesn't undo that.
+                # begin_nested() opens a SAVEPOINT so a failure here rolls
+                # back only this one insert, leaving the outer transaction
+                # perfectly usable for everything after it.
+                with conn.begin_nested():
+                    upsert_position_from_holding(conn, owner, h["symbol"], h.get("exchange"), h["quantity"], h.get("avg_price"))
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                log_event(LOGGER, "position_mirror_failed", level="warning",
+                          account_id=account_id, symbol=h["symbol"], error=str(exc))
         seen_symbols.add(h["symbol"])
         synced += 1
 

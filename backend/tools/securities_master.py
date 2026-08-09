@@ -119,6 +119,13 @@ def fetch_bse_main_board(force: bool = False) -> list[dict]:
                         "name":     str(item.get("Scrip_Name", "")).strip() or None,
                         "isin":     str(item.get("ISIN_NUMBER", "")).strip() or None,
                         "exchange": "BSE",
+                        # BSE's own numeric scrip code — its shareholding-pattern
+                        # API (tools/bse_shareholding.py) is scripcode-keyed, not
+                        # symbol-keyed, unlike NSE's. Kept alongside `code`
+                        # rather than a NEW top-level `bse_scripcode` key so a
+                        # caller doesn't need to know which source produced a
+                        # given master row before reading it.
+                        "code":     code,
                         "series":   group,
                     })
                 except Exception:

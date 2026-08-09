@@ -104,7 +104,7 @@ def _normalize_trade(t: dict) -> dict | None:
     }
 
 
-def sync_account(engine, account_id: int, access_token: str, api_key: str) -> dict:
+def sync_account(engine, account_id: int, access_token: str, api_key: str, owner: tuple | None = None) -> dict:
     """Syncs one connected Zerodha account's holdings + today's executed
     trades into the existing Portfolio Aggregator schema. Read-only against
     Kite (holdings/positions/trades — never places an order). Returns a
@@ -114,7 +114,10 @@ def sync_account(engine, account_id: int, access_token: str, api_key: str) -> di
 
     `api_key` is this connection's own registered app key (broker_connections.api_key),
     never a deployment-wide env var — see db/models.py's broker_connections comment
-    for why a single global KITE_API_KEY wouldn't work across different accounts."""
+    for why a single global KITE_API_KEY wouldn't work across different accounts.
+
+    `owner` is optional, passed straight through to
+    broker_sync_common.sync_holdings() — see its own docstring."""
     try:
         kite = _get_kite_client(api_key, access_token=access_token)
         raw_holdings = broker_sync_common.call_with_backoff(kite.holdings, broker=BROKER_NAME)
@@ -129,6 +132,7 @@ def sync_account(engine, account_id: int, access_token: str, api_key: str) -> di
         summary = {}
         summary.update(broker_sync_common.sync_holdings(
             conn, account_id, [_normalize_holding(h) for h in (raw_holdings or [])], _META_SOURCE, today,
+            owner=owner,
         ))
         summary.update(broker_sync_common.sync_trades(
             conn, account_id, [_normalize_trade(t) for t in (raw_trades or [])], _META_SOURCE,

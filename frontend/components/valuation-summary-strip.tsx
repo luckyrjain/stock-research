@@ -2,7 +2,7 @@
 
 import type { DcfEstimate, PeerComparison } from '@/types';
 import InfoTooltip from './info-tooltip';
-import { fmt } from './dashboard-format';
+import { fmt } from '@/lib/format';
 
 // A single "at a glance" reconciliation of every independent valuation lens
 // this app computes for the same stock — the AI analyst's own Undervalued/

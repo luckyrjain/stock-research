@@ -1,5 +1,7 @@
 'use client';
 
+import type { ReactNode } from 'react';
+
 // Small, generic UI atoms shared by every filterable/sortable stock table in
 // this app — extracted out of app/screener/page.tsx and app/sme-signals/page.tsx,
 // which had each independently implemented byte-identical (or near-identical)
@@ -37,13 +39,14 @@ export function FilterChip<T extends string | number>({
   );
 }
 
-export function SortableTh<K extends string>({ label, sortK, currentKey, currentDir, onSort, align = 'left' }: {
+export function SortableTh<K extends string>({ label, sortK, currentKey, currentDir, onSort, align = 'left', tooltip }: {
   label: string;
   sortK: K;
   currentKey: K | null;
   currentDir: 'asc' | 'desc';
   onSort: (k: K) => void;
   align?: 'left' | 'right';
+  tooltip?: ReactNode;
 }) {
   const active = currentKey === sortK;
   return (
@@ -51,24 +54,23 @@ export function SortableTh<K extends string>({ label, sortK, currentKey, current
       aria-sort={active ? (currentDir === 'desc' ? 'descending' : 'ascending') : 'none'}
       className={`p-0 text-[10px] font-bold text-muted uppercase tracking-wider whitespace-nowrap ${align === 'right' ? 'text-right' : 'text-left'}`}
     >
-      <button
-        type="button"
-        onClick={() => onSort(sortK)}
-        className={`inline-flex items-center gap-1 px-4 py-3 uppercase tracking-wider
-                   cursor-pointer hover:text-tx transition-colors select-none group
-                   ${align === 'right' ? 'flex-row-reverse' : ''}`}
-      >
-        {label}
-        <span className={`text-[9px] transition-colors ${active ? 'text-accent' : 'text-muted/25 group-hover:text-muted/60'}`}>
-          {active ? (currentDir === 'desc' ? '↓' : '↑') : '↕'}
-        </span>
-      </button>
+      <div className={`flex items-center gap-1 ${align === 'right' ? 'justify-end' : ''}`}>
+        {/* Button owns the original cell padding so the full header area stays
+            clickable/hoverable, not just the label+arrow's own tight bounding box. */}
+        <button
+          type="button"
+          onClick={() => onSort(sortK)}
+          className={`inline-flex items-center gap-1 px-4 py-3 uppercase tracking-wider
+                     cursor-pointer hover:text-tx transition-colors select-none group
+                     ${align === 'right' ? 'flex-row-reverse' : ''}`}
+        >
+          {label}
+          <span className={`text-[9px] transition-colors ${active ? 'text-accent' : 'text-muted/60 group-hover:text-tx'}`}>
+            {active ? (currentDir === 'desc' ? '↓' : '↑') : '↕'}
+          </span>
+        </button>
+        {tooltip && <span className={align === 'right' ? 'pl-4' : 'pr-4'}>{tooltip}</span>}
+      </div>
     </th>
   );
-}
-
-export function fmtMarketCap(v: number | null): string {
-  if (v == null) return '—';
-  if (v >= 1_000) return `₹${(v / 1_000).toFixed(2)}k Cr`;
-  return `₹${v.toFixed(0)} Cr`;
 }

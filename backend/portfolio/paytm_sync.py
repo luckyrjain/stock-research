@@ -88,14 +88,24 @@ def _fetch_holdings(api_key: str, access_token: str) -> list[dict]:
     resp = requests.get(f"{_API_BASE}/holdings", headers=_headers(api_key, access_token), timeout=_TIMEOUT)
     resp.raise_for_status()
     body = resp.json()
-    return body.get("data", body if isinstance(body, list) else [])
+    # isinstance() must be checked before .get() — a bare list has no .get()
+    # method at all, so `body.get("data", ...)` would raise AttributeError
+    # before the fallback could ever run if the response is a top-level list.
+    if isinstance(body, list):
+        return body
+    return body.get("data", [])
 
 
 def _fetch_orders(api_key: str, access_token: str) -> list[dict]:
     resp = requests.get(f"{_API_BASE}/order/book", headers=_headers(api_key, access_token), timeout=_TIMEOUT)
     resp.raise_for_status()
     body = resp.json()
-    return body.get("data", body if isinstance(body, list) else [])
+    # isinstance() must be checked before .get() — a bare list has no .get()
+    # method at all, so `body.get("data", ...)` would raise AttributeError
+    # before the fallback could ever run if the response is a top-level list.
+    if isinstance(body, list):
+        return body
+    return body.get("data", [])
 
 
 def _normalize_holding(h: dict) -> dict | None:
@@ -145,14 +155,17 @@ def _normalize_trade(o: dict) -> dict | None:
     }
 
 
-def sync_account(engine, account_id: int, access_token: str, api_key: str) -> dict:
+def sync_account(engine, account_id: int, access_token: str, api_key: str, owner: tuple | None = None) -> dict:
     """Syncs one connected Paytm Money account's holdings + filled orders
     into the existing Portfolio Aggregator schema. Read-only. Returns a
     summary dict; never raises — a broker-API hiccup degrades to an
     {"error": ...} result, same convention as every tools/*.py module.
 
     `api_key` is this connection's own registered app key (broker_connections.api_key),
-    never a deployment-wide env var — see db/models.py's broker_connections comment."""
+    never a deployment-wide env var — see db/models.py's broker_connections comment.
+
+    `owner` is optional, passed straight through to
+    broker_sync_common.sync_holdings() — see its own docstring."""
     try:
         raw_holdings = broker_sync_common.call_with_backoff(
             lambda: _fetch_holdings(api_key, access_token), broker=BROKER_NAME,
@@ -172,6 +185,7 @@ def sync_account(engine, account_id: int, access_token: str, api_key: str) -> di
         summary = {}
         summary.update(broker_sync_common.sync_holdings(
             conn, account_id, [_normalize_holding(h) for h in (raw_holdings or [])], _META_SOURCE, today,
+            owner=owner,
         ))
         summary.update(broker_sync_common.sync_trades(
             conn, account_id, [_normalize_trade(o) for o in filled_orders], _META_SOURCE,

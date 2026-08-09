@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { SSE_HEADERS, marketPick, marketPicksSseBody } from './fixtures';
+import { SSE_HEADERS, marketPick, marketPicksSseBody, expectNoA11yViolations } from './fixtures';
 
 test.describe('Market Picks page', () => {
   test('shows the idle hero with a CTA to run a scan', async ({ page }) => {
@@ -33,6 +33,8 @@ test.describe('Market Picks page', () => {
     await expect(page.getByText('INFY Limited')).toBeVisible();
     await expect(page.getByText('BUY', { exact: true }).first()).toBeVisible();
     await expect(page.getByText('WATCH', { exact: true }).first()).toBeVisible();
+    // ENF-03 (design.md §19): landmark/label/contrast/heading-order gate.
+    await expectNoA11yViolations(page);
   });
 
   test('shows "past target" instead of a garbled double sign once the live price clears the target', async ({ page }) => {

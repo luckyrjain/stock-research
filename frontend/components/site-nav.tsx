@@ -54,7 +54,11 @@ interface Props {
   extraLabel?: string;
   /** Extra page-specific controls (refresh/cancel buttons) rendered after AuthWidget. */
   right?: React.ReactNode;
-  /** Allow the bar to wrap on narrow viewports — pages with a `right` slot need this. */
+  /** Allow the bar to wrap onto a second line instead of overflowing. Defaults to true —
+   *  without it, the full 9-link desktop row + search + AuthWidget doesn't fit inside any
+   *  of this app's page-width containers (max-w-4xl through max-w-[1600px]) at common
+   *  desktop widths (1280-1440px), silently pushing AuthWidget (and often HeaderSearch)
+   *  off-screen with no wrap and no visible scrollbar affordance. */
   wrap?: boolean;
 }
 
@@ -71,7 +75,7 @@ interface Props {
 // at every width (HeaderSearch's own input is already responsive,
 // `w-36 sm:w-56`) since search and account access are worth the space even
 // on a small screen.
-export default function SiteNav({ active, extraLabel, right, wrap = false }: Props) {
+export default function SiteNav({ active, extraLabel, right, wrap = true }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
@@ -149,7 +153,13 @@ export default function SiteNav({ active, extraLabel, right, wrap = false }: Pro
         <span className="md:hidden text-sm font-semibold text-accent truncate">{extraLabel}</span>
       )}
 
-      <div className="ml-auto flex items-center gap-3">
+      {/* No ml-auto — with wrap on by default, anchoring this block to the
+          container's right edge just relocates the overflow problem into a
+          large empty gap on whichever line it lands on. Flowing it in
+          reading order after the links means it either sits right after
+          the last link or wraps to its own line starting at the left,
+          never stranding AuthWidget off past the visible edge. */}
+      <div className="flex items-center gap-3">
         <HeaderSearch />
         <AuthWidget />
         {right}
