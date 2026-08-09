@@ -88,14 +88,24 @@ def _fetch_holdings(api_key: str, access_token: str) -> list[dict]:
     resp = requests.get(f"{_API_BASE}/holdings", headers=_headers(api_key, access_token), timeout=_TIMEOUT)
     resp.raise_for_status()
     body = resp.json()
-    return body.get("data", body if isinstance(body, list) else [])
+    # isinstance() must be checked before .get() — a bare list has no .get()
+    # method at all, so `body.get("data", ...)` would raise AttributeError
+    # before the fallback could ever run if the response is a top-level list.
+    if isinstance(body, list):
+        return body
+    return body.get("data", [])
 
 
 def _fetch_orders(api_key: str, access_token: str) -> list[dict]:
     resp = requests.get(f"{_API_BASE}/order/book", headers=_headers(api_key, access_token), timeout=_TIMEOUT)
     resp.raise_for_status()
     body = resp.json()
-    return body.get("data", body if isinstance(body, list) else [])
+    # isinstance() must be checked before .get() — a bare list has no .get()
+    # method at all, so `body.get("data", ...)` would raise AttributeError
+    # before the fallback could ever run if the response is a top-level list.
+    if isinstance(body, list):
+        return body
+    return body.get("data", [])
 
 
 def _normalize_holding(h: dict) -> dict | None:

@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useAuth } from '@/lib/auth';
 import PageShell from '@/components/page-shell';
 import { Skeleton } from '@/components/data-table-ui';
+import { useToast } from '@/components/toast';
 import type { ApiKey, ApiKeysResponse, ApiUsage, CreatedApiKey } from '@/types';
 
 function fmtDate(iso: string | null): string {
@@ -14,6 +15,7 @@ function fmtDate(iso: string | null): string {
 
 export default function ApiKeysPage() {
   const { user, loading: authLoading } = useAuth();
+  const { showError } = useToast();
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [tier, setTier] = useState<'free' | 'pro'>('free');
   const [usage, setUsage] = useState<ApiUsage | null>(null);
@@ -89,7 +91,11 @@ export default function ApiKeysPage() {
       if (!res.ok) throw new Error('Could not revoke key.');
       await loadKeys({ silent: true });
     } catch {
-      setError('Could not revoke key. Try again.');
+      // A toast, not the create-form's Error banner (FORM-07) — revoking a
+      // row is a background mutation, not a form submission, same
+      // distinction AccountBlock.removeAccount() already draws in
+      // portfolio-aggregator/page.tsx.
+      showError('Could not revoke key. Try again.');
     }
   }
 

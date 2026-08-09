@@ -244,7 +244,12 @@ def _fetch_holdings(api_key: str, access_token: str) -> list[dict]:
     )
     resp.raise_for_status()
     body = resp.json()
-    return body.get("data", body if isinstance(body, list) else [])
+    # isinstance() must be checked before .get() — a bare list has no .get()
+    # method at all, so `body.get("data", ...)` would raise AttributeError
+    # before the fallback could ever run if the response is a top-level list.
+    if isinstance(body, list):
+        return body
+    return body.get("data", [])
 
 
 def _fetch_tradebook(api_key: str, access_token: str) -> list[dict]:
@@ -258,7 +263,12 @@ def _fetch_tradebook(api_key: str, access_token: str) -> list[dict]:
     )
     resp.raise_for_status()
     body = resp.json()
-    return body.get("data", body if isinstance(body, list) else [])
+    # isinstance() must be checked before .get() — a bare list has no .get()
+    # method at all, so `body.get("data", ...)` would raise AttributeError
+    # before the fallback could ever run if the response is a top-level list.
+    if isinstance(body, list):
+        return body
+    return body.get("data", [])
 
 
 def _resolve_hdfc_symbol(engine, record: dict, master: list[dict]) -> tuple[str, str | None] | None:

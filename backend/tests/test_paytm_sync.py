@@ -1,6 +1,6 @@
 import unittest
 from datetime import date, datetime, timezone
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from sqlalchemy import create_engine, insert, select
 from sqlalchemy.pool import StaticPool
@@ -15,7 +15,14 @@ from db.models import (
     transactions,
     valuations,
 )
-from portfolio.paytm_sync import sync_account
+from portfolio.paytm_sync import _fetch_holdings, _fetch_orders, sync_account
+
+
+def _mock_response(json_body) -> Mock:
+    resp = Mock()
+    resp.json.return_value = json_body
+    resp.raise_for_status = Mock()
+    return resp
 
 _TABLES = [profiles, accounts, assets, holdings, valuations, transactions, broker_connections]
 
@@ -61,6 +68,26 @@ _FILLED_ORDER = {
 }
 
 _PENDING_ORDER = {**_FILLED_ORDER, "orderNo": "O002", "status": "PENDING"}
+
+
+class FetchRawShapeTest(unittest.TestCase):
+    """Regression test: `body.get("data", body if isinstance(body, list)
+    else [])` raised AttributeError before the isinstance() branch could
+    ever run, since a bare list has no .get() method — dead code for a
+    response shape that would have crashed instead of falling through
+    cleanly. Fixed to check isinstance() first."""
+
+    @patch("portfolio.paytm_sync.requests.get")
+    def test_fetch_holdings_handles_a_bare_list_response(self, mock_get):
+        mock_get.return_value = _mock_response([_HOLDING])
+        result = _fetch_holdings("my-key", "token")
+        self.assertEqual(result, [_HOLDING])
+
+    @patch("portfolio.paytm_sync.requests.get")
+    def test_fetch_orders_handles_a_bare_list_response(self, mock_get):
+        mock_get.return_value = _mock_response([_FILLED_ORDER])
+        result = _fetch_orders("my-key", "token")
+        self.assertEqual(result, [_FILLED_ORDER])
 
 
 class SyncAccountTest(unittest.TestCase):

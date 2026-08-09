@@ -16,6 +16,8 @@ from db.models import (
     valuations,
 )
 from portfolio.hdfc_sync import (
+    _fetch_holdings,
+    _fetch_tradebook,
     _resolve_hdfc_symbol,
     authorise,
     get_access_token,
@@ -155,6 +157,26 @@ class LoginFlowTest(unittest.TestCase):
         mock_post.return_value = _mock_response({})
         result = get_access_token("my-key", "my-secret", "req-1")
         self.assertIn("error", result)
+
+
+class FetchRawShapeTest(unittest.TestCase):
+    """Regression test: `body.get("data", body if isinstance(body, list)
+    else [])` raised AttributeError before the isinstance() branch could
+    ever run, since a bare list has no .get() method — dead code for a
+    response shape that would have crashed instead of falling through
+    cleanly. Fixed to check isinstance() first."""
+
+    @patch("portfolio.hdfc_sync.requests.get")
+    def test_fetch_holdings_handles_a_bare_list_response(self, mock_get):
+        mock_get.return_value = _mock_response([{"isin": "INE1"}])
+        result = _fetch_holdings("my-key", "token")
+        self.assertEqual(result, [{"isin": "INE1"}])
+
+    @patch("portfolio.hdfc_sync.requests.get")
+    def test_fetch_tradebook_handles_a_bare_list_response(self, mock_get):
+        mock_get.return_value = _mock_response([{"trade_id": "t1"}])
+        result = _fetch_tradebook("my-key", "token")
+        self.assertEqual(result, [{"trade_id": "t1"}])
 
 
 class ResolveHdfcSymbolTest(unittest.TestCase):
