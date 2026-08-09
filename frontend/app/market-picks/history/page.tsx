@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import type { MarketPicksHistoryResponse, MarketPickTrackRecord, MarketPicksDailySnapshot } from '@/types';
 import PageShell from '@/components/page-shell';
@@ -37,43 +37,51 @@ export default function MarketPicksHistoryPage() {
   const [dailyLoading, setDailyLoading] = useState(false);
   const [dailyError,   setDailyError]   = useState<string | null>(null);
 
+  // "Latest request wins" via a monotonically-increasing token, rather than
+  // an effect-scoped `cancelled` closure — that closure only ever guards the
+  // ONE call the owning effect itself made; a Retry button also calling
+  // loadHistory()/loadDaily() directly (bypassing the effect entirely) got
+  // no cancellation at all, so a slow retry could resolve after a newer
+  // request (e.g. the user stepped to a different date via Prev/Next) and
+  // silently overwrite its result with stale data. A shared ref-based token
+  // covers every caller uniformly.
+  const historyRequestRef = useRef(0);
   const loadHistory = useCallback(() => {
+    const requestId = ++historyRequestRef.current;
     setLoading(true);
     setError(null);
-    let cancelled = false;
     fetch('/api/market-picks/history')
       .then(async res => {
         const json = await res.json().catch(() => null);
         if (!res.ok) throw new Error((json && json.error) || `Error ${res.status}`);
         return json as MarketPicksHistoryResponse;
       })
-      .then(json => { if (!cancelled) setData(json); })
-      .catch((e: Error) => { if (!cancelled) setError(e.message || 'Could not reach the backend.'); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
+      .then(json => { if (historyRequestRef.current === requestId) setData(json); })
+      .catch((e: Error) => { if (historyRequestRef.current === requestId) setError(e.message || 'Could not reach the backend.'); })
+      .finally(() => { if (historyRequestRef.current === requestId) setLoading(false); });
   }, []);
 
-  useEffect(() => loadHistory(), [loadHistory]);
+  useEffect(() => { loadHistory(); }, [loadHistory]);
 
+  const dailyRequestRef = useRef(0);
   const loadDaily = useCallback((date: string) => {
+    const requestId = ++dailyRequestRef.current;
     setDailyLoading(true);
     setDailyError(null);
-    let cancelled = false;
     fetch(`/api/market-picks/history?date=${encodeURIComponent(date)}`)
       .then(async res => {
         const json = await res.json().catch(() => null);
         if (!res.ok) throw new Error((json && (json.detail || json.error)) || `Error ${res.status}`);
         return json as MarketPicksDailySnapshot;
       })
-      .then(json => { if (!cancelled) setDaily(json); })
-      .catch((e: Error) => { if (!cancelled) setDailyError(e.message || "Could not load that day's snapshot."); })
-      .finally(() => { if (!cancelled) setDailyLoading(false); });
-    return () => { cancelled = true; };
+      .then(json => { if (dailyRequestRef.current === requestId) setDaily(json); })
+      .catch((e: Error) => { if (dailyRequestRef.current === requestId) setDailyError(e.message || "Could not load that day's snapshot."); })
+      .finally(() => { if (dailyRequestRef.current === requestId) setDailyLoading(false); });
   }, []);
 
   useEffect(() => {
     if (!selectedDate) { setDaily(null); setDailyError(null); return; }
-    return loadDaily(selectedDate);
+    loadDaily(selectedDate);
   }, [selectedDate, loadDaily]);
 
   const symbols: MarketPickTrackRecord[] = data?.symbols ?? [];

@@ -50,6 +50,13 @@ class BrokerRoutesTest(unittest.TestCase):
         os.environ["PORTFOLIO_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 
         rate_limiter._memory_calls.clear()
+        # Locks are keyed by account_id, which SQLite resets to 1, 2, 3... at
+        # the start of every test's fresh in-memory DB — a lock left held by
+        # one test (e.g. login-start acquires broker_hdfc_login:{acc} and
+        # only releases it on a matching verify-otp call, by design; several
+        # tests deliberately only exercise login-start) would otherwise leak
+        # into a later test whose own account happens to reuse the same id.
+        rate_limiter._memory_locks.clear()
 
     def tearDown(self) -> None:
         api._DB_ENGINE = self._old_engine
@@ -62,6 +69,7 @@ class BrokerRoutesTest(unittest.TestCase):
             else:
                 os.environ[var] = old
         rate_limiter._memory_calls.clear()
+        rate_limiter._memory_locks.clear()
 
     def _mk_profile(self) -> int:
         res = client.post("/api/portfolio/profiles", json={"name": "me"})
@@ -793,6 +801,71 @@ class BrokerRoutesTest(unittest.TestCase):
             resp = client.post("/api/portfolio/broker/hdfc_securities/verify-otp", json={"account_id": acc, "otp": "123456"})
             self.assertEqual(resp.status_code, 200, resp.text)
         return acc
+
+    def test_concurrent_login_start_for_same_account_returns_409(self) -> None:
+        """Regression test: login-start/verify-otp previously held no lock at
+        all (unlike sync), so two concurrent login-start calls for the same
+        account could each independently reach HDFC and race each other's
+        pending_token_id write — whichever landed last silently invalidated
+        the other's already-dispatched OTP. Simulates "already in progress"
+        the same way test_concurrent_sync_for_same_connection_returns_409
+        does for the sync lock."""
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+
+        lock_name = f"broker_hdfc_login:{acc}"
+        self.assertTrue(rate_limiter.try_acquire_lock(lock_name, 300))
+        try:
+            resp = self._login_start(acc, api_key="my-hdfc-key", api_secret="my-hdfc-secret")
+            self.assertEqual(resp.status_code, 409)
+        finally:
+            rate_limiter.release_lock(lock_name)
+
+    @patch("portfolio.hdfc_sync.submit_credentials")
+    @patch("portfolio.hdfc_sync.start_login")
+    def test_login_start_releases_lock_on_hdfc_rejection(self, mock_start_login, mock_submit_creds) -> None:
+        """A failed login-start (HDFC rejects the credentials) must release
+        its lock — otherwise a real user's own retry after fixing a typo'd
+        password would 409 against their own prior failed attempt."""
+        mock_start_login.return_value = {"token_id": "tok-1"}
+        mock_submit_creds.return_value = {"error": "invalid credentials"}
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+
+        resp = self._login_start(acc, api_key="my-hdfc-key", api_secret="wrong-password")
+        self.assertEqual(resp.status_code, 422)
+
+        # Lock released — an immediate retry must not 409.
+        mock_submit_creds.return_value = {"status": "ok"}
+        resp = self._login_start(acc)
+        self.assertEqual(resp.status_code, 200, resp.text)
+
+    @patch("portfolio.hdfc_sync.submit_otp")
+    @patch("portfolio.hdfc_sync.submit_credentials")
+    @patch("portfolio.hdfc_sync.start_login")
+    def test_verify_otp_releases_lock_on_wrong_otp_allowing_a_fresh_login_start(
+        self, mock_start_login, mock_submit_creds, mock_submit_otp,
+    ) -> None:
+        """A wrong OTP must release the login lock login-start acquired —
+        the frontend's own recovery path drops back to the credentials form
+        and calls login-start again; that must not 409 against the lock its
+        own failed attempt left behind."""
+        mock_start_login.return_value = {"token_id": "tok-1"}
+        mock_submit_creds.return_value = {"status": "ok"}
+        mock_submit_otp.return_value = {"error": "invalid OTP"}
+
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        self._login_start(acc, api_key="my-hdfc-key", api_secret="my-hdfc-secret")
+
+        resp = client.post("/api/portfolio/broker/hdfc_securities/verify-otp", json={"account_id": acc, "otp": "000000"})
+        self.assertEqual(resp.status_code, 422)
+
+        # Lock released by verify-otp's own finally — a fresh login-start
+        # for the same account must succeed, not 409.
+        mock_start_login.return_value = {"token_id": "tok-2"}
+        resp = self._login_start(acc)
+        self.assertEqual(resp.status_code, 200, resp.text)
 
     @patch("portfolio.portfolio_valuation.refresh_valuations")
     @patch("portfolio.hdfc_sync.sync_account")

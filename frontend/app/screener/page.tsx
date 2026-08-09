@@ -446,7 +446,12 @@ export default function ScreenerPage() {
             <div className="px-4 py-2 border-t border-sell/20 bg-sell/10 text-xs text-sell flex items-center justify-between gap-4">
               <span>{error} — showing the last loaded data.</span>
               <button
-                onClick={() => fetchStocks({ silent: true, targetOffset: offset })}
+                // Resets to the first page rather than re-fetching just the
+                // current offset — matches the periodic auto-refresh poll
+                // below (same reasoning: without `append`, refetching a
+                // single mid-list page would replace the whole accumulated
+                // "Load more" list with just that one page's rows).
+                onClick={() => { setOffset(0); fetchStocks({ silent: true, targetOffset: 0 }); }}
                 className="shrink-0 text-xs font-semibold hover:underline"
               >
                 Retry

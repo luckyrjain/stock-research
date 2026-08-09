@@ -86,6 +86,8 @@ function ProfilePicker({ onSelect }: { onSelect: (p: PortfolioProfile) => void }
   // the misleading empty state below never renders; this is what does.
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  const [creating, setCreating] = useState(false);
+
   const load = useCallback(() => {
     setLoadError(null);
     api<{ profiles: PortfolioProfile[] }>('profiles')
@@ -95,8 +97,9 @@ function ProfilePicker({ onSelect }: { onSelect: (p: PortfolioProfile) => void }
   useEffect(load, [load]);
 
   async function create() {
-    if (!name.trim()) return;
+    if (!name.trim() || creating) return;
     setError(null);
+    setCreating(true);
     try {
       const p = await api<PortfolioProfile>('profiles', { method: 'POST', body: JSON.stringify({ name: name.trim() }) });
       setName('');
@@ -104,6 +107,8 @@ function ProfilePicker({ onSelect }: { onSelect: (p: PortfolioProfile) => void }
       onSelect(p);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to create profile');
+    } finally {
+      setCreating(false);
     }
   }
 
@@ -148,8 +153,8 @@ function ProfilePicker({ onSelect }: { onSelect: (p: PortfolioProfile) => void }
           placeholder="New profile name"
           className="flex-1 px-3 py-2 rounded-lg border border-border bg-surface text-sm text-tx"
         />
-        <button onClick={create} className="px-4 py-2 rounded-lg bg-accent text-bg text-sm font-semibold">
-          Create
+        <button onClick={create} disabled={creating} className="px-4 py-2 rounded-lg bg-accent text-bg text-sm font-semibold disabled:opacity-50">
+          {creating ? 'Creating…' : 'Create'}
         </button>
       </div>
       {error && <p className="text-sm text-sell mt-2">{error}</p>}
@@ -174,16 +179,20 @@ function AddAccountForm({ profileId, onAdded }: { profileId: number; onAdded: ()
   const [name, setName] = useState('');
   const [type, setType] = useState<PortfolioAccountType>('bank');
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   async function submit() {
-    if (!name.trim()) return;
+    if (!name.trim() || submitting) return;
     setError(null);
+    setSubmitting(true);
     try {
       await api('accounts', { method: 'POST', body: JSON.stringify({ profile_id: profileId, name: name.trim(), type }) });
       setName('');
       onAdded();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to add account');
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -203,8 +212,8 @@ function AddAccountForm({ profileId, onAdded }: { profileId: number; onAdded: ()
           {ACCOUNT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
         </select>
       </Field>
-      <button onClick={submit} className="px-4 py-2 rounded-lg bg-accent text-bg text-sm font-semibold">
-        Add account
+      <button onClick={submit} disabled={submitting} className="px-4 py-2 rounded-lg bg-accent text-bg text-sm font-semibold disabled:opacity-50">
+        {submitting ? 'Adding…' : 'Add account'}
       </button>
       {error && <span className="text-sm text-sell">{error}</span>}
     </div>
@@ -218,12 +227,14 @@ function AddAssetForm({ accountId, onAdded }: { accountId: number; onAdded: () =
   const [units, setUnits] = useState('');
   const [symbol, setSymbol] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const isSecurity = SECURITY_TYPES.has(type);
 
   async function submit() {
     const v = parseFloat(value);
-    if (!name.trim() || Number.isNaN(v)) return;
+    if (!name.trim() || Number.isNaN(v) || submitting) return;
     setError(null);
+    setSubmitting(true);
     try {
       await api('assets', {
         method: 'POST',
@@ -237,6 +248,8 @@ function AddAssetForm({ accountId, onAdded }: { accountId: number; onAdded: () =
       onAdded();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to add asset');
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -268,8 +281,8 @@ function AddAssetForm({ accountId, onAdded }: { accountId: number; onAdded: () =
         <input value={value} onChange={e => setValue(e.target.value)} placeholder="0" type="number"
           className="px-2 py-1.5 rounded-lg border border-border bg-bg text-xs text-tx w-28" />
       </Field>
-      <button onClick={submit} className="px-3 py-1.5 rounded-lg border border-accent text-accent text-xs font-semibold">
-        Add asset
+      <button onClick={submit} disabled={submitting} className="px-3 py-1.5 rounded-lg border border-accent text-accent text-xs font-semibold disabled:opacity-50">
+        {submitting ? 'Adding…' : 'Add asset'}
       </button>
       {error && <span className="text-xs text-sell">{error}</span>}
     </div>
@@ -279,19 +292,32 @@ function AddAssetForm({ accountId, onAdded }: { accountId: number; onAdded: () =
 function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () => void }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(String(asset.value ?? ''));
+  const [saving, setSaving] = useState(false);
   const { isPositioned } = usePositions();
   const alsoTracked = asset.symbol ? isPositioned(asset.symbol) : false;
   const { showError } = useToast();
 
+  // Reseeds from the live prop, not just at mount — this row stays mounted
+  // across every refresh() (keyed by asset.id), so a background valuation
+  // refresh updating the displayed value one row up must not leave a stale
+  // number sitting in an edit box the user hasn't opened yet.
+  function startEditing() {
+    setValue(String(asset.value ?? ''));
+    setEditing(true);
+  }
+
   async function saveValue() {
     const v = parseFloat(value);
     if (Number.isNaN(v)) return;
+    setSaving(true);
     try {
       await api(`assets/${asset.id}/valuations`, { method: 'POST', body: JSON.stringify({ value: v }) });
       setEditing(false);
       onChanged();
     } catch (e) {
       showError(e instanceof Error ? e.message : 'Could not save this value.');
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -321,17 +347,19 @@ function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () =
       </span>
       {editing ? (
         <span className="flex items-center gap-1">
-          <input value={value} onChange={e => setValue(e.target.value)} type="number"
-            className="w-24 px-2 py-1 rounded border border-border bg-bg text-xs text-tx" autoFocus />
-          <button onClick={saveValue} className="text-xs text-accent font-semibold">Save</button>
-          <button onClick={() => setEditing(false)} className="text-xs text-muted">Cancel</button>
+          <input value={value} onChange={e => setValue(e.target.value)} type="number" disabled={saving}
+            className="w-24 px-2 py-1 rounded border border-border bg-bg text-xs text-tx disabled:opacity-50" autoFocus />
+          <button onClick={saveValue} disabled={saving} className="text-xs text-accent font-semibold disabled:opacity-50">
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+          <button onClick={() => setEditing(false)} disabled={saving} className="text-xs text-muted disabled:opacity-50">Cancel</button>
         </span>
       ) : (
         <span className="flex items-center gap-2">
           <span className={`font-mono font-semibold ${asset.type === 'loan' ? 'text-sell' : 'text-tx'}`}>
             {asset.type === 'loan' ? '−' : ''}{fmtInr(Math.abs(signed))}
           </span>
-          <button onClick={() => setEditing(true)} className="text-xs text-muted hover:text-tx">edit</button>
+          <button onClick={startEditing} className="text-xs text-muted hover:text-tx">edit</button>
           <button onClick={remove} className="text-xs text-muted hover:text-sell">delete</button>
         </span>
       )}
@@ -623,11 +651,39 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
         body.api_key = apiKey.trim();
         body.api_secret = apiSecret.trim();
       }
+      // A DIFFERENT, still-unresolved connect attempt already parked here
+      // (started in another tab, not yet completed) must not be silently
+      // clobbered — the shared callback route has no way to tell two
+      // attempts apart once overwritten (neither broker's OAuth redirect
+      // echoes back custom state, see broker-callback/page.tsx's own
+      // comment), so whichever tab's redirect lands second would resume
+      // against the WRONG (account_id, broker) pairing. This can't fully
+      // prevent the race (nothing stops the user proceeding anyway once
+      // warned), but it turns a silent wrong-account resume into a clear,
+      // actionable message instead.
+      const pendingRaw = localStorage.getItem(PENDING_BROKER_CONNECT_KEY);
+      if (pendingRaw) {
+        try {
+          const pending = JSON.parse(pendingRaw) as { account_id: number; broker: string; started_at?: number };
+          // A pending attempt older than a normal OAuth-login-page detour
+          // is treated as abandoned (tab closed, user gave up mid-flow) and
+          // safe to overwrite — without this, one abandoned attempt would
+          // permanently block connecting ANY broker until localStorage is
+          // cleared by hand, which is worse than the race this check exists
+          // to catch. 30 min comfortably covers a slow real login+OTP flow.
+          const isStale = !pending.started_at || Date.now() - pending.started_at > 30 * 60 * 1000;
+          if (!isStale && (pending.account_id !== account.id || pending.broker !== broker.id)) {
+            setMsg('Another broker connection is already in progress in a different tab — finish or cancel it first.');
+            setBusy(false);
+            return;
+          }
+        } catch { /* malformed leftover value — safe to overwrite below */ }
+      }
       const { login_url } = await api<{ login_url: string }>(`broker/${broker.id}/login-url`, {
         method: 'POST',
         body: JSON.stringify(body),
       });
-      localStorage.setItem(PENDING_BROKER_CONNECT_KEY, JSON.stringify({ account_id: account.id, broker: broker.id }));
+      localStorage.setItem(PENDING_BROKER_CONNECT_KEY, JSON.stringify({ account_id: account.id, broker: broker.id, started_at: Date.now() }));
       window.location.href = login_url;
     } catch (e) {
       setMsg(e instanceof Error ? e.message : `Could not start ${broker.label} login`);
@@ -1226,7 +1282,7 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
                     key={type}
                     title={`${type}: ${fmtInr(val)}`}
                     className={val < 0 ? 'bg-sell' : 'bg-accent'}
-                    style={{ width: `${(Math.abs(val) / scale) * 100}%`, opacity: val < 0 ? 0.7 : 1 - i * 0.15 }}
+                    style={{ width: `${(Math.abs(val) / scale) * 100}%`, opacity: val < 0 ? 0.7 : Math.max(0.3, 1 - i * 0.15) }}
                   />
                 ))}
               </div>

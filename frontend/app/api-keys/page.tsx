@@ -227,8 +227,11 @@ export default function ApiKeysPage() {
               <div role="alert" className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-4
                                            flex items-start justify-between gap-4">
                 <span>{loadError}</span>
-                <button onClick={() => loadKeys()} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
-                                                                border border-sell/40 hover:bg-sell/10 transition-colors">
+                <button
+                  onClick={() => loadKeys({ silent: keys.length > 0 })}
+                  className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
+                             border border-sell/40 hover:bg-sell/10 transition-colors"
+                >
                   Retry
                 </button>
               </div>

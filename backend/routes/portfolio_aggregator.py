@@ -779,13 +779,46 @@ async def hdfc_login_start(request: Request, body: HdfcLoginStartIn):
 
     `200 {"otp_required": true}` on success (the frontend's next step is
     always an OTP prompt) · `404` no credentials registered and none
-    supplied · `422` exactly one of api_key/api_secret supplied, or HDFC
+    supplied · `409` a login attempt for this account is already in
+    progress · `422` exactly one of api_key/api_secret supplied, or HDFC
     rejected the login/credentials step · `503` PORTFOLIO_ENCRYPTION_KEY
     unset (first-time/replace mode only)."""
     if bool(body.api_key) != bool(body.api_secret):
         raise HTTPException(status_code=422, detail="provide both api_key and api_secret, or neither to reuse saved credentials")
 
     def _sync() -> dict:
+        import api
+        from core import rate_limiter
+        from core.crypto import EncryptionNotConfigured, encrypt
+        from db.models import accounts, broker_connections
+        from portfolio import hdfc_sync
+        from sqlalchemy import insert, select, update
+
+        # Held from here through hdfc_verify_otp()'s own release (success or
+        # failure) — spans two separate HTTP requests, same as
+        # pending_token_id itself already does, since HDFC's real login is a
+        # two-request handshake with no way to collapse it into one. Without
+        # this, two concurrent login-start calls for the same account (two
+        # tabs, a retried timeout) could each independently reach HDFC, and
+        # whichever's pending_token_id write landed last would silently
+        # invalidate the other's already-dispatched OTP — same
+        # `try_acquire_lock`/`release_lock` pattern broker_sync() already
+        # uses for the identical "don't let two attempts interleave"
+        # problem, just spanning a login handshake instead of a sync job.
+        # TTL-bounded so an abandoned login-start (user never submits the
+        # OTP) self-heals rather than locking this account's HDFC connect
+        # flow out forever.
+        lock_name = f"broker_hdfc_login:{body.account_id}"
+        if not rate_limiter.try_acquire_lock(lock_name, _BROKER_SYNC_LOCK_TTL_SECONDS):
+            raise HTTPException(status_code=409, detail="a hdfc_securities login attempt for this account is already in progress")
+
+        try:
+            return _do_login_start()
+        except Exception:
+            rate_limiter.release_lock(lock_name)
+            raise
+
+    def _do_login_start() -> dict:
         import api
         from core.crypto import EncryptionNotConfigured, encrypt
         from db.models import accounts, broker_connections
@@ -800,7 +833,10 @@ async def hdfc_login_start(request: Request, body: HdfcLoginStartIn):
         # and a row lock on this account's broker_connections row for as
         # long as HDFC takes to respond (up to hdfc_sync._TIMEOUT per call),
         # for no benefit — nothing here needs the credential write and the
-        # HDFC calls to commit atomically together.
+        # HDFC calls to commit atomically together. Safe now that the lock
+        # above serializes concurrent attempts for this account — the old
+        # single-transaction version's row lock was incidentally doing part
+        # of that job before this restructure existed.
         with api._get_db_engine().begin() as conn:
             account = conn.execute(
                 select(accounts.c.id, accounts.c.profile_id, accounts.c.type)
@@ -888,6 +924,7 @@ async def hdfc_verify_otp(request: Request, body: HdfcVerifyOtpIn):
         import datetime as _dt
 
         import api
+        from core import rate_limiter
         from core.crypto import EncryptionNotConfigured, decrypt, encrypt
         from db.models import broker_connections
         from portfolio import hdfc_sync
@@ -920,59 +957,84 @@ async def hdfc_verify_otp(request: Request, body: HdfcVerifyOtpIn):
         # Single-use, scoped to one login attempt either way — clearing it
         # immediately, before HDFC has even answered the OTP, is correct
         # regardless of what happens next.
+        #
+        # Compare-and-swap on the value just read, not a bare id match —
+        # defense in depth alongside the broker_hdfc_login:{account_id} lock
+        # login-start now holds across this whole handshake: the lock is
+        # what actually prevents a second concurrent attempt from ever
+        # reaching here while this one is in flight, but a CAS clear means
+        # even a lock-acquisition bug or a future caller that forgets to
+        # hold it can't silently wipe a DIFFERENT, newer login attempt's
+        # still-unconsumed token — this UPDATE only ever clears the exact
+        # value this request itself read.
         with engine.begin() as conn:
-            conn.execute(
+            clear_result = conn.execute(
                 update(broker_connections)
-                .where(broker_connections.c.id == conn_row.id)
+                .where(
+                    broker_connections.c.id == conn_row.id,
+                    broker_connections.c.pending_token_id == conn_row.pending_token_id,
+                )
                 .values(pending_token_id=None)
             )
-
-        otp_result = hdfc_sync.submit_otp(conn_row.api_key, conn_row.pending_token_id, body.otp)
-        if "error" in otp_result:
-            raise HTTPException(status_code=422, detail=otp_result["error"])
-        request_token = otp_result["request_token"]
-
-        authorise_result = hdfc_sync.authorise(conn_row.api_key, conn_row.pending_token_id, request_token)
-        if "error" in authorise_result:
-            raise HTTPException(status_code=422, detail=authorise_result["error"])
-
-        try:
-            api_secret = decrypt(conn_row.api_secret_enc)
-        except EncryptionNotConfigured as exc:
-            raise HTTPException(status_code=503, detail=str(exc))
-        except Exception:
+        if clear_result.rowcount == 0:
             raise HTTPException(
-                status_code=422,
-                detail="stored app secret could not be decrypted — re-register this broker's API key/secret",
+                status_code=404,
+                detail="no hdfc_securities login in progress for this account — call login-start first",
             )
 
-        token_result = hdfc_sync.get_access_token(conn_row.api_key, api_secret, request_token)
-        if "error" in token_result:
-            raise HTTPException(status_code=422, detail=token_result["error"])
-
+        # Acquired by login-start, released here — the one place this
+        # login attempt's lock can end, whether the rest of this handshake
+        # succeeds or fails below.
+        lock_name = f"broker_hdfc_login:{body.account_id}"
         try:
-            token_enc = encrypt(token_result["access_token"])
-        except EncryptionNotConfigured as exc:
-            raise HTTPException(status_code=503, detail=str(exc))
+            otp_result = hdfc_sync.submit_otp(conn_row.api_key, conn_row.pending_token_id, body.otp)
+            if "error" in otp_result:
+                raise HTTPException(status_code=422, detail=otp_result["error"])
+            request_token = otp_result["request_token"]
 
-        now = _dt.datetime.now(_dt.timezone.utc)
-        with engine.begin() as conn:
-            conn.execute(
-                update(broker_connections)
-                .where(broker_connections.c.id == conn_row.id)
-                # A fresh token invalidates whatever the *previous* token's
-                # last sync attempt recorded — without clearing these, the
-                # frontend's poll immediately re-displays the stale
-                # last_sync_error right after showing "Connected.", making a
-                # successful reconnect look like it failed again. `idle`
-                # matches what a connection has before its first-ever sync
-                # (see BrokerConnection.sync_status's own comment).
-                .values(
-                    access_token_enc=token_enc, token_obtained_at=now, pending_token_id=None,
-                    sync_status="idle", last_sync_error=None,
+            authorise_result = hdfc_sync.authorise(conn_row.api_key, conn_row.pending_token_id, request_token)
+            if "error" in authorise_result:
+                raise HTTPException(status_code=422, detail=authorise_result["error"])
+
+            try:
+                api_secret = decrypt(conn_row.api_secret_enc)
+            except EncryptionNotConfigured as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+            except Exception:
+                raise HTTPException(
+                    status_code=422,
+                    detail="stored app secret could not be decrypted — re-register this broker's API key/secret",
                 )
-            )
-        return {"connected": True, "account_id": body.account_id, "broker": "hdfc_securities"}
+
+            token_result = hdfc_sync.get_access_token(conn_row.api_key, api_secret, request_token)
+            if "error" in token_result:
+                raise HTTPException(status_code=422, detail=token_result["error"])
+
+            try:
+                token_enc = encrypt(token_result["access_token"])
+            except EncryptionNotConfigured as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+
+            now = _dt.datetime.now(_dt.timezone.utc)
+            with engine.begin() as conn:
+                conn.execute(
+                    update(broker_connections)
+                    .where(broker_connections.c.id == conn_row.id)
+                    # A fresh token invalidates whatever the *previous* token's
+                    # last sync attempt recorded — without clearing these, the
+                    # frontend's poll immediately re-displays the stale
+                    # last_sync_error right after showing "Connected.", making a
+                    # successful reconnect look like it failed again. `idle`
+                    # matches what a connection has before its first-ever sync
+                    # (see BrokerConnection.sync_status's own comment).
+                    .values(
+                        access_token_enc=token_enc, token_obtained_at=now, pending_token_id=None,
+                        sync_status="idle", last_sync_error=None,
+                    )
+                )
+            return {"connected": True, "account_id": body.account_id, "broker": "hdfc_securities"}
+        finally:
+            rate_limiter.release_lock(lock_name)
 
     return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
 
