@@ -474,8 +474,21 @@ function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
         onSynced();
       }
     } else if (connection?.sync_status === 'error' && connection.last_sync_error) {
-      setMsg(connection.last_sync_error);
+      // A partial-fetch failure (e.g. holdings synced, tradebook fetch
+      // failed) still carries real synced counts in last_sync_summary
+      // alongside the error — shown together so the user isn't left
+      // thinking nothing happened when some data actually landed.
+      const r = connection.last_sync_summary;
+      const synced = r && ((r.holdings_synced ?? 0) > 0 || (r.trades_synced ?? 0) > 0);
+      setMsg(synced ? `${connection.last_sync_error} (${r.holdings_synced} holdings, ${r.trades_synced} trades synced.)` : connection.last_sync_error);
       setBusy(false);
+      if (synced) {
+        const key = `${connection.id}:${connection.last_synced_at}`;
+        if (handledSyncRef.current !== key) {
+          handledSyncRef.current = key;
+          onSynced();
+        }
+      }
     }
   }, [connection?.sync_status, connection?.last_sync_summary, connection?.last_sync_error, connection?.id, connection?.last_synced_at, onSynced]);
 
@@ -494,7 +507,7 @@ function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
         )}
         {connection?.connected && (
           <button onClick={sync} disabled={syncing} className="text-xs text-accent font-semibold disabled:opacity-50 flex items-center gap-1.5">
-            {syncing && <span className="w-2.5 h-2.5 rounded-full border border-current border-t-transparent animate-spin-slow" />}
+            {syncing && <span className="animate-spin-slow" aria-hidden="true">⟳</span>}
             {syncing ? 'Syncing…' : 'Sync now'}
           </button>
         )}
@@ -668,8 +681,21 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
         onSynced();
       }
     } else if (connection?.sync_status === 'error' && connection.last_sync_error) {
-      setMsg(connection.last_sync_error);
+      // A partial-fetch failure (e.g. holdings synced, tradebook fetch
+      // failed) still carries real synced counts in last_sync_summary
+      // alongside the error — shown together so the user isn't left
+      // thinking nothing happened when some data actually landed.
+      const r = connection.last_sync_summary;
+      const synced = r && ((r.holdings_synced ?? 0) > 0 || (r.trades_synced ?? 0) > 0);
+      setMsg(synced ? `${connection.last_sync_error} (${r.holdings_synced} holdings, ${r.trades_synced} trades synced.)` : connection.last_sync_error);
       setBusy(false);
+      if (synced) {
+        const key = `${connection.id}:${connection.last_synced_at}`;
+        if (handledSyncRef.current !== key) {
+          handledSyncRef.current = key;
+          onSynced();
+        }
+      }
     }
   }, [connection?.sync_status, connection?.last_sync_summary, connection?.last_sync_error, connection?.id, connection?.last_synced_at, onSynced]);
 
@@ -693,7 +719,7 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
         )}
         {connection?.connected && (
           <button onClick={sync} disabled={syncing} className="text-xs text-accent font-semibold disabled:opacity-50 flex items-center gap-1.5">
-            {syncing && <span className="w-2.5 h-2.5 rounded-full border border-current border-t-transparent animate-spin-slow" />}
+            {syncing && <span className="animate-spin-slow" aria-hidden="true">⟳</span>}
             {syncing ? 'Syncing…' : 'Sync now'}
           </button>
         )}

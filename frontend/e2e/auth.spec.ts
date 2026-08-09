@@ -17,6 +17,12 @@ test.describe('Login page', () => {
     await expectNoA11yViolations(page);
   });
 
+  test('has no axe violations in the idle form state', async ({ page }) => {
+    await page.goto('/login');
+    await expect(page.getByRole('button', { name: 'Send sign-in link' })).toBeVisible();
+    await expectNoA11yViolations(page);
+  });
+
   test('shows an error message when the request fails', async ({ page }) => {
     await page.route('**/api/auth/request-link', route => route.fulfill({
       status: 429, json: { detail: 'Too many requests. Try again later.' },
@@ -149,6 +155,7 @@ test.describe('API keys page', () => {
 
     await expect(page.getByText("Copy this key now — it won't be shown again.")).toBeVisible();
     await expect(page.getByText('ap_live_faketestkeyvalue')).toBeVisible();
+    await expectNoA11yViolations(page);
   });
 
   test('does not carry a stale "Copied!" label over to a newly-created key', async ({ page, context, baseURL }) => {
@@ -266,5 +273,6 @@ test.describe('Pricing page', () => {
     // usage-card link both render an "API Keys" link; either satisfies this
     // check, so this isn't a strict-mode ambiguity worth disambiguating further.
     await expect(page.getByRole('link', { name: 'API Keys' }).first()).toBeVisible();
+    await expectNoA11yViolations(page);
   });
 });

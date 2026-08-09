@@ -335,19 +335,30 @@ def sync_account(engine, account_id: int, access_token: str, api_key: str, owner
     that guess is wrong, trades sync as zero (logged) while holdings —
     already proven to work — still syncs normally; only a genuine failure
     of *both* fetches degrades the whole call to {"error": ...}, since at
-    that point there's nothing left to write.
+    that point there's nothing left to write. A failure of just *one* of
+    the two still writes whatever the other fetch produced (never
+    discarded), but is surfaced via the returned `"error"` key too —
+    without this, a lone fetch failure was indistinguishable from "the
+    account genuinely has zero holdings/trades," since `sync_holdings()`/
+    `sync_trades()` report `0 synced` identically either way. The route
+    layer (routes/portfolio_aggregator.py's broker_sync()) already treats
+    any `"error"` key as `sync_status="error"` — that still leaves the
+    successful half's data committed and visible, just flags the sync
+    itself as needing another look.
 
     `api_key` is this connection's own registered app key (broker_connections.api_key),
     never a deployment-wide env var — see db/models.py's broker_connections comment.
 
     `owner` is optional, passed straight through to
     broker_sync_common.sync_holdings() — see its own docstring."""
+    holdings_error = trades_error = None
     try:
         raw_holdings = broker_sync_common.call_with_backoff(
             lambda: _fetch_holdings(api_key, access_token), broker=BROKER_NAME,
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         raw_holdings = None
+        holdings_error = str(exc)
         log_event(LOGGER, "hdfc_holdings_fetch_failed", level="warning",
                    account_id=account_id, error=str(exc))
 
@@ -357,6 +368,7 @@ def sync_account(engine, account_id: int, access_token: str, api_key: str, owner
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         raw_trades = None
+        trades_error = str(exc)
         log_event(LOGGER, "hdfc_tradebook_fetch_failed", level="warning",
                    account_id=account_id, error=str(exc))
 
@@ -393,6 +405,11 @@ def sync_account(engine, account_id: int, access_token: str, api_key: str, owner
             )
             .values(last_synced_at=datetime.now(timezone.utc))
         )
+
+    if holdings_error is not None:
+        summary["error"] = f"holdings fetch failed (trades synced normally): {holdings_error}"
+    elif trades_error is not None:
+        summary["error"] = f"tradebook fetch failed (holdings synced normally): {trades_error}"
 
     log_event(LOGGER, "hdfc_sync_completed", account_id=account_id, **summary)
     return summary

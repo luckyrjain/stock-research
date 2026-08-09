@@ -1107,7 +1107,13 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
             )
             if "error" in result:
                 error = result["error"]
-            else:
+            # Runs whenever sync_account() actually wrote something, even on
+            # a partial failure (e.g. hdfc_sync.py's holdings-succeeded/
+            # trades-failed case still commits real holdings) — result
+            # carries an "error" key alongside real synced counts in that
+            # case, not just on total failure, so gating this on "no error"
+            # would skip revaluing data that did land.
+            if result.get("holdings_synced") or result.get("trades_synced"):
                 refresh_valuations(api._get_db_engine())
         except Exception as exc:  # pylint: disable=broad-exception-caught
             # No HTTP request is left to surface this to — record it on the
@@ -1126,7 +1132,14 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
                             broker_connections.c.account_id == account_id,
                             broker_connections.c.broker == broker,
                         )
-                        .values(sync_status="error", last_sync_error=error)
+                        # `result` still carries real synced counts on a
+                        # partial-fetch failure (see hdfc_sync.py's
+                        # sync_account()) — stored alongside the error so the
+                        # frontend can show "X holdings, Y trades synced" next
+                        # to the failure, not just the bare error string.
+                        # `None` on a total failure (the exception path
+                        # above), same as before this fix.
+                        .values(sync_status="error", last_sync_summary=result, last_sync_error=error)
                     )
                 else:
                     conn.execute(

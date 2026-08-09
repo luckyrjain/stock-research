@@ -314,12 +314,16 @@ class SyncAccountTest(unittest.TestCase):
         # this is exactly what happened when the original /portfolio/tradebook
         # guess 404'd while /portfolio/holdings worked fine, back when both
         # fetches shared one try/except and either failure killed the whole sync.
+        # The failed half must still surface via "error" (not swallowed) —
+        # a lone fetch failure is otherwise indistinguishable from "the account
+        # genuinely has zero holdings," which is its own regression.
         mock_holdings.side_effect = Exception("network blip")
         mock_trades.return_value = [_TRADE]
 
         result = sync_account(self.engine, self.account_id, "fake-token", api_key="fake-key")
 
-        self.assertNotIn("error", result)
+        self.assertIn("error", result)
+        self.assertIn("holdings fetch failed", result["error"])
         self.assertEqual(result["trades_synced"], 1)
         self.assertEqual(result.get("holdings_synced", 0), 0)
 
@@ -332,7 +336,8 @@ class SyncAccountTest(unittest.TestCase):
 
         result = sync_account(self.engine, self.account_id, "fake-token", api_key="fake-key")
 
-        self.assertNotIn("error", result)
+        self.assertIn("error", result)
+        self.assertIn("tradebook fetch failed", result["error"])
         self.assertEqual(result["holdings_synced"], 1)
         self.assertEqual(result.get("trades_synced", 0), 0)
 
