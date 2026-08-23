@@ -10,8 +10,8 @@ and links into rather than duplicating. Frontend detail lives in `frontend/CLAUD
 A FastAPI backend (`backend/api.py` + `backend/routes/`) talks to yfinance, Screener.in, NSE, BSE,
 AMFI, Trendlyne, RBI, and Google News, normalizes what it scrapes, runs a deterministic quant
 signal engine over it, and (for the flagship single-stock flow) calls an LLM for a structured
-recommendation. It serves **61 HTTP routes** (29 in `api.py`, 5 + 6 + 21 across the three
-extracted `routes/` modules; 59 of them under `/api/*`, plus `/` and `/health`). A
+recommendation. It serves **63 HTTP routes** (29 in `api.py`, 5 + 6 + 23 across the three
+extracted `routes/` modules; 61 of them under `/api/*`, plus `/` and `/health`). A
 Next.js 15 frontend never talks to FastAPI directly — every call goes through a same-shaped proxy
 route under `frontend/app/api/*` first. PostgreSQL (via SQLAlchemy Core, migrated with Alembic)
 is the shared, persistent store for anything cross-session: accounts, watchlist, positions,
@@ -36,9 +36,129 @@ system** (magic-link auth — optional; anonymous `client_id` usage works everyw
 cached for one symbol, with zero new fetching. Behind all of it, an **EOD price store** ingests
 NSE bhavcopy + AMFI NAV nightly — no endpoint of its own, it exists to feed the valuation engine.
 
+### Component diagram
+
+Every arrow is a real, live call this codebase makes today — nothing speculative or planned. The
+Postgres/Redis/file-cache stack, and the "no direct browser→FastAPI" proxy rule, are described in
+prose above; this is the same picture as a diagram.
+
+```mermaid
+graph TB
+    Browser["Browser<br/>(Next.js :3000 pages)"]
+
+    subgraph FE["Next.js 15 — frontend/"]
+        Proxy["Proxy routes<br/>app/api/*/route.ts<br/>(pipe SSE, forward session cookie<br/>as Authorization: Bearer)"]
+    end
+
+    subgraph BE["FastAPI — backend/ (single process)"]
+        API["api.py<br/>29 routes"]
+        Routes["routes/<br/>watchlist · positions · portfolio_aggregator<br/>34 routes"]
+        Signals["signals/<br/>quant signal engine"]
+        Analyst["analyst/crew.py<br/>LLM call + guardrails + failover"]
+        Tools["tools/<br/>scrapers (never raise)"]
+        Pipelines["pipelines/<br/>SME · Screener · EOD prices ·<br/>Market Picks · Watchlist alerts"]
+        Portfolio["portfolio/<br/>valuation · CAS/CSV import · broker sync"]
+    end
+
+    FileCache[("File cache<br/>output/ (TTL'd, regenerable)")]
+    PG[("PostgreSQL<br/>23 tables")]
+    Redis[("Redis<br/>(optional — rate limits + cache,<br/>degrades to in-process when unset)")]
+
+    subgraph Ext["Scraped data sources"]
+        NSE["NSE / BSE"]
+        Screener["Screener.in"]
+        YF["yfinance"]
+        AMFI["AMFI"]
+        Trendlyne["Trendlyne"]
+        RBI["RBI"]
+        GNews["Google News (gnews)"]
+    end
+
+    subgraph LLM["LLM providers — one primary + one failover"]
+        Anthropic["Anthropic"]
+        OpenAI["OpenAI"]
+        Groq["Groq"]
+        Gemini["Google Gemini"]
+        OpenRouter["OpenRouter"]
+        Ollama["Ollama (self-hosted)"]
+    end
+
+    subgraph Brokers["Broker APIs (Portfolio Aggregator)"]
+        Kite["Zerodha Kite Connect"]
+        HDFC["HDFC Securities"]
+        PaytmM["Paytm Money"]
+    end
+
+    subgraph Cron["GitHub Actions — cron"]
+        SmeCron["sme-cron"]
+        ScreenerCron["screener-cron"]
+        EodCron["eod-prices-cron"]
+        AlertsCron["watchlist-alerts-cron"]
+        PicksCron["market-picks-cron"]
+        LiveCheck["live-contract-check (weekly)"]
+    end
+
+    SMTP["SMTP<br/>(magic-link + watchlist-alert email)"]
+    Sentry["Sentry<br/>(optional error tracking)"]
+
+    Browser -- "EventSource / fetch" --> Proxy
+    Proxy -- "server-to-server, same request shape" --> API
+    Proxy --> Routes
+    API --> Routes
+    API --> Tools
+    API --> Signals
+    API --> Analyst
+    Tools --> Ext
+    Analyst --> LLM
+    API --> FileCache
+    API --> PG
+    API --> Redis
+    Routes --> PG
+    Pipelines --> PG
+    Pipelines --> Tools
+    Portfolio --> Brokers
+    Portfolio --> PG
+    Cron -- "?force=true HTTP trigger, or direct run" --> Pipelines
+    API --> SMTP
+    Pipelines --> SMTP
+    API --> Sentry
+```
+
 ---
 
 ## Request flow: stock analysis
+
+The flagship end-to-end journey — one SSE request from browser to final report:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Browser
+    participant FE as Next.js proxy route
+    participant BE as FastAPI (api.py)
+    participant Cache as File cache (output/)
+    participant Tools as tools/* scrapers
+    participant Sig as signals/engine
+    participant LLM as LLM provider
+    participant DB as PostgreSQL
+
+    U->>FE: EventSource GET /api/analyse/{symbol}
+    FE->>BE: proxy, server-to-server
+    BE->>Cache: is_fresh() for each of 6 tasks
+    BE-->>U: SSE "start" (stale vs. cached tasks)
+    par stale tasks, dispatched concurrently
+        BE->>Tools: get_stock_quote / get_fundamentals / get_latest_news / ...
+        Tools-->>BE: raw payload (or {"error": ...}, never raises)
+        BE->>Cache: schemas.normalize() then save()
+        BE-->>U: SSE "task_done" (one per completed task)
+    end
+    BE->>Sig: run_signal_engine(symbol, all_data)
+    Sig-->>BE: signal_context + verdict
+    BE->>LLM: run_analysis_with_fallback() (primary, then failover on error)
+    LLM-->>BE: structured BUY/HOLD/SELL recommendation
+    BE->>DB: verdict_history.save_snapshot() (fire-and-forget)
+    BE-->>U: SSE "done" (merged report)
+```
 
 ```text
 Browser (Next.js :3000)
