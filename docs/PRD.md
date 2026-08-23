@@ -25,6 +25,10 @@ trustworthy enough that its own track record, not its confidence, is the pitch. 
 (§13) is to be the one place an Indian retail investor's research and portfolio tracking happens.
 
 This is a single-engineer project today (§17.1) — real, and disclosed rather than hidden.
+Present-day distribution is scoped down from the long-term audience above: today this runs
+privately for the operator's own circle of friends and family, not offered to the public or for
+consideration (§17.4) — the personas in §5 describe that same circle's use cases, not a public
+user base yet.
 
 ---
 
@@ -67,6 +71,12 @@ Explicitly out of scope for the foreseeable future:
   The product is built on a batch-fetch, disciplined-analysis model (see Data Freshness in the
   Feature Catalog), not a streaming feed.
 - **Global (non-Indian) markets.** NSE/BSE stays the entire universe.
+- **Public or commercial distribution, for now.** Decided scope, not an oversight (§17.4): this
+  runs privately for the operator's own circle of friends and family — nobody outside that circle
+  signs up, no fee is charged, and it isn't advertised or offered to the public. This is what
+  keeps the SEBI-registration question (§17.4) closed for the current scope; it reopens the moment
+  distribution grows past a private circle, becomes public/advertised, or a fee is introduced (§11
+  already has no real payment processing, consistent with this).
 
 ---
 
@@ -344,7 +354,7 @@ order.
 | LLM hallucination / fabricated numeric claim | Medium (mitigated) | High if unmitigated | The Trust Framework (§7) exists for this — guardrails, numeric-misread check, degraded-fallback labeling |
 | Broad market crash / regime shift | Low-Medium | Medium — signal weights aren't back-tested, so calibration is unproven in a real drawdown | Disclosed gap (Feature Catalog, "Known Gaps"); a backtest harness is the mitigation, not yet built |
 | Scraper/API rate-limit or cost spike (LLM or data source) | Medium | Medium — degraded freshness or a blown cost budget | Per-call LLM cost instrumentation with a daily running total; Redis-backed sliding-window rate limiting; a global LLM concurrency ceiling |
-| Regulatory status of issuing BUY/SELL calls to Indian retail investors is unassessed | Unknown (unassessed) | High if SEBI registration turns out to be required | See §17.4 — requires qualified counsel, not an engineering fix |
+| Distribution scope (private friends/family, non-public, no fee) expands past what §17.4's SEBI determination is contingent on | Low today (operator-controlled) | High if it happens without re-checking §17.4 first | See §17.4 — reopens the registration question; needs qualified counsel before, not after, any such expansion |
 | No legal/compliance review of the scraping surface | Unknown (unassessed) | High if a source objects | See §17.2 — requires a licensed professional |
 | Bus factor of one | High (certain, today) | High for anyone relying on this as durable infrastructure | See §17.1 — requires a real second engineer or a written handoff plan |
 
@@ -378,30 +388,42 @@ hand. Disclosed by design: standing up billing is a business decision (processor
 India-specific tax/compliance, refunds) that must precede engineering. **Needs:** those decisions
 first; the engineering that follows is then a normal, scoped task.
 
-### 17.4 Regulatory status of the recommendations themselves — unassessed
-The product issues BUY/HOLD/SELL calls with confidence levels, price targets, and stop-losses to
-Indian retail investors, and publishes its own track record against them. Whether that constitutes
-regulated activity under SEBI's Research Analyst or Investment Adviser regulations — and what
-registration, disclosure, or disclaimer obligations would follow — has **not** been assessed by
-qualified counsel. Notably, "financial advisory" was *deliberately not* listed as a non-goal in
-§3: the product's positioning on this question is genuinely open, which makes getting a real
-answer more urgent, not less. **Needs:** a SEBI-competent professional's read on the current
-feature set before any material distribution push. Recorded here as an open question, not as an
-implied claim in either direction.
+### 17.4 Regulatory status of the recommendations themselves — decided for current scope
 
-**Partial mitigation shipped — explicitly not a substitute for the above.** Every surface that
-carries a recommendation now states that AlphaPulse is *not registered with SEBI as a Research
-Analyst or Investment Adviser*, alongside the pre-existing "not investment advice" language: the
-global footer (`app/layout.tsx`), the single-stock verdict (`results-dashboard.tsx`), and the
-Market Picks list (`market-picks-dashboard.tsx`). Those disclaimers were also raised from
-`text-muted/50`–`/60` to full `text-muted` — they had been rendering at **2.41:1 and 2.95:1**
-contrast, the least legible text in the product, which is a poor property for a legal notice as
-well as an accessibility failure. At full `muted` they measure 6.12:1.
+**Decision (operator, current scope): SEBI Research Analyst / Investment Adviser registration is
+not required today.** The product issues BUY/HOLD/SELL calls with confidence levels, price
+targets, and stop-losses, and publishes its own track record against them — but SEBI's Research
+Analyst and Investment Adviser regulations are aimed at a person carrying on the *business* of
+advising the public (or clients) for consideration. That fact pattern is what was genuinely open
+in an earlier version of this section. It's closed now because the distribution fact pattern is
+fixed and stated as a non-goal (§3): this runs privately for the operator's own circle of friends
+and family — nobody outside that circle has access, no fee is charged for it, and it is not
+advertised, marketed, or offered to the public. This is the operator's own scope-based
+determination, **not a formal opinion from qualified counsel** — recorded as a decision this
+project is operating under, not as a claim that a lawyer has signed off on it.
 
-Two caveats, stated so this isn't mistaken for resolution:
-1. **A disclaimer is risk-reduction, not compliance.** If the activity does fall within SEBI's
-   Research Analyst regulations, disclaiming registration does not cure the absence of it. This
-   buys honesty with users, not a legal position.
+**This determination is contingent on the stated facts, not permanent.** It holds only as long as
+distribution stays inside a private, unpaid, non-public circle (§3's non-goal). If any of that
+changes — the circle grows into something that reads as "the public," a fee is introduced, it's
+advertised or marketed, or usage otherwise scales past personal/informal sharing — this question
+reopens and needs a SEBI-competent professional's actual read before that expansion, not after.
+`PRD.md`'s own "Needs a human decision" framing (`docs/backlog.md`) tracked this as open; it now
+tracks it as decided-for-current-scope with that reopening condition attached, not as resolved
+outright.
+
+**Disclaimer language kept as continued good practice, not as the thing that makes the above
+determination true.** Every surface that carries a recommendation still states that AlphaPulse is
+*not registered with SEBI as a Research Analyst or Investment Adviser*, alongside the pre-existing
+"not investment advice" language: the global footer (`app/layout.tsx`), the single-stock verdict
+(`results-dashboard.tsx`), and the Market Picks list (`market-picks-dashboard.tsx`). Those
+disclaimers were also raised from `text-muted/50`–`/60` to full `text-muted` — they had been
+rendering at **2.41:1 and 2.95:1** contrast, the least legible text in the product, a poor
+property for a legal notice as well as an accessibility failure. At full `muted` they measure
+6.12:1. Two things this still doesn't do:
+1. **A disclaimer is risk-reduction, not compliance, on its own.** The real reason registration
+   isn't required today is the private/non-commercial distribution scope above, not this text —
+   but keeping the disclaimer costs nothing and stays honest with the friends/family circle using
+   this about what it is and isn't.
 2. **The non-registration statement is an assumption, not a verified fact.** It reflects that no
    registration is known to exist for this project. If the operator *is* SEBI-registered, that
    copy is wrong and must be corrected in the three files named above.

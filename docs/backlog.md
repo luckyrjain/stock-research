@@ -32,9 +32,18 @@ Nothing on that rejected list should be proposed or scaffolded without the human
 
 ## Needs a human decision — no code change closes these
 
+~~**SEBI registration status**~~ — decided for current scope, not left open: the operator has
+determined registration isn't required *because* distribution is scoped to a private, unpaid
+circle of friends and family (now a stated non-goal, `PRD.md` §3), not offered to the public or
+for consideration. This is the operator's own scope-based call, not a formal opinion from
+qualified counsel, and it's contingent on that distribution scope holding — it reopens (needs
+real counsel before, not after) if the circle ever grows past personal/informal sharing, a fee is
+introduced, or it's advertised/marketed. The non-registration disclaimer stays live on every
+recommendation surface as continued good practice, not as the thing that makes the determination
+true. *(`PRD.md` §17.4, §3)*
+
 | Item | Detail |
 |---|---|
-| **SEBI registration status** — the product issues BUY/SELL calls with targets and stop-losses to Indian retail investors and publishes a track record. Whether that is regulated activity has never been assessed. A non-registration disclaimer now ships on every recommendation surface, but **a disclaimer is risk-reduction, not compliance**, and it *asserts* non-registration — correct it if that's wrong. | `PRD.md` §17.4 |
 | **No legal review of the scraping surface** — screener.in, nseindia.com, bseindia.com, trendlyne.com, rbi.org.in, on a recurring schedule, at beyond-hobby scale. No ToS review by counsel. | `PRD.md` §17.2 |
 | **No real payments** — `users.tier` is set by an operator by hand. Pricing, processor, India tax/compliance and refund policy are all undecided; that decision precedes any engineering. | `PRD.md` §17.3 |
 | **Bus factor of one.** | `PRD.md` §17.1 |
