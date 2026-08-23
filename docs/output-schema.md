@@ -606,9 +606,9 @@ contributes (e.g. no positions have a share count yet).
 
 A separate personal net-worth tracker. `profiles`/`accounts`/`assets` are plain CRUD returning
 standard `{"id": N}` / `{"ok": true}` / `{"<collection>": [...]}` shapes — see
-[api-reference.md § Portfolio Aggregator](api-reference.md#portfolio-aggregator-4157) for their
-full request contract (including the disclosed no-auth, no-ownership-scoping design). The
-computed and import endpoints have less obvious bodies:
+[api-reference.md § Portfolio Aggregator](api-reference.md#portfolio-aggregator-4163) for their
+full request contract (including the ownership model — owned via `client_id`/`user_id`, same
+shape as Watchlist/Positions). The computed and import endpoints have less obvious bodies:
 
 **`POST /api/portfolio/refresh-valuations`** — auto-values every non-archived `mf`/`stock` asset
 with a `holdings` row, from `prices_daily`/`mf_nav_daily` (live yfinance quote as a stock fallback):

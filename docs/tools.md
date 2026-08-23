@@ -225,6 +225,32 @@ never a fabricated one.
 
 ---
 
+### `bse_shareholding.get_shareholding_detail`
+
+- File: `tools/bse_shareholding.py`
+- Source: BSE's own `SHPQNewFormat` endpoint (scripcode-keyed, not symbol-keyed — unlike every
+  NSE endpoint in this doc), scraping the same quarterly shareholding filing but served as
+  **inline XBRL** (facts under `ix:nonNumeric`/`ix:nonFraction`, embedded in an XHTML wrapper),
+  which needs its own parser distinct from NSE's plain XBRL XML.
+
+The BSE-only fallback for `get_shareholding_detail` above — `GET
+/api/shareholding-detail/{symbol}` calls this only when NSE's own shareholding master genuinely
+returns zero records for the symbol (a real, permanent "not on NSE," confirmed via NSE's own
+specific `_NO_SHAREHOLDING_RECORDS_MSG` error, never any other NSE failure) and the securities
+master resolves the symbol to a real BSE scrip code. Reuses NSE's own XXE-safe
+`etree.XMLParser(resolve_entities=False)` settings and the same `NameOfTheShareholder`/
+`ShareholdingAsAPercentageOfTotalNumberOfShares` concept names — BSE's SEBI-mandated
+shareholding taxonomy happens to use identical concept names to NSE's. Same response shape as
+`get_shareholding_detail` (`promoters`, `shareholder_categories`), reusing NSE's own
+`_percent_from_ambiguous_value` plausibility ceiling.
+
+**Confirmed against a real live filing** (AG Ventures Ltd, scripcode 506579), not a guess —
+including one real, fixed bug found live: BSE's API hangs indefinitely (no response, no clean
+reject) on a connection-pooled/keep-alive `requests` call, so every request here sends
+`Connection: close` explicitly.
+
+---
+
 ### `get_latest_news`
 
 - File: `tools/news_tools.py`
@@ -262,7 +288,7 @@ These feed the standalone, on-demand endpoints (`/api/peers`, `/api/financials`,
 
 ### `portfolio/dcf_valuation.py::compute_dcf_estimate`
 
-- File: **`backend/dcf_valuation.py`** (backend root, *not* under `tools/`) — a pure computation module, not a scraper
+- File: **`backend/portfolio/dcf_valuation.py`** (under `portfolio/`, *not* under `tools/`) — a pure computation module, not a scraper
 - Input: the `cash_flow` dict from `get_financial_statements`, plus `current_price` and `market_cap_cr`
 
 A deterministic two-stage DCF off the cash-flow table's Operating Activity row — never

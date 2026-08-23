@@ -236,8 +236,14 @@ prices → portfolio valuations.
 A **separate** personal net-worth tracker (`/portfolio-aggregator`), distinct from `/portfolio` —
 the "I bought this" Market Picks P&L tracker backed by the `positions` table. The two share a
 `/api/portfolio` URL prefix by accident of routing, nothing else: different tables, different
-lifecycle, different purpose. This one has **no auth** — profiles are a bare picker with no
-credentials, a deliberate personal-scale-tool decision, not an oversight.
+lifecycle, different purpose. `profiles` carries the same `client_id`/`user_id` ownership shape
+as `watchlist_items`/`positions` (added by migration `ec7850b73d2f`, after this feature's
+original no-auth design) — every profile/account/asset-scoped endpoint resolves the caller's
+owner and 404s on one it doesn't control. `profiles` is still a bare picker with no credentials
+of its own, not this app's `users`/`sessions` account system, and this remains a
+personal-scale-tool decision, not a multi-tenant one — see "Watchlist, Positions & the
+claim-to-account flow" below for the shared ownership shape, and `docs/database.md` for
+`profiles`' own column-level detail.
 
 - **Foundation** (`routes/portfolio_aggregator.py`, mounted at `/api/portfolio`): `profiles` →
   `accounts` (bank/broker/amc/epfo/other) → `assets` (mf/stock/fd/epf/ppf/cash/manual/loan, with a
@@ -696,11 +702,12 @@ routes/
 │                              positions table only, unrelated to the Portfolio Aggregator
 │                              despite the shared /api/portfolio prefix, which it lands on
 │                              because this router has no prefix= of its own)
-└── portfolio_aggregator.py (21)  APIRouter(prefix="/api/portfolio") — profiles, accounts,
+└── portfolio_aggregator.py (23)  APIRouter(prefix="/api/portfolio") — profiles, accounts,
                                assets (+/valuations), networth, refresh-valuations, xirr,
                                import-cas, import-csv(/preview), broker/{broker}/login-url,
                                broker/{broker}/connect, broker/{broker}/sync,
-                               broker/connections. Full CRUD, hence the count
+                               broker/connections, broker/hdfc_securities/login-start,
+                               broker/hdfc_securities/verify-otp. Full CRUD, hence the count
 ```
 
 **`run_owned_db_call(request, rate_limit_name, max_calls, sync_fn, event_prefix, window_seconds=60)`**

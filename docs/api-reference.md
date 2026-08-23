@@ -1,8 +1,8 @@
 # API Reference
 
 The **request contract** for every FastAPI endpoint: method, path, auth, params, request body,
-status codes, rate limits, and caching behaviour. **61 endpoints** — 29 in `backend/api.py`, 32
-across `backend/routes/` (`watchlist.py` 5, `positions.py` 6, `portfolio_aggregator.py` 21).
+status codes, rate limits, and caching behaviour. **63 endpoints** — 29 in `backend/api.py`, 34
+across `backend/routes/` (`watchlist.py` 5, `positions.py` 6, `portfolio_aggregator.py` 23).
 
 **Division of responsibility with [`output-schema.md`](output-schema.md):**
 
@@ -157,7 +157,7 @@ only when **every** section succeeded.
 
 ---
 
-## All 61 endpoints
+## All 63 endpoints
 
 Auth column: `—` none · `session` session bearer · `owner` session-or-`client_id` · `key`
 `X-API-Key`.
@@ -204,32 +204,35 @@ Auth column: `—` none · `session` session bearer · `owner` session-or-`clien
 | 38 | DELETE | `/api/positions/{symbol}` | owner | Remove a position |
 | 39 | POST | `/api/positions/claim` | session | Claim anonymous rows onto the account |
 | 40 | GET | `/api/portfolio/concentration` | owner | Capital-weighted sector concentration |
-| 41 | GET | `/api/portfolio/profiles` | — | List net-worth profiles |
-| 42 | POST | `/api/portfolio/profiles` | — | Create a profile |
-| 43 | GET | `/api/portfolio/accounts` | — | List a profile's accounts |
-| 44 | POST | `/api/portfolio/accounts` | — | Create an account |
-| 45 | PATCH | `/api/portfolio/accounts/{account_id}` | — | Update an account |
-| 46 | DELETE | `/api/portfolio/accounts/{account_id}` | — | Delete an empty account |
-| 47 | GET | `/api/portfolio/assets` | — | List an account's assets + latest valuation |
-| 48 | POST | `/api/portfolio/assets` | — | Create an asset (+ initial valuation, + holding) |
-| 49 | PATCH | `/api/portfolio/assets/{asset_id}` | — | Update asset and/or holding fields |
-| 50 | DELETE | `/api/portfolio/assets/{asset_id}` | — | Delete an asset and its children |
-| 51 | POST | `/api/portfolio/assets/{asset_id}/valuations` | — | Upsert a dated valuation |
-| 52 | GET | `/api/portfolio/networth` | — | Net-worth summary for a profile |
-| 53 | POST | `/api/portfolio/refresh-valuations` | — | Auto-value `mf`/`stock` assets |
-| 54 | GET | `/api/portfolio/xirr` | — | Per-asset + pooled XIRR |
-| 55 | POST | `/api/portfolio/import-cas` | — | Import a CAMS/KFintech detailed CAS PDF |
-| 56 | POST | `/api/portfolio/import-csv/preview` | — | Preview + map a broker CSV/XLSX |
-| 57 | POST | `/api/portfolio/import-csv` | — | Import mapped broker rows |
-| 58 | POST | `/api/portfolio/broker/{broker}/login-url` | — | Register (or reuse) app credentials, get the broker's login URL |
-| 59 | POST | `/api/portfolio/broker/{broker}/connect` | — | Exchange a `request_token` for an access token |
-| 60 | POST | `/api/portfolio/broker/{broker}/sync` | — | Kick off a background pull of holdings/trades from the connected broker account (202, poll #61) |
-| 61 | GET | `/api/portfolio/broker/connections` | — | List broker connections for a profile (never credentials) |
+| 41 | GET | `/api/portfolio/profiles` | owner | List net-worth profiles |
+| 42 | POST | `/api/portfolio/profiles` | owner | Create a profile |
+| 43 | GET | `/api/portfolio/accounts` | owner | List a profile's accounts |
+| 44 | POST | `/api/portfolio/accounts` | owner | Create an account |
+| 45 | PATCH | `/api/portfolio/accounts/{account_id}` | owner | Update an account |
+| 46 | DELETE | `/api/portfolio/accounts/{account_id}` | owner | Delete an empty account |
+| 47 | GET | `/api/portfolio/assets` | owner | List an account's assets + latest valuation |
+| 48 | POST | `/api/portfolio/assets` | owner | Create an asset (+ initial valuation, + holding) |
+| 49 | PATCH | `/api/portfolio/assets/{asset_id}` | owner | Update asset and/or holding fields |
+| 50 | DELETE | `/api/portfolio/assets/{asset_id}` | owner | Delete an asset and its children |
+| 51 | POST | `/api/portfolio/assets/{asset_id}/valuations` | owner | Upsert a dated valuation |
+| 52 | GET | `/api/portfolio/networth` | owner | Net-worth summary for a profile |
+| 53 | POST | `/api/portfolio/refresh-valuations` | — | Auto-value `mf`/`stock` assets globally, unscoped |
+| 54 | GET | `/api/portfolio/xirr` | owner | Per-asset + pooled XIRR |
+| 55 | POST | `/api/portfolio/import-cas` | owner | Import a CAMS/KFintech detailed CAS PDF |
+| 56 | POST | `/api/portfolio/import-csv/preview` | owner | Preview + map a broker CSV/XLSX |
+| 57 | POST | `/api/portfolio/import-csv` | owner | Import mapped broker rows |
+| 58 | POST | `/api/portfolio/broker/{broker}/login-url` | owner | Register (or reuse) app credentials, get the broker's login URL |
+| 59 | POST | `/api/portfolio/broker/{broker}/connect` | owner | Exchange a `request_token` for an access token |
+| 60 | POST | `/api/portfolio/broker/{broker}/sync` | owner | Kick off a background pull of holdings/trades from the connected broker account (202, poll #61) |
+| 61 | GET | `/api/portfolio/broker/connections` | owner | List broker connections for a profile (never credentials) |
+| 62 | POST | `/api/portfolio/broker/hdfc_securities/login-start` | owner | HDFC's real login, steps 1-2 — always returns `otp_required: true` |
+| 63 | POST | `/api/portfolio/broker/hdfc_securities/verify-otp` | owner | HDFC's real login, steps 3-5 — OTP → consent → access token |
 
-Endpoints 41–57 have **no authentication and no ownership scoping** — any caller may read or
-mutate any profile's data by id. This is a disclosed, deliberate scope call (a personal
-localhost/Tailscale tool), documented in `routes/portfolio_aggregator.py`'s own module docstring
-and repeated at [that section](#portfolio-aggregator-4157) below.
+Endpoints 41–63, except #53, are owner-resolved exactly like Watchlist/Positions above (session
+or `client_id`) — `profiles` gained real ownership via migration `ec7850b73d2f`, closing what
+used to be a disclosed no-auth/no-ownership-scoping gap. `#53` (`POST /refresh-valuations`) is
+the one deliberately unscoped exception: a global, idempotent market-data recompute with no
+per-owner data in its response. Full detail at [that section](#portfolio-aggregator-4163) below.
 
 ---
 
@@ -964,24 +967,33 @@ Note: the rate-limit bucket is `portfolio_concentration` but the log/event prefi
 
 ---
 
-## Portfolio Aggregator (41–61)
+## Portfolio Aggregator (41–63)
 
 A **separate** personal net-worth tracker: profiles → accounts → assets → valuations, plus XIRR
 and two import paths. Mounted under the same `/api/portfolio` prefix as #40 but otherwise
 unrelated — different tables, different router, different frontend page
 (`/portfolio-aggregator`, nav label "Net Worth").
 
-> **No authentication, no ownership scoping — deliberate and disclosed.** Every endpoint here
-> takes a bare `profile_id` / `account_id` / `asset_id` and never checks who is asking. Any
-> caller can read or mutate any profile's data. `profiles` is a bare picker with no credentials,
-> unconnected to this app's real `users`/`sessions` account system. This is the original design
-> intent (a personal localhost/Tailscale tool for a household, not a multi-tenant product), not
-> an oversight — see `routes/portfolio_aggregator.py`'s module docstring. **Do not expose this
-> router on a public interface without adding auth first.**
+**Owner-resolved (session or anonymous `client_id`), same as Watchlist/Positions above** —
+`profiles` was originally a bare, unowned picker; migration `ec7850b73d2f` added the identical
+`client_id`/`user_id` ownership shape `watchlist_items`/`positions` already had. Every
+profile/account/asset-scoped endpoint below accepts an optional `client_id` (query param on a
+`GET`, body field on a `POST`/`PATCH`/`DELETE`) and resolves the caller's owner the same way
+Watchlist does — a valid session always wins over `client_id` when both are present. It then
+checks the requested `profile_id`/`account_id`/`asset_id` against that owner
+(`_owned_profile_id()`/`_owned_account_id()`/`_owned_asset_id()`) — **`404`, never `403`**, for a
+profile/account/asset that doesn't exist *or* belongs to someone else, so a caller can't probe
+for another owner's ids. This is still a personal-scale tool, not a multi-tenant product — see
+`docs/database.md`'s "Portfolio Aggregator" section — and `POST /refresh-valuations` (#53) is the
+one endpoint left deliberately unscoped (a global, idempotent market-data recompute with no
+per-owner data in its response).
 
-All 17 use `run_owned_db_call()` (see [its envelope](#watchlist)), so all share: `503
+22 of the 23 use `run_owned_db_call()` (see [its envelope](#watchlist)), so those share: `503
 "DATABASE_URL not configured."` when unset, sanitized `503` on any unexpected DB error, `429` on
-their bucket, and `422` for a `ValueError`. Two buckets, both per IP:
+their bucket, and `422` for a `ValueError`. `POST /broker/{broker}/sync` (#60) is the one
+exception — it deliberately runs its DB work directly on the request (a fast rate-limit/lock/
+decrypt check) and dispatches the actual sync onto its own background executor rather than going
+through the wrapper's `run_in_executor` step; see its own entry below. Two buckets, both per IP:
 
 - **`portfolio_agg_read` — 120 / 60 s**: #41, #43, #47, #52, #54, #61
 - **`portfolio_agg_write` — 60 / 60 s**: #42, #44, #45, #46, #48, #49, #50, #51, #53, #55, #56, #57, #58, #59, #60, #62, #63
@@ -1002,7 +1014,8 @@ exists"` on the unique-name `IntegrityError`.
 ### Accounts
 
 **`GET /api/portfolio/accounts`** — 43. Query `profile_id: int`, **required** (omitted →
-`422`). `200 {"accounts": [...]}`. An unknown `profile_id` returns an empty list, not `404`.
+`422`). `200 {"accounts": [...]}` · `404 "profile not found"` for a `profile_id` that doesn't
+exist *or* isn't owned by the resolved caller.
 
 **`POST /api/portfolio/accounts`** — 44. Body `AccountIn`: `profile_id: int` **required** ·
 `name: str` **required**, `1 ≤ len ≤ 120` · `institution: str | None` = `null` · `type: str`
@@ -1181,7 +1194,9 @@ account/broker (call `login-url` first) · `422` the broker rejected the exchang
 **`POST /api/portfolio/broker/{broker}/sync`** — 60. JSON body: `{"account_id": int}`. Kicks off a
 background sync and returns immediately — the actual fetch (holdings + trades from the broker via
 that broker's `sync_account()`, writing into `assets`/`holdings`/`valuations`/`transactions`,
-deduped by trade id, never placing an order) runs on a dedicated `ThreadPoolExecutor`
+deduped by trade id, never placing an order — plus mirroring each synced holding into `positions`
+under whichever owner triggered this request, so it shows up on `/portfolio` too) runs on a
+dedicated `ThreadPoolExecutor`
 (`_BROKER_SYNC_EXECUTOR`), not inline in this request. Poll `GET /broker/connections` for the
 outcome (`sync_status`/`last_sync_summary`/`last_sync_error`) — the same shape this endpoint used
 to return synchronously now lands in `last_sync_summary` once `sync_status` flips to `"success"`.

@@ -87,7 +87,7 @@ or if distribution scope changes per the SEBI item's own contingency. *(`PRD.md`
    `routes/_shared.py::claim_anonymous_rows_sync()` already uses, would close it for these two
    paths too, if it's ever worth doing. *(`database.md` §Known schema gaps #6)*
 3. ~~**Portfolio Aggregator had no auth and no ownership scoping.**~~ — fixed. All 23 endpoints
-   (including the 4 broker-API-sync ones) now resolve the caller's owner via the same
+   (including the 6 broker-API-sync ones) now resolve the caller's owner via the same
    `client_id`/signed-in-`user_id` shape `watchlist_items` already used
    (`routes.watchlist.resolve_owner()`), and every `profile_id`/`account_id`/`asset_id` path param
    is checked against that owner (`_owned_profile_id`/`_owned_account_id`/`_owned_asset_id`) before
@@ -101,8 +101,14 @@ or if distribution scope changes per the SEBI item's own contingency. *(`PRD.md`
    `broker_sync`'s ownership check used to run *after* its rate-limit/lock acquisition, letting an
    unauthorized caller burn another owner's rate-limit budget before hitting the 404 — was fixed
    alongside it (ownership now checked first). New migration: `ec7850b73d2f_add_profiles_ownership`
-   adds `client_id`/`user_id` to `profiles`. *(`api-reference.md`, `database.md`,
-   `feature-catalog.md`)*
+   adds `client_id`/`user_id` to `profiles`. **What's still genuinely open, from the same
+   review**: `POST /broker/{broker}/login-url`/`connect` still has **no CSRF `state` parameter**
+   binding the OAuth redirect back to the account that initiated it — a caller who already owns
+   *some* account, or who can otherwise reach this port, could still race a `connect` call against
+   another owner's in-flight login for the same `(account_id, broker)` if they can trigger or
+   guess the timing. Deliberate for a localhost/Tailscale tool; this sub-feature needs the CSRF
+   `state` fix before ever being exposed on a public interface. *(`api-reference.md`,
+   `database.md`, `feature-catalog.md`)*
 4. **`client_id` is a grouping key, not a security boundary.** Anyone holding one can read/write
    that browser's anonymous watchlist and positions. Claim endpoints are rate-limited and
    audit-logged, which bounds abuse without eliminating a targeted guess. *(`feature-catalog.md`)*
