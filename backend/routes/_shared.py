@@ -1,7 +1,9 @@
-"""Shared plumbing for api.py, routes/watchlist.py, and routes/positions.py —
-the primitives all three need (a cached DB engine, per-IP rate limiting,
-bearer-token parsing, the ticker regex, and structured logging), plus the
-read/write wrapper the two domain route modules build on.
+"""Shared plumbing for api.py, routes/watchlist.py, routes/positions.py, and
+routes/portfolio_aggregator.py — the primitives these modules need (a cached
+DB engine, per-IP rate limiting, bearer-token parsing, the ticker regex, and
+structured logging), plus the read/write wrapper the domain route modules
+build on and the OwnedRequest Pydantic base their write-endpoint bodies
+inherit.
 
 These used to be defined in api.py itself and reached into by
 routes/watchlist.py and routes/positions.py via `import api` + dotted

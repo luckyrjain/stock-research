@@ -2386,7 +2386,17 @@ endpoints) to warrant its own module from the start.
    event_prefix)` is the extracted wrapper itself — the repeated rate-limit/DATABASE_URL-
    check/executor/sanitize-error shape most of these domains' CRUD endpoints now call
    instead of re-implementing (a few list-shaped calendar/read-only paths that don't fit
-   this exact shape stay inline).
+   this exact shape stay inline). `routes/_shared.py::OwnedRequest` is the equivalent
+   dedup on the request-body side — a Pydantic base carrying `client_id: str | None =
+   None`, the field every anonymous-identity write-endpoint body needs (see "Watchlist
+   flow" below). Originally a `portfolio_aggregator.py`-local class; moved here once
+   `watchlist.py`'s `WatchlistAddRequest` and `positions.py`'s `PositionAddRequest`/
+   `PositionSharesRequest` needed the same field instead of each hand-declaring it —
+   the two multipart-upload endpoints in `portfolio_aggregator.py` (`import-cas`,
+   `import-csv`) still declare `client_id: str | None = Form(None)` by hand rather than
+   inheriting it, since a FastAPI Form-model's fields stop flattening as individual form
+   fields once an `UploadFile = File(...)` parameter sits in the same endpoint — a real
+   structural limit, not an oversight.
 4. `routes/watchlist.py` owns the ownership-resolution primitives (`resolve_owner()`,
    `owner_column()`, `WatchlistOwner`, `_VALID_EXCHANGES` — renamed from `api.py`'s original
    `_resolve_watchlist_owner`/`_owner_column`) since positions.py and portfolio_aggregator.py

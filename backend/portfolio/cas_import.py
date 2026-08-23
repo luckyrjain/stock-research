@@ -92,23 +92,18 @@ def import_cas(engine, parsed: dict, account_id: int) -> dict:
         # folio's just-inserted rows for the same asset before this
         # transaction commits.
         cas_rows_cleared: set[int] = set()
-        # Same reasoning applies to holdings.units: a scheme genuinely held
-        # via two folios (two SIP folios, a post-merger split) now resolves
-        # to one asset, but each folio still reports its OWN closing
-        # balance — the true total is their sum, not either one alone.
-        # Accumulated here and upserted once per asset after the loop
-        # (rather than once per folio inside it) so a second folio's write
-        # can't clobber the first folio's contribution via the plain
-        # "SET units = EXCLUDED.units" upsert.
-        holdings_close_by_asset: dict[int, float] = {}
-        # True combined close across EVERY folio touching this asset,
-        # including a zero/negative one -- unlike holdings_close_by_asset
-        # (which only sums positive folios, so it can build a holdings row),
-        # this is what the archived-flag reconciliation below needs: an
-        # asset whose folios sum to zero must be able to re-archive, which a
-        # dict that only ever holds positive contributions structurally
-        # cannot represent.
-        total_close_by_asset: dict[int, float] = {}
+        # Same reasoning applies to holdings.units and the archived flag: a
+        # scheme genuinely held via two folios (two SIP folios, a
+        # post-merger split) now resolves to one asset, but each folio still
+        # reports its OWN closing balance -- the true total is their sum,
+        # not either one alone (and not whichever folio the row happened to
+        # be created/last-updated from). Accumulated here across EVERY
+        # folio touching this asset -- including a zero/negative one, which
+        # matters for the archived reconciliation below: a dict that only
+        # ever held positive contributions could never represent "this
+        # asset's folios now net out to fully redeemed," making that
+        # reconciliation able to un-archive but never re-archive.
+        close_by_asset: dict[int, float] = {}
 
         for folio in parsed.get("folios", []):
             for scheme in folio.get("schemes", []):
@@ -165,34 +160,28 @@ def import_cas(engine, parsed: dict, account_id: int) -> dict:
                     if isin:
                         by_isin[isin] = new_row
 
-                total_close_by_asset[asset_id] = total_close_by_asset.get(asset_id, 0.0) + close
-                if close > 0:
-                    holdings_close_by_asset[asset_id] = holdings_close_by_asset.get(asset_id, 0.0) + close
+                close_by_asset[asset_id] = close_by_asset.get(asset_id, 0.0) + close
 
                 summary["transactions"] += _write_transactions(
                     conn, asset_id, folio.get("folio"), txns, summary,
                     clear_existing=asset_id not in cas_rows_cleared)
                 cas_rows_cleared.add(asset_id)
 
-        for asset_id, total_units in holdings_close_by_asset.items():
-            conn.execute(_text(
-                "INSERT INTO holdings (asset_id, units) VALUES (:aid, :u) "
-                "ON CONFLICT (asset_id) DO UPDATE SET units = EXCLUDED.units"
-            ), {"aid": asset_id, "u": total_units})
-
-        for asset_id, total_close in total_close_by_asset.items():
-            # A scheme matched across two folios (see the by_amfi/by_isin
-            # backfill above) may have been created `archived=True`/`False`
-            # off a single folio's own close before a later folio's
-            # contribution was accumulated in here -- reconcile against the
-            # TRUE combined close now that every folio's contribution is in,
-            # rather than trusting whichever folio happened to be seen first
-            # at asset-creation time. Uses total_close_by_asset (every
-            # folio, including zero/negative ones), not
-            # holdings_close_by_asset (only positive ones) -- the latter can
-            # never be <= 0 for a key it contains, which would make this
-            # reconciliation only ever un-archive, never re-archive a scheme
-            # whose folios now net out to fully redeemed.
+        for asset_id, total_close in close_by_asset.items():
+            if total_close > 0:
+                conn.execute(_text(
+                    "INSERT INTO holdings (asset_id, units) VALUES (:aid, :u) "
+                    "ON CONFLICT (asset_id) DO UPDATE SET units = EXCLUDED.units"
+                ), {"aid": asset_id, "u": total_close})
+            # A scheme matched across one or more folios (see the
+            # by_amfi/by_isin backfill above -- this also covers an asset
+            # matched to a SINGLE folio in THIS statement whose own close
+            # now differs from its prior archived state, not just the
+            # multi-folio backfill case) may have been created
+            # `archived=True`/`False` off a stale assumption -- reconcile
+            # against the TRUE combined close now that every folio's
+            # contribution is in, rather than trusting whichever folio
+            # happened to be seen first at asset-creation time.
             conn.execute(_update(assets_t)
                          .where(assets_t.c.id == asset_id)
                          .values(archived=total_close <= 0))

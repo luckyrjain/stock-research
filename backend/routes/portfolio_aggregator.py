@@ -594,6 +594,11 @@ async def import_cas_endpoint(
     file: UploadFile = File(...),
     password: str = Form(...),
     account_id: int = Form(...),
+    # Can't inherit OwnedRequest here: a FastAPI Form-model's fields stop
+    # being flattened as individual form fields the moment an
+    # UploadFile = File(...) parameter sits alongside it in the same
+    # endpoint (verified against this repo's installed FastAPI) — so this
+    # one field is duplicated by hand rather than through the shared base.
     client_id: str | None = Form(None),
 ):
 
@@ -655,6 +660,8 @@ async def import_csv_endpoint(
     mapping: str = Form(...),
     account_id: int = Form(...),
     broker: str = Form(...),
+    # See import_cas_endpoint's identical comment above — same File(...) +
+    # Form-model limitation, same reason this can't inherit OwnedRequest.
     client_id: str | None = Form(None),
 ):
 
