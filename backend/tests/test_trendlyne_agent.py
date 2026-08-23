@@ -1,27 +1,8 @@
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from tools.trendlyne_agent import _gnews, _queries, fetch_trendlyne_consensus, fetch_trendlyne_consensus_for_symbol
-
-
-def _article(title="t", desc="d", url="https://example.com/a", pub="Mon, 01 Jan 2026 10:00:00 GMT"):
-    return {"title": title, "description": desc, "url": url, "published date": pub}
-
-
-class GnewsHelperTest(unittest.TestCase):
-    def test_parses_articles(self) -> None:
-        fake_gn = MagicMock()
-        fake_gn.get_news.return_value = [_article()]
-        with patch("gnews.GNews", return_value=fake_gn):
-            result = _gnews("query")
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["title"], "t")
-
-    def test_import_or_network_failure_returns_empty_list(self) -> None:
-        with patch("gnews.GNews", side_effect=RuntimeError("boom")):
-            result = _gnews("query")
-        self.assertEqual(result, [])
+from tools.trendlyne_agent import _queries, fetch_trendlyne_consensus, fetch_trendlyne_consensus_for_symbol
 
 
 class FetchTrendlyneConsensusTest(unittest.TestCase):
@@ -107,7 +88,8 @@ class FetchTrendlyneConsensusForSymbolTest(unittest.TestCase):
         self.assertEqual(result, {"symbol": "", "articles": []})
 
     def test_underlying_gnews_import_or_network_failure_yields_empty_list(self) -> None:
-        # _gnews() (see GnewsHelperTest above) already swallows import/network
+        # _gnews() delegates to tools/_gnews_client.py::fetch_gnews() (see
+        # tests/test_gnews_client.py), which already swallows import/network
         # failures internally and returns [] — fetch_trendlyne_consensus_for_symbol
         # relies on that guarantee rather than adding its own try/except,
         # matching fetch_trendlyne_consensus()'s existing behavior.

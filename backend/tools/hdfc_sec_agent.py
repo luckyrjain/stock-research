@@ -8,34 +8,11 @@ Follows the same conventions as market_picks_tools.py:
 
 from datetime import datetime, timezone
 
-from gnews import GNews
-
-import tools._gnews_timeout  # noqa: F401 — sets a socket default timeout for GNews calls below
+from tools._gnews_client import fetch_gnews
 
 
 def _gnews(query: str, max_results: int = 10) -> list[dict]:
-    try:
-        gn = GNews(language="en", country="IN", period="7d", max_results=max_results)
-        arts = gn.get_news(query)
-        results = []
-        for a in arts:
-            pub_iso = None
-            try:
-                raw = a.get("published date") or ""
-                if raw:
-                    from email.utils import parsedate_to_datetime
-                    pub_iso = parsedate_to_datetime(raw).isoformat()
-            except Exception:
-                pass
-            results.append({
-                "title":        a.get("title", ""),
-                "summary":      (a.get("description") or "")[:400],
-                "url":          a.get("url", ""),
-                "published_at": pub_iso,
-            })
-        return results
-    except Exception:
-        return []
+    return fetch_gnews(query, period="7d", max_results=max_results, summary_len=400)
 
 
 def fetch_hdfc_sec_fundamental() -> dict:

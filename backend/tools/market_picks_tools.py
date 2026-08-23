@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import feedparser
 import requests
 
-import tools._gnews_timeout  # noqa: F401 — sets a socket default timeout for GNews calls below
+from tools._gnews_client import fetch_gnews
 
 _HEADERS = {
     "User-Agent": (
@@ -107,29 +107,7 @@ def _parse_rss(url: str, max_articles: int = 20, delay: float = 0.0) -> list[dic
 
 
 def _gnews(query: str, max_results: int = 10) -> list[dict]:
-    try:
-        from gnews import GNews
-        gn = GNews(language="en", country="IN", period="14d", max_results=max_results)
-        arts = gn.get_news(query)
-        results = []
-        for a in arts:
-            pub_iso: str | None = None
-            try:
-                raw_date = a.get("published date") or ""
-                if raw_date:
-                    from email.utils import parsedate_to_datetime
-                    pub_iso = parsedate_to_datetime(raw_date).isoformat()
-            except Exception:
-                pass
-            results.append({
-                "title":        a.get("title", ""),
-                "summary":      (a.get("description") or "")[:500],
-                "url":          a.get("url", ""),
-                "published_at": pub_iso,
-            })
-        return results
-    except Exception:
-        return []
+    return fetch_gnews(query, period="14d", max_results=max_results, summary_len=500)
 
 
 # ── Individual source scrapers ────────────────────────────────────────────────

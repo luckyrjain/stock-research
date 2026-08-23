@@ -104,32 +104,13 @@ def _parse_screen_html(html: str, criterion_label: str) -> list[dict]:
 
 
 def _gnews_fallback() -> list[dict]:
-    try:
-        import tools._gnews_timeout  # noqa: F401 — sets a socket default timeout for GNews calls below
-        from datetime import datetime, timezone
-        from gnews import GNews
-        from email.utils import parsedate_to_datetime
-        year = datetime.now(timezone.utc).year
-        gn   = GNews(language="en", country="IN", period="14d", max_results=12)
-        arts = gn.get_news(f"screener.in fundamentally strong stock buy NSE India {year}")
-        out: list[dict] = []
-        for a in arts:
-            pub_iso: str | None = None
-            try:
-                raw = a.get("published date") or ""
-                if raw:
-                    pub_iso = parsedate_to_datetime(raw).isoformat()
-            except Exception:
-                pass
-            out.append({
-                "title":        a.get("title", ""),
-                "summary":      (a.get("description") or "")[:500],
-                "url":          a.get("url", ""),
-                "published_at": pub_iso,
-            })
-        return out
-    except Exception:
-        return []
+    from datetime import datetime, timezone
+    from tools._gnews_client import fetch_gnews
+    year = datetime.now(timezone.utc).year
+    return fetch_gnews(
+        f"screener.in fundamentally strong stock buy NSE India {year}",
+        period="14d", max_results=12, summary_len=500,
+    )
 
 
 def fetch_screener_scanner() -> dict:
