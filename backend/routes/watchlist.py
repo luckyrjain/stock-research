@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from routes._shared import (
     LOGGER,
     _TICKER_RE,
+    OwnedRequest,
     _bearer_token_from_request,
     _get_db_engine,
     _rate_limit,
@@ -72,8 +73,7 @@ def owner_column(owner: WatchlistOwner) -> str:
     return "user_id" if owner[0] == "user" else "client_id"
 
 
-class WatchlistAddRequest(BaseModel):
-    client_id: str | None = None
+class WatchlistAddRequest(OwnedRequest):
     symbol: str
     company: str = Field(default="")
     exchange: str = Field(default="NSE")

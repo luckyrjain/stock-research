@@ -34,10 +34,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date as _date
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from routes._shared import (
     LOGGER,
+    OwnedRequest,
     _bearer_token_from_request,
     _get_db_engine,
     log_event,
@@ -182,16 +183,6 @@ def compute_networth(rows: list[dict]) -> dict:
     return {"total": round(total, 2), "by_type": by_type, "by_account": list(by_account.values())}
 
 
-class OwnedRequest(BaseModel):
-    """Base for every write-endpoint body below — carries the anonymous
-    browser identity (lib/watchlist.ts's getClientId()) a request resolves
-    against when there's no signed-in session (see resolve_owner()). A
-    shared base rather than each model re-declaring this field means a new
-    write-endpoint model inherits it structurally instead of relying on
-    every author remembering to add it by hand."""
-    client_id: str | None = None
-
-
 class ProfileIn(OwnedRequest):
     name: str = Field(min_length=1, max_length=60)
 
@@ -254,12 +245,11 @@ class BrokerConnectIn(OwnedRequest):
 
 
 class BrokerSyncIn(OwnedRequest):
+    """client_id (inherited from OwnedRequest) is used only to mirror synced
+    holdings into `positions` (see
+    portfolio/broker_sync_common.py's upsert_position_from_holding) — not an
+    ownership check here; ownership resolves via account_id -> profile_id."""
     account_id: int
-    # client_id (from OwnedRequest) is optional here specifically so synced
-    # holdings can also be mirrored into `positions` (see
-    # portfolio/broker_sync_common.py's upsert_position_from_holding) — not
-    # itself an ownership check, since Portfolio Aggregator resolves
-    # ownership via account_id -> profile_id, not this field.
 
 
 class HdfcLoginStartIn(OwnedRequest):

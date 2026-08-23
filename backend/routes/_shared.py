@@ -21,6 +21,7 @@ import re
 import threading
 
 from fastapi import HTTPException, Request, UploadFile
+from pydantic import BaseModel
 
 from core import rate_limiter
 from core.observability import get_logger, log_event
@@ -28,6 +29,17 @@ from core.observability import get_logger, log_event
 LOGGER = get_logger("api")
 
 _TICKER_RE = re.compile(r"^[A-Z0-9&\-]{1,20}$")
+
+
+class OwnedRequest(BaseModel):
+    """Base for every write-endpoint body across watchlist/positions/
+    portfolio_aggregator that carries the anonymous browser identity
+    (lib/watchlist.ts's getClientId()) a request resolves against when
+    there's no signed-in session (see routes.watchlist.resolve_owner()). A
+    shared base rather than each model re-declaring this field means a new
+    write-endpoint model inherits it structurally instead of relying on
+    every author remembering to add it by hand."""
+    client_id: str | None = None
 
 
 def _bearer_token_from_request(request: Request) -> str | None:

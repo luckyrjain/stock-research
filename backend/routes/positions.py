@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from routes._shared import (
     LOGGER,
     _TICKER_RE,
+    OwnedRequest,
     _bearer_token_from_request,
     _fetch_live_price_sync,
     _get_db_engine,
@@ -34,8 +35,7 @@ router = APIRouter()
 _MAX_POSITIONS_PER_CLIENT = 200
 
 
-class PositionAddRequest(BaseModel):
-    client_id: str | None = None
+class PositionAddRequest(OwnedRequest):
     symbol: str
     company: str = Field(default="")
     exchange: str = Field(default="NSE")
@@ -44,8 +44,7 @@ class PositionAddRequest(BaseModel):
     stop_loss: float | None = None
 
 
-class PositionSharesRequest(BaseModel):
-    client_id: str | None = None
+class PositionSharesRequest(OwnedRequest):
     # None clears a previously-entered share count back to "unknown" — never
     # invented, never defaulted to 0/1.
     shares: float | None = None

@@ -1,4 +1,4 @@
-import { getSessionTokenFromRequest } from '@/lib/auth-cookie';
+import { authHeaders } from '@/lib/auth-cookie';
 import { clientIpHeaders } from '@/lib/proxy-headers';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
@@ -8,13 +8,12 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const token = getSessionTokenFromRequest(req);
 
   let upstream: Response;
   try {
     upstream = await fetch(`${API}/api/api-keys/${encodeURIComponent(id)}`, {
       method: 'DELETE',
-      headers: { ...clientIpHeaders(req), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: { ...clientIpHeaders(req), ...authHeaders(req) },
       cache: 'no-store',
     });
   } catch {

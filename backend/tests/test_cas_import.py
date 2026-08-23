@@ -147,6 +147,32 @@ class ImportCasTest(unittest.TestCase):
         self.assertFalse(asset["archived"])
         self.assertEqual(float(hold["units"]), 50.0)
 
+    def test_existing_open_asset_re_archived_when_this_statement_shows_it_fully_redeemed(self) -> None:
+        # Regression test: the first version of the archived-reconciliation
+        # fix only summed folios with close > 0 (holdings_close_by_asset),
+        # so an asset whose EVERY folio in this statement closes at <= 0
+        # never appeared in that dict at all -- the reconciliation loop
+        # never even considered it, leaving archived=False (correct before
+        # this import, stale after it) untouched instead of flipping to
+        # True. Must reconcile off the true combined close across every
+        # folio (total_close_by_asset), not just the positive ones.
+        from sqlalchemy import insert
+        with self.engine.begin() as conn:
+            asset_id = conn.execute(insert(assets).values(
+                account_id=self.account_id, type="mf", name="Test Fund",
+                symbol="INF090I01239", meta={"isin": "INF090I01239"},
+                archived=False,
+            )).inserted_primary_key[0]
+
+        parsed = {"folios": [{"folio": "F1", "schemes": [
+            _scheme(close=0.0, txns=[_txn("2024-01-01", "PURCHASE"), _txn("2024-08-01", "REDEMPTION")]),
+        ]}]}
+        result = import_cas(self.engine, parsed, self.account_id)
+        self.assertEqual(result["assets_matched"], 1)
+        with self.engine.connect() as conn:
+            asset = conn.execute(select(assets).where(assets.c.id == asset_id)).mappings().first()
+        self.assertTrue(asset["archived"])
+
     def test_closed_folio_with_no_transactions_skipped_entirely(self) -> None:
         parsed = {"folios": [{"folio": "F1", "schemes": [_scheme(close=0.0, txns=[])]}]}
         result = import_cas(self.engine, parsed, self.account_id)
