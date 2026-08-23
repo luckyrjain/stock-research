@@ -545,8 +545,6 @@ async def import_cas_endpoint(
 
 @router.post("/import-csv/preview")
 async def import_csv_preview(request: Request, file: UploadFile = File(...)):
-    import api
-
     file_bytes = await rate_limited_upload(request, "portfolio_agg_write", 60, file)
     filename = file.filename or ""
 
