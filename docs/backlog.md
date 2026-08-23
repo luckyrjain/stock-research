@@ -86,20 +86,23 @@ or if distribution scope changes per the SEBI item's own contingency. *(`PRD.md`
    `uq_transactions_asset_external_ref`); the same fix, or the `pg_advisory_xact_lock` pattern
    `routes/_shared.py::claim_anonymous_rows_sync()` already uses, would close it for these two
    paths too, if it's ever worth doing. *(`database.md` §Known schema gaps #6)*
-3. **Portfolio Aggregator has no auth and no ownership scoping — and for the broker-sync
-   sub-feature specifically, this is a write/credential-hijack risk, not just a read-exposure
-   one.** All 22 endpoints (including the 4 broker-API-sync ones) accept any profile id/account id
-   from any caller, and the tables hold real personal financial data — including, since broker
-   sync landed, encrypted broker app secrets and access tokens. Concretely: `POST
-   /broker/{broker}/login-url` lets any caller register their own `api_key`/`api_secret` against
-   any account id (a small guessable integer), wiping any existing `access_token_enc`; `POST
-   /broker/{broker}/connect` then exchanges an attacker-supplied `request_token` and overwrites
-   the stored token — there is no CSRF `state` parameter binding the redirect back to the account
-   that initiated it. An attacker who can reach this port can silently take over another account's
-   broker connection and have future syncs write attacker-influenced holdings/trades into that
-   account. Deliberate for a localhost/Tailscale tool — but it must not be exposed on a public
-   interface as-is; if it ever is, this sub-feature needs the CSRF `state` fix at minimum, ahead of
-   the general no-auth gap. *(`api-reference.md`, `database.md`, `feature-catalog.md`)*
+3. ~~**Portfolio Aggregator had no auth and no ownership scoping.**~~ — fixed. All 23 endpoints
+   (including the 4 broker-API-sync ones) now resolve the caller's owner via the same
+   `client_id`/signed-in-`user_id` shape `watchlist_items` already used
+   (`routes.watchlist.resolve_owner()`), and every `profile_id`/`account_id`/`asset_id` path param
+   is checked against that owner (`_owned_profile_id`/`_owned_account_id`/`_owned_asset_id`) before
+   any read or write — a mismatch is always a 404, never a 403, so a caller can't distinguish
+   "doesn't exist" from "not yours" and probe for other owners' ids. This closes the specific
+   exploit this item used to describe: `POST /broker/{broker}/login-url` and `POST
+   /broker/{broker}/connect` (which register `api_key`/`api_secret` and exchange a
+   `request_token`/overwrite `access_token_enc`) now 404 on any `account_id` the caller doesn't
+   own, so an attacker without that owner's `client_id` or session can no longer silently take over
+   another account's broker connection. A separate, narrower ordering bug in this same landing —
+   `broker_sync`'s ownership check used to run *after* its rate-limit/lock acquisition, letting an
+   unauthorized caller burn another owner's rate-limit budget before hitting the 404 — was fixed
+   alongside it (ownership now checked first). New migration: `ec7850b73d2f_add_profiles_ownership`
+   adds `client_id`/`user_id` to `profiles`. *(`api-reference.md`, `database.md`,
+   `feature-catalog.md`)*
 4. **`client_id` is a grouping key, not a security boundary.** Anyone holding one can read/write
    that browser's anonymous watchlist and positions. Claim endpoints are rate-limited and
    audit-logged, which bounds abuse without eliminating a targeted guess. *(`feature-catalog.md`)*
