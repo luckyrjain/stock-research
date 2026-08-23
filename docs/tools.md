@@ -34,7 +34,7 @@ Returns quote and company metadata:
 | `company_name` | string | Full company name |
 | `current_price` | number | Last traded price |
 | `previous_close` | number | Prior session close |
-| `change_pct` | number | % change from previous close |
+| `change_pct` | number \| null | % change from previous close — `null` (never a fabricated `0.0`) when there's no previous close to compute it from |
 | `volume` | number | Session volume |
 | `avg_volume_10d` | number | 10-day average volume |
 | `market_cap_cr` | number | Market cap in crores |
@@ -61,7 +61,8 @@ for a price/market-cap/P-E/book-value/dividend-yield instead of hard-failing the
 EPS and price-to-book are derived from price÷P-E and price÷book-value (Screener's widget doesn't
 carry either directly); `_stockanalysis_extra_fields()` additionally scrapes stockanalysis.com for
 a real EPS/52-week-range/volume where reachable, overriding the derived EPS when available. No
-intraday change % is available from this path (`change_pct` is `0.0`).
+intraday change % is available from this path — `change_pct` is `null` (never a fabricated
+`0.0`), same "never invent" convention as the primary yfinance path.
 
 ---
 

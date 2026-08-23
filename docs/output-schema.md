@@ -361,7 +361,7 @@ Each item in `picks`:
 | `trend` | string | `rising` / `falling` / `stable` / `new` |
 | `trend_delta` | number\|null | Confidence delta vs prior 3-day average |
 | `current_price` | number\|null | Last traded price |
-| `change_pct` | number | % change today |
+| `change_pct` | number\|null | % change today — `null` (never a fabricated `0.0`) when the underlying quote had no previous close to compute it from |
 | `pe_ratio` | number\|null | Trailing P/E |
 | `market_cap_cr` | number\|null | Market cap in crores |
 | `valuation_percentile` | number\|null | 0–100, where current P/E sits vs. this stock's own 3–5y Screener-published P/E history (absolute anchor, not peer-relative); `null` when Screener didn't have a parseable band. Also folded into `confidence_score` as a small ±3-point nudge (≤33rd percentile +3, ≥67th percentile −3) |

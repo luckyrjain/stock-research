@@ -308,10 +308,16 @@ that no client can rely on a uniform rule.
   ts`'s `StockInfo.change_pct` is now `number | null`; its one real consumer (`ExchangeTable` in
   `dashboard-primitives.tsx`) already coalesced a missing value to 0 for display, so this needed
   no further frontend change. The identical fallback in `_screener_fallback_quote()` (used only
-  when yfinance has no quote on either exchange) is left as-is — there's no real previous-close
-  value to fall back to there at all, so fixing it needs a UI decision about what "flat because
-  unknown" should look like, not just a type change; still disclosed in that function's own
-  docstring.
+  when yfinance has no quote on either exchange) has since been fixed too — it also now returns
+  `None` rather than a fabricated `0.0`. A follow-up review pass also found and fixed the same
+  fabricated-default pattern one layer downstream: `core/schemas.py::_norm_exchange_quote()`'s
+  `d.get("change_pct", 0.0)` didn't fire on a present-but-`None` key (a `dict.get` default only
+  substitutes when the key is *absent*), so the `None` was silently turned back into `0.0` during
+  normalization — fixed to `d.get("change_pct")`. `main.py`'s CLI report printer and
+  `pipelines/market_picks_pipeline.py`'s `MarketPick.change_pct` had the identical bug (the
+  former crashed formatting `None` with `:+.2f}`, the latter silently coerced back to `0`) — both
+  fixed, and `frontend/types/index.ts`'s `MarketPick.change_pct` widened to `number | null` to
+  match.
 - ~~**Watchlist alert emails were not deduplicated across reruns**~~ — fixed.
   `pipelines/watchlist_alerts.py` had no record of "this (user, symbol, verdict_date, kind) alert
   was already emailed" — a second run on the same day (a `workflow_dispatch` retry, a manual
