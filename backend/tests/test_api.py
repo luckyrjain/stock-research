@@ -3040,7 +3040,7 @@ class PositionsEndpointsTest(unittest.TestCase):
         ]
         fake_engine = MagicMock()
         fake_engine.connect.return_value = _FakeConn([rows_result])
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.positions._get_db_engine", return_value=fake_engine):
             resp = client.get("/api/positions?client_id=client-abc")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -3050,7 +3050,7 @@ class PositionsEndpointsTest(unittest.TestCase):
 
     def test_get_db_error_returns_sanitized_503(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        with patch("api._get_db_engine", side_effect=RuntimeError("connection refused: password exposed")):
+        with patch("routes.positions._get_db_engine", side_effect=RuntimeError("connection refused: password exposed")):
             resp = client.get("/api/positions?client_id=client-abc")
         self.assertEqual(resp.status_code, 503)
         self.assertNotIn("password", resp.json()["detail"])
@@ -3095,7 +3095,7 @@ class PositionsEndpointsTest(unittest.TestCase):
         fake_engine.begin.return_value = _FakeConn([lock_result, count_result, existing_result, insert_result])
         fake_engine.connect.return_value = _FakeConn([rows_result])
 
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.positions._get_db_engine", return_value=fake_engine):
             resp = client.post("/api/positions", json={
                 "client_id": "client-abc", "symbol": "tcs", "company": "Tata Consultancy Services",
                 "exchange": "NSE", "entry_price": 3500.0, "target_price": 3800.0, "stop_loss": 3300.0,
@@ -3112,7 +3112,7 @@ class PositionsEndpointsTest(unittest.TestCase):
         existing_result.first.return_value = None
         fake_engine = MagicMock()
         fake_engine.begin.return_value = _FakeConn([lock_result, count_result, existing_result])
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.positions._get_db_engine", return_value=fake_engine):
             resp = client.post("/api/positions", json={"client_id": "client-abc", "symbol": "TCS"})
         self.assertEqual(resp.status_code, 422)
 
@@ -3131,7 +3131,7 @@ class PositionsEndpointsTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.begin.return_value = _FakeConn([lock_result, count_result, existing_result, insert_result])
         fake_engine.connect.return_value = _FakeConn([rows_result])
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.positions._get_db_engine", return_value=fake_engine):
             resp = client.post("/api/positions", json={"client_id": "client-abc", "symbol": "TCS"})
         self.assertEqual(resp.status_code, 200)
 
@@ -3147,7 +3147,7 @@ class PositionsEndpointsTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.begin.return_value = _FakeConn([update_result])
         fake_engine.connect.return_value = _FakeConn([rows_result])
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.positions._get_db_engine", return_value=fake_engine):
             resp = client.patch("/api/positions/TCS", json={"client_id": "client-abc", "shares": 10})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["items"][0]["shares"], 10.0)
@@ -3165,7 +3165,7 @@ class PositionsEndpointsTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.begin.return_value = _FakeConn([update_result])
         fake_engine.connect.return_value = _FakeConn([rows_result])
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.positions._get_db_engine", return_value=fake_engine):
             resp = client.patch("/api/positions/TCS", json={"client_id": "client-abc", "shares": None})
         self.assertEqual(resp.status_code, 200)
 
@@ -3187,7 +3187,7 @@ class PositionsEndpointsTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.begin.return_value = _FakeConn([delete_result])
         fake_engine.connect.return_value = _FakeConn([rows_result])
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.positions._get_db_engine", return_value=fake_engine):
             resp = client.delete("/api/positions/TCS?client_id=client-abc")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["items"], [])
@@ -3220,7 +3220,7 @@ class PositionsAccountLinkingTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.connect.return_value = conn
 
-        with patch("api._get_db_engine", return_value=fake_engine), \
+        with patch("routes.positions._get_db_engine", return_value=fake_engine), \
              patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
             resp = client.get(
                 "/api/positions?client_id=client-abc",
@@ -3241,7 +3241,7 @@ class PositionsAccountLinkingTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.connect.return_value = conn
 
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.positions._get_db_engine", return_value=fake_engine):
             resp = client.get("/api/positions?client_id=client-abc")
 
         self.assertEqual(resp.status_code, 200)
@@ -3270,7 +3270,7 @@ class PositionsAccountLinkingTest(unittest.TestCase):
         fake_engine.begin.return_value = begin_conn
         fake_engine.connect.return_value = connect_conn
 
-        with patch("api._get_db_engine", return_value=fake_engine), \
+        with patch("routes.positions._get_db_engine", return_value=fake_engine), \
              patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
             resp = client.post(
                 "/api/positions",
@@ -3294,7 +3294,7 @@ class PositionsAccountLinkingTest(unittest.TestCase):
         fake_engine.begin.return_value = begin_conn
         fake_engine.connect.return_value = connect_conn
 
-        with patch("api._get_db_engine", return_value=fake_engine), \
+        with patch("routes.positions._get_db_engine", return_value=fake_engine), \
              patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
             resp = client.delete("/api/positions/TCS", headers={"Authorization": "Bearer sometoken"})
 
@@ -3372,7 +3372,7 @@ class PositionsClaimEndpointTest(unittest.TestCase):
         fake_engine.begin.return_value = begin_conn
         fake_engine.connect.return_value = connect_conn
 
-        with patch("api._get_db_engine", return_value=fake_engine), \
+        with patch("routes.positions._get_db_engine", return_value=fake_engine), \
              patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
             resp = client.post(
                 "/api/positions/claim", json={"client_id": "client-abc"},
@@ -3490,7 +3490,7 @@ class PortfolioConcentrationEndpointTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.connect.return_value = _FakeConn([rows_result])
 
-        with patch("api._get_db_engine", return_value=fake_engine), \
+        with patch("routes.positions._get_db_engine", return_value=fake_engine), \
              patch("api._fetch_live_price_sync", return_value={"price": 3500.0, "change_pct": 1.0}), \
              patch("core.cache.load", return_value={"sector": "IT"}):
             resp = client.get("/api/portfolio/concentration?client_id=client-abc")
@@ -3511,7 +3511,7 @@ class PortfolioConcentrationEndpointTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.connect.return_value = _FakeConn([rows_result])
 
-        with patch("api._get_db_engine", return_value=fake_engine), \
+        with patch("routes.positions._get_db_engine", return_value=fake_engine), \
              patch("api._fetch_live_price_sync", return_value={"price": 3500.0, "change_pct": 1.0}), \
              patch("core.cache.load", return_value=None):
             resp = client.get("/api/portfolio/concentration?client_id=client-abc")

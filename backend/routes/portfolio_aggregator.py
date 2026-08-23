@@ -22,6 +22,11 @@ just the caller's own — a global, idempotent market-data recompute with no
 per-owner data in its response, so scoping it would need threading a profile
 filter through `portfolio.portfolio_valuation.refresh_valuations()` for no
 real confidentiality benefit.
+
+Imports its shared primitives (`_get_db_engine`, `_bearer_token_from_request`,
+`LOGGER`, `log_event`) from routes/_shared.py rather than reaching into `api`
+for them — see routes/watchlist.py's own docstring for why (a real
+dependency, not the ordering-coincidence `import api` used to be).
 """
 import asyncio
 import json
@@ -31,7 +36,14 @@ from datetime import date as _date
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from routes._shared import rate_limited_upload, run_owned_db_call
+from routes._shared import (
+    LOGGER,
+    _bearer_token_from_request,
+    _get_db_engine,
+    log_event,
+    rate_limited_upload,
+    run_owned_db_call,
+)
 from routes.watchlist import WatchlistOwner, owner_column, resolve_owner
 
 router = APIRouter(prefix="/api/portfolio")
@@ -274,13 +286,12 @@ class HdfcVerifyOtpIn(BaseModel):
 @router.get("/profiles")
 async def list_profiles(request: Request, client_id: str | None = None):
     def _sync() -> dict:
-        import api
         from sqlalchemy import select
         from db.models import profiles
 
-        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
+        owner = resolve_owner(_bearer_token_from_request(request), client_id)
         column = owner_column(owner)
-        with api._get_db_engine().connect() as conn:
+        with _get_db_engine().connect() as conn:
             rows = conn.execute(
                 select(profiles)
                 .where(getattr(profiles.c, column) == owner[1])
@@ -294,15 +305,14 @@ async def list_profiles(request: Request, client_id: str | None = None):
 @router.post("/profiles", status_code=201)
 async def create_profile(request: Request, body: ProfileIn):
     def _sync() -> dict:
-        import api
         from sqlalchemy import insert
         from sqlalchemy.exc import IntegrityError
         from db.models import profiles
 
-        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
+        owner = resolve_owner(_bearer_token_from_request(request), body.client_id)
         column = owner_column(owner)
         try:
-            with api._get_db_engine().begin() as conn:
+            with _get_db_engine().begin() as conn:
                 new_id = conn.execute(
                     insert(profiles).values(name=body.name, **{column: owner[1]}).returning(profiles.c.id)
                 ).scalar()
@@ -316,12 +326,11 @@ async def create_profile(request: Request, body: ProfileIn):
 @router.get("/accounts")
 async def list_accounts(request: Request, profile_id: int, client_id: str | None = None):
     def _sync() -> dict:
-        import api
         from sqlalchemy import select
         from db.models import accounts
 
-        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
-        with api._get_db_engine().begin() as conn:
+        owner = resolve_owner(_bearer_token_from_request(request), client_id)
+        with _get_db_engine().begin() as conn:
             _owned_profile_id(conn, owner, profile_id)
             rows = conn.execute(
                 select(accounts).where(accounts.c.profile_id == profile_id).order_by(accounts.c.id)
@@ -337,12 +346,11 @@ async def create_account(request: Request, body: AccountIn):
         raise HTTPException(status_code=422, detail=f"type must be one of: {sorted(_ACCOUNT_TYPES)}")
 
     def _sync() -> dict:
-        import api
         from sqlalchemy import insert
         from db.models import accounts
 
-        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
-        with api._get_db_engine().begin() as conn:
+        owner = resolve_owner(_bearer_token_from_request(request), body.client_id)
+        with _get_db_engine().begin() as conn:
             _owned_profile_id(conn, owner, body.profile_id)
             new_id = conn.execute(
                 insert(accounts).values(
@@ -364,12 +372,11 @@ async def patch_account(request: Request, account_id: int, body: AccountPatch):
         raise HTTPException(status_code=422, detail=f"type must be one of: {sorted(_ACCOUNT_TYPES)}")
 
     def _sync() -> dict:
-        import api
         from sqlalchemy import update
         from db.models import accounts
 
-        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
-        with api._get_db_engine().begin() as conn:
+        owner = resolve_owner(_bearer_token_from_request(request), body.client_id)
+        with _get_db_engine().begin() as conn:
             _owned_account_id(conn, owner, account_id)
             conn.execute(update(accounts).where(accounts.c.id == account_id).values(**updates))
         return {"ok": True}
@@ -380,12 +387,11 @@ async def patch_account(request: Request, account_id: int, body: AccountPatch):
 @router.delete("/accounts/{account_id}")
 async def delete_account(request: Request, account_id: int, client_id: str | None = None):
     def _sync() -> dict:
-        import api
         from sqlalchemy import delete, func, select
         from db.models import accounts, assets
 
-        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
-        with api._get_db_engine().begin() as conn:
+        owner = resolve_owner(_bearer_token_from_request(request), client_id)
+        with _get_db_engine().begin() as conn:
             _owned_account_id(conn, owner, account_id)
             n_assets = conn.execute(
                 select(func.count()).where(assets.c.account_id == account_id)
@@ -401,11 +407,10 @@ async def delete_account(request: Request, account_id: int, client_id: str | Non
 @router.get("/assets")
 async def list_assets(request: Request, account_id: int, client_id: str | None = None):
     def _sync() -> dict:
-        import api
         from sqlalchemy import text as _text
 
-        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
-        with api._get_db_engine().connect() as conn:
+        owner = resolve_owner(_bearer_token_from_request(request), client_id)
+        with _get_db_engine().connect() as conn:
             _owned_account_id(conn, owner, account_id)
             # Correlated scalar subqueries, not a LATERAL join — LATERAL
             # isn't supported by SQLite, which this codebase's tests run
@@ -440,12 +445,11 @@ async def create_asset(request: Request, body: AssetIn):
         raise HTTPException(status_code=422, detail="cannot set avg_cost without units")
 
     def _sync() -> dict:
-        import api
         from sqlalchemy import insert
         from db.models import assets, holdings, valuations
 
-        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
-        with api._get_db_engine().begin() as conn:
+        owner = resolve_owner(_bearer_token_from_request(request), body.client_id)
+        with _get_db_engine().begin() as conn:
             _owned_account_id(conn, owner, body.account_id)
             asset_id = conn.execute(
                 insert(assets).values(
@@ -476,12 +480,11 @@ async def patch_asset(request: Request, asset_id: int, body: AssetPatch):
         raise HTTPException(status_code=422, detail="no fields to update")
 
     def _sync() -> dict:
-        import api
         from sqlalchemy import insert, select, update
         from db.models import assets, holdings
 
-        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
-        with api._get_db_engine().begin() as conn:
+        owner = resolve_owner(_bearer_token_from_request(request), body.client_id)
+        with _get_db_engine().begin() as conn:
             _owned_asset_id(conn, owner, asset_id)
             asset_row = conn.execute(
                 select(assets.c.id, assets.c.type).where(assets.c.id == asset_id)
@@ -508,12 +511,11 @@ async def patch_asset(request: Request, asset_id: int, body: AssetPatch):
 @router.delete("/assets/{asset_id}")
 async def delete_asset(request: Request, asset_id: int, client_id: str | None = None):
     def _sync() -> dict:
-        import api
         from sqlalchemy import delete
         from db.models import assets, holdings, transactions, valuations
 
-        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
-        with api._get_db_engine().begin() as conn:
+        owner = resolve_owner(_bearer_token_from_request(request), client_id)
+        with _get_db_engine().begin() as conn:
             _owned_asset_id(conn, owner, asset_id)
             conn.execute(delete(valuations).where(valuations.c.asset_id == asset_id))
             conn.execute(delete(holdings).where(holdings.c.asset_id == asset_id))
@@ -530,11 +532,10 @@ async def upsert_valuation(request: Request, asset_id: int, body: ValuationIn):
         raise HTTPException(status_code=422, detail="as_of cannot be in the future")
 
     def _sync() -> dict:
-        import api
         from sqlalchemy import text as _text
 
-        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
-        with api._get_db_engine().begin() as conn:
+        owner = resolve_owner(_bearer_token_from_request(request), body.client_id)
+        with _get_db_engine().begin() as conn:
             _owned_asset_id(conn, owner, asset_id)
             conn.execute(_text("""
                 INSERT INTO valuations (asset_id, as_of, value)
@@ -550,11 +551,10 @@ async def upsert_valuation(request: Request, asset_id: int, body: ValuationIn):
 @router.get("/networth")
 async def get_networth(request: Request, profile_id: int, client_id: str | None = None):
     def _sync() -> dict:
-        import api
         from sqlalchemy import text as _text
 
-        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
-        with api._get_db_engine().connect() as conn:
+        owner = resolve_owner(_bearer_token_from_request(request), client_id)
+        with _get_db_engine().connect() as conn:
             _owned_profile_id(conn, owner, profile_id)
             # Correlated scalar subquery, not a LATERAL join — see the same
             # note in list_assets() above. The EXISTS filters out an asset
@@ -579,10 +579,9 @@ async def get_networth(request: Request, profile_id: int, client_id: str | None 
 @router.post("/refresh-valuations")
 async def refresh_valuations_endpoint(request: Request):
     def _sync() -> dict:
-        import api
         from portfolio.portfolio_valuation import refresh_valuations
 
-        return refresh_valuations(api._get_db_engine())
+        return refresh_valuations(_get_db_engine())
 
     return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
 
@@ -590,11 +589,10 @@ async def refresh_valuations_endpoint(request: Request):
 @router.get("/xirr")
 async def get_xirr(request: Request, profile_id: int, client_id: str | None = None):
     def _sync() -> dict:
-        import api
         from portfolio.portfolio_valuation import xirr_report
 
-        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
-        engine = api._get_db_engine()
+        owner = resolve_owner(_bearer_token_from_request(request), client_id)
+        engine = _get_db_engine()
         with engine.connect() as conn:
             _owned_profile_id(conn, owner, profile_id)
         return xirr_report(engine, profile_id)
@@ -610,7 +608,6 @@ async def import_cas_endpoint(
     account_id: int = Form(...),
     client_id: str | None = Form(None),
 ):
-    import api
 
     # rate_limited_upload() couples the rate-limit check to the file read
     # so they can't be separated by a future edit — see that function's own
@@ -622,8 +619,8 @@ async def import_cas_endpoint(
         from portfolio.cas_import import archive_parsed, import_cas, parse_cas
         from portfolio.portfolio_valuation import refresh_valuations
 
-        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
-        engine = api._get_db_engine()
+        owner = resolve_owner(_bearer_token_from_request(request), client_id)
+        engine = _get_db_engine()
         with engine.connect() as conn:
             _owned_account_id(conn, owner, account_id)
         parsed = parse_cas(pdf_bytes, password)
@@ -672,7 +669,6 @@ async def import_csv_endpoint(
     broker: str = Form(...),
     client_id: str | None = Form(None),
 ):
-    import api
 
     file_bytes = await rate_limited_upload(request, "portfolio_agg_write", 60, file)
     filename = file.filename or ""
@@ -690,8 +686,8 @@ async def import_csv_endpoint(
         from portfolio.csv_import import import_rows, parse_broker_file
         from portfolio.portfolio_valuation import refresh_valuations
 
-        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
-        engine = api._get_db_engine()
+        owner = resolve_owner(_bearer_token_from_request(request), client_id)
+        engine = _get_db_engine()
         with engine.connect() as conn:
             _owned_account_id(conn, owner, account_id)
         parsed = parse_broker_file(file_bytes, filename)
@@ -745,15 +741,14 @@ async def broker_login_url(request: Request, broker: str, body: BrokerLoginUrlIn
         raise HTTPException(status_code=422, detail="provide both api_key and api_secret, or neither to reuse saved credentials")
 
     def _sync() -> dict:
-        import api
         from core.crypto import EncryptionNotConfigured, encrypt
         from db.models import accounts, broker_connections
         from sqlalchemy import insert, select, update
 
         mod = _broker_sync_module(broker)
-        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
+        owner = resolve_owner(_bearer_token_from_request(request), body.client_id)
 
-        with api._get_db_engine().begin() as conn:
+        with _get_db_engine().begin() as conn:
             _owned_account_id(conn, owner, body.account_id)
             account = conn.execute(
                 select(accounts.c.id, accounts.c.profile_id, accounts.c.type)
@@ -824,15 +819,14 @@ async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
     def _sync() -> dict:
         import datetime as _dt
 
-        import api
         from core.crypto import EncryptionNotConfigured, decrypt, encrypt
         from db.models import broker_connections
         from sqlalchemy import select, update
 
         mod = _broker_sync_module(broker)
-        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
+        owner = resolve_owner(_bearer_token_from_request(request), body.client_id)
 
-        with api._get_db_engine().begin() as conn:
+        with _get_db_engine().begin() as conn:
             _owned_account_id(conn, owner, body.account_id)
             conn_row = conn.execute(
                 select(broker_connections.c.id, broker_connections.c.api_key, broker_connections.c.api_secret_enc)
@@ -900,11 +894,10 @@ async def hdfc_login_start(request: Request, body: HdfcLoginStartIn):
         raise HTTPException(status_code=422, detail="provide both api_key and api_secret, or neither to reuse saved credentials")
 
     def _sync() -> dict:
-        import api
         from core import rate_limiter
 
-        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
-        with api._get_db_engine().connect() as conn:
+        owner = resolve_owner(_bearer_token_from_request(request), body.client_id)
+        with _get_db_engine().connect() as conn:
             _owned_account_id(conn, owner, body.account_id)
 
         # Held from here through hdfc_verify_otp()'s own release (success or
@@ -932,7 +925,6 @@ async def hdfc_login_start(request: Request, body: HdfcLoginStartIn):
             raise
 
     def _do_login_start() -> dict:
-        import api
         from core.crypto import EncryptionNotConfigured, encrypt
         from db.models import accounts, broker_connections
         from portfolio import hdfc_sync
@@ -950,7 +942,7 @@ async def hdfc_login_start(request: Request, body: HdfcLoginStartIn):
         # above serializes concurrent attempts for this account — the old
         # single-transaction version's row lock was incidentally doing part
         # of that job before this restructure existed.
-        with api._get_db_engine().begin() as conn:
+        with _get_db_engine().begin() as conn:
             account = conn.execute(
                 select(accounts.c.id, accounts.c.profile_id, accounts.c.type)
                 .where(accounts.c.id == body.account_id)
@@ -1007,7 +999,7 @@ async def hdfc_login_start(request: Request, body: HdfcLoginStartIn):
         if "error" in creds:
             raise HTTPException(status_code=422, detail=creds["error"])
 
-        with api._get_db_engine().begin() as conn:
+        with _get_db_engine().begin() as conn:
             conn.execute(
                 update(broker_connections)
                 .where(
@@ -1036,15 +1028,14 @@ async def hdfc_verify_otp(request: Request, body: HdfcVerifyOtpIn):
     def _sync() -> dict:
         import datetime as _dt
 
-        import api
         from core import rate_limiter
         from core.crypto import EncryptionNotConfigured, decrypt, encrypt
         from db.models import broker_connections
         from portfolio import hdfc_sync
         from sqlalchemy import select, update
 
-        engine = api._get_db_engine()
-        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
+        engine = _get_db_engine()
+        owner = resolve_owner(_bearer_token_from_request(request), body.client_id)
 
         with engine.connect() as conn:
             _owned_account_id(conn, owner, body.account_id)
@@ -1188,7 +1179,6 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
     rate_key = f"broker_sync_rl:{account_id}:{broker}"
 
     def _prepare() -> dict:
-        import api
         from core import rate_limiter
         from core.crypto import EncryptionNotConfigured, decrypt
         from db.models import broker_connections
@@ -1215,8 +1205,8 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
         # before ever hitting a 404. Every other broker endpoint in this
         # module already checks ownership before touching any shared
         # guard state; this one now matches.
-        engine = api._get_db_engine()
-        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
+        engine = _get_db_engine()
+        owner = resolve_owner(_bearer_token_from_request(request), body.client_id)
         with engine.connect() as conn:
             _owned_account_id(conn, owner, account_id)
 
@@ -1267,7 +1257,6 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
     prepared = await run_owned_db_call(request, "portfolio_agg_write", 60, _prepare, "portfolio_agg_write")
 
     def _run_and_release() -> None:
-        import api
         from core import rate_limiter
         from db.models import broker_connections
         from portfolio.portfolio_valuation import refresh_valuations
@@ -1284,7 +1273,7 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
         try:
             mod = _broker_sync_module(broker)
             result = mod.sync_account(
-                api._get_db_engine(), account_id, prepared["access_token"], api_key=prepared["api_key"],
+                _get_db_engine(), account_id, prepared["access_token"], api_key=prepared["api_key"],
                 owner=prepared["owner"],
             )
             if "error" in result:
@@ -1296,17 +1285,17 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
             # case, not just on total failure, so gating this on "no error"
             # would skip revaluing data that did land.
             if result.get("holdings_synced") or result.get("trades_synced"):
-                refresh_valuations(api._get_db_engine())
+                refresh_valuations(_get_db_engine())
         except Exception as exc:  # pylint: disable=broad-exception-caught
             # No HTTP request is left to surface this to — record it on the
             # connection row instead, same "never let a background failure
             # be silent" instinct as pipelines/watchlist_alerts.py.
-            api.log_event(api.LOGGER, "broker_sync_background_failed", level="error",
-                           account_id=account_id, broker=broker, error=str(exc))
+            log_event(LOGGER, "broker_sync_background_failed", level="error",
+                      account_id=account_id, broker=broker, error=str(exc))
             error = str(exc)
 
         try:
-            with api._get_db_engine().begin() as conn:
+            with _get_db_engine().begin() as conn:
                 if error is not None:
                     conn.execute(
                         update(broker_connections)
@@ -1338,8 +1327,8 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
             # sync_status="syncing" with the lock released is recoverable
             # (the next sync attempt just overwrites it); a stuck lock
             # would not be, short of its TTL expiring.
-            api.log_event(api.LOGGER, "broker_sync_status_write_failed", level="error",
-                           account_id=account_id, broker=broker, error=str(exc))
+            log_event(LOGGER, "broker_sync_status_write_failed", level="error",
+                      account_id=account_id, broker=broker, error=str(exc))
         finally:
             rate_limiter.release_lock(lock_name)
 
@@ -1350,12 +1339,11 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
 @router.get("/broker/connections")
 async def list_broker_connections(request: Request, profile_id: int, client_id: str | None = None):
     def _sync() -> dict:
-        import api
         from db.models import broker_connections
         from sqlalchemy import select
 
-        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
-        with api._get_db_engine().connect() as conn:
+        owner = resolve_owner(_bearer_token_from_request(request), client_id)
+        with _get_db_engine().connect() as conn:
             _owned_profile_id(conn, owner, profile_id)
             rows = conn.execute(
                 select(
