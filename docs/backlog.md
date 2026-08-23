@@ -42,11 +42,32 @@ introduced, or it's advertised/marketed. The non-registration disclaimer stays l
 recommendation surface as continued good practice, not as the thing that makes the determination
 true. *(`PRD.md` §17.4, §3)*
 
+~~**No legal review of the scraping surface**~~ — accepted risk for current scope, not left open:
+unlike the SEBI item above, this one is *not* an audience-size argument — the cron pipelines hit
+`screener.in`/`nseindia.com`/`bseindia.com`/`trendlyne.com`/`rbi.org.in`/AMFI at the same request
+volume regardless of viewer count, so "just friends and family" doesn't itself reduce scraping
+load. The operator has instead accepted the risk on narrower grounds: the data is used for
+personal, non-commercial research, never resold or offered as a paid feed, nothing in the code
+evades rate limits or misrepresents the client, and the posture is to comply immediately (stop
+scraping a source) if that source ever objects, rather than to contest it. This is a risk
+acceptance, not a legal conclusion — nobody has read these sites' actual ToS against Indian law.
+It reopens (needs a licensed professional before continuing, not after) on materially higher
+volume, resale/redistribution of scraped data, a distribution-scope change per the SEBI item's own
+contingency, or if any source objects, rate-limits, or sends a cease-and-desist. *(`PRD.md` §17.2)*
+
+~~**Bus factor of one**~~ — accepted risk for current scope, not left open: this can't actually be
+*resolved* by any fact pattern — it stays true until a second engineer or a written handoff plan
+exists — but the operator has judged that, for a project run privately with no SLA, no paying
+customers, and nobody's real financial decisions depending on its uptime, building either isn't
+justified by what's at stake today. The accepted downside if the operator becomes unavailable is
+that the tool stops running, which costs the friends-and-family circle something but breaches no
+commitment, since none was made. It reopens (needs a real second engineer or a written handoff
+plan before this is treated as closed) if usage starts being depended on like real infrastructure,
+or if distribution scope changes per the SEBI item's own contingency. *(`PRD.md` §17.1)*
+
 | Item | Detail |
 |---|---|
-| **No legal review of the scraping surface** — screener.in, nseindia.com, bseindia.com, trendlyne.com, rbi.org.in, on a recurring schedule, at beyond-hobby scale. No ToS review by counsel. | `PRD.md` §17.2 |
 | **No real payments** — `users.tier` is set by an operator by hand. Pricing, processor, India tax/compliance and refund policy are all undecided; that decision precedes any engineering. | `PRD.md` §17.3 |
-| **Bus factor of one.** | `PRD.md` §17.1 |
 
 ---
 

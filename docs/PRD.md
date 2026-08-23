@@ -355,8 +355,8 @@ order.
 | Broad market crash / regime shift | Low-Medium | Medium — signal weights aren't back-tested, so calibration is unproven in a real drawdown | Disclosed gap (Feature Catalog, "Known Gaps"); a backtest harness is the mitigation, not yet built |
 | Scraper/API rate-limit or cost spike (LLM or data source) | Medium | Medium — degraded freshness or a blown cost budget | Per-call LLM cost instrumentation with a daily running total; Redis-backed sliding-window rate limiting; a global LLM concurrency ceiling |
 | Distribution scope (private friends/family, non-public, no fee) expands past what §17.4's SEBI determination is contingent on | Low today (operator-controlled) | High if it happens without re-checking §17.4 first | See §17.4 — reopens the registration question; needs qualified counsel before, not after, any such expansion |
-| No legal/compliance review of the scraping surface | Unknown (unassessed) | High if a source objects | See §17.2 — requires a licensed professional |
-| Bus factor of one | High (certain, today) | High for anyone relying on this as durable infrastructure | See §17.1 — requires a real second engineer or a written handoff plan |
+| A scraped source objects (rate-limits, blocks, or sends a cease-and-desist) before legal review ever happens | Low-Medium | High if it happens — see §17.2's stop-immediately posture | See §17.2 — accepted risk for current non-commercial, low-volume scope; reopens on objection or scale-up |
+| Operator becomes unavailable (bus factor of one) | High (certain, today) | High for anyone relying on this as durable infrastructure, low for informal friends/family use with no SLA | See §17.1 — accepted risk for current scope; reopens if usage starts being depended on like infrastructure |
 
 ---
 
@@ -365,21 +365,57 @@ order.
 These are **not engineering problems** — no further code work closes them. Restated here because a
 PRD that omitted them would misrepresent the product's readiness for scale.
 
-### 17.1 Bus factor of one
+### 17.1 Bus factor of one — accepted risk for current scope
 The entire commit history traces to a single human author (with AI pair-programming assistance).
 The density of the `CLAUDE.md` files is real engineering discipline, but it is not evidence a team
-exists. **Needs:** a second engineer, or at minimum a written handoff plan, before this is treated
-as infrastructure a business depends on.
+exists, and no amount of documentation makes it one.
 
-### 17.2 No legal/compliance review of the scraping surface
+**Decision (operator, current scope): accepted as-is, not mitigated today.** Unlike §17.4, this
+isn't something a fact pattern can resolve — it will stay true for as long as one person writes
+all the code, and a second engineer or a written handoff plan is the only thing that actually
+changes it. What's decided here is narrower: given the product runs privately for the operator's
+own circle (§3), with no SLA, no paying customers, and no external party depending on its uptime,
+the operator has judged that building a handoff plan or bringing on a second engineer isn't
+justified by what's at stake today. The accepted downside if the operator becomes unavailable is
+that the tool simply stops running — a real cost to the friends-and-family users, but not one that
+obligates anyone or breaches a commitment, since none was made.
+
+**This is contingent, not permanent.** It reopens — needs a real second engineer or a written
+handoff plan before the gap is treated as closed — if this project starts being depended on the
+way infrastructure is depended on: if anyone's real financial decisions come to rely on its
+uptime, or if distribution scope changes per §17.4's own contingency (at that point the audience
+also has a claim on continuity, not just on the SEBI question).
+
+### 17.2 No legal/compliance review of the scraping surface — accepted risk for current scope
 AlphaPulse scrapes `screener.in`, `nseindia.com`/`nsearchives.nseindia.com`,
 `bseindia.com`/`api.bseindia.com`, `trendlyne.com`, `rbi.org.in`, and AMFI, plus GNews-mediated
-coverage of several news publishers, on a recurring schedule at a scale beyond casual use — with
-no confirmed Terms-of-Service review by qualified counsel. (This is also *why* Watchlist/Positions
-ownership is never auto-migrated on sign-in, and why the claim flow is tightly rate-limited and
-audit-logged — the default posture throughout is "ask, disclose, bound the blast radius.")
-**Needs:** a licensed professional reviewing each source's actual ToS and applicable Indian
-data-protection/scraping law before scaling traffic materially.
+coverage of several news publishers, on a recurring schedule at a scale beyond casual manual
+browsing — with no confirmed Terms-of-Service review by qualified counsel. (This is also *why*
+Watchlist/Positions ownership is never auto-migrated on sign-in, and why the claim flow is tightly
+rate-limited and audit-logged — the default posture throughout is "ask, disclose, bound the blast
+radius.")
+
+**Decision (operator, current scope): accepted as-is, not blocking on legal review today.**
+Note what this decision does *not* rest on: unlike §17.4, this isn't an audience-size argument —
+the scheduled pipelines (`pipelines/sme_ema_pipeline.py`, `screener_pipeline.py`,
+`eod_prices_pipeline.py`, `market_picks_pipeline.py`) hit these sources on the same cron schedule
+at the same request volume regardless of how many people view the results, so "it's just for
+friends and family" doesn't reduce the actual scraping load on any of these sites the way it
+reduced the SEBI "advising the public" question. The basis here is narrower and different: the
+data pulled is used for personal, non-commercial research, not resold, republished, or offered as
+a paid feed to anyone outside the operator's own circle; nothing in the code is built to evade
+rate limits, defeat CAPTCHAs, or misrepresent the client as something other than an automated
+fetcher; and the operator's stated posture is to comply immediately (throttle, pause, or drop a
+source) if any site operator objects, rather than to contest it. That's a risk-acceptance by the
+operator, not a legal conclusion that this scraping is permitted — nobody has read these sites'
+actual ToS against Indian law and confirmed it.
+
+**This is contingent, not permanent.** It reopens — needs a licensed professional's actual review
+before continuing, not after — if request volume increases materially beyond the current cron
+cadence, if any scraped data is resold, redistributed, or offered as a paid feed, if distribution
+scope changes per §17.4's own contingency, or if any source sends a cease-and-desist, rate-limits
+the operator's requests specifically, or otherwise objects — at which point the response is to
+stop scraping that source, not to keep going while seeking counsel.
 
 ### 17.3 No real payment processing
 `users.tier` and the informational `/pricing` page exist specifically to *stop short* of a
