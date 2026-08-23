@@ -2619,6 +2619,7 @@ async def verify_magic_link(request: Request, token: str = Query(...)):
 
 @app.get("/api/auth/me")
 async def get_current_user(request: Request):
+    _rate_limit(request, "auth_me", max_calls=60, window_seconds=60)
     token = _bearer_token_from_request(request)
     if not token or not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=401, detail="Not signed in.")
@@ -2634,6 +2635,7 @@ async def get_current_user(request: Request):
 
 @app.post("/api/auth/logout")
 async def logout(request: Request):
+    _rate_limit(request, "auth_logout", max_calls=60, window_seconds=60)
     token = _bearer_token_from_request(request)
     if token and os.environ.get("DATABASE_URL"):
         import auth as _auth
@@ -2760,7 +2762,14 @@ async def _require_api_key_user(request: Request) -> int:
     """Returns the owning user_id for a valid X-API-Key header, else raises
     401. Also applies a per-user, tier-scaled rate limit distinct from the
     IP-keyed limits on internal endpoints, since a legitimate integration may
-    call from a shared/rotating IP."""
+    call from a shared/rotating IP.
+
+    A cheap per-IP limit runs first, before the key is ever looked up — the
+    per-user limit below only exists once a key has already resolved to a
+    real user_id, so a stream of invalid/garbage X-API-Key values would
+    otherwise never be rate-limited at all, just DB-load-amplified (one
+    lookup per garbage attempt, unbounded)."""
+    _rate_limit(request, "api_v1_auth", max_calls=30, window_seconds=60)
     raw_key = _api_key_from_request(request)
     if not raw_key or not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header.")

@@ -43,29 +43,65 @@ Nothing on that rejected list should be proposed or scaffolded without the human
 
 ## Security & correctness
 
-1. **`GET /api/v1/consolidated/{symbol}` applies no rate limit before authenticating.**
-   `_require_api_key_user()` does a DB lookup on every request, and only rate-limits *after* a key
-   resolves — so invalid `X-API-Key` attempts are unbounded, each costing a DB round trip, with no
-   IP throttle and no rate-limit middleware. Keys are 256-bit (`secrets.token_urlsafe(32)`), so
-   this is **not** a credential brute-force risk; it is unauthenticated DB-load amplification.
-   One `_rate_limit()` call before the lookup fixes it. *(`api-reference.md` §Response-contract
-   inconsistencies #3)*
-2. **`cas_import`/`csv_import` still have no unique constraint.** Both importers' idempotency is a
-   read-then-write with no DB-level guard, so two concurrent uploads of overlapping tradebooks can
-   both insert. The broker-API-sync writer closed this exact gap for its own rows
-   (`transactions.external_ref` + `uq_transactions_asset_external_ref`); the same fix would close
-   it for these two paths too, if it's ever worth doing. *(`database.md` §Known schema gaps #6)*
-3. **Portfolio Aggregator has no auth and no ownership scoping.** All 22 endpoints (including the
-   4 broker-API-sync ones) accept any profile id/account id from any caller, and the tables hold
-   real personal financial data — including, since broker sync landed, encrypted broker app
-   secrets and access tokens. Deliberate for a localhost/Tailscale tool — but it must not be
-   exposed on a public interface as-is. *(`api-reference.md`, `database.md`, `feature-catalog.md`)*
+1. ~~**`GET /api/v1/consolidated/{symbol}` applies no rate limit before authenticating.**~~ — done.
+   `_require_api_key_user()` now calls `_rate_limit()` (30/min per IP) before the DB lookup, so a
+   stream of invalid `X-API-Key` attempts is bounded instead of costing an unbounded number of DB
+   round trips.
+2. **`cas_import`/`csv_import` still have no unique constraint, and no advisory lock either.**
+   Both importers' idempotency is a read-then-write with no DB-level guard, so two concurrent
+   uploads for the same account can both insert (the CAS same-scheme-across-folios *duplicate*
+   bug found in this pass — see Data model below — was a same-request instance of this same class
+   of gap; two concurrent *requests* can still race the same way this item already described). The
+   broker-API-sync writer closed this exact gap for its own rows (`transactions.external_ref` +
+   `uq_transactions_asset_external_ref`); the same fix, or the `pg_advisory_xact_lock` pattern
+   `routes/_shared.py::claim_anonymous_rows_sync()` already uses, would close it for these two
+   paths too, if it's ever worth doing. *(`database.md` §Known schema gaps #6)*
+3. **Portfolio Aggregator has no auth and no ownership scoping — and for the broker-sync
+   sub-feature specifically, this is a write/credential-hijack risk, not just a read-exposure
+   one.** All 22 endpoints (including the 4 broker-API-sync ones) accept any profile id/account id
+   from any caller, and the tables hold real personal financial data — including, since broker
+   sync landed, encrypted broker app secrets and access tokens. Concretely: `POST
+   /broker/{broker}/login-url` lets any caller register their own `api_key`/`api_secret` against
+   any account id (a small guessable integer), wiping any existing `access_token_enc`; `POST
+   /broker/{broker}/connect` then exchanges an attacker-supplied `request_token` and overwrites
+   the stored token — there is no CSRF `state` parameter binding the redirect back to the account
+   that initiated it. An attacker who can reach this port can silently take over another account's
+   broker connection and have future syncs write attacker-influenced holdings/trades into that
+   account. Deliberate for a localhost/Tailscale tool — but it must not be exposed on a public
+   interface as-is; if it ever is, this sub-feature needs the CSRF `state` fix at minimum, ahead of
+   the general no-auth gap. *(`api-reference.md`, `database.md`, `feature-catalog.md`)*
 4. **`client_id` is a grouping key, not a security boundary.** Anyone holding one can read/write
    that browser's anonymous watchlist and positions. Claim endpoints are rate-limited and
    audit-logged, which bounds abuse without eliminating a targeted guess. *(`feature-catalog.md`)*
-5. **`GET /api/auth/me` and `POST /api/auth/logout` are entirely unrate-limited**, despite
-   `/api/auth/me` doing a DB session lookup per anonymous call.
-   *(`api-reference.md` #4)*
+5. ~~**`GET /api/auth/me` and `POST /api/auth/logout` are entirely unrate-limited**~~ — done. Both
+   now call `_rate_limit()` (60/min per IP), matching every neighboring auth endpoint.
+6. **CAS/CSV import have no upload size cap** — was true, now fixed: both endpoints (plus the CSV
+   preview endpoint) go through `routes/_shared.py::read_upload_capped()`, which rejects (413)
+   anything over 20 MB instead of buffering an unbounded request body into memory first. A residual,
+   unaddressed risk: a small, tightly-compressed malicious `.xlsx` within that cap could still
+   decompress into a very large in-memory DataFrame via `pandas.read_excel` (a "zip bomb" on the
+   upload path) — the size cap bounds the *transport*, not the *decompressed* size. Worth a
+   follow-up (e.g. a row-count ceiling in `csv_import.parse_broker_file`) if this is ever exposed
+   beyond a trusted operator.
+7. **No security headers on the Next.js frontend** — was true, now fixed: `next.config.ts` sets
+   `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy:
+   strict-origin-when-cross-origin` on every response. Deliberately not a full Content-Security-
+   Policy — this app has no `dangerouslySetInnerHTML` and no inline scripts, but a CSP strict
+   enough to matter (nonces/hashes for Next's own injected scripts) needs verifying against a real
+   production build rather than added blind. Tracked here as a follow-up.
+8. **Session cookie's `Secure` flag depends on `process.env.NODE_ENV === 'production'` exactly**
+   (`frontend/lib/auth-cookie.ts`). A Docker/Compose deployment that runs the standalone server
+   without explicitly exporting `NODE_ENV=production` (common if a container just runs `node
+   server.js` from the `next build` output, or a reverse-proxy setup that strips/overrides env)
+   would silently ship the 30-day session cookie without `Secure`. Not fixed in this pass — the
+   safer fix (derive the flag from whether the request itself is HTTPS, or an explicit
+   `COOKIE_SECURE` env var) touches the request-handling path and deserves its own verification
+   pass rather than a blind one-line change.
+9. **`analysis_error.reason` leaks a truncated raw exception string over SSE** — already tracked
+   below for the single-stock analysis flow; this pass found the identical pattern a second time,
+   independently, in `pipelines/market_picks_pipeline.py`'s own `analysis_error` SSE event. Not
+   fixed in this pass (same fix in both places: map to a generic client-facing message, keep
+   logging the real exception server-side).
 
 ---
 
@@ -84,9 +120,19 @@ Ordered by consequence. None are live bugs today.
    current market value, and every *historical* series in the app comes from yfinance with
    `auto_adjust=True` — so adjustment correctness is already handled for every consumer that
    exists. The corporate-actions pipeline is pre-built infrastructure for a migration that hasn't
-   happened. **Real risk is silent rot**: an NSE format change would break the parser and nothing
-   would surface it. Cheapest mitigation is wiring the CA parse into the existing
-   `source_health`/error-counter machinery. *(#5)*
+   happened. **Real risk is silent rot**, and this pass found the precise mechanism on both sides
+   of it: `eod_sources.parse_bhavcopy()` only guards the 4 columns required to avoid `malformed`
+   (`SYMBOL`/`DATE1`/`CLOSE_PRICE`/`PREV_CLOSE`) — a rename of any *other* column (e.g.
+   `DELIV_PER`) parses "successfully" with zero logged signal, silently NULLing that field
+   platform-wide indefinitely. `corporate_actions.parse_corporate_actions()` is weaker still: a
+   parse failure is a bare `except: continue` logged only at `logger.debug` (invisible at this
+   app's default INFO level, never routed through `observability.log_event`), and
+   `corporate_actions_pipeline.py` has no health-gate equivalent to `eod_prices_pipeline`'s own
+   "empty bhavcopy → error status → non-zero exit" pattern — a total rename of `symbol`/`exDate`
+   silently zeroes the whole ingest with `ca_ingested actions=0` logged at plain INFO, identical to
+   a genuinely action-free week. Cheapest mitigation: apply `eod_prices_pipeline`'s own
+   fail-loudly pattern to `corporate_actions_pipeline`, and widen `parse_bhavcopy`'s required-field
+   check to the fields report readers actually use (at minimum `DELIV_PER`). *(#5)*
 4. **`assets.symbol` unindexed** (scanned by `csv_import` and `eod_prices_pipeline`);
    **`securities.isin` neither unique nor indexed** while `securities_master` dedupes by ISIN in
    Python. *(#3, #8)*
@@ -96,6 +142,45 @@ Ordered by consequence. None are live bugs today.
 6. **`sessions` pruning is coupled to sign-in traffic** — both expiry deletes live inside
    `create_magic_link()`, so a deployment where everyone stays signed in never prunes. Storage
    growth, not an auth hole. *(#7)*
+7. ~~**`cas_import.py`'s stale `by_amfi`/`by_isin` lookup dicts create duplicate MF assets.**~~ —
+   fixed. `existing` was snapshotted once before the folio loop started and never updated when a
+   new asset was created mid-loop — a scheme held via two SIP folios (or split across a folio
+   merger) that matched neither folio's *existing* DB row used to create two separate `mf` assets
+   for the same scheme instead of matching the one the import itself just created, splitting that
+   scheme's holdings/XIRR across two rows. `import_cas()` now backfills both lookup dicts
+   immediately on insert (the same pattern `csv_import.py` already used correctly). Fixing this
+   also surfaced a compounding bug: `_write_transactions()`'s per-folio delete-then-insert would
+   have wiped out an earlier folio's just-inserted rows for the same now-correctly-matched asset —
+   fixed alongside it (delete only once per asset per `import_cas()` call, not once per folio).
+8. **`DELETE /api/portfolio/accounts/{id}` doesn't pre-check `broker_connections` before
+   deleting**, unlike its existing `assets` pre-check (422 on a non-empty account). An account with
+   a registered/connected broker but zero assets yet hits an unhandled `IntegrityError` on the
+   `DELETE` (no `ondelete` on that FK either — see #1), surfacing as an opaque 503 instead of a
+   clear 422. Same fix shape as the existing `assets` check, or `ondelete="CASCADE"` on that FK
+   (defensible — a connection is disposable metadata, unlike an asset).
+9. **No DB-level `CHECK` constraint on any monetary/quantity column, anywhere** — not isolated to
+   `positions.entry_price`/`target_price`/`stop_loss` (already known, see API contract
+   consistency's #9 below). `transactions.amount`/`.units`, `valuations.value`, `holdings.units`/
+   `.avg_cost` all have zero backstop against a negative value; only `AssetIn.value`/`ValuationIn.
+   value` get an app-level `Field(ge=0)` in the Pydantic models. Any future write path (a new
+   import format, a manual SQL fix) has nothing stopping a negative price/quantity from silently
+   corrupting XIRR or net-worth math.
+10. ~~**`app_state`'s `cas_archive` namespace grows unbounded**~~ — fixed (90-day retention via
+    `state_store.delete_older_than()` after every write, matching the pattern CLAUDE.md's own rule
+    already requires for a namespace like this). `market_picks_pipeline`'s `market_picks_history`
+    namespace was also flagged by this pass as technically matching that same rule's letter (no
+    `delete_older_than` call) but is a deliberate exception, not a gap: unlike `cas_archive`
+    (a debug/replay convenience), this namespace is real, deliberately-permanent product history —
+    `GET /api/market-picks/history`'s `available_dates` and the track-record win-rate/alpha
+    computation both depend on browsing arbitrarily old snapshots, the same "kept forever on
+    purpose" shape as `verdict_history`. Growth is also slow (one row per weekly cron run, not
+    per-request), so left as-is rather than pruned.
+11. **`GET /api/watchlist/calendar` is an N+1 against `verdict_history`** — fans out via
+    `asyncio.gather` over up to 200 symbols, and each one independently queries
+    `verdict_history.detect_recent_changes()` (its own `load_history(sym, limit=2)` round trip).
+    Thread-pooled, so not serialized, but still up to 200 individual `SELECT`s per page load
+    instead of one batched `WHERE symbol = ANY(:symbols)` query. Low severity at this app's stated
+    scale — worth revisiting if the per-identity watchlist cap ever grows materially past 200.
 
 ---
 
@@ -137,41 +222,265 @@ that no client can rely on a uniform rule.
 - **Market-picks source curation.** Per-source telemetry now ships (`telemetry/source_quality.py`); actually
   dropping or down-weighting sources in `_SOURCE_CREDIBILITY` is deliberately deferred until real
   telemetry accrues. Decide by reading the report, not by guessing.
+- ~~**`change_pct` was invented as `0.0` (not `None`) on the primary quote path when yfinance had
+  no `previousClose`**~~ — fixed. `tools/nse_tools.py::_build_quote_payload()` (the six-task
+  pipeline's own quote path) now mirrors `api._fetch_live_price_sync()`'s existing "no prev close
+  → `None`, never a fabricated flat day" convention. This mattered beyond display: `signals/
+  volume.py::volume_signal()` reads `change_pct` to tell a volume spike's direction apart
+  (accumulation vs. distribution) — the invented `0.0` was read as a genuine "not a down day,"
+  silently resolving a real data gap toward the bullish `ACCUMULATION`/`STRONG_ACCUMULATION`
+  verdict whenever the underlying data was actually missing. `volume_signal()` itself needed no
+  change — it already treated a `None` `change_pct` correctly, per its own docstring; only the
+  producer was fabricating a value instead of passing the gap through. `frontend/types/index.
+  ts`'s `StockInfo.change_pct` is now `number | null`; its one real consumer (`ExchangeTable` in
+  `dashboard-primitives.tsx`) already coalesced a missing value to 0 for display, so this needed
+  no further frontend change. The identical fallback in `_screener_fallback_quote()` (used only
+  when yfinance has no quote on either exchange) is left as-is — there's no real previous-close
+  value to fall back to there at all, so fixing it needs a UI decision about what "flat because
+  unknown" should look like, not just a type change; still disclosed in that function's own
+  docstring.
+- ~~**Watchlist alert emails were not deduplicated across reruns**~~ — fixed.
+  `pipelines/watchlist_alerts.py` had no record of "this (user, symbol, verdict_date, kind) alert
+  was already emailed" — a second run on the same day (a `workflow_dispatch` retry, a manual
+  `--force` rerun while `cache.is_fresh()` was still true) recomputed the identical
+  "yesterday → today" diff and resent the exact same digest. `run()` now checks/records sent keys
+  under a new `watchlist_alerts_sent` `app_state` namespace (keyed by date, guarded with
+  `state_store.mutate()` so two overlapping runs can't clobber each other's recorded keys, pruned
+  to 3 days' retention each run since only "today" is ever read) before including an alert in a
+  user's digest. The corresponding cron workflow also gained a `concurrency` guard (see
+  Engineering debt) as a second, independent layer against the same failure mode.
+- **Corporate-actions/EOD-price scraper drift detection has real gaps** — see Data model's #3
+  above for the precise mechanism on both `eod_prices_pipeline` (partial/optional-column drift
+  uncaught) and `corporate_actions_pipeline` (near-total silent-failure blind spot).
+- **The analyst's numeric-claim guardrail only cross-checks 9 named metrics**
+  (`analyst/crew.py::_NUMERIC_FIELD_CHECKS` — P/E, ROE, ROCE, dividend yield, book value,
+  sales/profit growth, EBITDA margin, market cap). A fabricated number for anything else the LLM
+  might cite in prose (promoter/institutional holding %, debt-to-equity, a specific RSI/EMA value,
+  a filing date) has no grounding check at all — `_analysis_support_issues` only flags
+  *directional words* against a single shareholding snapshot, never a cited percentage value. Not
+  a regression — a real, narrow guardrail surface worth widening (e.g. promoter-holding % is
+  already available in `shareholding.shareholding_pattern` and would be cheap to add to the
+  existing pattern-check table).
 
 ---
 
 ## Frontend & accessibility
 
-Fixed on this branch: global focus indicator, `muted` contrast, solid-fill ink, the retired
-`#6c71f0` accent, disclaimer legibility. Still open — all in `design.md` §10/§12:
+Fixed (verified in this pass, not just claimed): global focus indicator, `muted` contrast at full
+opacity, solid-fill ink, the retired `#6c71f0` accent, disclaimer legibility, `sell`/`accent` text
+contrast on `card` (recomputed at ~5.11:1 / ~5.21:1 — both clear AA now, correcting the older
+4.33/4.43 figures below), touch targets for `InfoTooltip` and the `sm` watchlist star (a `p-3
+-m-3` hit-area trick brings both to ~38px — the code comment there claims 44px, which is itself a
+small, harmless doc-code drift worth a one-line fix sometime). `PageShell` now gives every page a
+skip-link plus `<header>`/`<main id="main">` landmarks, and `ConsolidatedCard` has a real focus
+trap (`inert` on the background + manual Tab-wrap) — neither was tracked as fixed before this
+pass. Still open — most in `design.md` §10/§12:
 
-- **No focus trap** in modals/dropdowns; **no skip-to-content link**; **no landmark elements**
-  (`<main>`/`<nav>`/`<header>` unused); **heading order unaudited**.
-- **Touch targets below 24px** — `InfoTooltip` trigger is 14×14, the `sm` watchlist star ~16.
-- **Five inputs use `focus:outline-none`** and out-specify the global focus rule. Each has its own
-  ring/border so none are blind, but it's a second inconsistent treatment that also fires on mouse
-  click.
-- **Contrast still under AA**: `sell` 4.33 and `accent` 4.43 as text on `card`; every
-  reduced-opacity `muted` (`/70` 3.59, `/60` 2.95, `/50` 2.41). Nothing a user must read should go
-  below full `muted`.
+- **The mobile nav dropdown (`site-nav.tsx`) has no real focus trap**, unlike `ConsolidatedCard` —
+  click-outside/Escape-to-close exist, but Tab can walk out of the open menu into the (visible,
+  non-inert) background. The nav bar itself is also still a plain `<div>`, not a `<nav>` landmark
+  (only the surrounding `<header>` is real) — **heading order unaudited**.
+- **Three inputs still use `focus:outline-none`** (down from five) and out-specify the global focus
+  rule — each has its own ring/border so none are blind, but it's a second inconsistent treatment
+  that also fires on mouse click.
+- **Contrast still under AA for reduced-opacity `muted`** — `/70` 3.59, `/60` 2.95, `/50` 2.41,
+  used at 30+ call sites, several at `text-[9px]`/`text-[10px]`/`text-xs`. Nothing a user must read
+  should go below full `muted`.
 - **`Skeleton` duplicated** byte-identically in four places; **no `warning` token**, so two
   components invented different substitutes; **page width unstandardised** across five `max-w-*`.
-- **Dense tables have no mobile card layout** — horizontal scroll only, on a mobile-heavy audience.
+- **Dense tables have no mobile card layout** — horizontal scroll only. The Screener table
+  specifically renders 12 columns per row, on the persona (§5's SME/momentum trader) most likely
+  to be checking it mid-day on a phone rather than at a desk (see Product & UX below).
+- ~~**`TickerSearch` misreported a backend outage as "symbol not found"**~~ — fixed.
+  `components/ticker-search.tsx`'s validate handler never checked `res.ok` before branching on the
+  parsed body — `GET /api/validate/{symbol}` returns `{found:false, valid:false}` with a real 503
+  status when the backend is down, and the ignored status meant that read identically to a
+  genuinely invalid ticker. Now checks `res.ok` first and routes a non-2xx response to the
+  existing, distinct `'error'` state instead.
+- **No `error.tsx`/`global-error.tsx` anywhere under `app/`.** Any render-time exception from a
+  wrong-*type* (not just missing) field — e.g. an unexpected SSE payload shape, since
+  `lib/useStockAnalysis.ts` parses `JSON.parse(e.data) as SSEMessage` with no runtime shape
+  validation — has no route-level fallback UI, just the default Next.js crash screen. Most
+  components are heavily `?.`/`?? []`-guarded against *missing* fields, so this is a narrow but
+  real gap, not a systemic one.
+- **No e2e coverage for two explicitly user-critical flows**: "I bought this" position *creation*
+  (`e2e/portfolio.spec.ts` only covers reading/aggregating already-tracked positions, never the
+  actual mark-as-bought action) and broker CSV/CAS statement import
+  (`e2e/portfolio-aggregator.spec.ts` covers only axe-violations and asset-value editing).
+- **`app/api/portfolio/[...path]/route.ts`'s catch-all proxy builds the upstream URL via
+  `path.join('/')` with no `..`-segment validation.** Low severity given this whole feature is a
+  disclosed personal/localhost-only tool with no auth passthrough anyway, but worth a segment
+  allowlist given it's a genuine catch-all forwarding to the backend.
+- ~~**An `UNKNOWN` signal's score rendered as `0.00`, visually identical to a genuinely-computed
+  neutral score**~~ — fixed. `results-dashboard.tsx`'s Quant Signals card now renders `—` when
+  `signal.value === 'UNKNOWN'` instead of `fmt(signal.score, 2)` (which was always `0` for an
+  `UNKNOWN` signal by the backend's own convention) — a UI-layer fix for a real, visible instance
+  of this product's own "Data > Opinion... missing is null, never a guessed value" principle being
+  violated at the last mile, independent of the backend-level `signals/*.py` gap already tracked
+  in `feature-catalog.md`'s Known Gaps.
 
 ---
 
 ## Engineering debt
 
-- **`api.py` is ~2,760 lines and holds 29 of the 61 routes.** Only watchlist, positions and the
-  Portfolio Aggregator have been extracted to `routes/`.
+- **`api.py` is ~2,790 lines and holds 29 of the 61 routes.** Only watchlist, positions and the
+  Portfolio Aggregator have been extracted to `routes/`. A deep architecture pass this round traced
+  the full module dependency graph and found the extraction itself clean — no circular imports, no
+  business logic leaking into `api.py` beyond what's already disclosed here.
 - **`pipelines/market_picks_pipeline.py` has never been decomposed** — the largest module in the repo, with
-  six phases sharing mutable state and threading/async coordination.
-- **No typed config module.** ~20 env vars read via scattered `os.getenv`; `docs/setup.md` is the
-  closest thing to a schema.
+  six phases sharing mutable state and threading/async coordination. Re-audited this round for a
+  thread-safety bug specifically (shared dict/list/counter written from worker threads without a
+  lock) — none found; every `ThreadPoolExecutor` result is collected single-threaded via
+  `as_completed`, and the three explicit `threading.Lock()` usages are all correctly scoped.
+- **No typed config module.** Closer to ~50 `os.getenv`/`os.environ` call sites across `backend/`
+  today (re-counted this round), not the "~20" this doc previously estimated — the gap has grown
+  as broker sync/portfolio-aggregator/API-keys landed, not shrunk. `docs/setup.md` is still the
+  closest thing to a schema. One concrete, low-risk gap in the existing startup-warning coverage:
+  `_log_startup_config_warnings()` checks for zero/multiple LLM keys and a missing
+  `TRUSTED_PROXY_SECRET`, but not a malformed-but-present `DATABASE_URL` or an invalid
+  `PORTFOLIO_ENCRYPTION_KEY` — both fail only at first use, reading identically to "the database is
+  down" / "encryption isn't configured" in logs rather than "the connection string/key itself is
+  wrong," costing debugging time. A cheap format-only check (no live connection) for both would fit
+  the same pattern as the two existing checks.
 - **Seven near-duplicate `_nse_session()` wrappers**, kept deliberately for test-patch
   compatibility — an eighth NSE integration means a ninth copy.
 - **No user-behaviour analytics**, so every KPI in `PRD.md` §12 except the track record is
   unmeasurable today.
+- **Frontend business logic (`frontend/lib/*.ts`) has zero unit tests** — `useStockAnalysis.ts`'s
+  SSE event parsing, the `watchlist.ts`/`positions.ts`/`auth.ts` shared-cache-plus-generation-
+  counter pattern, and `client_id` generation are all exercised only indirectly through Playwright
+  specs where, per `frontend/CLAUDE.md`'s own note, every backend response is mocked. A fast
+  Vitest/Jest suite for `lib/*.ts` in isolation (SSE parsing edge cases especially) would catch a
+  regression Playwright's mocked, happy-path-oriented specs are less likely to.
+- **`main.py`'s CLI has one narrow, harmless divergence from `api.py`'s SSE path**: on a pure
+  cache-hit, the CLI's early-return branch calls `save_verdict_snapshot(..., signal_context=None)`
+  — it never runs the signal engine at all on that path, while `api.py` always computes
+  `signal_context` before checking cache freshness. `verdict_history.save_snapshot()`'s own
+  `COALESCE` against the prior stored value means the *database* never ends up wrong from this, but
+  the CLI's own printed report on a full cache hit lacks a signal breakdown the equivalent web
+  request would show. Worth a one-line docstring note in `main.py` if not fixed outright.
+
+---
+
+## Deployment & operations
+
+Not previously tracked as its own section — surfaced by a dedicated ops/deployment review this
+round. Severity here is about operational risk (data loss, a job silently going dark, a widened
+attack surface), not user-facing correctness.
+
+1. **No documented Postgres backup strategy.** `docs/database.md` warns to keep
+   `PORTFOLIO_ENCRYPTION_KEY` separate from "a database backup," implying one exists, but no
+   `pg_dump` cron, retention policy, or restore procedure is documented anywhere. Every piece of
+   this app's durable state funnels into this one Postgres instance (`app_state` included) — losing
+   the `postgres_data` volume loses everything with no recovery path. Fits this repo's existing
+   "GitHub Actions cron, not a new orchestrator" pattern: a documented nightly `pg_dump | gzip` to
+   off-host storage plus a stated retention window is the natural shape, not new infrastructure.
+2. ~~**`docker-compose.yml`'s `POSTGRES_PASSWORD` defaulted to a fixed, publicly-documented
+   value (`stockresearch`) if unset in `.env`**~~ — fixed. Both interpolation sites now use
+   Compose's `${VAR:?message}` required-variable syntax — `docker compose up` refuses to start
+   without a real password, rather than silently accepting the weak default. `.env.example` and
+   `docs/deployment.md`'s quickstart now document the requirement and how to generate one.
+3. **The five GitHub Actions cron pipelines had no `timeout-minutes` or `concurrency` guard** —
+   fixed for all five (`sme-cron.yml`, `screener-cron.yml`, `eod-prices-cron.yml`,
+   `watchlist-alerts-cron.yml`, `market-picks-cron.yml`): each now sets a `timeout-minutes` sized to
+   its own workload and a `concurrency` group (`cancel-in-progress: false`, so an overlapping
+   trigger queues rather than racing the in-flight run) to stop a hung run — or a
+   `workflow_dispatch` fired while the schedule is still in flight — from launching a second
+   concurrent pipeline against the same tables. Most of these pipelines' upserts are idempotent, so
+   an overlap was "wasteful, not corrupting" — except `watchlist_alerts.py`, which sends real
+   emails; that job now also has its own application-level dedup guard (see Signal engine & data
+   quality above) as a second, independent layer.
+4. **Both `backend/Dockerfile` and `frontend/Dockerfile` run as root** — no `USER` directive in
+   either, so a container-escape or dependency RCE gets root inside the container for free. Neither
+   image needs root at runtime (installs happen at build time). Not fixed in this pass — adding a
+   non-root user is simple in principle but changes runtime file-ownership assumptions for the
+   `backend_output` volume mount, which deserves a quick verification pass (container actually
+   starts and can still write to `output/`) rather than a blind Dockerfile edit.
+5. **`docker-compose.yml` maps the backend's port directly to the host (`8000:8000`)** even though
+   the frontend only ever needs to reach it over the internal Docker network
+   (`API_URL=http://backend:8000`). Once a reverse proxy is added in front of the frontend for
+   production TLS (as `docs/deployment.md` instructs), this leaves `/api/*` also reachable
+   directly, bypassing `ALLOWED_ORIGINS` (a browser-only protection) and `TRUSTED_PROXY_SECRET`
+   entirely for a caller hitting `:8000` directly. Not fixed in this pass — the right fix depends on
+   the deployment (drop the mapping in a production compose override vs. firewall the port), which
+   is an operator decision this doc shouldn't make unilaterally.
+6. **No healthcheck on the `backend`/`frontend` services themselves** — `postgres`/`redis` have
+   one; `backend`/`frontend` don't, and `frontend`'s `depends_on: [backend]` has no
+   `condition: service_healthy`, so it can start serving before the backend actually accepts
+   connections. Combined with `SENTRY_DSN` shipping commented-out in `.env.example` and nothing
+   polling the existing `GET /health` endpoint, a production deployment following the compose
+   quickstart as documented gets no automated signal at all of a crashed backend process. Not fixed
+   in this pass — adding a `healthcheck` block and documenting an external uptime check (even a
+   free third-party pinger on `/health`) as a "day-one" step in `docs/deployment.md` is the shape of
+   the fix.
+7. **`frontend/Dockerfile` pins `node:20-slim`**, past active LTS as of this pass — worth bumping to
+   `node:22-slim` (current LTS) on the next Dockerfile touch.
+8. **`backend/requirements.txt` has no lockfile** — disclosed in the file's own comment already;
+   re-confirmed still true. Wide-enough version ranges mean two `docker compose up --build` runs
+   weeks apart aren't guaranteed to resolve identical transitive dependencies.
+
+---
+
+## Product & UX
+
+A genuine critique of the shipped product, not a restatement of the roadmap below — surfaced by a
+dedicated product/UX review this round, walking the actual pages against `PRD.md`'s stated
+journeys and trust framework (§6–§7).
+
+- **A concrete "Data > Opinion" violation, now fixed** — see Frontend & accessibility above
+  (`UNKNOWN` signal rendering as `0.00`). Worth naming here too since it's the clearest example
+  found this round of the product's own stated principle (§4: "a missing scraped field is `null`,
+  never a guessed plausible-looking value") being violated at the UI layer specifically, not just
+  the already-disclosed backend engine gap.
+- **The SME/momentum-trader persona (§5) has an internal contradiction, visible directly in the
+  shipped freshness table.** That persona is described as wanting to "catch a real cross signal
+  before it's obvious from price action," checking "daily/near-daily during active trading
+  periods" — but SME Signals refreshes once, on a weekday cron, ~3 hours after close
+  (`feature-catalog.md`'s own Data Freshness table), and intraday data is a stated non-goal (§3).
+  A persona defined by wanting to catch a signal *during* active trading is being served a
+  screener that, by this product's own batch-fetch architecture, can only ever report what already
+  happened after the market closed. Not a call to add intraday data (explicitly out of scope,
+  correctly) — flagged because the persona description itself overstates what this screener can
+  deliver, which is a copy/positioning fix, not an engineering one.
+- **Cross-mode verdict disagreement is only ever reconciled in the one place fewest users will
+  find it.** `consolidated-card.tsx::verdictsDisagree()` exists specifically because Stock
+  Analysis (3-tier) and Market Picks (4-tier) run independently and can legitimately disagree —
+  but that reconciliation only surfaces inside the search box's consolidated modal. A user who
+  stars a stock as BUY from Market Picks and then opens its full Stock Analysis report (an
+  encouraged, plausible next step) sees a completely separate `results-dashboard.tsx` with no
+  acknowledgment a different verdict exists elsewhere for the same symbol. The comparison logic
+  already exists; surfacing a small "Market Picks called this WATCHLIST on [date]" note on the
+  analysis hero when a divergent pick exists would reuse it.
+- **The trust pipeline that's supposed to be the product's core differentiator (§7 — quant
+  signals → guardrails → LLM → track record) only narrates itself on failure.** The "⚠ Analysis
+  degraded" banner exists, but on every normal, successful run (the overwhelming majority) a user
+  sees a BUY/HOLD/SELL badge and a confidence label with nothing that says "this passed 4
+  independent checks before you saw it" — the disclaimer's own wording ("generated by an AI
+  model") reads, in the common case, as exactly the generic "an AI said BUY" positioning §7 exists
+  to differentiate against. Compounding this: the aggregate track record (win-rate, alpha vs.
+  Nifty — PRD §12's one "real and computed today" metric) lives only at `/market-picks/history`;
+  the per-stock `VerdictTimeline` strip on the analysis page shows that symbol's own call history
+  but never links out to the aggregate page, so the strongest trust signal in the product is
+  structurally disconnected from the page where a user is actually deciding whether to trust a
+  call.
+- **The same concept has at least four names across the product**: "verdict" (results-dashboard's
+  own prose), `recommendation` (the underlying field), "Signal Verdict" (the sidebar's own quant
+  card), "Quant signal" (`consolidated-card.tsx`), "rating"/"pick" (Market Picks), "Track Record"
+  (the nav label for the aggregate page). None is wrong in isolation, but a user moving between
+  pages has no fixed vocabulary to hold onto.
+- **The Screener table renders 12 columns per row with horizontal-scroll-only mobile handling** —
+  see Frontend & accessibility above; called out again here specifically because it's the surface
+  most exposed to the SME/momentum persona, who per §5 is more likely mid-day on a phone than at a
+  desk.
+- **`/pricing` isn't in the primary nav** — reachable only via a direct URL or from `/api-keys`
+  (which links to it for free-tier accounts). A signed-out visitor curious "does this cost
+  anything" has no path to it otherwise, unlike every other page (Compare, SME Signals, Screener,
+  API Keys), all of which are correctly in `site-nav.tsx`'s `LINKS`.
+- **`/portfolio-aggregator` ("Net Worth" in the nav) gives a first-time visitor zero framing that
+  it's a separate tool** from the "Portfolio" page they likely just came from — both are genuinely
+  well-designed on their own terms (each has a real, deliberate empty state), but nothing on first
+  load of either says "these are unrelated" the way the code comments explaining the split already
+  do internally.
 
 ---
 

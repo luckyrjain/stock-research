@@ -5,9 +5,33 @@ reasoning) and, until this module existed, each independently repeated the
 same rate-limit → DB-configured-check → run_in_executor → sanitize-error
 wrapper around every read/write.
 """
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 
 import api
+
+# Applies to every multipart file upload in this app (CAS PDF, broker
+# CSV/XLSX import) — these endpoints previously called `await file.read()`
+# unconditionally, reading an arbitrarily large request body fully into
+# memory (and, for `preview`, doing so on every keystroke of a client
+# retrying) before any parsing could reject it. 20 MB comfortably covers a
+# real CAS statement or broker tradebook export (typically well under 1 MB)
+# while bounding the worst case to a small, fixed amount of memory per
+# request.
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
+
+async def read_upload_capped(file: UploadFile, max_bytes: int = _MAX_UPLOAD_BYTES) -> bytes:
+    """Reads an UploadFile's body, rejecting (413) anything over `max_bytes`
+    rather than buffering an unbounded amount of it first. Reads one byte
+    past the cap so a file exactly at the limit isn't misreported as over
+    it, without ever holding more than `max_bytes + 1` bytes in memory."""
+    data = await file.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {max_bytes // (1024 * 1024)} MB).",
+        )
+    return data
 
 
 async def run_owned_db_call(

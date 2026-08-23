@@ -9,10 +9,23 @@ on:
     - cron: '30 13 * * 1-5'
   workflow_dispatch:
 
+# Prevents an overlapping run of this same workflow (a workflow_dispatch
+# retry, or an unusually long scheduled run bleeding into the next
+# trigger) from re-sending the same day's digest email twice. The pipeline
+# now also guards this itself (pipelines/watchlist_alerts.py's
+# _already_alerted_today/_mark_alerted, keyed per (user, symbol, kind,
+# date)), but avoiding two full LLM-analysis runs racing at once in the
+# first place is still worth doing here — belt and suspenders, not
+# either/or.
+concurrency:
+  group: watchlist-alerts-cron
+  cancel-in-progress: false
+
 jobs:
   run-alerts:
     name: Run watchlist alert pipeline
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: backend

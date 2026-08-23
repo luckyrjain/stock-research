@@ -24,6 +24,15 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
     try {
       const url = exchange ? `/api/validate/${sym}?exchange=${exchange}` : `/api/validate/${sym}`;
       const res  = await fetch(url);
+      if (!res.ok) {
+        // A non-2xx response (e.g. 503 when the backend is unreachable)
+        // still resolves fetch() normally rather than throwing — without
+        // this check it fell through to the same branches as a genuine
+        // "symbol not found" body, misreporting a backend outage as an
+        // invalid ticker instead of the distinct 'error' state below.
+        setStatus('error');
+        return;
+      }
       const data: ValidationResult = await res.json();
       setResult(data);
       if (data.valid) {

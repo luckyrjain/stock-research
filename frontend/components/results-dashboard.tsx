@@ -456,7 +456,7 @@ export default function ResultsDashboard({ report, onHardRefresh, refreshing }: 
                         </InfoTooltip>
                       )}
                     </>}
-                    value={fmt(signal.score, 2)}
+                    value={signal.value === 'UNKNOWN' ? '—' : fmt(signal.score, 2)}
                     colorClass={signal.score > 0 ? 'text-buy' : signal.score < 0 ? 'text-sell' : 'text-muted'}
                   />
                 );

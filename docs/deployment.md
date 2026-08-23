@@ -8,10 +8,15 @@ running in production rather than `--reload`/`npm run dev`.
 ## Docker Compose
 
 ```bash
-cp .env.example .env   # add at least one LLM provider key
+cp .env.example .env   # add at least one LLM provider key and set POSTGRES_PASSWORD
 docker compose up --build
 docker compose exec backend alembic upgrade head   # first run only — creates all 23 tables
 ```
+
+`docker compose up` refuses to start without `POSTGRES_PASSWORD` set in `.env` — there is no
+default (see `.env.example` for how to generate one). This is deliberate: a default password would
+be fixed and publicly documented, silently protecting real account/broker-credential data with a
+guessable value.
 
 This starts four services (`docker-compose.yml`):
 

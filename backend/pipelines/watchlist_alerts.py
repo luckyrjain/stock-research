@@ -15,8 +15,9 @@ import argparse
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date
 
-from core import cache
+from core import cache, state_store
 from analytics import verdict_history
 from analyst.crew import ALL_DATA_TASKS, run_analysis_with_fallback
 from db.models import get_engine
@@ -28,6 +29,41 @@ from core.schemas import normalize as schema_normalize
 from signals.engine import run_signal_engine
 
 LOGGER = get_logger("watchlist_alerts")
+
+# Guards against sending the same day's digest twice -- save_snapshot()
+# upserts today's verdict_history row, so a second run on the same day (a
+# GitHub Actions workflow_dispatch retry, a manual --force rerun while
+# cache.is_fresh() is still true) recomputes an identical "yesterday ->
+# today" diff and, without this, would re-email every affected user. Keyed
+# by calendar date so only "was this (user, symbol, kind) already alerted
+# today" needs checking -- older days are pruned each run since nothing
+# ever reads past today's key (see run()'s own delete_older_than call).
+_ALERTED_NAMESPACE = "watchlist_alerts_sent"
+_ALERTED_RETENTION_DAYS = 3
+
+
+def _alert_key(user_id: int, symbol: str, kind: str) -> str:
+    return f"{user_id}:{symbol}:{kind}"
+
+
+def _already_alerted_today(today: str) -> set[str]:
+    payload = state_store.load(_ALERTED_NAMESPACE, today)
+    return set((payload or {}).get("keys", []))
+
+
+def _mark_alerted(today: str, keys: set[str]) -> None:
+    """Records `keys` as sent for `today` under a row lock (state_store.mutate,
+    not load()-then-save()) — a re-run racing this same write must not
+    silently clobber another run's already-recorded keys."""
+    if not keys:
+        return
+
+    def _add(current: dict) -> dict:
+        existing = set((current or {}).get("keys", []))
+        existing |= keys
+        return {"keys": sorted(existing)}
+
+    state_store.mutate(_ALERTED_NAMESPACE, today, _add, default={"keys": []})
 
 # This job runs the full (data-fetch + LLM analyst) pipeline per symbol, so
 # an unbounded watchlist fan-in means an unbounded daily LLM bill — same
@@ -195,8 +231,10 @@ def run(force: bool = False) -> bool:
         symbols = symbols[:_MAX_ALERT_SYMBOLS]
 
     run_id = uuid.uuid4().hex[:12]
+    today = date.today().isoformat()
+    already_alerted = _already_alerted_today(today)
     alerts_by_user: dict[int, dict] = {}
-    analyzed, failed = 0, 0
+    analyzed, failed, deduped = 0, 0, 0
 
     for symbol in symbols:
         analysis = _analyze_symbol(symbol, run_id, force=force)
@@ -216,20 +254,36 @@ def run(force: bool = False) -> bool:
         if not symbol_alerts:
             continue
         for watcher in by_symbol[symbol]:
-            entry = alerts_by_user.setdefault(watcher["user_id"], {"email": watcher["email"], "alerts": []})
-            entry["alerts"].extend(symbol_alerts)
+            entry = alerts_by_user.setdefault(
+                watcher["user_id"], {"email": watcher["email"], "alerts": [], "keys": set()},
+            )
+            for alert in symbol_alerts:
+                key = _alert_key(watcher["user_id"], symbol, alert["kind"])
+                if key in already_alerted:
+                    deduped += 1
+                    continue
+                entry["alerts"].append(alert)
+                entry["keys"].add(key)
 
+    newly_alerted: set[str] = set()
     for user in alerts_by_user.values():
+        if not user["alerts"]:
+            continue  # every alert for this user was already sent today
         sent = send_watchlist_alert_email(user["email"], user["alerts"])
         log_event(
             LOGGER, "watchlist_alert_email_sent" if sent else "watchlist_alert_email_failed",
             level="info" if sent else "warning",
             alert_count=len(user["alerts"]),
         )
+        if sent:
+            newly_alerted |= user["keys"]
+    _mark_alerted(today, newly_alerted)
+    state_store.delete_older_than(_ALERTED_NAMESPACE, days=_ALERTED_RETENTION_DAYS)
 
     log_event(
         LOGGER, "watchlist_alerts_completed",
-        symbols=len(symbols), analyzed=analyzed, failed=failed, users_notified=len(alerts_by_user),
+        symbols=len(symbols), analyzed=analyzed, failed=failed,
+        users_notified=len({u for u, e in alerts_by_user.items() if e["alerts"]}), deduped=deduped,
     )
 
     if symbols and (failed / len(symbols)) > _MAX_ACCEPTABLE_ERROR_RATE:

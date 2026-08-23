@@ -3892,10 +3892,12 @@ class AuthVerifyEndpointTest(unittest.TestCase):
 class AuthMeEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
+        rate_limiter._memory_calls.pop("auth_me:testclient", None)
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
+        rate_limiter._memory_calls.pop("auth_me:testclient", None)
 
     def test_missing_authorization_header_returns_401(self) -> None:
         resp = client.get("/api/auth/me")
@@ -3923,14 +3925,23 @@ class AuthMeEndpointTest(unittest.TestCase):
         resp = client.get("/api/auth/me", headers={"Authorization": "Basic sometoken"})
         self.assertEqual(resp.status_code, 401)
 
+    def test_rate_limited_returns_429(self) -> None:
+        # Regression test: this endpoint used to call no _rate_limit() at
+        # all, despite doing a DB session lookup per request.
+        rate_limiter._memory_calls["auth_me:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/auth/me")
+        self.assertEqual(resp.status_code, 429)
+
 
 class AuthLogoutEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
+        rate_limiter._memory_calls.pop("auth_logout:testclient", None)
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
+        rate_limiter._memory_calls.pop("auth_logout:testclient", None)
 
     def test_returns_ok_without_authorization_header(self) -> None:
         resp = client.post("/api/auth/logout")
@@ -3948,6 +3959,12 @@ class AuthLogoutEndpointTest(unittest.TestCase):
         resp = client.post("/api/auth/logout", headers={"Authorization": "Bearer sometoken"})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {"ok": True})
+
+    def test_rate_limited_returns_429(self) -> None:
+        # Regression test: this endpoint used to call no _rate_limit() at all.
+        rate_limiter._memory_calls["auth_logout:testclient"] = [api.time.monotonic()] * 60
+        resp = client.post("/api/auth/logout")
+        self.assertEqual(resp.status_code, 429)
 
 
 class ApiKeyManagementEndpointTest(unittest.TestCase):
@@ -4118,6 +4135,18 @@ class ConsolidatedV1EndpointTest(unittest.TestCase):
         with patch("auth.get_user_for_api_key", return_value=None):
             resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "bogus"})
         self.assertEqual(resp.status_code, 401)
+
+    def test_invalid_key_is_rate_limited_before_any_db_lookup(self) -> None:
+        # Regression test: an invalid/garbage X-API-Key never reached the
+        # per-user limit below (it only applies once a key has already
+        # resolved to a real user_id via a DB round trip) — so a stream of
+        # bad keys was previously rate-limited nowhere at all: unbounded
+        # DB-load amplification, one lookup per garbage attempt.
+        rate_limiter._memory_calls["api_v1_auth:testclient"] = [api.time.monotonic()] * 30
+        with patch("auth.get_user_for_api_key") as lookup:
+            resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "bogus"})
+        self.assertEqual(resp.status_code, 429)
+        lookup.assert_not_called()
 
     def test_missing_database_url_returns_401(self) -> None:
         os.environ.pop("DATABASE_URL", None)

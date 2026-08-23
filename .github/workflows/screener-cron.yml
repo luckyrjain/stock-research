@@ -11,10 +11,18 @@ on:
     - cron: '0 14 * * 1-5'
   workflow_dispatch:
 
+# See sme-cron.yml's identical comment — prevents an overlapping run of
+# this same workflow, not a cross-workflow guard (this pipeline and that
+# one don't share a table).
+concurrency:
+  group: screener-cron
+  cancel-in-progress: false
+
 jobs:
   run-pipeline:
     name: Run custom screener pipeline
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: backend

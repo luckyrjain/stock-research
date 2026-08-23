@@ -2669,7 +2669,19 @@ anonymous `client_id` row has no email to notify and is excluded at the query le
    `pipelines/market_picks_pipeline.py`'s `_MAX_STOCKS`. `_MAX_ALERT_SYMBOLS` (50) caps how many distinct
    symbols one run analyses; symbols beyond the cap are skipped for that day (logged, not
    silently dropped — no-silent-caps convention) rather than letting the bound grow unbounded.
-5. `core/email_sender.py` gained a second message builder/sender pair —
+5. **Same-day dedup, so a re-run never resends a digest.** `save_snapshot()` upserts *today's*
+   `verdict_history` row (point 2), so a second run on the same day — a `workflow_dispatch` retry,
+   a manual `--force` rerun while `cache.is_fresh()` was still true — used to recompute the
+   identical "yesterday → today" diff and resend the exact same digest. `run()` now checks/records
+   sent `(user_id, symbol, kind)` keys against a `watchlist_alerts_sent` namespace in
+   `core/state_store.py`, keyed by date and guarded with `state_store.mutate()` (not
+   load()-then-save()) so two overlapping runs can't clobber each other's recorded keys — pruned
+   to 3 days' retention each run, since only "today" is ever read. A user whose digest included
+   some already-sent and some genuinely-new alerts only gets the new ones; a user with nothing new
+   gets no email at all. `.github/workflows/watchlist-alerts-cron.yml` also gained a `concurrency`
+   guard to stop two runs from overlapping in the first place — belt and suspenders, not
+   either/or.
+6. `core/email_sender.py` gained a second message builder/sender pair —
    `send_watchlist_alert_email(to_email, alerts)` — alongside the existing magic-link one; both
    now share one `_send_via_smtp()` helper (extracted, not duplicated) for the connect/STARTTLS/
    login/send sequence. One digest email per user per run lists every alert (recommendation
@@ -2678,7 +2690,7 @@ anonymous `client_id` row has no email to notify and is excluded at the query le
    branches on each alert's `kind` to render the right line shape. Same best-effort convention
    as `send_magic_link_email`: returns `True`/`False`, never raises, and a missing `SMTP_HOST`
    just means the email never arrives.
-6. **Daily auto-run**: `.github/workflows/watchlist-alerts-cron.yml` runs at 13:30 UTC (19:00
+7. **Daily auto-run**: `.github/workflows/watchlist-alerts-cron.yml` runs at 13:30 UTC (19:00
    IST) on weekdays — after `sme-cron.yml` (13:00 UTC) so that pipeline's own writes have
    settled, and well after NSE's 15:30 IST close. Requires the same `DATABASE_URL` secret as
    `sme-cron.yml`, plus whichever LLM provider key and `SMTP_*` secrets the deployment already
@@ -2777,6 +2789,10 @@ session-cookie identity the frontend itself uses. Three independent pieces:
    `last_used_at`) and applies a per-*user*, **tier-scaled** rate limit (`api_v1:{user_id}`, a
    sliding one-hour window) rather than per-IP like the internal endpoints — a legitimate
    integration may run from a shared or rotating IP, so IP-keying would be the wrong bucket here.
+   That per-user limit only exists once a key has already resolved to a real `user_id` via a DB
+   round trip, though — `_require_api_key_user()` also runs a cheap per-IP `_rate_limit()` call
+   *before* that lookup, so a stream of invalid/garbage `X-API-Key` values is bounded too, rather
+   than each one costing an unbounded DB round trip with no limiter of any kind applying to it.
    More `/api/v1/*` routes can follow the same wrapper-around-an-existing-handler pattern later;
    this PR intentionally ships one real endpoint rather than a speculative surface no caller has
    asked for yet.

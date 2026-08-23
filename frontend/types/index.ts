@@ -15,7 +15,7 @@ export interface StockInfo {
   company_name: string;
   current_price: number | null;
   previous_close?: number | null;
-  change_pct: number;
+  change_pct: number | null;   // null when the source had no previous-close to compute it from
   volume?: number | null;
   avg_volume_10d?: number | null;
   market_cap_cr: number | null;

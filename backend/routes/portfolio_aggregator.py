@@ -17,7 +17,7 @@ from datetime import date as _date
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from routes._shared import run_owned_db_call
+from routes._shared import read_upload_capped, run_owned_db_call
 
 router = APIRouter(prefix="/api/portfolio")
 
@@ -517,7 +517,7 @@ async def import_cas_endpoint(
     password: str = Form(...),
     account_id: int = Form(...),
 ):
-    pdf_bytes = await file.read()
+    pdf_bytes = await read_upload_capped(file)
 
     def _sync() -> dict:
         import api
@@ -539,7 +539,7 @@ async def import_cas_endpoint(
 
 @router.post("/import-csv/preview")
 async def import_csv_preview(request: Request, file: UploadFile = File(...)):
-    file_bytes = await file.read()
+    file_bytes = await read_upload_capped(file)
     filename = file.filename or ""
 
     def _sync() -> dict:
@@ -567,7 +567,7 @@ async def import_csv_endpoint(
     account_id: int = Form(...),
     broker: str = Form(...),
 ):
-    file_bytes = await file.read()
+    file_bytes = await read_upload_capped(file)
     filename = file.filename or ""
     from portfolio.csv_import import REQUIRED_FIELDS
 

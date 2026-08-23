@@ -46,10 +46,17 @@ class BuildQuotePayloadTest(unittest.TestCase):
         self.assertEqual(payload["change_pct"], 10.0)
         self.assertEqual(payload["market_cap_cr"], 1000.0)
 
-    def test_missing_previous_close_falls_back_to_price_with_zero_change(self) -> None:
+    def test_missing_previous_close_yields_null_change_pct_not_zero(self) -> None:
+        # Regression test: change_pct used to fall back to a fabricated 0.0
+        # ("flat today") whenever yfinance's info had no previousClose at
+        # all — indistinguishable from a genuine flat day, and read by
+        # signals/volume.py's volume_signal() as a real "not a down day",
+        # silently resolving a data gap toward accumulation. previous_close
+        # itself still falls back to price for display purposes; only the
+        # derived change_pct (what the signal engine acts on) changed.
         payload = _build_quote_payload("TCS", "NSE", {"currentPrice": 110, "marketCap": 1e10})
         self.assertEqual(payload["previous_close"], 110)
-        self.assertEqual(payload["change_pct"], 0.0)
+        self.assertIsNone(payload["change_pct"])
 
     def test_dividend_yield_as_decimal_is_converted_to_percent(self) -> None:
         payload = _build_quote_payload("TCS", "NSE", {"currentPrice": 100, "dividendYield": 0.025})

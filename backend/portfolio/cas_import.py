@@ -83,6 +83,15 @@ def import_cas(engine, parsed: dict, account_id: int) -> dict:
         by_amfi = {r["symbol"]: r for r in existing if r["symbol"]}
         by_isin = {(r["meta"] or {}).get("isin"): r
                    for r in existing if (r["meta"] or {}).get("isin")}
+        # `_write_transactions()` deletes an asset's existing CAS rows before
+        # inserting the statement's own — correct once per asset per import
+        # (a full re-import restates that asset's history), but the same
+        # scheme can now be matched from more than one folio within this
+        # same statement (see the by_amfi/by_isin backfill above) — without
+        # this guard, the second folio's write would delete the first
+        # folio's just-inserted rows for the same asset before this
+        # transaction commits.
+        cas_rows_cleared: set[int] = set()
 
         for folio in parsed.get("folios", []):
             for scheme in folio.get("schemes", []):
@@ -124,6 +133,20 @@ def import_cas(engine, parsed: dict, account_id: int) -> dict:
                         archived=close <= 0,
                     ).returning(assets_t.c.id)).scalar()
                     summary["assets_created"] += 1
+                    # Record the new asset in this run's own lookup dicts —
+                    # not just the DB — so the same scheme appearing under a
+                    # second folio later in this same statement (a scheme
+                    # held via two SIP folios, or a post-merger folio split)
+                    # matches this asset instead of silently creating a
+                    # duplicate one. `existing` above was snapshotted once
+                    # before this loop started, so without this a later
+                    # iteration's lookup would still see it as unmatched.
+                    new_row = {"id": asset_id, "symbol": amfi,
+                               "meta": {"isin": isin}, "name": scheme.get("scheme")}
+                    if amfi:
+                        by_amfi[amfi] = new_row
+                    if isin:
+                        by_isin[isin] = new_row
 
                 if close > 0:
                     conn.execute(_text(
@@ -132,7 +155,9 @@ def import_cas(engine, parsed: dict, account_id: int) -> dict:
                     ), {"aid": asset_id, "u": close})
 
                 summary["transactions"] += _write_transactions(
-                    conn, asset_id, folio.get("folio"), txns, summary)
+                    conn, asset_id, folio.get("folio"), txns, summary,
+                    clear_existing=asset_id not in cas_rows_cleared)
+                cas_rows_cleared.add(asset_id)
 
     log_event(LOGGER, "cas_imported", account_id=account_id,
               **{k: v for k, v in summary.items() if k != "warnings"},
@@ -141,16 +166,23 @@ def import_cas(engine, parsed: dict, account_id: int) -> dict:
 
 
 def _write_transactions(conn, asset_id: int, folio: str | None,
-                        txns: list[dict], summary: dict) -> int:
-    """Replace this asset's CAS-sourced rows with the statement's rows."""
+                        txns: list[dict], summary: dict,
+                        clear_existing: bool = True) -> int:
+    """Replace this asset's CAS-sourced rows with the statement's rows.
+
+    `clear_existing=False` skips the delete — used when this asset was
+    already cleared earlier in the same `import_cas()` call (a scheme
+    spanning two folios in one statement), so a later folio's write doesn't
+    wipe out an earlier folio's just-inserted rows for the same asset."""
     from datetime import date as _date
     from sqlalchemy import delete as _delete, insert as _insert
     from db.models import transactions as transactions_t
 
-    conn.execute(_delete(transactions_t).where(
-        transactions_t.c.asset_id == asset_id,
-        transactions_t.c.meta["source"].as_string() == "cas",
-    ))
+    if clear_existing:
+        conn.execute(_delete(transactions_t).where(
+            transactions_t.c.asset_id == asset_id,
+            transactions_t.c.meta["source"].as_string() == "cas",
+        ))
 
     written = 0
     unmapped: set[str] = set()
@@ -188,6 +220,14 @@ def _write_transactions(conn, asset_id: int, folio: str | None,
 
 
 ARCHIVE_NAMESPACE = "cas_archive"
+# One full scrubbed parse per import — a debug/replay convenience, not
+# durable product history (unlike e.g. verdict_history), so it's pruned the
+# same way telemetry/source_quality.py's own per-run namespace is (see
+# CLAUDE.md's "A namespace with unbounded per-run growth ... should call
+# delete_older_than() after each write"). 90 days comfortably covers
+# realistic "re-run this import for debugging" use without keeping every
+# statement's full transaction history around indefinitely.
+_ARCHIVE_RETENTION_DAYS = 90
 
 
 def archive_parsed(parsed: dict) -> str:
@@ -200,6 +240,7 @@ def archive_parsed(parsed: dict) -> str:
     from datetime import datetime, timezone
     key = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
     state_store.save(ARCHIVE_NAMESPACE, key, _scrub(parsed))
+    state_store.delete_older_than(ARCHIVE_NAMESPACE, days=_ARCHIVE_RETENTION_DAYS)
     return key
 
 

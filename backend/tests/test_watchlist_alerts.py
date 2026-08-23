@@ -195,8 +195,24 @@ class RunTest(unittest.TestCase):
                 "GROQ_API_KEY", "GOOGLE_API_KEY", "LLM_PROVIDER",
             )
         }
+        # Most RunTest cases don't care about the same-day dedup guard —
+        # default it to "nothing alerted yet today" / a no-op recorder so
+        # they don't need their own state_store plumbing (and don't
+        # accidentally try a real DB connection off the fake DATABASE_URL
+        # these tests set). Tests that DO exercise dedup override these.
+        self._already_alerted_patch = patch(
+            "pipelines.watchlist_alerts._already_alerted_today", return_value=set())
+        self._already_alerted_patch.start()
+        self._mark_alerted_patch = patch("pipelines.watchlist_alerts._mark_alerted")
+        self._mark_alerted_patch.start()
+        self._delete_older_patch = patch(
+            "pipelines.watchlist_alerts.state_store.delete_older_than")
+        self._delete_older_patch.start()
 
     def tearDown(self) -> None:
+        self._already_alerted_patch.stop()
+        self._mark_alerted_patch.stop()
+        self._delete_older_patch.stop()
         for k, v in self._env.items():
             if v is not None:
                 os.environ[k] = v
@@ -341,6 +357,93 @@ class RunTest(unittest.TestCase):
         self.assertEqual(mock_detect.call_count, 2)
         called_symbols = {call.args[0] for call in mock_detect.call_args_list}
         self.assertEqual(called_symbols, {"TCS", "INFY"})
+
+    def test_already_alerted_today_suppresses_duplicate_email(self) -> None:
+        # Regression test: a second run on the same day (a workflow_dispatch
+        # retry, a manual --force rerun) used to recompute the identical
+        # "yesterday -> today" diff and re-send the exact same digest.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        os.environ["ANTHROPIC_API_KEY"] = "fake"
+        by_symbol = {"TCS": [{"user_id": 1, "email": "a@example.com"}]}
+        change = {"kind": "recommendation_change", "symbol": "TCS", "old_recommendation": "HOLD", "new_recommendation": "BUY", "confidence": "HIGH"}
+        self._already_alerted_patch.stop()  # override this test's own return
+
+        with patch("pipelines.watchlist_alerts.get_engine", return_value=MagicMock()), \
+             patch("pipelines.watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
+             patch("pipelines.watchlist_alerts._analyze_symbol", return_value={"recommendation": "BUY"}), \
+             patch("pipelines.watchlist_alerts._detect_change", return_value=change), \
+             patch("pipelines.watchlist_alerts._detect_price_move", return_value=None), \
+             patch(
+                 "pipelines.watchlist_alerts._already_alerted_today",
+                 return_value={watchlist_alerts._alert_key(1, "TCS", "recommendation_change")},
+             ), \
+             patch("pipelines.watchlist_alerts.send_watchlist_alert_email") as send_email:
+            result = watchlist_alerts.run()
+
+        self._already_alerted_patch.start()  # restore for tearDown's .stop()
+        self.assertTrue(result)
+        send_email.assert_not_called()
+
+    def test_new_alert_for_a_different_kind_still_sends_when_one_kind_already_alerted(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        os.environ["ANTHROPIC_API_KEY"] = "fake"
+        by_symbol = {"TCS": [{"user_id": 1, "email": "a@example.com"}]}
+        change = {"kind": "recommendation_change", "symbol": "TCS", "old_recommendation": "HOLD", "new_recommendation": "BUY", "confidence": "HIGH"}
+        move = {"kind": "price_move", "symbol": "TCS", "old_price": 100.0, "new_price": 115.0, "change_pct": 15.0}
+        self._already_alerted_patch.stop()
+
+        with patch("pipelines.watchlist_alerts.get_engine", return_value=MagicMock()), \
+             patch("pipelines.watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
+             patch("pipelines.watchlist_alerts._analyze_symbol", return_value={"recommendation": "BUY"}), \
+             patch("pipelines.watchlist_alerts._detect_change", return_value=change), \
+             patch("pipelines.watchlist_alerts._detect_price_move", return_value=move), \
+             patch(
+                 "pipelines.watchlist_alerts._already_alerted_today",
+                 return_value={watchlist_alerts._alert_key(1, "TCS", "recommendation_change")},
+             ), \
+             patch("pipelines.watchlist_alerts._mark_alerted") as mark_alerted, \
+             patch("pipelines.watchlist_alerts.send_watchlist_alert_email", return_value=True) as send_email:
+            result = watchlist_alerts.run()
+
+        self._already_alerted_patch.start()
+        self.assertTrue(result)
+        # Only the not-yet-alerted price_move should reach the email.
+        send_email.assert_called_once_with("a@example.com", [move])
+        mark_alerted.assert_called_once()
+        (_today, marked_keys), _kwargs = mark_alerted.call_args
+        self.assertEqual(marked_keys, {watchlist_alerts._alert_key(1, "TCS", "price_move")})
+
+    def test_mark_alerted_merges_into_existing_keys_under_a_lock(self) -> None:
+        # _mark_alerted must use state_store.mutate() (a row-locked
+        # read-modify-write), not load()-then-save() -- two overlapping
+        # runs racing this same write must not silently clobber each
+        # other's already-recorded keys.
+        captured = {}
+
+        def fake_mutate(namespace, key, fn, default):
+            captured["namespace"] = namespace
+            captured["key"] = key
+            return fn({"keys": ["1:TCS:recommendation_change"]})
+
+        self._mark_alerted_patch.stop()  # test the real function, not the RunTest default mock
+        try:
+            with patch("pipelines.watchlist_alerts.state_store.mutate", side_effect=fake_mutate) as mutate:
+                watchlist_alerts._mark_alerted("2024-01-01", {"2:INFY:price_move"})
+        finally:
+            self._mark_alerted_patch.start()
+
+        mutate.assert_called_once()
+        self.assertEqual(captured["namespace"], watchlist_alerts._ALERTED_NAMESPACE)
+        self.assertEqual(captured["key"], "2024-01-01")
+
+    def test_mark_alerted_is_a_noop_for_an_empty_key_set(self) -> None:
+        self._mark_alerted_patch.stop()
+        try:
+            with patch("pipelines.watchlist_alerts.state_store.mutate") as mutate:
+                watchlist_alerts._mark_alerted("2024-01-01", set())
+            mutate.assert_not_called()
+        finally:
+            self._mark_alerted_patch.start()
 
 
 if __name__ == "__main__":
