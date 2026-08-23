@@ -2687,7 +2687,13 @@ anonymous `client_id` row has no email to notify and is excluded at the query le
    doesn't permanently look like "already sent" and silently drop a real alert forever — pruned to
    3 days' retention each run regardless, since only "today" is ever read.
    `.github/workflows/watchlist-alerts-cron.yml` also gained a `concurrency` guard to stop two runs
-   from overlapping in the first place — belt and suspenders, not either/or.
+   from overlapping in the first place — belt and suspenders, not either/or. `_claim_alert_keys()`
+   also fails closed on a storage error: it returns `claimed` (populated as a side effect of the
+   callback `state_store.mutate()` runs) only when `mutate()` itself actually returns non-`None` —
+   a second adversarial-review pass caught an earlier version returning that side-effect set
+   unconditionally, which meant a `mutate()` transaction failure *after* the callback ran (a
+   connection blip) would still report those keys as claimed even though the claim was never
+   actually persisted, letting a later run re-send them for real.
 6. `core/email_sender.py` gained a second message builder/sender pair —
    `send_watchlist_alert_email(to_email, alerts)` — alongside the existing magic-link one; both
    now share one `_send_via_smtp()` helper (extracted, not duplicated) for the connect/STARTTLS/

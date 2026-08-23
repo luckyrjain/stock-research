@@ -43,7 +43,11 @@ async def read_upload_capped(file: UploadFile, max_bytes: int = _MAX_UPLOAD_BYTE
     See this module's own disclosed limitation above: for files between
     Starlette's own default per-part limit (1 MB) and `max_bytes`,
     Starlette's multipart parser rejects the upload before this function
-    ever runs, with a less specific 400 rather than this function's 413."""
+    ever runs, with a less specific 400 rather than this function's 413.
+
+    Prefer `rate_limited_upload()` below over calling this directly for a
+    new upload endpoint — it couples the rate-limit check to the read so
+    the two can't be separated by a future edit."""
     data = await file.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise HTTPException(
@@ -51,6 +55,32 @@ async def read_upload_capped(file: UploadFile, max_bytes: int = _MAX_UPLOAD_BYTE
             detail=f"File too large (max {max_bytes // (1024 * 1024)} MB).",
         )
     return data
+
+
+async def rate_limited_upload(
+    request, rate_limit_name: str, max_calls: int, file: UploadFile,
+    max_bytes: int = _MAX_UPLOAD_BYTES, window_seconds: float = 60,
+) -> bytes:
+    """Rate-limits `request`, then reads `file`'s capped body — always in
+    that order, as one call, for every upload endpoint. An earlier version
+    of the 3 upload endpoints below called `api._rate_limit()` and
+    `read_upload_capped()` as two separate statements, ahead of a
+    `run_owned_db_call(..., skip_rate_limit=True)`. An adversarial-review
+    pass on that version confirmed no live bug in the 3 endpoints it
+    touched, but flagged the shape itself as a footgun for a *future*
+    upload endpoint: the unsafe combination (an explicit `_rate_limit()`
+    call copy-pasted in, `skip_rate_limit` left at its default `False`)
+    needs no deliberate action to reach, while the safe one requires
+    remembering an extra kwarg at a call site physically far from the
+    `_rate_limit()` line it depends on — silently halving that new
+    endpoint's rate limit via a double-counted bucket, the exact bug this
+    whole mechanism exists to prevent. This function exists so a caller
+    literally cannot do one step without the other. Callers still pass
+    `skip_rate_limit=True` to `run_owned_db_call()` afterward — this
+    function only replaces the read_upload_capped()-plus-a-separate-
+    _rate_limit()-call pair, not `run_owned_db_call()` itself."""
+    api._rate_limit(request, rate_limit_name, max_calls=max_calls, window_seconds=window_seconds)
+    return await read_upload_capped(file, max_bytes)
 
 
 async def run_owned_db_call(

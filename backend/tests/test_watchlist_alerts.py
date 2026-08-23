@@ -474,6 +474,37 @@ class RunTest(unittest.TestCase):
         # Only the key that WASN'T already in the stored set is newly claimed.
         self.assertEqual(newly_claimed, {"2:INFY:price_move"})
 
+    def test_claim_alert_keys_returns_empty_set_when_mutate_fails(self) -> None:
+        # Regression test: _claim_alert_keys used to return the local
+        # `claimed` set (populated as a side effect of the callback passed
+        # to state_store.mutate()) unconditionally -- even when mutate()
+        # itself failed AFTER the callback already ran (a connection blip,
+        # a serialization error on the final UPDATE) and returned None,
+        # meaning the claim was never actually persisted. run() would then
+        # treat those keys as successfully claimed and send the email
+        # anyway, even though a later run's DB read would show them as
+        # still unclaimed -- reintroducing the exact duplicate-send this
+        # whole mechanism exists to prevent, via a DB-failure window
+        # instead of a concurrency window.
+        # side_effect actually invokes the callback (so the local `claimed`
+        # set genuinely gets populated as a side effect, matching the real
+        # failure timing) and only then returns None, the same shape
+        # state_store.mutate() itself produces when its own transaction
+        # fails after the callback already ran.
+        def fake_mutate_that_fails_after_callback(namespace, key, fn, default):
+            fn({"keys": []})  # runs the callback, populating `claimed`...
+            return None       # ...but the write itself failed.
+
+        self._claim_patch.stop()
+        try:
+            with patch("pipelines.watchlist_alerts.state_store.mutate",
+                       side_effect=fake_mutate_that_fails_after_callback):
+                newly_claimed = watchlist_alerts._claim_alert_keys("2024-01-01", {"1:TCS:recommendation_change"})
+        finally:
+            self._claim_patch.start()
+
+        self.assertEqual(newly_claimed, set())
+
     def test_claim_alert_keys_is_a_noop_for_an_empty_key_set(self) -> None:
         self._claim_patch.stop()
         try:

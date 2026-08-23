@@ -393,6 +393,20 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
                            files={"file": ("trades.csv", b"", "text/csv")})
         self.assertEqual(resp.status_code, 422)
 
+    def test_import_csv_preview_consumes_exactly_one_rate_limit_slot(self) -> None:
+        # Same regression coverage as import-cas's own version of this test
+        # (see test_import_cas_endpoint_consumes_exactly_one_rate_limit_slot)
+        # — added for this endpoint too per an adversarial-review finding
+        # that only import-cas had it, even though all three upload
+        # endpoints share the same rate-limit-before-read pattern.
+        before = len(rate_limiter._memory_calls.get("portfolio_agg_write:testclient", []))
+        content = b"symbol,side,qty,price\nTCS,buy,10,100\n"
+        resp = client.post("/api/portfolio/import-csv/preview",
+                           files={"file": ("trades.csv", content, "text/csv")})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        after = len(rate_limiter._memory_calls.get("portfolio_agg_write:testclient", []))
+        self.assertEqual(after - before, 1)
+
     def test_import_csv_endpoint_422_on_missing_required_mapping_field(self) -> None:
         pid = self._mk_profile()
         acc = self._mk_account(pid)
@@ -435,6 +449,26 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         body = resp.json()
         self.assertEqual(body["imported"], 1)
         self.assertEqual(body["assets_created"], 1)
+
+    def test_import_csv_endpoint_consumes_exactly_one_rate_limit_slot(self) -> None:
+        # Same regression coverage as import-cas's own version of this test.
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        content = b"date,symbol,side,qty,price\n2024-01-01,TCS,buy,10,100\n"
+        mapping = {"date": "date", "symbol": "symbol", "side": "side",
+                  "quantity": "qty", "price": "price"}
+        before = len(rate_limiter._memory_calls.get("portfolio_agg_write:testclient", []))
+        with patch("portfolio.csv_import.resolve_symbol", return_value={
+            "symbol": None, "exchange": None, "confidence": "unresolved", "candidate_name": None,
+        }), patch("portfolio.csv_import.get_full_securities_master", return_value=[]):
+            resp = client.post(
+                "/api/portfolio/import-csv",
+                files={"file": ("trades.csv", content, "text/csv")},
+                data={"mapping": json.dumps(mapping), "account_id": acc, "broker": "zerodha"},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        after = len(rate_limiter._memory_calls.get("portfolio_agg_write:testclient", []))
+        self.assertEqual(after - before, 1)
 
 
 if __name__ == "__main__":

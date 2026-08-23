@@ -75,15 +75,22 @@ Nothing on that rejected list should be proposed or scaffolded without the human
    audit-logged, which bounds abuse without eliminating a targeted guess. *(`feature-catalog.md`)*
 5. ~~**`GET /api/auth/me` and `POST /api/auth/logout` are entirely unrate-limited**~~ — done. Both
    now call `_rate_limit()` (60/min per IP), matching every neighboring auth endpoint.
-6. **CAS/CSV import have no upload size cap** — was true, now fixed: both endpoints (plus the CSV
-   preview endpoint) go through `routes/_shared.py::read_upload_capped()`, which rejects (413)
-   anything over 20 MB instead of buffering an unbounded request body into memory first, and are
-   now rate-limited *before* that read runs (not after — an independent-review finding: the
-   original ordering meant `run_owned_db_call`'s own internal rate-limit check ran only after the
-   file was already fully read into memory; `skip_rate_limit=True` on that call, plus an explicit
-   `_rate_limit()` call before the read, close the gap without double-counting against the same
-   sliding-window bucket — see `test_import_cas_endpoint_consumes_exactly_one_rate_limit_slot`).
-   Two residual, disclosed (not silently assumed solved) gaps found by the same review pass:
+6. **CAS/CSV import have no upload size cap** — was true, now fixed: all three endpoints (CAS
+   import, CSV import, CSV preview) go through `routes/_shared.py::read_upload_capped()`, which
+   rejects (413) anything over 20 MB instead of buffering an unbounded request body into memory
+   first, and are now rate-limited *before* that read runs (not after — an independent-review
+   finding: the original ordering meant `run_owned_db_call`'s own internal rate-limit check ran
+   only after the file was already fully read into memory). A first-pass fix called `_rate_limit()`
+   explicitly ahead of the read at each of the 3 call sites, with `skip_rate_limit=True` passed to
+   `run_owned_db_call()` to avoid double-counting against the same sliding-window bucket — correct,
+   but a second, independent adversarial-review round flagged the *shape* as a footgun for a future
+   4th upload endpoint (the unsafe combination needs no deliberate action to reach; the safe one
+   needs remembering an extra kwarg at a call site physically far from the line it depends on).
+   Consolidated into one `rate_limited_upload()` helper that does both steps as a single call, so
+   a caller can no longer separate them — all 3 endpoints now call this instead of two loose
+   statements. Every one of the 3 endpoints (not just import-cas, the first-pass fix's original
+   target) now has its own `test_..._consumes_exactly_one_rate_limit_slot` regression test.
+   Two residual, disclosed (not silently assumed solved) gaps found by the same review passes:
    - A small, tightly-compressed malicious `.xlsx` within the 20 MB cap could still decompress
      into a very large in-memory DataFrame via `pandas.read_excel` (a "zip bomb" on the upload
      path) — the size cap bounds the *transport*, not the *decompressed* size. Worth a follow-up
@@ -283,7 +290,16 @@ that no client can rely on a uniform rule.
   permanently masquerade as "already sent" and silently drop a real alert forever — pruned to 3
   days' retention each run regardless, since only "today" is ever read. The corresponding cron
   workflow also gained a `concurrency` guard (see Engineering debt) as a second, independent layer
-  against the same failure mode.
+  against the same failure mode. This claim-before-send fix itself shipped with one more real gap,
+  caught by a third review round: `_claim_alert_keys()` returned its local `claimed` set
+  unconditionally, even when `state_store.mutate()`'s own transaction failed *after* the callback
+  that populates `claimed` had already run (a connection blip, a serialization error) — `mutate()`
+  correctly returns `None` on that failure, meaning the claim was never actually persisted, but the
+  function still reported those keys as claimed and `run()` sent the email anyway. A later run's DB
+  read would then show them as still unclaimed, reintroducing the exact duplicate-send this whole
+  mechanism exists to prevent, via a DB-failure window instead of a concurrency window. Fixed:
+  `_claim_alert_keys()` now returns an empty set whenever `mutate()` itself returns `None`,
+  regardless of what the callback's side effect populated.
 - **Corporate-actions/EOD-price scraper drift detection has real gaps** — see Data model's #3
   above for the precise mechanism on both `eod_prices_pipeline` (partial/optional-column drift
   uncaught) and `corporate_actions_pipeline` (near-total silent-failure blind spot).

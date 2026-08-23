@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from fastapi import HTTPException
 
@@ -10,7 +11,7 @@ import api  # noqa: F401  -- import before routes._shared to avoid a circular
 # importing, that watchlist-> _shared import happens while _shared is still
 # mid-initialization and fails. Every other test module that touches
 # routes/_shared goes through `import api` first for the same reason.
-from routes._shared import read_upload_capped
+from routes._shared import rate_limited_upload, read_upload_capped
 
 
 class _FakeUploadFile:
@@ -67,6 +68,53 @@ class ReadUploadCappedTest(unittest.TestCase):
 
         asyncio.run(read_upload_capped(_RecordingFile(b"x" * 5), max_bytes=1000))
         self.assertEqual(requested_sizes, [1001])
+
+
+class RateLimitedUploadTest(unittest.TestCase):
+    """rate_limited_upload() couples the rate-limit check to the capped
+    read as one call -- see its own docstring for why (an adversarial-
+    review finding on the 3 upload endpoints that used to do these as two
+    separate statements)."""
+
+    def test_calls_rate_limit_before_reading_the_file(self) -> None:
+        # If the rate limit rejects the request, the file must never be
+        # read at all -- not read-then-discarded.
+        read_calls: list[int] = []
+
+        class _CountingFile(_FakeUploadFile):
+            async def read(self, size: int = -1) -> bytes:
+                read_calls.append(size)
+                return await super().read(size)
+
+        with patch("routes._shared.api._rate_limit", side_effect=HTTPException(status_code=429)):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(rate_limited_upload(
+                    request=object(), rate_limit_name="test_bucket", max_calls=10,
+                    file=_CountingFile(b"x" * 5),
+                ))
+        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertEqual(read_calls, [])
+
+    def test_reads_the_file_after_rate_limit_passes(self) -> None:
+        data = b"hello world"
+        fake_request = object()
+        with patch("routes._shared.api._rate_limit") as rate_limit:
+            result = asyncio.run(rate_limited_upload(
+                request=fake_request, rate_limit_name="test_bucket", max_calls=10,
+                file=_FakeUploadFile(data), max_bytes=1000,
+            ))
+        rate_limit.assert_called_once_with(
+            fake_request, "test_bucket", max_calls=10, window_seconds=60)
+        self.assertEqual(result, data)
+
+    def test_still_enforces_the_upload_cap_after_rate_limit_passes(self) -> None:
+        with patch("routes._shared.api._rate_limit"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(rate_limited_upload(
+                    request=object(), rate_limit_name="test_bucket", max_calls=10,
+                    file=_FakeUploadFile(b"x" * 101), max_bytes=100,
+                ))
+        self.assertEqual(ctx.exception.status_code, 413)
 
 
 if __name__ == "__main__":

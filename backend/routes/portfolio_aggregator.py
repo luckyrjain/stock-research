@@ -17,7 +17,7 @@ from datetime import date as _date
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from routes._shared import read_upload_capped, run_owned_db_call
+from routes._shared import rate_limited_upload, run_owned_db_call
 
 router = APIRouter(prefix="/api/portfolio")
 
@@ -519,14 +519,11 @@ async def import_cas_endpoint(
 ):
     import api
 
-    # Rate-limited before the file is read, not after — the same "cheap
-    # check first" ordering api._require_api_key_user() uses, so a flood of
-    # requests each carrying a near-cap file doesn't each pay the read cost
-    # before ever getting a 429. skip_rate_limit=True below avoids
-    # double-counting this same check against run_owned_db_call's own
-    # internal one (see that function's docstring).
-    api._rate_limit(request, "portfolio_agg_write", max_calls=60, window_seconds=60)
-    pdf_bytes = await read_upload_capped(file)
+    # rate_limited_upload() couples the rate-limit check to the file read
+    # so they can't be separated by a future edit — see that function's own
+    # docstring. skip_rate_limit=True below avoids double-counting this
+    # same check against run_owned_db_call's own internal one.
+    pdf_bytes = await rate_limited_upload(request, "portfolio_agg_write", 60, file)
 
     def _sync() -> dict:
         from portfolio.cas_import import archive_parsed, import_cas, parse_cas
@@ -550,9 +547,7 @@ async def import_cas_endpoint(
 async def import_csv_preview(request: Request, file: UploadFile = File(...)):
     import api
 
-    # Same "rate-limit before reading the upload" ordering as import-cas above.
-    api._rate_limit(request, "portfolio_agg_write", max_calls=60, window_seconds=60)
-    file_bytes = await read_upload_capped(file)
+    file_bytes = await rate_limited_upload(request, "portfolio_agg_write", 60, file)
     filename = file.filename or ""
 
     def _sync() -> dict:
@@ -583,9 +578,7 @@ async def import_csv_endpoint(
 ):
     import api
 
-    # Same "rate-limit before reading the upload" ordering as import-cas above.
-    api._rate_limit(request, "portfolio_agg_write", max_calls=60, window_seconds=60)
-    file_bytes = await read_upload_capped(file)
+    file_bytes = await rate_limited_upload(request, "portfolio_agg_write", 60, file)
     filename = file.filename or ""
     from portfolio.csv_import import REQUIRED_FIELDS
 

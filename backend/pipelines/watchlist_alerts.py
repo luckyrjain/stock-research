@@ -58,7 +58,17 @@ def _claim_alert_keys(today: str, keys: set[str]) -> set[str]:
     then race to record it — by which point the duplicate has already gone
     out. Claiming first closes that window: only one caller's `mutate()`
     can ever see a given key as unclaimed, so at most one of two racing
-    callers is ever told to send it."""
+    callers is ever told to send it.
+
+    Fails closed on any storage error: if `state_store.mutate()`'s own
+    transaction fails after `_claim` already ran (a connection blip, a
+    serialization error) it returns `None` — the write never actually
+    committed, so the local `claimed` set populated as `_claim`'s side
+    effect would otherwise report keys as claimed that were never really
+    recorded, letting a later run re-claim (and re-send) them for real.
+    Adversarial-review finding: an earlier version of this function
+    returned the side-effect set unconditionally, regardless of whether
+    `mutate()` itself succeeded."""
     if not keys:
         return set()
     claimed: set[str] = set()
@@ -68,8 +78,8 @@ def _claim_alert_keys(today: str, keys: set[str]) -> set[str]:
         claimed.update(keys - existing)
         return {"keys": sorted(existing | keys)}
 
-    state_store.mutate(_ALERTED_NAMESPACE, today, _claim, default={"keys": []})
-    return claimed
+    result = state_store.mutate(_ALERTED_NAMESPACE, today, _claim, default={"keys": []})
+    return claimed if result is not None else set()
 
 
 def _release_alert_keys(today: str, keys: set[str]) -> None:
