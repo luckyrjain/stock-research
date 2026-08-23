@@ -2377,10 +2377,11 @@ endpoints) to warrant its own module from the start.
    then `positions.py`/`portfolio_aggregator.py`); each router's own module docstring explains
    why. `unittest.mock.patch(...)` test targets moved to match — e.g.
    `patch("routes.positions._get_db_engine", ...)`, not `patch("api._get_db_engine", ...)`,
-   for anything routed through `positions.py`. The one exception: `positions.py`'s
-   `get_portfolio_concentration()` still does a local `import api` for
-   `api._fetch_live_price_sync()`, which has no home in `_shared.py` — a genuine cross-module
-   call, not this same primitives-duplication pattern.
+   for anything routed through `positions.py`. `_fetch_live_price_sync()` (the one function
+   `get_portfolio_concentration()` used to reach into `api` for via a local `import api`) now
+   lives in `_shared.py` too, since it has no dependency on `api.py`'s own app/state — `api.py`
+   itself now imports it back from `_shared.py`, the same direction every other primitive here
+   already goes.
 3. `routes/_shared.py::run_owned_db_call(request, rate_limit_name, max_calls, sync_fn,
    event_prefix)` is the extracted wrapper itself — the repeated rate-limit/DATABASE_URL-
    check/executor/sanitize-error shape most of these domains' CRUD endpoints now call

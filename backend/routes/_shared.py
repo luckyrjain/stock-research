@@ -38,6 +38,35 @@ def _bearer_token_from_request(request: Request) -> str | None:
     return None
 
 
+def _fetch_live_price_sync(sym: str) -> dict:
+    """LTP + day change% for one NSE/BSE symbol via yfinance, trying the .NS
+    then .BO suffix. Returns {} (never raises) if neither resolves — shared by
+    GET /api/prices (bulk), GET /api/verdict-history/{symbol} (single-symbol,
+    for scoring past verdicts against today's price), and
+    GET /api/portfolio/concentration (routes/positions.py)."""
+    import yfinance as yf
+    for suffix in (".NS", ".BO"):
+        # Each suffix attempt is independently guarded — a genuine BSE-only
+        # symbol (never listed on NSE, or delisted from it) can make the
+        # .NS attempt raise outright rather than just return empty data; a
+        # shared try/except around the whole loop would abort before .BO is
+        # even tried, silently losing a real, resolvable price.
+        try:
+            fi = yf.Ticker(sym + suffix).fast_info
+            price = getattr(fi, "last_price", None)
+            prev  = getattr(fi, "previous_close", None)
+            if price and price > 0:
+                # None (never a fabricated 0.0 "flat today") when prev isn't
+                # available — same "never invent" convention as everywhere
+                # else in this codebase; a real flat day and a missing
+                # previous-close aren't the same fact.
+                chg = round((price - prev) / prev * 100, 2) if prev else None
+                return {"price": round(price, 2), "change_pct": chg}
+        except Exception:
+            continue
+    return {}
+
+
 # ── Cached DB engine ──────────────────────────────────────────────────────────
 _DB_ENGINE = None
 _DB_ENGINE_LOCK = threading.Lock()

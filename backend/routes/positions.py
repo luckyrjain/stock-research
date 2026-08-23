@@ -7,12 +7,10 @@ rather than redefining its own copy of identity-resolution logic that isn't
 actually watchlist-specific.
 
 Imports its shared primitives (`_get_db_engine`, `_bearer_token_from_request`,
-`_TICKER_RE`, `LOGGER`, `log_event`) from routes/_shared.py rather than
-reaching into `api` for them — see routes/watchlist.py's own docstring for
-why (a real dependency, not the ordering-coincidence `import api` used to
-be). `get_portfolio_concentration()` still does a local `import api` for
-`api._fetch_live_price_sync()`, which has no home in _shared.py — that's a
-genuine cross-module call, not this same primitives-duplication pattern.
+`_TICKER_RE`, `LOGGER`, `log_event`, `_fetch_live_price_sync`) from
+routes/_shared.py rather than reaching into `api` for them — see
+routes/watchlist.py's own docstring for why (a real dependency, not the
+ordering-coincidence `import api` used to be).
 """
 from concurrent.futures import ThreadPoolExecutor
 
@@ -23,6 +21,7 @@ from routes._shared import (
     LOGGER,
     _TICKER_RE,
     _bearer_token_from_request,
+    _fetch_live_price_sync,
     _get_db_engine,
     claim_anonymous_rows_sync,
     log_event,
@@ -281,7 +280,6 @@ async def get_portfolio_concentration(request: Request, client_id: str | None = 
     already-cached data only (this table's own rows, GET /api/prices' live
     quote, and the 1h stock_info cache for sector) — never triggers a new
     scrape, and never writes back to market-picks' own scoring/cache."""
-    import api
     from core import cache as _cache
 
     token = _bearer_token_from_request(request)
@@ -301,7 +299,7 @@ async def get_portfolio_concentration(request: Request, client_id: str | None = 
         # _fetch_valuation_percentile() uses for its own per-stock fan-out).
         live_prices: dict[str, float] = {}
         with ThreadPoolExecutor(max_workers=8) as pool:
-            for sym, live in zip(symbols, pool.map(api._fetch_live_price_sync, symbols)):
+            for sym, live in zip(symbols, pool.map(_fetch_live_price_sync, symbols)):
                 if live.get("price"):
                     live_prices[sym] = live["price"]
 

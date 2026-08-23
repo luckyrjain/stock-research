@@ -3491,7 +3491,7 @@ class PortfolioConcentrationEndpointTest(unittest.TestCase):
         fake_engine.connect.return_value = _FakeConn([rows_result])
 
         with patch("routes.positions._get_db_engine", return_value=fake_engine), \
-             patch("api._fetch_live_price_sync", return_value={"price": 3500.0, "change_pct": 1.0}), \
+             patch("routes.positions._fetch_live_price_sync", return_value={"price": 3500.0, "change_pct": 1.0}), \
              patch("core.cache.load", return_value={"sector": "IT"}):
             resp = client.get("/api/portfolio/concentration?client_id=client-abc")
 
@@ -3512,7 +3512,7 @@ class PortfolioConcentrationEndpointTest(unittest.TestCase):
         fake_engine.connect.return_value = _FakeConn([rows_result])
 
         with patch("routes.positions._get_db_engine", return_value=fake_engine), \
-             patch("api._fetch_live_price_sync", return_value={"price": 3500.0, "change_pct": 1.0}), \
+             patch("routes.positions._fetch_live_price_sync", return_value={"price": 3500.0, "change_pct": 1.0}), \
              patch("core.cache.load", return_value=None):
             resp = client.get("/api/portfolio/concentration?client_id=client-abc")
 
