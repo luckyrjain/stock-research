@@ -1730,7 +1730,7 @@ Return ONLY this JSON (no markdown):
                 "trend":            trend["trend"],
                 "trend_delta":      trend["delta"],
                 "current_price":    price,
-                "change_pct":       si.get("change_pct", 0),
+                "change_pct":       si.get("change_pct"),
                 "pe_ratio":         si.get("pe_ratio"),
                 "market_cap_cr":    si.get("market_cap_cr"),
                 "summary":          analysis.get("summary") or rd.get("signal_insight", ""),

@@ -26,3 +26,12 @@ export function setSessionCookieHeader(token: string): string {
 export function clearSessionCookieHeader(): string {
   return `${AUTH_COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax`;
 }
+
+// Forwards this browser's session (if any) to the backend as
+// `Authorization: Bearer <token>` — shared by every proxy route that needs
+// to resolve the caller's identity server-side, same "shared, not
+// re-copied per route" convention as clientIpHeaders() in proxy-headers.ts.
+export function authHeaders(req: Request): Record<string, string> {
+  const token = getSessionTokenFromRequest(req);
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}

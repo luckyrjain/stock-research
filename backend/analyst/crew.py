@@ -410,19 +410,13 @@ _NUMERIC_FIELD_CHECKS = [
 ]
 
 
-def _analysis_numeric_issues(  # pylint: disable=unused-argument
-    data: dict | None, all_data: dict[str, dict] | None, signal_context: dict | None = None,
+def _analysis_numeric_issues(
+    data: dict | None, all_data: dict[str, dict] | None,
 ) -> list[str]:
     """Compares numbers the analyst LLM cites in prose against the actual
     source data, catching transcription errors like a 0.46 dividend yield
     being written as "47%". A 2x-tolerance mismatch is flagged; anything
-    closer is assumed to be legitimate rounding/rephrasing.
-
-    `signal_context` isn't consulted by `_NUMERIC_FIELD_CHECKS` yet (adding
-    RSI/EMA/macro-specific checks there is separate, tracked follow-up
-    work) — it's accepted here so this function's signature doesn't block
-    a future check from reading it, matching `_source_text()`'s own
-    already-wired use of it in `_analysis_support_issues`."""
+    closer is assumed to be legitimate rounding/rephrasing."""
     if data is None or not all_data:
         return []
 
@@ -654,7 +648,7 @@ def _validate_analysis_payload(  # pylint: disable=too-many-return-statements
             )
     support_issues = (
         _analysis_support_issues(data, all_data, signal_context)
-        + _analysis_numeric_issues(data, all_data, signal_context)
+        + _analysis_numeric_issues(data, all_data)
     )
     if support_issues:
         return False, f"Unsupported claims found: {'; '.join(support_issues)}."

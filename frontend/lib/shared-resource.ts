@@ -62,6 +62,13 @@ export function createSharedResource<T>(
   let cache: T | undefined;
   let inFlight: Promise<T> | null = null;
   let generation = 0;
+  // Bumped by every cache write, whether from a resolved fetch or a direct
+  // setCache() (a mutation like toggle()/addPosition()). Lets a fetch that
+  // was already in flight when a same-identity mutation landed detect that
+  // its own (possibly stale/failed-fallback) result is no longer the
+  // freshest thing known and skip overwriting it — generation alone only
+  // fences an identity change (sign-in/out), not a same-identity mutation.
+  let version = 0;
   const listeners = new Set<() => void>();
 
   function notify(): void {
@@ -69,16 +76,19 @@ export function createSharedResource<T>(
   }
 
   async function fetchValue(): Promise<T> {
-    // Captured BEFORE joining/creating the in-flight fetch — a later
-    // refresh()/bumpGeneration() call can advance `generation` while this
-    // fetch is still pending, and the write below must be able to tell.
+    // Both captured BEFORE joining/creating the in-flight fetch — a later
+    // refresh()/bumpGeneration() call can advance `generation`, and a later
+    // setCache() call can advance `version`, while this fetch is still
+    // pending; the write below must be able to tell either happened.
     const myGeneration = generation;
+    const myVersion = version;
     if (!inFlight) {
       inFlight = fetchFn(cache).finally(() => { inFlight = null; });
     }
     const value = await inFlight;
-    if (myGeneration === generation) {
+    if (myGeneration === generation && myVersion === version) {
       cache = value;
+      version++;
       notify();
     }
     // No caller of fetch()/refresh() in this codebase uses the resolved
@@ -102,6 +112,7 @@ export function createSharedResource<T>(
 
   function setCache(value: T): void {
     cache = value;
+    version++;
     notify();
   }
 

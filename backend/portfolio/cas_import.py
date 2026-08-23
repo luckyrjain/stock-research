@@ -170,6 +170,16 @@ def import_cas(engine, parsed: dict, account_id: int) -> dict:
                 "INSERT INTO holdings (asset_id, units) VALUES (:aid, :u) "
                 "ON CONFLICT (asset_id) DO UPDATE SET units = EXCLUDED.units"
             ), {"aid": asset_id, "u": total_units})
+            # A scheme matched across two folios (see the by_amfi/by_isin
+            # backfill above) may have been created `archived=True` off a
+            # single folio's own zero/negative close before a later folio's
+            # positive close was accumulated in here -- reconcile against the
+            # TRUE combined total now that every folio's contribution is in,
+            # rather than trusting whichever folio's close happened to be
+            # seen first at asset-creation time.
+            conn.execute(_update(assets_t)
+                         .where(assets_t.c.id == asset_id)
+                         .values(archived=total_units <= 0))
 
     log_event(LOGGER, "cas_imported", account_id=account_id,
               **{k: v for k, v in summary.items() if k != "warnings"},

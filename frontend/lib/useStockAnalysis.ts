@@ -74,6 +74,11 @@ export function reduceSSEMessage(state: SSEReducerState, msg: SSEMessage): SSERe
       }
       return { errorMessage: msg.message, phase: 'error', closeStream: true };
     }
+    default:
+      // An unrecognized event value (a malformed/future payload the JSON.parse
+      // above can't catch) is a no-op, same as the pre-extraction inline
+      // switch — never crash the SSE handler on an untrusted network payload.
+      return {};
   }
 }
 

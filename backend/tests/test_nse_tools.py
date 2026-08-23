@@ -193,6 +193,16 @@ class ScreenerFallbackQuoteTest(unittest.TestCase):
         with patch("tools.screener_tools._fetch_soup", side_effect=ConnectionError("boom")):
             self.assertIsNone(_screener_fallback_quote("NOSUCH"))
 
+    def test_change_pct_is_null_not_fabricated_zero(self) -> None:
+        # Regression test: this fallback has no real previous-close to compute
+        # a change% from, so change_pct must be None (never invent), matching
+        # _build_quote_payload's own "missing previousClose -> None" fix.
+        soup = self._soup_with_ratios({"Current Price": "120"})
+        with patch("tools.screener_tools._fetch_soup", return_value=soup), \
+             patch("tools.nse_tools._stockanalysis_extra_fields", return_value={}):
+            result = _screener_fallback_quote("CHANDAN")
+        self.assertIsNone(result["change_pct"])
+
 
 class StockanalysisExtraFieldsTest(unittest.TestCase):
     def test_parses_eps_range_and_volume(self) -> None:

@@ -124,6 +124,29 @@ class ImportCasTest(unittest.TestCase):
         self.assertTrue(asset["archived"])
         self.assertEqual(hold_count, [])
 
+    def test_two_folios_same_scheme_closed_folio_first_asset_not_left_archived(self) -> None:
+        # Regression test: a scheme held via two folios (e.g. two SIP
+        # folios) resolves to one asset via the by_amfi/by_isin backfill.
+        # If the folio with a zero closing balance is processed FIRST, the
+        # asset used to be created archived=True and stay that way forever,
+        # even though a later folio's positive balance gave it real units.
+        parsed = {"folios": [
+            {"folio": "F1", "schemes": [
+                _scheme(close=0.0, txns=[_txn("2024-01-01", "PURCHASE"), _txn("2024-06-01", "REDEMPTION")]),
+            ]},
+            {"folio": "F2", "schemes": [
+                _scheme(close=50.0, txns=[_txn("2024-07-01", "PURCHASE")]),
+            ]},
+        ]}
+        result = import_cas(self.engine, parsed, self.account_id)
+        self.assertEqual(result["assets_created"], 1)
+        self.assertEqual(result["assets_matched"], 1)
+        with self.engine.connect() as conn:
+            asset = conn.execute(select(assets)).mappings().first()
+            hold = conn.execute(select(holdings)).mappings().first()
+        self.assertFalse(asset["archived"])
+        self.assertEqual(float(hold["units"]), 50.0)
+
     def test_closed_folio_with_no_transactions_skipped_entirely(self) -> None:
         parsed = {"folios": [{"folio": "F1", "schemes": [_scheme(close=0.0, txns=[])]}]}
         result = import_cas(self.engine, parsed, self.account_id)

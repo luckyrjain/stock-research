@@ -1,4 +1,4 @@
-import { getSessionTokenFromRequest } from '@/lib/auth-cookie';
+import { authHeaders } from '@/lib/auth-cookie';
 import { clientIpHeaders } from '@/lib/proxy-headers';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
@@ -10,16 +10,13 @@ function unavailable() {
   );
 }
 
-// Forwards the session cookie (if any) as a Bearer header alongside the
-// existing client_id passthrough — the backend prefers the account identity
-// when a valid session is present, so a signed-in user transparently sees
-// their account's watchlist across any browser instead of the anonymous
+// Forwards the session cookie (if any) as a Bearer header (see
+// lib/auth-cookie.ts's authHeaders()) alongside the existing client_id
+// passthrough — the backend prefers the account identity when a valid
+// session is present, so a signed-in user transparently sees their
+// account's watchlist across any browser instead of the anonymous
 // per-browser one. A logged-out request simply has no Authorization header
 // and behaves exactly as before.
-function authHeaders(req: Request): Record<string, string> {
-  const token = getSessionTokenFromRequest(req);
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);

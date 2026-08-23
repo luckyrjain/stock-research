@@ -182,28 +182,34 @@ def compute_networth(rows: list[dict]) -> dict:
     return {"total": round(total, 2), "by_type": by_type, "by_account": list(by_account.values())}
 
 
-class ProfileIn(BaseModel):
+class OwnedRequest(BaseModel):
+    """Base for every write-endpoint body below — carries the anonymous
+    browser identity (lib/watchlist.ts's getClientId()) a request resolves
+    against when there's no signed-in session (see resolve_owner()). A
+    shared base rather than each model re-declaring this field means a new
+    write-endpoint model inherits it structurally instead of relying on
+    every author remembering to add it by hand."""
     client_id: str | None = None
+
+
+class ProfileIn(OwnedRequest):
     name: str = Field(min_length=1, max_length=60)
 
 
-class AccountIn(BaseModel):
-    client_id: str | None = None
+class AccountIn(OwnedRequest):
     profile_id: int
     name: str = Field(min_length=1, max_length=120)
     institution: str | None = None
     type: str
 
 
-class AccountPatch(BaseModel):
-    client_id: str | None = None
+class AccountPatch(OwnedRequest):
     name: str | None = None
     institution: str | None = None
     type: str | None = None
 
 
-class AssetIn(BaseModel):
-    client_id: str | None = None
+class AssetIn(OwnedRequest):
     account_id: int
     type: str
     name: str = Field(min_length=1, max_length=200)
@@ -214,8 +220,7 @@ class AssetIn(BaseModel):
     avg_cost: float | None = None
 
 
-class AssetPatch(BaseModel):
-    client_id: str | None = None
+class AssetPatch(OwnedRequest):
     name: str | None = None
     symbol: str | None = None
     meta: dict | None = None
@@ -224,14 +229,12 @@ class AssetPatch(BaseModel):
     avg_cost: float | None = None
 
 
-class ValuationIn(BaseModel):
-    client_id: str | None = None
+class ValuationIn(OwnedRequest):
     value: float = Field(ge=0)
     as_of: _date | None = None
 
 
-class BrokerLoginUrlIn(BaseModel):
-    client_id: str | None = None
+class BrokerLoginUrlIn(OwnedRequest):
     account_id: int
     # This account's own app credentials, registered by whoever owns this
     # broker login (e.g. developers.kite.trade) — never a deployment-wide
@@ -245,25 +248,21 @@ class BrokerLoginUrlIn(BaseModel):
     api_secret: str | None = Field(default=None, min_length=1, max_length=255)
 
 
-class BrokerConnectIn(BaseModel):
-    client_id: str | None = None
+class BrokerConnectIn(OwnedRequest):
     account_id: int
     request_token: str
 
 
-class BrokerSyncIn(BaseModel):
+class BrokerSyncIn(OwnedRequest):
     account_id: int
-    # Optional — the browser's own anonymous identity (lib/watchlist.ts's
-    # getClientId(), same one Watchlist/Positions already use), passed only
-    # so synced holdings can also be mirrored into `positions` (see
-    # portfolio/broker_sync_common.py's upsert_position_from_holding). Never
-    # stored on accounts/profiles themselves — Portfolio Aggregator has no
-    # owner concept otherwise and this doesn't add one.
-    client_id: str | None = None
+    # client_id (from OwnedRequest) is optional here specifically so synced
+    # holdings can also be mirrored into `positions` (see
+    # portfolio/broker_sync_common.py's upsert_position_from_holding) — not
+    # itself an ownership check, since Portfolio Aggregator resolves
+    # ownership via account_id -> profile_id, not this field.
 
 
-class HdfcLoginStartIn(BaseModel):
-    client_id: str | None = None
+class HdfcLoginStartIn(OwnedRequest):
     account_id: int
     # Same both-or-neither shape as BrokerLoginUrlIn — first-time setup
     # supplies the app credentials, a retry after a failed/expired login
@@ -277,8 +276,7 @@ class HdfcLoginStartIn(BaseModel):
     password: str = Field(min_length=1, max_length=255)
 
 
-class HdfcVerifyOtpIn(BaseModel):
-    client_id: str | None = None
+class HdfcVerifyOtpIn(OwnedRequest):
     account_id: int
     otp: str = Field(min_length=1, max_length=20)
 

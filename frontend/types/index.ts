@@ -285,7 +285,7 @@ export interface MarketPick {
   trend: 'rising' | 'falling' | 'stable' | 'new';
   trend_delta: number | null;
   current_price: number | null;
-  change_pct: number;
+  change_pct: number | null;   // null when the source had no previous-close to compute it from
   pe_ratio: number | null;
   market_cap_cr: number | null;
   summary: string;

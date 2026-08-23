@@ -29,7 +29,7 @@ def _norm_exchange_quote(d: dict) -> dict:
         "company_name":       d.get("company_name", ""),
         "current_price":      _pick(d, "current_price", "regularMarketPrice"),
         "previous_close":     d.get("previous_close"),
-        "change_pct":         d.get("change_pct", 0.0),
+        "change_pct":         d.get("change_pct"),
         "volume":             d.get("volume"),
         "avg_volume_10d":     d.get("avg_volume_10d"),
         "market_cap_cr":      d.get("market_cap_cr"),

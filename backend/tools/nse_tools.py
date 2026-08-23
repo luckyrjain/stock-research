@@ -194,21 +194,13 @@ def _screener_fallback_quote(sym: str) -> dict | None:
     track). Supplemented with stockanalysis.com's 52-week range/EPS/volume where
     available.
 
-    Disclosed limitation: Screener's top-ratios widget has no intraday
-    change%, so `change_pct` is set to 0.0 here rather than the more
-    correct `None`. `_build_quote_payload()`'s own identical fallback for
-    the primary yfinance path (line ~93) was fixed to return `None` instead
-    — `frontend/types/index.ts`'s `StockInfo.change_pct` is now `number |
-    null` and its one real consumer (`ExchangeTable` in
-    dashboard-primitives.tsx) already coalesces a missing value to 0 for
-    display, so that change needed no further frontend work. This fallback
-    path is intentionally left as-is: unlike the primary path, there's no
-    real previous-close value to fall back to at all here, so fixing it
-    would need the same display-side null-handling plus a decision about
-    what "flat because unknown" should look like in the UI — tracked here
-    rather than silently left as a "never invent" violation:
-    a stock priced only through this fallback will show as "flat today"
-    even though that's genuinely unknown, not observed."""
+    Screener's top-ratios widget has no intraday change%, so `change_pct` is
+    `None` here (never a fabricated 0.0 "flat today") — same "never invent"
+    convention as `_build_quote_payload()`'s own identical fallback for the
+    primary yfinance path (line ~93). `frontend/types/index.ts`'s
+    `StockInfo.change_pct` is `number | null` and its one real consumer
+    (`ExchangeTable` in dashboard-primitives.tsx) already coalesces a
+    missing value to 0 for display, so this needs no further frontend work."""
     try:
         from tools.screener_tools import _clean, _fetch_soup
         soup = _fetch_soup(sym)
@@ -238,7 +230,7 @@ def _screener_fallback_quote(sym: str) -> dict | None:
             "company_name": h1.get_text(strip=True) if h1 else "",
             "current_price": price,
             "previous_close": None,
-            "change_pct": 0.0,
+            "change_pct": None,
             "volume": None,
             "avg_volume_10d": None,
             "market_cap_cr": _num(ratios.get("Market Cap")),

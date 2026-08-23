@@ -1,4 +1,4 @@
-import { getSessionTokenFromRequest } from '@/lib/auth-cookie';
+import { authHeaders } from '@/lib/auth-cookie';
 import { clientIpHeaders } from '@/lib/proxy-headers';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
@@ -11,13 +11,9 @@ function unavailable() {
 }
 
 // Same pattern as app/api/watchlist/route.ts: forward the session cookie as a
-// Bearer header. Unlike watchlist, there is no anonymous fallback here — key
-// management always requires being signed in, so a missing/invalid session
-// just means the backend returns 401.
-function authHeaders(req: Request): Record<string, string> {
-  const token = getSessionTokenFromRequest(req);
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
+// Bearer header (see lib/auth-cookie.ts's authHeaders()). Unlike watchlist,
+// there is no anonymous fallback here — key management always requires being
+// signed in, so a missing/invalid session just means the backend returns 401.
 
 export async function GET(req: Request) {
   let upstream: Response;
