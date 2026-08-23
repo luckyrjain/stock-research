@@ -31,6 +31,7 @@ from db.models import assets as assets_t
 from db.models import broker_connections as broker_connections_t
 from db.models import holdings as holdings_t
 from db.models import transactions as transactions_t
+from portfolio.portfolio_valuation import upsert_valuation
 
 LOGGER = get_logger("portfolio.broker_sync_common")
 
@@ -189,18 +190,6 @@ def upsert_position_from_holding(
             f"exchange = EXCLUDED.exchange, entry_price = EXCLUDED.entry_price, shares = EXCLUDED.shares"
         ),
         {"owner_value": owner_value, "symbol": symbol, "exchange": exchange, "entry_price": avg_price, "shares": quantity},
-    )
-
-
-def upsert_valuation(conn, asset_id: int, as_of: date, value: Decimal) -> None:
-    # Same raw-SQL upsert shape as portfolio_valuation.py::refresh_valuations()
-    # — one row per (asset_id, as_of), same-day re-sync updates in place.
-    conn.execute(
-        text(
-            "INSERT INTO valuations (asset_id, as_of, value) VALUES (:asset_id, :as_of, :value) "
-            "ON CONFLICT (asset_id, as_of) DO UPDATE SET value = EXCLUDED.value"
-        ),
-        {"asset_id": asset_id, "as_of": as_of, "value": value},
     )
 
 
