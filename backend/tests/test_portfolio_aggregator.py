@@ -339,6 +339,44 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(resp.json()["assets_created"], 1)
 
+    def test_import_cas_endpoint_consumes_exactly_one_rate_limit_slot(self) -> None:
+        # Regression test (adversarial-review finding): the upload cap was
+        # added ahead of run_owned_db_call's own internal rate-limit check,
+        # which already rate-limits every call to this endpoint. A naive
+        # fix that called _rate_limit() a second time with the SAME bucket
+        # name before reading the file would silently consume two slots per
+        # request from one sliding window, halving the effective per-minute
+        # limit without changing the advertised max_calls anywhere.
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        # _mk_profile/_mk_account above already consumed their own slots
+        # from this same shared "portfolio_agg_write" bucket (every
+        # portfolio-aggregator write endpoint shares one rate-limit pool) --
+        # measure the DELTA from this one import-cas call, not the raw count.
+        before = len(rate_limiter._memory_calls.get("portfolio_agg_write:testclient", []))
+        parsed = {"cas_type": "DETAILED", "folios": []}
+        with patch("portfolio.cas_import.parse_cas", return_value=parsed):
+            resp = client.post(
+                "/api/portfolio/import-cas",
+                files={"file": ("cas.pdf", b"fake", "application/pdf")},
+                data={"password": "pw", "account_id": acc},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        after = len(rate_limiter._memory_calls.get("portfolio_agg_write:testclient", []))
+        self.assertEqual(after - before, 1)
+
+    def test_import_cas_endpoint_is_still_rate_limited(self) -> None:
+        # Confirms skip_rate_limit=True didn't disable rate limiting
+        # entirely -- the endpoint calls it explicitly itself instead.
+        acc = self._mk_account(self._mk_profile())
+        rate_limiter._memory_calls["portfolio_agg_write:testclient"] = [rate_limiter.time.monotonic()] * 60
+        resp = client.post(
+            "/api/portfolio/import-cas",
+            files={"file": ("cas.pdf", b"fake", "application/pdf")},
+            data={"password": "pw", "account_id": acc},
+        )
+        self.assertEqual(resp.status_code, 429)
+
     # ── CSV import ───────────────────────────────────────────────────────────
 
     def test_import_csv_preview_returns_headers_and_suggestion(self) -> None:

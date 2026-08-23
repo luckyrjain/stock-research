@@ -184,9 +184,18 @@ class ImportCasTest(unittest.TestCase):
         with self.engine.connect() as conn:
             asset_rows = conn.execute(select(assets)).mappings().fetchall()
             txn_rows = conn.execute(select(transactions)).mappings().fetchall()
+            hold = conn.execute(select(holdings)).mappings().first()
         self.assertEqual(len(asset_rows), 1)
         self.assertEqual(len(txn_rows), 2)
         self.assertTrue(all(t["asset_id"] == asset_rows[0]["id"] for t in txn_rows))
+        # Regression test: each folio's own holdings write used to run
+        # per-folio via a plain "ON CONFLICT DO UPDATE SET units =
+        # EXCLUDED.units" upsert -- once both folios resolved to the same
+        # asset (the fix above), that overwrote rather than summed, so the
+        # final stored total was only the LAST-processed folio's balance
+        # (30.0) instead of the true combined holding across both folios
+        # (50.0 + 30.0 = 80.0), silently losing units.
+        self.assertEqual(float(hold["units"]), 80.0)
 
     def test_matches_existing_asset_by_amfi_and_backfills_isin(self) -> None:
         from sqlalchemy import insert

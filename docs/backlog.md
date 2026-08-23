@@ -77,12 +77,29 @@ Nothing on that rejected list should be proposed or scaffolded without the human
    now call `_rate_limit()` (60/min per IP), matching every neighboring auth endpoint.
 6. **CAS/CSV import have no upload size cap** — was true, now fixed: both endpoints (plus the CSV
    preview endpoint) go through `routes/_shared.py::read_upload_capped()`, which rejects (413)
-   anything over 20 MB instead of buffering an unbounded request body into memory first. A residual,
-   unaddressed risk: a small, tightly-compressed malicious `.xlsx` within that cap could still
-   decompress into a very large in-memory DataFrame via `pandas.read_excel` (a "zip bomb" on the
-   upload path) — the size cap bounds the *transport*, not the *decompressed* size. Worth a
-   follow-up (e.g. a row-count ceiling in `csv_import.parse_broker_file`) if this is ever exposed
-   beyond a trusted operator.
+   anything over 20 MB instead of buffering an unbounded request body into memory first, and are
+   now rate-limited *before* that read runs (not after — an independent-review finding: the
+   original ordering meant `run_owned_db_call`'s own internal rate-limit check ran only after the
+   file was already fully read into memory; `skip_rate_limit=True` on that call, plus an explicit
+   `_rate_limit()` call before the read, close the gap without double-counting against the same
+   sliding-window bucket — see `test_import_cas_endpoint_consumes_exactly_one_rate_limit_slot`).
+   Two residual, disclosed (not silently assumed solved) gaps found by the same review pass:
+   - A small, tightly-compressed malicious `.xlsx` within the 20 MB cap could still decompress
+     into a very large in-memory DataFrame via `pandas.read_excel` (a "zip bomb" on the upload
+     path) — the size cap bounds the *transport*, not the *decompressed* size. Worth a follow-up
+     (e.g. a row-count ceiling in `csv_import.parse_broker_file`) if this is ever exposed beyond a
+     trusted operator.
+   - The 20 MB figure is currently aspirational for files between 1 MB and 20 MB: FastAPI's
+     automatic `UploadFile = File(...)` injection parses the multipart body via Starlette's own
+     `request.form()`, which enforces its own hardcoded `max_part_size` (1 MB, in the installed
+     Starlette version) *before* `read_upload_capped()` — or any endpoint code — ever runs, with no
+     way to override it through the declarative `File(...)` marker. A file in that range gets
+     Starlette's generic 400 instead of this function's friendlier 413. Not a security regression
+     (the real ceiling is *tighter* than advertised, not looser), but the stated cap doesn't fully
+     hold — closing it needs rewriting the 3 upload endpoints to call
+     `request.form(max_part_size=...)` manually instead of relying on FastAPI's automatic
+     injection, a larger, separate change not attempted here. See `routes/_shared.py`'s own
+     disclosure next to `read_upload_capped()`.
 7. **No security headers on the Next.js frontend** — was true, now fixed: `next.config.ts` sets
    `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy:
    strict-origin-when-cross-origin` on every response. Deliberately not a full Content-Security-
@@ -149,9 +166,19 @@ Ordered by consequence. None are live bugs today.
    for the same scheme instead of matching the one the import itself just created, splitting that
    scheme's holdings/XIRR across two rows. `import_cas()` now backfills both lookup dicts
    immediately on insert (the same pattern `csv_import.py` already used correctly). Fixing this
-   also surfaced a compounding bug: `_write_transactions()`'s per-folio delete-then-insert would
-   have wiped out an earlier folio's just-inserted rows for the same now-correctly-matched asset —
-   fixed alongside it (delete only once per asset per `import_cas()` call, not once per folio).
+   also surfaced two further compounding bugs, both fixed alongside it in the same pass:
+   `_write_transactions()`'s per-folio delete-then-insert would have wiped out an earlier folio's
+   just-inserted rows for the same now-correctly-matched asset (fixed: delete only once per asset
+   per `import_cas()` call, not once per folio) — and, caught one round later by an independent
+   adversarial-review pass on this same fix, the `holdings` upsert ran once per folio via a plain
+   `ON CONFLICT DO UPDATE SET units = EXCLUDED.units`, which now *overwrites* rather than sums once
+   both folios resolve to the same asset: a scheme genuinely held across two folios with real
+   non-zero balances in each (the exact scenario this fix targets) silently lost the
+   first-processed folio's units, keeping only the last-processed folio's balance as the final
+   stored total. Fixed by accumulating each asset's closing balance across all its folios during
+   the loop and upserting the summed total once per asset afterward, not once per folio —
+   regression-tested (`test_same_scheme_across_two_folios_in_one_statement_is_one_asset` now
+   asserts the summed `holdings.units`, not just asset/transaction counts).
 8. **`DELETE /api/portfolio/accounts/{id}` doesn't pre-check `broker_connections` before
    deleting**, unlike its existing `assets` pre-check (422 on a non-empty account). An account with
    a registered/connected broker but zero assets yet hits an unhandled `IntegrityError` on the
@@ -243,12 +270,20 @@ that no client can rely on a uniform rule.
   `pipelines/watchlist_alerts.py` had no record of "this (user, symbol, verdict_date, kind) alert
   was already emailed" — a second run on the same day (a `workflow_dispatch` retry, a manual
   `--force` rerun while `cache.is_fresh()` was still true) recomputed the identical
-  "yesterday → today" diff and resent the exact same digest. `run()` now checks/records sent keys
-  under a new `watchlist_alerts_sent` `app_state` namespace (keyed by date, guarded with
-  `state_store.mutate()` so two overlapping runs can't clobber each other's recorded keys, pruned
-  to 3 days' retention each run since only "today" is ever read) before including an alert in a
-  user's digest. The corresponding cron workflow also gained a `concurrency` guard (see
-  Engineering debt) as a second, independent layer against the same failure mode.
+  "yesterday → today" diff and resent the exact same digest. `run()` now atomically *claims* each
+  key against a `watchlist_alerts_sent` `app_state` namespace (keyed by date) via
+  `_claim_alert_keys()` — a `state_store.mutate()` call returning only the subset NOT already
+  claimed by another run — **before** sending, not after. An earlier version of this same fix (the
+  prior deep-review pass) checked "already sent" up front and recorded the sent keys only
+  afterward; an independent adversarial-review pass on that fix caught that this ordering still
+  can't prevent two genuinely concurrent runs from both reading "not yet sent" and both dispatching
+  the same email before either recorded it. Claiming first closes that window: at most one of two
+  racing `mutate()` calls can ever see a given key as unclaimed. If the claimed batch's send then
+  fails (SMTP down), the keys are released (`_release_alert_keys()`) so a transient failure doesn't
+  permanently masquerade as "already sent" and silently drop a real alert forever — pruned to 3
+  days' retention each run regardless, since only "today" is ever read. The corresponding cron
+  workflow also gained a `concurrency` guard (see Engineering debt) as a second, independent layer
+  against the same failure mode.
 - **Corporate-actions/EOD-price scraper drift detection has real gaps** — see Data model's #3
   above for the precise mechanism on both `eod_prices_pipeline` (partial/optional-column drift
   uncaught) and `corporate_actions_pipeline` (near-total silent-failure blind spot).
@@ -296,7 +331,16 @@ pass. Still open — most in `design.md` §10/§12:
   parsed body — `GET /api/validate/{symbol}` returns `{found:false, valid:false}` with a real 503
   status when the backend is down, and the ignored status meant that read identically to a
   genuinely invalid ticker. Now checks `res.ok` first and routes a non-2xx response to the
-  existing, distinct `'error'` state instead.
+  existing, distinct `'error'` state instead. This fix itself shipped with a real regression, caught
+  one round later by an independent adversarial-review pass: `selectSuggestion()` (the "Also try"
+  suggestion row) calls `validate()` directly without first resetting `validSymbol.current`, unlike
+  `handleChange()` — so a stale symbol from a *prior* successful validation could survive into the
+  new `'error'` branch and still fire on pressing Enter, silently analysing the wrong stock while
+  the UI showed a connection-error message for a different one. Fixed by clearing
+  `validSymbol.current` unconditionally at the top of `validate()` (not just in the branches that
+  already did), plus a defense-in-depth `status === 'valid'` check added to the Enter-key handler
+  (matching the CTA button's own pre-existing, correct `disabled={status !== 'valid'}` gating).
+  Regression-tested end-to-end in `e2e/home.spec.ts` (confirmed to fail against the pre-fix code).
 - **No `error.tsx`/`global-error.tsx` anywhere under `app/`.** Any render-time exception from a
   wrong-*type* (not just missing) field — e.g. an unexpected SSE payload shape, since
   `lib/useStockAnalysis.ts` parses `JSON.parse(e.data) as SSEMessage` with no runtime shape
@@ -317,7 +361,9 @@ pass. Still open — most in `design.md` §10/§12:
   `UNKNOWN` signal by the backend's own convention) — a UI-layer fix for a real, visible instance
   of this product's own "Data > Opinion... missing is null, never a guessed value" principle being
   violated at the last mile, independent of the backend-level `signals/*.py` gap already tracked
-  in `feature-catalog.md`'s Known Gaps.
+  in `feature-catalog.md`'s Known Gaps. Regression-tested in `e2e/home.spec.ts` (confirmed to fail
+  against the pre-fix code) — this closes the "zero test coverage" gap noted below for this
+  specific fix, though `frontend/lib/*.ts` unit-test coverage (Engineering debt, above) remains open.
 
 ---
 

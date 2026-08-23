@@ -15,7 +15,14 @@ from routes._shared import read_upload_capped
 
 class _FakeUploadFile:
     """Minimal async-read stand-in for fastapi.UploadFile — only the
-    `.read(size)` chunked-read shape read_upload_capped() actually uses."""
+    `.read(size)` chunked-read shape read_upload_capped() actually uses.
+
+    Deliberately has no cursor/stream position, unlike a real UploadFile —
+    `.read(size)` always slices from byte 0. Safe only because
+    read_upload_capped() calls `.read()` exactly once per invocation; if it
+    (or any other caller) is ever changed to read in a loop, this fake would
+    silently return the same prefix every time instead of advancing, and
+    would need real cursor tracking to keep testing the real thing."""
 
     def __init__(self, data: bytes) -> None:
         self._data = data

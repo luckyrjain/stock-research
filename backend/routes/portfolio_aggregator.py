@@ -517,10 +517,18 @@ async def import_cas_endpoint(
     password: str = Form(...),
     account_id: int = Form(...),
 ):
+    import api
+
+    # Rate-limited before the file is read, not after — the same "cheap
+    # check first" ordering api._require_api_key_user() uses, so a flood of
+    # requests each carrying a near-cap file doesn't each pay the read cost
+    # before ever getting a 429. skip_rate_limit=True below avoids
+    # double-counting this same check against run_owned_db_call's own
+    # internal one (see that function's docstring).
+    api._rate_limit(request, "portfolio_agg_write", max_calls=60, window_seconds=60)
     pdf_bytes = await read_upload_capped(file)
 
     def _sync() -> dict:
-        import api
         from portfolio.cas_import import archive_parsed, import_cas, parse_cas
         from portfolio.portfolio_valuation import refresh_valuations
 
@@ -534,11 +542,16 @@ async def import_cas_endpoint(
         refresh_valuations(api._get_db_engine())
         return result
 
-    return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
+    return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write",
+                                    skip_rate_limit=True)
 
 
 @router.post("/import-csv/preview")
 async def import_csv_preview(request: Request, file: UploadFile = File(...)):
+    import api
+
+    # Same "rate-limit before reading the upload" ordering as import-cas above.
+    api._rate_limit(request, "portfolio_agg_write", max_calls=60, window_seconds=60)
     file_bytes = await read_upload_capped(file)
     filename = file.filename or ""
 
@@ -556,7 +569,8 @@ async def import_csv_preview(request: Request, file: UploadFile = File(...)):
             "detected": suggestion["detected"],
         }
 
-    return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
+    return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write",
+                                    skip_rate_limit=True)
 
 
 @router.post("/import-csv")
@@ -567,6 +581,10 @@ async def import_csv_endpoint(
     account_id: int = Form(...),
     broker: str = Form(...),
 ):
+    import api
+
+    # Same "rate-limit before reading the upload" ordering as import-cas above.
+    api._rate_limit(request, "portfolio_agg_write", max_calls=60, window_seconds=60)
     file_bytes = await read_upload_capped(file)
     filename = file.filename or ""
     from portfolio.csv_import import REQUIRED_FIELDS
@@ -580,7 +598,6 @@ async def import_csv_endpoint(
         raise HTTPException(status_code=422, detail=f"mapping missing required field(s): {missing}")
 
     def _sync() -> dict:
-        import api
         from portfolio.csv_import import import_rows, parse_broker_file
         from portfolio.portfolio_valuation import refresh_valuations
 
@@ -594,7 +611,8 @@ async def import_csv_endpoint(
         refresh_valuations(api._get_db_engine())
         return result
 
-    return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
+    return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write",
+                                    skip_rate_limit=True)
 
 
 def _require_supported_broker(broker: str) -> None:

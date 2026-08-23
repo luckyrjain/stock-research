@@ -2672,15 +2672,22 @@ anonymous `client_id` row has no email to notify and is excluded at the query le
 5. **Same-day dedup, so a re-run never resends a digest.** `save_snapshot()` upserts *today's*
    `verdict_history` row (point 2), so a second run on the same day — a `workflow_dispatch` retry,
    a manual `--force` rerun while `cache.is_fresh()` was still true — used to recompute the
-   identical "yesterday → today" diff and resend the exact same digest. `run()` now checks/records
-   sent `(user_id, symbol, kind)` keys against a `watchlist_alerts_sent` namespace in
-   `core/state_store.py`, keyed by date and guarded with `state_store.mutate()` (not
-   load()-then-save()) so two overlapping runs can't clobber each other's recorded keys — pruned
-   to 3 days' retention each run, since only "today" is ever read. A user whose digest included
-   some already-sent and some genuinely-new alerts only gets the new ones; a user with nothing new
-   gets no email at all. `.github/workflows/watchlist-alerts-cron.yml` also gained a `concurrency`
-   guard to stop two runs from overlapping in the first place — belt and suspenders, not
-   either/or.
+   identical "yesterday → today" diff and resend the exact same digest. `run()` now atomically
+   *claims* each `(user_id, symbol, kind)` key against a `watchlist_alerts_sent` namespace in
+   `core/state_store.py` (keyed by date) via `_claim_alert_keys()` — a `state_store.mutate()` call
+   that returns only the subset of keys NOT already claimed by another run — **before** sending,
+   not after. An earlier version of this guard checked "already sent" up front and only recorded
+   the newly-sent keys afterward; an own-adversarial-review pass caught that this ordering can't
+   actually prevent two genuinely concurrent runs from both reading "not yet sent" and both
+   dispatching the same email before either recorded it — claiming first closes that window, since
+   at most one of two racing `mutate()` calls can ever see a given key as unclaimed. A user whose
+   digest included some already-claimed and some newly-claimed alerts only gets the new ones; a
+   user with nothing new gets no email at all. If `send_watchlist_alert_email()` itself then fails
+   (SMTP down), the just-claimed keys are released (`_release_alert_keys()`) so a transient failure
+   doesn't permanently look like "already sent" and silently drop a real alert forever — pruned to
+   3 days' retention each run regardless, since only "today" is ever read.
+   `.github/workflows/watchlist-alerts-cron.yml` also gained a `concurrency` guard to stop two runs
+   from overlapping in the first place — belt and suspenders, not either/or.
 6. `core/email_sender.py` gained a second message builder/sender pair —
    `send_watchlist_alert_email(to_email, alerts)` — alongside the existing magic-link one; both
    now share one `_send_via_smtp()` helper (extracted, not duplicated) for the connect/STARTTLS/

@@ -92,6 +92,15 @@ def import_cas(engine, parsed: dict, account_id: int) -> dict:
         # folio's just-inserted rows for the same asset before this
         # transaction commits.
         cas_rows_cleared: set[int] = set()
+        # Same reasoning applies to holdings.units: a scheme genuinely held
+        # via two folios (two SIP folios, a post-merger split) now resolves
+        # to one asset, but each folio still reports its OWN closing
+        # balance — the true total is their sum, not either one alone.
+        # Accumulated here and upserted once per asset after the loop
+        # (rather than once per folio inside it) so a second folio's write
+        # can't clobber the first folio's contribution via the plain
+        # "SET units = EXCLUDED.units" upsert.
+        holdings_close_by_asset: dict[int, float] = {}
 
         for folio in parsed.get("folios", []):
             for scheme in folio.get("schemes", []):
@@ -149,15 +158,18 @@ def import_cas(engine, parsed: dict, account_id: int) -> dict:
                         by_isin[isin] = new_row
 
                 if close > 0:
-                    conn.execute(_text(
-                        "INSERT INTO holdings (asset_id, units) VALUES (:aid, :u) "
-                        "ON CONFLICT (asset_id) DO UPDATE SET units = EXCLUDED.units"
-                    ), {"aid": asset_id, "u": close})
+                    holdings_close_by_asset[asset_id] = holdings_close_by_asset.get(asset_id, 0.0) + close
 
                 summary["transactions"] += _write_transactions(
                     conn, asset_id, folio.get("folio"), txns, summary,
                     clear_existing=asset_id not in cas_rows_cleared)
                 cas_rows_cleared.add(asset_id)
+
+        for asset_id, total_units in holdings_close_by_asset.items():
+            conn.execute(_text(
+                "INSERT INTO holdings (asset_id, units) VALUES (:aid, :u) "
+                "ON CONFLICT (asset_id) DO UPDATE SET units = EXCLUDED.units"
+            ), {"aid": asset_id, "u": total_units})
 
     log_event(LOGGER, "cas_imported", account_id=account_id,
               **{k: v for k, v in summary.items() if k != "warnings"},

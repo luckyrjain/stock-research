@@ -213,6 +213,112 @@ test.describe('Home page', () => {
     await expect(page.getByText('Connection to server lost. Please try again.')).toHaveCount(0);
   });
 
+  test('a stale valid symbol cannot be analysed after picking a suggestion that then errors', async ({ page }) => {
+    // Regression test (adversarial-review finding): selectSuggestion() calls
+    // validate() directly without first resetting validSymbol.current (unlike
+    // handleChange(), which always does). If that validate() call then hit
+    // the 'error' branch (a non-2xx /api/validate response), the PRIOR
+    // symbol's still-truthy validSymbol.current survived into the new error
+    // state -- so pressing Enter silently analysed the old symbol instead of
+    // doing nothing, even though the UI showed a connection-error message
+    // for a different symbol. validate() now clears validSymbol.current
+    // unconditionally up front, and the Enter-key handler also requires
+    // status === 'valid' as defense in depth.
+    const symbol = 'TCS';
+    const suggestion = 'TCSALT';
+
+    await page.route(`**/api/validate/${symbol}`, route =>
+      route.fulfill({
+        json: { ...validationResult(symbol), suggestions: [{ symbol: suggestion, company: 'TCS Alt Ltd', exchange: 'NSE' }] },
+      }));
+    await page.route(`**/api/validate/${suggestion}`, route => route.fulfill({ status: 503, json: {} }));
+
+    let analyseRequested = false;
+    await page.route(`**/api/analyse/${symbol}**`, route => {
+      analyseRequested = true;
+      return route.fulfill({ status: 200, headers: SSE_HEADERS, body: sseAnalysisBody(symbol) });
+    });
+
+    await page.goto('/');
+    const input = page.getByLabel('NSE or BSE stock ticker');
+    await input.fill(symbol);
+    await expect(page.getByText(validationResult(symbol).company)).toBeVisible({ timeout: 5000 });
+
+    // Picking the "also try" suggestion triggers a second validate() call
+    // for a DIFFERENT symbol that resolves as a connection error.
+    await page.getByRole('button', { name: new RegExp(suggestion) }).click();
+    await expect(page.getByText("Couldn't check this symbol — connection error.")).toBeVisible({ timeout: 5000 });
+
+    // The old symbol's stale validSymbol.current must not fire on Enter.
+    await input.press('Enter');
+    await page.waitForTimeout(300);
+    expect(analyseRequested).toBe(false);
+    await expect(page.getByText('BUY', { exact: true })).toHaveCount(0);
+  });
+
+  test('an UNKNOWN signal renders as a dash, not a fabricated "0.00" score', async ({ page }) => {
+    // Regression test: the Quant Signals card used to render every signal's
+    // score via fmt(signal.score, 2) regardless of signal.value -- an
+    // UNKNOWN signal (backend convention: score is always 0 when a signal
+    // couldn't be computed, e.g. too little price history) rendered as
+    // "0.00", visually identical to a genuinely-computed neutral score.
+    // This is exactly the "missing data must never look like a real value"
+    // principle this product claims to follow (see docs/backlog.md's
+    // Product & UX section).
+    const symbol = 'TCS';
+    await page.route(`**/api/validate/${symbol}`, route =>
+      route.fulfill({ json: validationResult(symbol) }));
+    await page.route(`**/api/analyse/${symbol}**`, route =>
+      route.fulfill({
+        status: 200, headers: SSE_HEADERS,
+        body: sseAnalysisBody(symbol, {
+          signalsOverrides: {
+            technical: { name: 'technical', value: 'UNKNOWN', score: 0, meta: {} },
+            volume: { name: 'volume', value: 'STRONG_ACCUMULATION', score: 1, meta: { ratio: 3.2 } },
+          },
+        }),
+      }));
+    await page.route('**/api/peers/**', route => route.fulfill({
+      json: { symbol, self: null, peers: [], sector_median: null, percentiles: {}, absolute_anchor: null },
+    }));
+    await page.route('**/api/insider-activity/**', route => route.fulfill({
+      json: { symbol, insider_trades: [], bulk_block_deals: [] },
+    }));
+    await page.route('**/api/street-consensus/**', route => route.fulfill({
+      json: { symbol, articles: [] },
+    }));
+    await page.route('**/api/prices/history/**', route => route.fulfill({
+      json: { symbol, exchange: 'NSE', dates: [], closes: [] },
+    }));
+    await page.route('**/api/verdict-history/**', route => route.fulfill({
+      json: { symbol, history: [], win_rate: null, scored_count: 0 },
+    }));
+
+    await page.goto('/');
+    const input = page.getByLabel('NSE or BSE stock ticker');
+    await input.fill(symbol);
+    await expect(page.getByText(validationResult(symbol).company)).toBeVisible({ timeout: 5000 });
+    await page.getByRole('button', { name: 'Analyse Stock' }).click();
+    await expect(page.getByText('BUY', { exact: true }).first()).toBeVisible({ timeout: 15000 });
+
+    // Scoped to the Quant Signals card itself -- the page legitimately
+    // renders "0.00" elsewhere for unrelated real zero-valued fields (e.g.
+    // a 0% dividend yield), so a page-wide assertion would be a false
+    // positive on those, not on the bug this test targets. Card's title is
+    // a direct <p> child of its own root <div> (dashboard-primitives.tsx),
+    // so the nearest ancestor <div> of the title text IS that card.
+    const quantSignalsCard = page.getByText('Quant Signals').locator('xpath=ancestor::div[1]');
+    const technicalRow = quantSignalsCard.getByText('technical (UNKNOWN)');
+    await expect(technicalRow).toBeVisible();
+    const technicalValue = technicalRow.locator('xpath=ancestor::div[1]').getByText('—', { exact: true });
+    await expect(technicalValue).toBeVisible();
+    await expect(quantSignalsCard.getByText('0.00', { exact: true })).toHaveCount(0);
+
+    // A real, non-UNKNOWN signal still shows its actual score, not a dash.
+    await expect(quantSignalsCard.getByText('volume (STRONG_ACCUMULATION)')).toBeVisible();
+    await expect(quantSignalsCard.getByText('1.00', { exact: true })).toBeVisible();
+  });
+
   test('shows a degraded-analysis banner when every LLM provider failed', async ({ page }) => {
     // A full provider outage previously converged to a generic HOLD with no
     // visible signal that this wasn't a real analyst call — see crew.py's

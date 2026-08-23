@@ -17,6 +17,20 @@ import api
 # real CAS statement or broker tradebook export (typically well under 1 MB)
 # while bounding the worst case to a small, fixed amount of memory per
 # request.
+#
+# Disclosed limitation: FastAPI's automatic `UploadFile = File(...)` param
+# injection parses the multipart body via Starlette's own `request.form()`
+# with its hardcoded default `max_part_size` (1 MB as of the installed
+# Starlette version) BEFORE this function — or any endpoint code — ever
+# runs, and FastAPI exposes no way to override that default through the
+# declarative `File(...)` marker. So for a file between 1 MB and this 20 MB
+# cap, Starlette's own parser rejects it first with a generic 400, and this
+# function's friendlier 413 never actually fires. Not a security gap (the
+# effective ceiling today is *tighter* than 20 MB, not looser) but the 413
+# message here is aspirational for that size range until the 3 upload
+# endpoints are rewritten to call `request.form(max_part_size=...)`
+# manually instead of relying on FastAPI's automatic injection — a larger,
+# separate change not attempted here. See docs/backlog.md.
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
@@ -24,7 +38,12 @@ async def read_upload_capped(file: UploadFile, max_bytes: int = _MAX_UPLOAD_BYTE
     """Reads an UploadFile's body, rejecting (413) anything over `max_bytes`
     rather than buffering an unbounded amount of it first. Reads one byte
     past the cap so a file exactly at the limit isn't misreported as over
-    it, without ever holding more than `max_bytes + 1` bytes in memory."""
+    it, without ever holding more than `max_bytes + 1` bytes in memory.
+
+    See this module's own disclosed limitation above: for files between
+    Starlette's own default per-part limit (1 MB) and `max_bytes`,
+    Starlette's multipart parser rejects the upload before this function
+    ever runs, with a less specific 400 rather than this function's 413."""
     data = await file.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise HTTPException(
@@ -36,6 +55,7 @@ async def read_upload_capped(file: UploadFile, max_bytes: int = _MAX_UPLOAD_BYTE
 
 async def run_owned_db_call(
     request, rate_limit_name: str, max_calls: int, sync_fn, event_prefix: str, window_seconds: float = 60,
+    skip_rate_limit: bool = False,
 ):
     """Runs `sync_fn` (a zero-arg callable doing the actual DB work) off the
     event loop, with the exact shape every watchlist/positions endpoint
@@ -50,8 +70,17 @@ async def run_owned_db_call(
     window with a much lower cap (same per-address-not-just-per-IP
     precedent as the magic-link request-link endpoint's 5/hour) — a
     sensitive, low-frequency, exclusive-reassignment operation shouldn't
-    share the same generous per-minute budget as an ordinary star/unstar."""
-    api._rate_limit(request, rate_limit_name, max_calls=max_calls, window_seconds=window_seconds)
+    share the same generous per-minute budget as an ordinary star/unstar.
+
+    `skip_rate_limit=True` is for a caller that already called
+    `api._rate_limit(request, rate_limit_name, ...)` itself earlier in the
+    request — e.g. the CAS/CSV upload endpoints, which need the rate-limit
+    check to run BEFORE `read_upload_capped()` reads the file, not after.
+    Calling `_rate_limit()` a second time here with the *same* bucket name
+    would silently consume two slots from one sliding window per request,
+    halving the effective limit — this flag exists so that never happens."""
+    if not skip_rate_limit:
+        api._rate_limit(request, rate_limit_name, max_calls=max_calls, window_seconds=window_seconds)
     if not api.os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
 

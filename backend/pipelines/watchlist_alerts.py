@@ -46,24 +46,44 @@ def _alert_key(user_id: int, symbol: str, kind: str) -> str:
     return f"{user_id}:{symbol}:{kind}"
 
 
-def _already_alerted_today(today: str) -> set[str]:
-    payload = state_store.load(_ALERTED_NAMESPACE, today)
-    return set((payload or {}).get("keys", []))
+def _claim_alert_keys(today: str, keys: set[str]) -> set[str]:
+    """Atomically claims `keys` as sent-for-today, returning only the subset
+    NOT already claimed by another run — the ones this run is now
+    responsible for actually sending. Must be called BEFORE sending, not
+    after: a read-then-send-then-record ordering (checking
+    already-claimed, sending, then recording) leaves a window where two
+    genuinely concurrent runs (an operator's manual rerun racing an
+    in-flight cron run, the GitHub Actions concurrency guard notwithstanding)
+    can both read "not yet sent," both dispatch the same email, and only
+    then race to record it — by which point the duplicate has already gone
+    out. Claiming first closes that window: only one caller's `mutate()`
+    can ever see a given key as unclaimed, so at most one of two racing
+    callers is ever told to send it."""
+    if not keys:
+        return set()
+    claimed: set[str] = set()
+
+    def _claim(current: dict) -> dict:
+        existing = set((current or {}).get("keys", []))
+        claimed.update(keys - existing)
+        return {"keys": sorted(existing | keys)}
+
+    state_store.mutate(_ALERTED_NAMESPACE, today, _claim, default={"keys": []})
+    return claimed
 
 
-def _mark_alerted(today: str, keys: set[str]) -> None:
-    """Records `keys` as sent for `today` under a row lock (state_store.mutate,
-    not load()-then-save()) — a re-run racing this same write must not
-    silently clobber another run's already-recorded keys."""
+def _release_alert_keys(today: str, keys: set[str]) -> None:
+    """Un-claims `keys` — called when a claimed batch's send actually
+    failed (SMTP error, etc.), so a transient failure doesn't permanently
+    look like "already sent" and silently swallow a real alert forever."""
     if not keys:
         return
 
-    def _add(current: dict) -> dict:
+    def _release(current: dict) -> dict:
         existing = set((current or {}).get("keys", []))
-        existing |= keys
-        return {"keys": sorted(existing)}
+        return {"keys": sorted(existing - keys)}
 
-    state_store.mutate(_ALERTED_NAMESPACE, today, _add, default={"keys": []})
+    state_store.mutate(_ALERTED_NAMESPACE, today, _release, default={"keys": []})
 
 # This job runs the full (data-fetch + LLM analyst) pipeline per symbol, so
 # an unbounded watchlist fan-in means an unbounded daily LLM bill — same
@@ -232,9 +252,8 @@ def run(force: bool = False) -> bool:
 
     run_id = uuid.uuid4().hex[:12]
     today = date.today().isoformat()
-    already_alerted = _already_alerted_today(today)
     alerts_by_user: dict[int, dict] = {}
-    analyzed, failed, deduped = 0, 0, 0
+    analyzed, failed = 0, 0
 
     for symbol in symbols:
         analysis = _analyze_symbol(symbol, run_id, force=force)
@@ -255,35 +274,45 @@ def run(force: bool = False) -> bool:
             continue
         for watcher in by_symbol[symbol]:
             entry = alerts_by_user.setdefault(
-                watcher["user_id"], {"email": watcher["email"], "alerts": [], "keys": set()},
+                watcher["user_id"], {"email": watcher["email"], "alerts": []},
             )
-            for alert in symbol_alerts:
-                key = _alert_key(watcher["user_id"], symbol, alert["kind"])
-                if key in already_alerted:
-                    deduped += 1
-                    continue
-                entry["alerts"].append(alert)
-                entry["keys"].add(key)
+            entry["alerts"].extend(symbol_alerts)
 
-    newly_alerted: set[str] = set()
-    for user in alerts_by_user.values():
+    # Dedup happens here, at send time, as an atomic claim-then-send per
+    # user -- not as an upfront filter against a plain read of "already
+    # sent" (see _claim_alert_keys' own docstring for why that ordering
+    # can't prevent two genuinely concurrent runs from both sending).
+    deduped, notified_users = 0, 0
+    for user_id, user in alerts_by_user.items():
         if not user["alerts"]:
-            continue  # every alert for this user was already sent today
-        sent = send_watchlist_alert_email(user["email"], user["alerts"])
+            continue
+        alert_keys = [
+            (_alert_key(user_id, a["symbol"], a["kind"]), a) for a in user["alerts"]
+        ]
+        wanted_keys = {k for k, _ in alert_keys}
+        claimed = _claim_alert_keys(today, wanted_keys)
+        deduped += len(wanted_keys) - len(claimed)
+        alerts_to_send = [a for k, a in alert_keys if k in claimed]
+        if not alerts_to_send:
+            continue  # every alert for this user was already claimed by another run
+        notified_users += 1
+        sent = send_watchlist_alert_email(user["email"], alerts_to_send)
         log_event(
             LOGGER, "watchlist_alert_email_sent" if sent else "watchlist_alert_email_failed",
             level="info" if sent else "warning",
-            alert_count=len(user["alerts"]),
+            alert_count=len(alerts_to_send),
         )
-        if sent:
-            newly_alerted |= user["keys"]
-    _mark_alerted(today, newly_alerted)
+        if not sent:
+            # The claim already recorded these as "sent" -- release them so
+            # a transient SMTP failure doesn't permanently look like a
+            # delivered alert and get silently dropped on every future run.
+            _release_alert_keys(today, claimed)
     state_store.delete_older_than(_ALERTED_NAMESPACE, days=_ALERTED_RETENTION_DAYS)
 
     log_event(
         LOGGER, "watchlist_alerts_completed",
         symbols=len(symbols), analyzed=analyzed, failed=failed,
-        users_notified=len({u for u, e in alerts_by_user.items() if e["alerts"]}), deduped=deduped,
+        users_notified=notified_users, deduped=deduped,
     )
 
     if symbols and (failed / len(symbols)) > _MAX_ACCEPTABLE_ERROR_RATE:
