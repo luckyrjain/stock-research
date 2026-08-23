@@ -4,13 +4,6 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-import api  # noqa: F401  -- import before routes._shared to avoid a circular
-# import: routes/_shared.py itself does `import api`, and api.py imports
-# routes/watchlist.py, which imports names from routes/_shared.py -- if
-# routes/_shared is the very first of these three modules to start
-# importing, that watchlist-> _shared import happens while _shared is still
-# mid-initialization and fails. Every other test module that touches
-# routes/_shared goes through `import api` first for the same reason.
 from routes._shared import rate_limited_upload, read_upload_capped
 
 
@@ -86,7 +79,7 @@ class RateLimitedUploadTest(unittest.TestCase):
                 read_calls.append(size)
                 return await super().read(size)
 
-        with patch("routes._shared.api._rate_limit", side_effect=HTTPException(status_code=429)):
+        with patch("routes._shared._rate_limit", side_effect=HTTPException(status_code=429)):
             with self.assertRaises(HTTPException) as ctx:
                 asyncio.run(rate_limited_upload(
                     request=object(), rate_limit_name="test_bucket", max_calls=10,
@@ -98,7 +91,7 @@ class RateLimitedUploadTest(unittest.TestCase):
     def test_reads_the_file_after_rate_limit_passes(self) -> None:
         data = b"hello world"
         fake_request = object()
-        with patch("routes._shared.api._rate_limit") as rate_limit:
+        with patch("routes._shared._rate_limit") as rate_limit:
             result = asyncio.run(rate_limited_upload(
                 request=fake_request, rate_limit_name="test_bucket", max_calls=10,
                 file=_FakeUploadFile(data), max_bytes=1000,
@@ -108,7 +101,7 @@ class RateLimitedUploadTest(unittest.TestCase):
         self.assertEqual(result, data)
 
     def test_still_enforces_the_upload_cap_after_rate_limit_passes(self) -> None:
-        with patch("routes._shared.api._rate_limit"):
+        with patch("routes._shared._rate_limit"):
             with self.assertRaises(HTTPException) as ctx:
                 asyncio.run(rate_limited_upload(
                     request=object(), rate_limit_name="test_bucket", max_calls=10,

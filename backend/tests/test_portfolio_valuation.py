@@ -70,7 +70,7 @@ class RefreshValuationsTest(unittest.TestCase):
             prices_daily, mf_nav_daily,
         ])
         with self.engine.begin() as conn:
-            pid = conn.execute(insert(profiles).values(name="p").returning(profiles.c.id)).scalar()
+            pid = conn.execute(insert(profiles).values(name="p", client_id="test-client-0000-0000-0000-000000000000").returning(profiles.c.id)).scalar()
             self.account_id = conn.execute(
                 insert(accounts).values(profile_id=pid, name="broker", type="broker")
                 .returning(accounts.c.id)

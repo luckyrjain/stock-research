@@ -3,11 +3,25 @@ worth. See CLAUDE.md's "Portfolio aggregator" section for the full design
 and, importantly, why this is a *different* feature from the existing
 `/portfolio` page (which aggregates "I bought this" market-picks positions).
 
-No auth, no client_id/user_id ownership — deliberate scope call inherited
-from the original design: a personal, localhost/Tailscale-only tool for a
-handful of users, not a multi-tenant product. `profiles` is a bare picker
-(no credentials), which keeps the door open for real auth later without
-forcing it into this increment.
+Every `profiles` row is owned by exactly one identity — an anonymous
+per-browser `client_id` or a signed-in account's `user_id` — the same shape
+`watchlist_items`/`positions` already use (`db/models.py`'s `profiles` table
+comment has the full reasoning). `accounts`/`assets`/`broker_connections` all
+hang off a profile via `profile_id`/`account_id`, so every endpoint below
+resolves the caller's owner via `routes.watchlist.resolve_owner()` and checks
+it against whichever profile the requested row ultimately belongs to
+(`_owned_profile_id`/`_owned_account_id`/`_owned_asset_id` below) — never a
+403, always a 404, so a caller can't probe for another owner's ids, same
+convention this module's DELETE endpoints already used before ownership
+existed.
+
+`POST /refresh-valuations` is the one endpoint left unscoped: it recomputes
+`valuations` for every non-archived mf/stock asset in the database (the same
+thing the nightly `eod_prices_pipeline` cron already does for everyone), not
+just the caller's own — a global, idempotent market-data recompute with no
+per-owner data in its response, so scoping it would need threading a profile
+filter through `portfolio.portfolio_valuation.refresh_valuations()` for no
+real confidentiality benefit.
 """
 import asyncio
 import json
@@ -18,6 +32,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from routes._shared import rate_limited_upload, run_owned_db_call
+from routes.watchlist import WatchlistOwner, owner_column, resolve_owner
 
 router = APIRouter(prefix="/api/portfolio")
 
@@ -81,6 +96,56 @@ def _broker_sync_module(broker: str):
     return mod
 
 
+def _owned_profile_id(conn, owner: WatchlistOwner, profile_id: int) -> None:
+    """Raises 404 unless `profile_id` exists and is owned by `owner` — never a
+    403, so a caller can't probe for another owner's profile ids (same
+    non-confirming convention this module's other 404s already use)."""
+    from sqlalchemy import select
+    from db.models import profiles
+
+    column = owner_column(owner)
+    row = conn.execute(
+        select(profiles.c.id).where(profiles.c.id == profile_id, getattr(profiles.c, column) == owner[1])
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="profile not found")
+
+
+def _owned_account_id(conn, owner: WatchlistOwner, account_id: int) -> None:
+    """Same as `_owned_profile_id`, one join down — an account belonging to a
+    profile the caller doesn't own is treated identically to a nonexistent
+    one."""
+    from sqlalchemy import select
+    from db.models import accounts, profiles
+
+    column = owner_column(owner)
+    row = conn.execute(
+        select(accounts.c.id)
+        .select_from(accounts.join(profiles, profiles.c.id == accounts.c.profile_id))
+        .where(accounts.c.id == account_id, getattr(profiles.c, column) == owner[1])
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="account not found")
+
+
+def _owned_asset_id(conn, owner: WatchlistOwner, asset_id: int) -> None:
+    """Same as `_owned_account_id`, one join further down."""
+    from sqlalchemy import select
+    from db.models import accounts, assets, profiles
+
+    column = owner_column(owner)
+    row = conn.execute(
+        select(assets.c.id)
+        .select_from(
+            assets.join(accounts, accounts.c.id == assets.c.account_id)
+            .join(profiles, profiles.c.id == accounts.c.profile_id)
+        )
+        .where(assets.c.id == asset_id, getattr(profiles.c, column) == owner[1])
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="asset not found")
+
+
 def compute_networth(rows: list[dict]) -> dict:
     """Aggregates latest-valuation rows into a net worth summary. Pure
     function (rows in, summary out) so it's unit-testable without a live
@@ -106,10 +171,12 @@ def compute_networth(rows: list[dict]) -> dict:
 
 
 class ProfileIn(BaseModel):
+    client_id: str | None = None
     name: str = Field(min_length=1, max_length=60)
 
 
 class AccountIn(BaseModel):
+    client_id: str | None = None
     profile_id: int
     name: str = Field(min_length=1, max_length=120)
     institution: str | None = None
@@ -117,12 +184,14 @@ class AccountIn(BaseModel):
 
 
 class AccountPatch(BaseModel):
+    client_id: str | None = None
     name: str | None = None
     institution: str | None = None
     type: str | None = None
 
 
 class AssetIn(BaseModel):
+    client_id: str | None = None
     account_id: int
     type: str
     name: str = Field(min_length=1, max_length=200)
@@ -134,6 +203,7 @@ class AssetIn(BaseModel):
 
 
 class AssetPatch(BaseModel):
+    client_id: str | None = None
     name: str | None = None
     symbol: str | None = None
     meta: dict | None = None
@@ -143,11 +213,13 @@ class AssetPatch(BaseModel):
 
 
 class ValuationIn(BaseModel):
+    client_id: str | None = None
     value: float = Field(ge=0)
     as_of: _date | None = None
 
 
 class BrokerLoginUrlIn(BaseModel):
+    client_id: str | None = None
     account_id: int
     # This account's own app credentials, registered by whoever owns this
     # broker login (e.g. developers.kite.trade) — never a deployment-wide
@@ -162,6 +234,7 @@ class BrokerLoginUrlIn(BaseModel):
 
 
 class BrokerConnectIn(BaseModel):
+    client_id: str | None = None
     account_id: int
     request_token: str
 
@@ -178,6 +251,7 @@ class BrokerSyncIn(BaseModel):
 
 
 class HdfcLoginStartIn(BaseModel):
+    client_id: str | None = None
     account_id: int
     # Same both-or-neither shape as BrokerLoginUrlIn — first-time setup
     # supplies the app credentials, a retry after a failed/expired login
@@ -192,19 +266,26 @@ class HdfcLoginStartIn(BaseModel):
 
 
 class HdfcVerifyOtpIn(BaseModel):
+    client_id: str | None = None
     account_id: int
     otp: str = Field(min_length=1, max_length=20)
 
 
 @router.get("/profiles")
-async def list_profiles(request: Request):
+async def list_profiles(request: Request, client_id: str | None = None):
     def _sync() -> dict:
         import api
         from sqlalchemy import select
         from db.models import profiles
 
+        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
+        column = owner_column(owner)
         with api._get_db_engine().connect() as conn:
-            rows = conn.execute(select(profiles).order_by(profiles.c.id)).mappings().fetchall()
+            rows = conn.execute(
+                select(profiles)
+                .where(getattr(profiles.c, column) == owner[1])
+                .order_by(profiles.c.id)
+            ).mappings().fetchall()
         return {"profiles": [{"id": r["id"], "name": r["name"]} for r in rows]}
 
     return await run_owned_db_call(request, "portfolio_agg_read", 120, _sync, "portfolio_agg_read")
@@ -218,10 +299,12 @@ async def create_profile(request: Request, body: ProfileIn):
         from sqlalchemy.exc import IntegrityError
         from db.models import profiles
 
+        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
+        column = owner_column(owner)
         try:
             with api._get_db_engine().begin() as conn:
                 new_id = conn.execute(
-                    insert(profiles).values(name=body.name).returning(profiles.c.id)
+                    insert(profiles).values(name=body.name, **{column: owner[1]}).returning(profiles.c.id)
                 ).scalar()
         except IntegrityError:
             raise HTTPException(status_code=409, detail="profile name already exists")
@@ -231,13 +314,15 @@ async def create_profile(request: Request, body: ProfileIn):
 
 
 @router.get("/accounts")
-async def list_accounts(request: Request, profile_id: int):
+async def list_accounts(request: Request, profile_id: int, client_id: str | None = None):
     def _sync() -> dict:
         import api
         from sqlalchemy import select
         from db.models import accounts
 
-        with api._get_db_engine().connect() as conn:
+        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
+        with api._get_db_engine().begin() as conn:
+            _owned_profile_id(conn, owner, profile_id)
             rows = conn.execute(
                 select(accounts).where(accounts.c.profile_id == profile_id).order_by(accounts.c.id)
             ).mappings().fetchall()
@@ -253,12 +338,12 @@ async def create_account(request: Request, body: AccountIn):
 
     def _sync() -> dict:
         import api
-        from sqlalchemy import insert, select
-        from db.models import accounts, profiles
+        from sqlalchemy import insert
+        from db.models import accounts
 
+        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
         with api._get_db_engine().begin() as conn:
-            if not conn.execute(select(profiles.c.id).where(profiles.c.id == body.profile_id)).first():
-                raise HTTPException(status_code=404, detail="profile not found")
+            _owned_profile_id(conn, owner, body.profile_id)
             new_id = conn.execute(
                 insert(accounts).values(
                     profile_id=body.profile_id, name=body.name,
@@ -272,7 +357,7 @@ async def create_account(request: Request, body: AccountIn):
 
 @router.patch("/accounts/{account_id}")
 async def patch_account(request: Request, account_id: int, body: AccountPatch):
-    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    updates = {k: v for k, v in body.model_dump().items() if v is not None and k != "client_id"}
     if not updates:
         raise HTTPException(status_code=422, detail="no fields to update")
     if "type" in updates and updates["type"] not in _ACCOUNT_TYPES:
@@ -283,43 +368,45 @@ async def patch_account(request: Request, account_id: int, body: AccountPatch):
         from sqlalchemy import update
         from db.models import accounts
 
+        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
         with api._get_db_engine().begin() as conn:
-            res = conn.execute(update(accounts).where(accounts.c.id == account_id).values(**updates))
-            if res.rowcount == 0:
-                raise HTTPException(status_code=404, detail="account not found")
+            _owned_account_id(conn, owner, account_id)
+            conn.execute(update(accounts).where(accounts.c.id == account_id).values(**updates))
         return {"ok": True}
 
     return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
 
 
 @router.delete("/accounts/{account_id}")
-async def delete_account(request: Request, account_id: int):
+async def delete_account(request: Request, account_id: int, client_id: str | None = None):
     def _sync() -> dict:
         import api
         from sqlalchemy import delete, func, select
         from db.models import accounts, assets
 
+        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
         with api._get_db_engine().begin() as conn:
+            _owned_account_id(conn, owner, account_id)
             n_assets = conn.execute(
                 select(func.count()).where(assets.c.account_id == account_id)
             ).scalar() or 0
             if n_assets:
                 raise HTTPException(status_code=422, detail="account still has assets; delete them first")
-            res = conn.execute(delete(accounts).where(accounts.c.id == account_id))
-            if res.rowcount == 0:
-                raise HTTPException(status_code=404, detail="account not found")
+            conn.execute(delete(accounts).where(accounts.c.id == account_id))
         return {"ok": True}
 
     return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
 
 
 @router.get("/assets")
-async def list_assets(request: Request, account_id: int):
+async def list_assets(request: Request, account_id: int, client_id: str | None = None):
     def _sync() -> dict:
         import api
         from sqlalchemy import text as _text
 
+        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
         with api._get_db_engine().connect() as conn:
+            _owned_account_id(conn, owner, account_id)
             # Correlated scalar subqueries, not a LATERAL join — LATERAL
             # isn't supported by SQLite, which this codebase's tests run
             # these tables against (house rule: no live DB in tests). At
@@ -354,12 +441,12 @@ async def create_asset(request: Request, body: AssetIn):
 
     def _sync() -> dict:
         import api
-        from sqlalchemy import insert, select
-        from db.models import accounts, assets, holdings, valuations
+        from sqlalchemy import insert
+        from db.models import assets, holdings, valuations
 
+        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
         with api._get_db_engine().begin() as conn:
-            if not conn.execute(select(accounts.c.id).where(accounts.c.id == body.account_id)).first():
-                raise HTTPException(status_code=404, detail="account not found")
+            _owned_account_id(conn, owner, body.account_id)
             asset_id = conn.execute(
                 insert(assets).values(
                     account_id=body.account_id, type=body.type, name=body.name,
@@ -393,12 +480,12 @@ async def patch_asset(request: Request, asset_id: int, body: AssetPatch):
         from sqlalchemy import insert, select, update
         from db.models import assets, holdings
 
+        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
         with api._get_db_engine().begin() as conn:
+            _owned_asset_id(conn, owner, asset_id)
             asset_row = conn.execute(
                 select(assets.c.id, assets.c.type).where(assets.c.id == asset_id)
             ).mappings().first()
-            if not asset_row:
-                raise HTTPException(status_code=404, detail="asset not found")
             if holding_updates and asset_row["type"] not in ("mf", "stock"):
                 raise HTTPException(status_code=422, detail="units/avg_cost only apply to mf and stock assets")
             if asset_updates:
@@ -419,19 +506,19 @@ async def patch_asset(request: Request, asset_id: int, body: AssetPatch):
 
 
 @router.delete("/assets/{asset_id}")
-async def delete_asset(request: Request, asset_id: int):
+async def delete_asset(request: Request, asset_id: int, client_id: str | None = None):
     def _sync() -> dict:
         import api
         from sqlalchemy import delete
         from db.models import assets, holdings, transactions, valuations
 
+        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
         with api._get_db_engine().begin() as conn:
+            _owned_asset_id(conn, owner, asset_id)
             conn.execute(delete(valuations).where(valuations.c.asset_id == asset_id))
             conn.execute(delete(holdings).where(holdings.c.asset_id == asset_id))
             conn.execute(delete(transactions).where(transactions.c.asset_id == asset_id))
-            res = conn.execute(delete(assets).where(assets.c.id == asset_id))
-            if res.rowcount == 0:
-                raise HTTPException(status_code=404, detail="asset not found")
+            conn.execute(delete(assets).where(assets.c.id == asset_id))
         return {"ok": True}
 
     return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write")
@@ -444,12 +531,11 @@ async def upsert_valuation(request: Request, asset_id: int, body: ValuationIn):
 
     def _sync() -> dict:
         import api
-        from sqlalchemy import select, text as _text
-        from db.models import assets
+        from sqlalchemy import text as _text
 
+        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
         with api._get_db_engine().begin() as conn:
-            if not conn.execute(select(assets.c.id).where(assets.c.id == asset_id)).first():
-                raise HTTPException(status_code=404, detail="asset not found")
+            _owned_asset_id(conn, owner, asset_id)
             conn.execute(_text("""
                 INSERT INTO valuations (asset_id, as_of, value)
                 VALUES (:aid, :as_of, :value)
@@ -462,12 +548,14 @@ async def upsert_valuation(request: Request, asset_id: int, body: ValuationIn):
 
 
 @router.get("/networth")
-async def get_networth(request: Request, profile_id: int):
+async def get_networth(request: Request, profile_id: int, client_id: str | None = None):
     def _sync() -> dict:
         import api
         from sqlalchemy import text as _text
 
+        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
         with api._get_db_engine().connect() as conn:
+            _owned_profile_id(conn, owner, profile_id)
             # Correlated scalar subquery, not a LATERAL join — see the same
             # note in list_assets() above. The EXISTS filters out an asset
             # with no valuation row at all, matching the original inner-join
@@ -500,12 +588,16 @@ async def refresh_valuations_endpoint(request: Request):
 
 
 @router.get("/xirr")
-async def get_xirr(request: Request, profile_id: int):
+async def get_xirr(request: Request, profile_id: int, client_id: str | None = None):
     def _sync() -> dict:
         import api
         from portfolio.portfolio_valuation import xirr_report
 
-        return xirr_report(api._get_db_engine(), profile_id)
+        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
+        engine = api._get_db_engine()
+        with engine.connect() as conn:
+            _owned_profile_id(conn, owner, profile_id)
+        return xirr_report(engine, profile_id)
 
     return await run_owned_db_call(request, "portfolio_agg_read", 120, _sync, "portfolio_agg_read")
 
@@ -516,6 +608,7 @@ async def import_cas_endpoint(
     file: UploadFile = File(...),
     password: str = Form(...),
     account_id: int = Form(...),
+    client_id: str | None = Form(None),
 ):
     import api
 
@@ -529,14 +622,18 @@ async def import_cas_endpoint(
         from portfolio.cas_import import archive_parsed, import_cas, parse_cas
         from portfolio.portfolio_valuation import refresh_valuations
 
+        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
+        engine = api._get_db_engine()
+        with engine.connect() as conn:
+            _owned_account_id(conn, owner, account_id)
         parsed = parse_cas(pdf_bytes, password)
         if "error" in parsed:
             raise HTTPException(status_code=422, detail=parsed["error"])
-        result = import_cas(api._get_db_engine(), parsed, account_id)
+        result = import_cas(engine, parsed, account_id)
         if "error" in result:
             raise HTTPException(status_code=404, detail=result["error"])
         archive_parsed(parsed)
-        refresh_valuations(api._get_db_engine())
+        refresh_valuations(engine)
         return result
 
     return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write",
@@ -573,6 +670,7 @@ async def import_csv_endpoint(
     mapping: str = Form(...),
     account_id: int = Form(...),
     broker: str = Form(...),
+    client_id: str | None = Form(None),
 ):
     import api
 
@@ -592,14 +690,18 @@ async def import_csv_endpoint(
         from portfolio.csv_import import import_rows, parse_broker_file
         from portfolio.portfolio_valuation import refresh_valuations
 
+        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
+        engine = api._get_db_engine()
+        with engine.connect() as conn:
+            _owned_account_id(conn, owner, account_id)
         parsed = parse_broker_file(file_bytes, filename)
         if "error" in parsed:
             raise HTTPException(status_code=422, detail=parsed["error"])
-        result = import_rows(api._get_db_engine(), parsed["rows"], parsed["headers"],
+        result = import_rows(engine, parsed["rows"], parsed["headers"],
                              mapping_dict, account_id, broker)
         if "error" in result:
             raise HTTPException(status_code=404, detail=result["error"])
-        refresh_valuations(api._get_db_engine())
+        refresh_valuations(engine)
         return result
 
     return await run_owned_db_call(request, "portfolio_agg_write", 60, _sync, "portfolio_agg_write",
@@ -649,14 +751,14 @@ async def broker_login_url(request: Request, broker: str, body: BrokerLoginUrlIn
         from sqlalchemy import insert, select, update
 
         mod = _broker_sync_module(broker)
+        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
 
         with api._get_db_engine().begin() as conn:
+            _owned_account_id(conn, owner, body.account_id)
             account = conn.execute(
                 select(accounts.c.id, accounts.c.profile_id, accounts.c.type)
                 .where(accounts.c.id == body.account_id)
             ).first()
-            if account is None:
-                raise HTTPException(status_code=404, detail="account not found")
             if account.type != "broker":
                 raise HTTPException(status_code=422, detail="account.type must be 'broker' to connect a broker API")
 
@@ -728,8 +830,10 @@ async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
         from sqlalchemy import select, update
 
         mod = _broker_sync_module(broker)
+        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
 
         with api._get_db_engine().begin() as conn:
+            _owned_account_id(conn, owner, body.account_id)
             conn_row = conn.execute(
                 select(broker_connections.c.id, broker_connections.c.api_key, broker_connections.c.api_secret_enc)
                 .where(
@@ -798,10 +902,10 @@ async def hdfc_login_start(request: Request, body: HdfcLoginStartIn):
     def _sync() -> dict:
         import api
         from core import rate_limiter
-        from core.crypto import EncryptionNotConfigured, encrypt
-        from db.models import accounts, broker_connections
-        from portfolio import hdfc_sync
-        from sqlalchemy import insert, select, update
+
+        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
+        with api._get_db_engine().connect() as conn:
+            _owned_account_id(conn, owner, body.account_id)
 
         # Held from here through hdfc_verify_otp()'s own release (success or
         # failure) — spans two separate HTTP requests, same as
@@ -940,8 +1044,10 @@ async def hdfc_verify_otp(request: Request, body: HdfcVerifyOtpIn):
         from sqlalchemy import select, update
 
         engine = api._get_db_engine()
+        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
 
         with engine.connect() as conn:
+            _owned_account_id(conn, owner, body.account_id)
             conn_row = conn.execute(
                 select(
                     broker_connections.c.id, broker_connections.c.api_key,
@@ -1094,32 +1200,25 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
         # docstring: "runs inside the same executor thread as the caller's
         # other DB work"), so calling it directly in this async handler
         # would block the event loop for every other concurrent request on
-        # this worker. A signed-in session always wins over `client_id` (see
-        # routes/watchlist.py::resolve_owner's own docstring) so a synced
-        # holding lands under the SAME column GET /api/positions actually reads
-        # for that caller — writing it under client_id unconditionally would
-        # make it invisible to a signed-in user's own /portfolio page, since
-        # that page reads positions by user_id, not client_id, once signed in.
-        # Never raises past this point: a missing/malformed client_id and no
-        # session just means "don't mirror this sync into positions," not "the
-        # sync itself fails" — position-mirroring is purely additive.
+        # this worker. Required, not best-effort, now that every account has
+        # a real owner (_owned_account_id below) — the same owner also mirrors
+        # a synced holding into `positions` under the SAME column GET
+        # /api/positions actually reads for that caller (a signed-in session
+        # always wins over client_id, per resolve_owner's own docstring, so
+        # this lands visibly on that caller's own /portfolio page either way).
         #
-        # Disclosed limitation: the web UI's own proxy for this whole feature
-        # (frontend/app/api/portfolio/[...path]/route.ts) deliberately never
-        # forwards the session cookie — Portfolio Aggregator is anonymous/
-        # client_id-only by design (see that proxy's own comment). So in
-        # practice, through the actual web UI, `token` here is always None and
-        # this always resolves to the client_id path; the session-preferring
-        # branch only matters for a caller hitting this endpoint directly with
-        # a bearer token. Implemented correctly regardless, rather than
-        # skipped, since it's this endpoint's own contract to get right
-        # independent of which caller happens to exercise it today.
-        owner = None
-        try:
-            from routes.watchlist import resolve_owner
-            owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
-        except ValueError:
-            pass
+        # Checked in its own connection, before either guard below — the
+        # rate limit and lock are keyed only by account_id/broker, not by
+        # caller identity, so checking ownership after them would let a
+        # caller who doesn't even own this account burn through the real
+        # owner's rate-limit budget and acquire/release their sync lock
+        # before ever hitting a 404. Every other broker endpoint in this
+        # module already checks ownership before touching any shared
+        # guard state; this one now matches.
+        engine = api._get_db_engine()
+        owner = resolve_owner(api._bearer_token_from_request(request), body.client_id)
+        with engine.connect() as conn:
+            _owned_account_id(conn, owner, account_id)
 
         if not rate_limiter.is_allowed(
             rate_key, _BROKER_SYNC_RATE_LIMIT_MAX_CALLS, _BROKER_SYNC_RATE_LIMIT_WINDOW_SECONDS,
@@ -1132,7 +1231,7 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
             raise HTTPException(status_code=409, detail=f"a sync for this {broker} connection is already running")
 
         try:
-            with api._get_db_engine().begin() as conn:
+            with engine.begin() as conn:
                 conn_row = conn.execute(
                     select(broker_connections.c.api_key, broker_connections.c.access_token_enc).where(
                         broker_connections.c.account_id == account_id,
@@ -1249,13 +1348,15 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
 
 
 @router.get("/broker/connections")
-async def list_broker_connections(request: Request, profile_id: int):
+async def list_broker_connections(request: Request, profile_id: int, client_id: str | None = None):
     def _sync() -> dict:
         import api
         from db.models import broker_connections
         from sqlalchemy import select
 
+        owner = resolve_owner(api._bearer_token_from_request(request), client_id)
         with api._get_db_engine().connect() as conn:
+            _owned_profile_id(conn, owner, profile_id)
             rows = conn.execute(
                 select(
                     broker_connections.c.id,

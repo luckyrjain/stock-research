@@ -67,14 +67,35 @@ const MSG_TONE_CLASS: Record<ReturnType<typeof msgTone>, string> = {
   success: 'text-buy', neutral: 'text-muted', error: 'text-sell',
 };
 
+// Every Portfolio Aggregator profile/account/asset row is now owned by this
+// browser's client_id (or, once signed in, the account — the proxy below
+// forwards the session cookie the same way the watchlist/positions proxies
+// do). Every call in this file goes through this one helper, so injecting
+// client_id here — as a query param (what the GET/DELETE endpoints read)
+// and merged into a JSON body (what the POST/PATCH endpoints read) — covers
+// every endpoint without threading it through each call site by hand.
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api/portfolio/${path}`, {
+  const clientId = getClientId();
+  const sep = path.includes('?') ? '&' : '?';
+  let body = init?.body;
+  if (typeof body === 'string') {
+    try {
+      const parsed = JSON.parse(body) as Record<string, unknown>;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.client_id === undefined) {
+        body = JSON.stringify({ ...parsed, client_id: clientId });
+      }
+    } catch {
+      // Not a JSON body — leave untouched.
+    }
+  }
+  const res = await fetch(`/api/portfolio/${path}${sep}client_id=${encodeURIComponent(clientId)}`, {
     ...init,
+    body,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   });
-  const body = await res.json();
-  if (!res.ok) throw new Error(body?.detail ?? `Request failed (${res.status})`);
-  return body as T;
+  const responseBody = await res.json();
+  if (!res.ok) throw new Error(responseBody?.detail ?? `Request failed (${res.status})`);
+  return responseBody as T;
 }
 
 function ProfilePicker({ onSelect }: { onSelect: (p: PortfolioProfile) => void }) {
@@ -474,7 +495,7 @@ function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
     try {
       await api<BrokerSyncAck>('broker/hdfc_securities/sync', {
         method: 'POST',
-        body: JSON.stringify({ account_id: account.id, client_id: getClientId() }),
+        body: JSON.stringify({ account_id: account.id }),
       });
       setMsg('Syncing…');
       onSynced();
@@ -697,7 +718,7 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
     try {
       await api<BrokerSyncAck>(`broker/${broker.id}/sync`, {
         method: 'POST',
-        body: JSON.stringify({ account_id: account.id, client_id: getClientId() }),
+        body: JSON.stringify({ account_id: account.id }),
       });
       // The sync itself runs in the background (202 Accepted). `busy`
       // deliberately stays true here rather than clearing in a `finally`
@@ -975,6 +996,7 @@ function ImportCasForm({ accounts, onImported }: { accounts: PortfolioAccount[];
       form.append('file', file);
       form.append('password', password);
       form.append('account_id', String(accountId));
+      form.append('client_id', getClientId());
       const res = await fetch('/api/portfolio/import-cas', { method: 'POST', body: form });
       const body = await res.json();
       if (!res.ok) throw new Error(body?.detail ?? `Import failed (${res.status})`);
@@ -1066,6 +1088,7 @@ function ImportCsvForm({ accounts, onImported }: { accounts: PortfolioAccount[];
       form.append('mapping', JSON.stringify(mapping));
       form.append('account_id', String(accountId));
       form.append('broker', broker.trim());
+      form.append('client_id', getClientId());
       const res = await fetch('/api/portfolio/import-csv', { method: 'POST', body: form });
       const body = await res.json();
       if (!res.ok) throw new Error(body?.detail ?? `Import failed (${res.status})`);

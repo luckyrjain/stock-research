@@ -16,6 +16,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
 import api
+import routes._shared as _shared
 from core import rate_limiter
 from db.models import (
     accounts, assets, holdings, metadata, mf_nav_daily, prices_daily, profiles,
@@ -24,6 +25,15 @@ from db.models import (
 from routes.portfolio_aggregator import compute_networth
 
 client = TestClient(api.app)
+
+# Every endpoint in routes/portfolio_aggregator.py now resolves an owner via
+# routes.watchlist.resolve_owner() and scopes profiles/accounts/assets to it
+# (see that module's own docstring) — these endpoint tests predate ownership
+# and exercise CRUD/validation behavior that's orthogonal to it, so resolve_owner
+# is patched to a single fixed owner for the whole class rather than threading
+# a client_id through every one of ~30 test methods' request bodies/params.
+# Cross-owner isolation itself is covered by its own dedicated test below.
+_TEST_OWNER = ("client", "test-owner-0000-0000-0000-000000000000")
 
 
 def _silence_sqlite_date_adapter_warning() -> None:
@@ -79,12 +89,15 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         ])
         self._old_db_url = os.environ.get("DATABASE_URL")
         os.environ["DATABASE_URL"] = "sqlite://"
-        self._old_engine = api._DB_ENGINE
-        api._DB_ENGINE = self.engine
+        self._old_engine = _shared._DB_ENGINE
+        _shared._DB_ENGINE = self.engine
         rate_limiter._memory_calls.clear()
+        self._owner_patcher = patch("routes.portfolio_aggregator.resolve_owner", return_value=_TEST_OWNER)
+        self._owner_patcher.start()
 
     def tearDown(self) -> None:
-        api._DB_ENGINE = self._old_engine
+        self._owner_patcher.stop()
+        _shared._DB_ENGINE = self._old_engine
         if self._old_db_url is None:
             os.environ.pop("DATABASE_URL", None)
         else:
@@ -126,6 +139,44 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         os.environ.pop("DATABASE_URL", None)
         resp = client.get("/api/portfolio/profiles")
         self.assertEqual(resp.status_code, 503)
+
+    # ── ownership isolation ──────────────────────────────────────────────────
+
+    def test_other_owners_profile_account_and_asset_are_all_404(self) -> None:
+        """The class-wide resolve_owner patch above stands in for one fixed
+        caller everywhere else in this file — this test instead proves the
+        real ownership check itself: a second, different owner can't read,
+        modify, or delete another owner's profile/account/asset, even by id.
+        """
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        aid = self._mk_asset(acc)
+
+        other_owner = ("client", "other-owner-0000-0000-0000-000000000000")
+        with patch("routes.portfolio_aggregator.resolve_owner", return_value=other_owner):
+            self.assertEqual(client.get(f"/api/portfolio/accounts?profile_id={pid}").status_code, 404)
+            self.assertEqual(
+                client.post("/api/portfolio/accounts", json={"profile_id": pid, "name": "x", "type": "bank"}).status_code,
+                404,
+            )
+            self.assertEqual(client.patch(f"/api/portfolio/accounts/{acc}", json={"name": "x"}).status_code, 404)
+            self.assertEqual(client.delete(f"/api/portfolio/accounts/{acc}").status_code, 404)
+            self.assertEqual(client.get(f"/api/portfolio/assets?account_id={acc}").status_code, 404)
+            self.assertEqual(client.patch(f"/api/portfolio/assets/{aid}", json={"name": "x"}).status_code, 404)
+            self.assertEqual(client.delete(f"/api/portfolio/assets/{aid}").status_code, 404)
+            self.assertEqual(
+                client.post(f"/api/portfolio/assets/{aid}/valuations", json={"value": 1.0}).status_code, 404,
+            )
+            self.assertEqual(client.get(f"/api/portfolio/networth?profile_id={pid}").status_code, 404)
+            self.assertEqual(client.get(f"/api/portfolio/xirr?profile_id={pid}").status_code, 404)
+            self.assertEqual(
+                client.get(f"/api/portfolio/broker/connections?profile_id={pid}").status_code, 404,
+            )
+
+        # Sanity check: the true owner still has full access to everything above.
+        resp = client.get(f"/api/portfolio/accounts?profile_id={pid}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()["accounts"]), 1)
 
     # ── profiles ─────────────────────────────────────────────────────────────
 

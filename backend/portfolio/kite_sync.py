@@ -18,12 +18,9 @@ that one holding/trade being skipped (logged), never a fabricated value.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
-from sqlalchemy import update
+from datetime import datetime
 
 from core.observability import get_logger, log_event
-from db.models import broker_connections as broker_connections_t
 from portfolio import broker_sync_common
 
 LOGGER = get_logger("portfolio.kite_sync")
@@ -127,24 +124,9 @@ def sync_account(engine, account_id: int, access_token: str, api_key: str, owner
                    account_id=account_id, error=str(exc))
         return {"error": str(exc)}
 
-    today = datetime.now(timezone.utc).date()
-    with engine.begin() as conn:
-        summary = {}
-        summary.update(broker_sync_common.sync_holdings(
-            conn, account_id, [_normalize_holding(h) for h in (raw_holdings or [])], _META_SOURCE, today,
-            owner=owner,
-        ))
-        summary.update(broker_sync_common.sync_trades(
-            conn, account_id, [_normalize_trade(t) for t in (raw_trades or [])], _META_SOURCE,
-        ))
-        conn.execute(
-            update(broker_connections_t)
-            .where(
-                broker_connections_t.c.account_id == account_id,
-                broker_connections_t.c.broker == BROKER_NAME,
-            )
-            .values(last_synced_at=datetime.now(timezone.utc))
-        )
-
-    log_event(LOGGER, "kite_sync_completed", account_id=account_id, **summary)
-    return summary
+    return broker_sync_common.run_broker_sync(
+        engine, account_id, BROKER_NAME, _META_SOURCE,
+        [_normalize_holding(h) for h in (raw_holdings or [])],
+        [_normalize_trade(t) for t in (raw_trades or [])],
+        logger=LOGGER, completed_event="kite_sync_completed", owner=owner,
+    )

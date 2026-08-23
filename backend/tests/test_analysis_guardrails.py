@@ -834,6 +834,39 @@ class AnalysisGuardrailFallbackTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("dividend yield", message)
 
+    def test_source_text_renders_signal_context_technical_and_macro_values(self) -> None:
+        # Regression test for wiring signal_context into _source_text() --
+        # previously the QUANT SIGNALS block shown to the LLM (RSI/EMA
+        # posture, FII/DII flow, repo rate, CPI) was completely invisible
+        # to every grounding check, since _source_text() only ever built
+        # its corpus from the six scraped data slices.
+        signal_context = {
+            "signals": {
+                "technical": {
+                    "value": "BULLISH_TREND",
+                    "meta": {"rsi14": 65.4, "ema20_above_ema50": True},
+                },
+                "macro": {
+                    "value": "SUPPORTIVE",
+                    "meta": {
+                        "net_institutional_flow_cr": 1234.5,
+                        "repo_rate_pct": 6.5,
+                        "cpi_inflation_pct": 4.2,
+                    },
+                },
+            }
+        }
+        text = crew._source_text(self.all_data, signal_context)
+        self.assertIn("rsi14=65.4", text)
+        self.assertIn("ema20 above ema50", text)
+        self.assertIn("net flow=1234.5", text)
+        self.assertIn("repo rate=6.5", text)
+        self.assertIn("cpi inflation=4.2", text)
+
+        # No signal_context (the default) must behave exactly as before --
+        # no crash, no stray text.
+        self.assertEqual(crew._source_text(self.all_data), crew._source_text(self.all_data, None))
+
 
 class CrossProviderFailoverTest(unittest.TestCase):
     """A full provider outage (not a formatting hiccup on an otherwise

@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import type { ConsolidatedView } from '@/types';
 import { REC_TONE_4TIER, REC_TONE_UNKNOWN } from '@/lib/tone';
+import { useFocusTrap } from '@/lib/use-focus-trap';
 
 interface Props {
   symbol: string;
@@ -54,8 +55,6 @@ function SectionSkeleton() {
 // either. Renders as a centered modal per design.md's "glass card... for
 // modals" guidance, reusing the fixed-backdrop + Escape-to-close popover
 // pattern already established by InfoTooltip.
-const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
 export default function ConsolidatedCard({ symbol, onClose }: Props) {
   const [data, setData]       = useState<ConsolidatedView | null>(null);
   const [loading, setLoading] = useState(true);
@@ -89,36 +88,9 @@ export default function ConsolidatedCard({ symbol, onClose }: Props) {
     setModalRoot(document.getElementById('modal-root'));
   }, []);
 
-  // A11Y-11: background inert while the modal is open — Tab can't reach it,
-  // a screen reader can't see it. Paired with the manual Tab-wrap trap below
-  // since inert alone stops Tab from *entering* the background but doesn't
-  // make focus *cycle* at the panel's own edges.
-  useEffect(() => {
-    const appContent = document.getElementById('app-content');
-    appContent?.setAttribute('inert', '');
-    return () => { appContent?.removeAttribute('inert'); };
-  }, []);
-
-  useEffect(() => {
-    closeBtnRef.current?.focus();
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { onClose(); return; }
-      if (e.key !== 'Tab' || !panelRef.current) return;
-      const focusables = panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
-      if (focusables.length === 0) return;
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
+  // A11Y-11: background inert while the modal is open, Tab-wrap trap at the
+  // panel's own edges, initial focus on the close button, Escape-to-close.
+  useFocusTrap(panelRef, true, { onEscape: onClose, initialFocusRef: closeBtnRef });
 
   if (!modalRoot) return null;
 

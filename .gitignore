@@ -7,7 +7,7 @@ venv/
 *.egg-info/
 .pylint*
 .vscode*
-Untitled
+*.pytest_cache*
 
 # Next.js
 frontend/.next/

@@ -25,7 +25,7 @@ def _sqlite_engine():
 
 def _mk_account(engine) -> int:
     with engine.begin() as conn:
-        pid = conn.execute(insert(profiles).values(name="p")).inserted_primary_key[0]
+        pid = conn.execute(insert(profiles).values(name="p", client_id="test-client-0000-0000-0000-000000000000")).inserted_primary_key[0]
         return conn.execute(insert(accounts).values(profile_id=pid, name="a", type="broker")).inserted_primary_key[0]
 
 

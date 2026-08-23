@@ -1,13 +1,112 @@
-"""Shared plumbing for routes/watchlist.py and routes/positions.py — the two
-domains that share the exact same anonymous-client_id-or-account-user_id
-ownership shape (see routes/watchlist.py's own docstring for the full
-reasoning) and, until this module existed, each independently repeated the
-same rate-limit → DB-configured-check → run_in_executor → sanitize-error
-wrapper around every read/write.
-"""
-from fastapi import HTTPException, UploadFile
+"""Shared plumbing for api.py, routes/watchlist.py, and routes/positions.py —
+the primitives all three need (a cached DB engine, per-IP rate limiting,
+bearer-token parsing, the ticker regex, and structured logging), plus the
+read/write wrapper the two domain route modules build on.
 
-import api
+These used to be defined in api.py itself and reached into by
+routes/watchlist.py and routes/positions.py via `import api` + dotted
+attribute access (`api._get_db_engine()`) — a real dependency, but one that
+only worked because api.py happened to define all of them before it called
+`app.include_router(...)` for those two routers near the bottom of that file,
+not because of any actual import direction. A future reorder of api.py could
+have silently broken it. They now live here instead, and api.py imports them
+FROM this module the same way the two route modules do — this file has no
+dependency on api.py at all, so there's no import-order landmine left for
+api.py to trip over.
+"""
+import asyncio
+import hmac
+import os
+import re
+import threading
+
+from fastapi import HTTPException, Request, UploadFile
+
+from core import rate_limiter
+from core.observability import get_logger, log_event
+
+LOGGER = get_logger("api")
+
+_TICKER_RE = re.compile(r"^[A-Z0-9&\-]{1,20}$")
+
+
+def _bearer_token_from_request(request: Request) -> str | None:
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        token = header[7:].strip()
+        return token or None
+    return None
+
+
+# ── Cached DB engine ──────────────────────────────────────────────────────────
+_DB_ENGINE = None
+_DB_ENGINE_LOCK = threading.Lock()
+
+
+def _get_db_engine():
+    global _DB_ENGINE
+    if _DB_ENGINE is None:
+        with _DB_ENGINE_LOCK:
+            if _DB_ENGINE is None:  # re-check: another thread may have won the race
+                from db.models import get_engine
+                _DB_ENGINE = get_engine()
+    return _DB_ENGINE
+
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+# Sliding-window limiter, keyed by (bucket, client IP). Backed by
+# core/rate_limiter.py — Redis-shared across workers when REDIS_URL is set, an
+# in-memory per-process counter otherwise.
+
+# Every browser request reaches this backend via the Next.js proxy routes,
+# server-to-server (see "Proxy routes" in CLAUDE.md) — so request.client.host
+# is always the Next.js server's own IP, never the real visitor's. Left
+# unfixed, every one of the per-IP limiters collapses into one shared bucket
+# for the whole site, the opposite of what they're for: one abusive visitor
+# throttles everyone, and there's no per-visitor signal at all.
+# TRUSTED_PROXY_SECRET (also set on the frontend — see
+# frontend/lib/proxy-headers.ts) lets a request prove it really came through
+# the Next.js proxy layer via X-Internal-Proxy-Secret, in which case the
+# X-Forwarded-For value it forwarded is trusted as the real client IP.
+# Without a configured secret (the default), or without a match, the header
+# is ignored — an untrusted caller could otherwise spoof X-Forwarded-For to
+# dodge its own rate limit or frame someone else's IP into being blocked.
+_TRUSTED_PROXY_SECRET = os.getenv("TRUSTED_PROXY_SECRET")
+
+
+def _client_ip(request: Request) -> str:
+    secret = request.headers.get("x-internal-proxy-secret", "")
+    if _TRUSTED_PROXY_SECRET and hmac.compare_digest(secret, _TRUSTED_PROXY_SECRET):
+        forwarded = request.headers.get("x-forwarded-for", "")
+        parts = [p.strip() for p in forwarded.split(",")] if forwarded else []
+        # A correctly configured single-hop reverse proxy in "replace" mode
+        # (see docs/deployment.md) always produces exactly one IP here. More
+        # than one usually means an "append" mode misconfiguration (e.g.
+        # nginx's $proxy_add_x_forwarded_for) letting a client-supplied
+        # X-Forwarded-For survive alongside the real one — and since a
+        # browser/curl can set this header directly on a request to the
+        # reverse proxy, the leftmost entry in that case would be the
+        # attacker's own claimed value, not the one the proxy actually
+        # observed. Refuse to trust an ambiguous chain rather than guess
+        # which entry is real; this also naturally handles an empty/blank
+        # header the same way.
+        if len(parts) == 1 and parts[0]:
+            return parts[0]
+    return request.client.host if request.client else "unknown"
+
+
+def _check_rate_limit(key: str, max_calls: int, window_seconds: float) -> None:
+    if not rate_limiter.is_allowed(key, max_calls, window_seconds):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded: max {max_calls} requests per {int(window_seconds)}s on this endpoint. Try again later.",
+        )
+
+
+def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: float) -> None:
+    client_ip = _client_ip(request)
+    _check_rate_limit(f"{bucket}:{client_ip}", max_calls, window_seconds)
+
 
 # Applies to every multipart file upload in this app (CAS PDF, broker
 # CSV/XLSX import) — these endpoints previously called `await file.read()`
@@ -79,7 +178,7 @@ async def rate_limited_upload(
     `skip_rate_limit=True` to `run_owned_db_call()` afterward — this
     function only replaces the read_upload_capped()-plus-a-separate-
     _rate_limit()-call pair, not `run_owned_db_call()` itself."""
-    api._rate_limit(request, rate_limit_name, max_calls=max_calls, window_seconds=window_seconds)
+    _rate_limit(request, rate_limit_name, max_calls=max_calls, window_seconds=window_seconds)
     return await read_upload_capped(file, max_bytes)
 
 
@@ -103,18 +202,19 @@ async def run_owned_db_call(
     share the same generous per-minute budget as an ordinary star/unstar.
 
     `skip_rate_limit=True` is for a caller that already called
-    `api._rate_limit(request, rate_limit_name, ...)` itself earlier in the
+    `_rate_limit(request, rate_limit_name, ...)` itself earlier in the
     request — e.g. the CAS/CSV upload endpoints, which need the rate-limit
-    check to run BEFORE `read_upload_capped()` reads the file, not after.
-    Calling `_rate_limit()` a second time here with the *same* bucket name
-    would silently consume two slots from one sliding window per request,
-    halving the effective limit — this flag exists so that never happens."""
+    check to run BEFORE `read_upload_capped()` reads the file, not after
+    (see `rate_limited_upload()` above). Calling `_rate_limit()` a second
+    time here with the *same* bucket name would silently consume two slots
+    from one sliding window per request, halving the effective limit —
+    this flag exists so that never happens."""
     if not skip_rate_limit:
-        api._rate_limit(request, rate_limit_name, max_calls=max_calls, window_seconds=window_seconds)
-    if not api.os.environ.get("DATABASE_URL"):
+        _rate_limit(request, rate_limit_name, max_calls=max_calls, window_seconds=window_seconds)
+    if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
 
-    loop = api.asyncio.get_running_loop()
+    loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(None, sync_fn)
     except HTTPException:
@@ -135,7 +235,7 @@ async def run_owned_db_call(
     except PermissionError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
     except Exception as exc:
-        api.log_event(api.LOGGER, f"{event_prefix}_failed", level="error", error=str(exc))
+        log_event(LOGGER, f"{event_prefix}_failed", level="error", error=str(exc))
         raise HTTPException(status_code=503, detail="Database error. See server logs.")
 
 

@@ -1,17 +1,17 @@
 'use client';
 
-import { useMemo } from 'react';
-import type { MfHoldingsStakeDelta, Report, StockInfo } from '@/types';
+import type { Report, StockInfo } from '@/types';
 import InfoTooltip from './info-tooltip';
 import WatchlistButton from './watchlist-button';
 import { Card, MetricRow, ExchangeTable, RangeBar } from './dashboard-primitives';
-import { fmt, fmtCr, fmtVolume, fmtRatio, formatAge, formatDataAge, oldestDataFreshness, DATA_FRESHNESS_LABELS, humanizeMetaKey, formatMetaValue, normalizeRatioKey, safeExternalHref } from '@/lib/format';
+import { fmt, fmtCr, fmtVolume, fmtRatio, formatAge, formatDataAge, DATA_FRESHNESS_LABELS, humanizeMetaKey, formatMetaValue, normalizeRatioKey, safeExternalHref } from '@/lib/format';
 import { REC_CONFIG_3TIER, CONFIDENCE_TONE, SENTIMENT_TONE, valuationTone, exchangeTone } from '@/lib/tone';
-import { usePeerComparison, PeerTable, SimilarStocksRail } from './peer-comparison-card';
-import { useFinancials, FinancialStatementsCard, ConcallsCard } from './financial-statements-card';
+import { useResultsPageData } from '@/lib/use-results-page-data';
+import { PeerTable, SimilarStocksRail } from './peer-comparison-card';
+import { FinancialStatementsCard, ConcallsCard } from './financial-statements-card';
 import { InsiderActivityCard } from './insider-activity-card';
 import { ShareholdingDetailCard } from './shareholding-detail-card';
-import { useStreetConsensus, StreetConsensusCard } from './street-consensus-card';
+import { StreetConsensusCard } from './street-consensus-card';
 import ValuationSummaryStrip from './valuation-summary-strip';
 import PriceSparkline from './price-sparkline';
 import VerdictTimeline from './verdict-timeline';
@@ -73,34 +73,10 @@ function summaryBullets(text: string): string[] {
 }
 
 export default function ResultsDashboard({ report, onHardRefresh, refreshing }: Props) {
-  const { analysis: a, signals: sig, stock_info: s, research: r, news, holdings: h, filings, filings_summary: fs, mf_holdings_trend: mfTrend } = report;
+  const { analysis: a, signals: sig, stock_info: s, research: r, news, holdings: h, filings, filings_summary: fs } = report;
 
-  const peers = usePeerComparison(report.symbol);
-  const financials = useFinancials(report.symbol);
-  const streetConsensus = useStreetConsensus(report.symbol);
-  const percentileByNormalizedKey = useMemo(() => {
-    const map: Record<string, number> = {};
-    for (const [key, value] of Object.entries(peers?.percentiles ?? {})) {
-      map[normalizeRatioKey(key)] = value;
-    }
-    return map;
-  }, [peers]);
-
-  // The true bottleneck on "how fresh is everything on this page" — see
-  // lib/format.ts::oldestDataFreshness. report.generated_at alone
-  // (rendered below as formatAge) is stamped fresh on every report
-  // assembly regardless of whether anything was actually refetched, so a
-  // long-TTL task (shareholding/mf_holdings, 168h) could otherwise read as
-  // "Updated today" while being up to a week stale.
-  const oldestFreshness = useMemo(() => oldestDataFreshness(report.data_freshness), [report.data_freshness]);
-
-  const mfDeltaByFund = useMemo(() => {
-    const map: Record<string, MfHoldingsStakeDelta> = {};
-    for (const d of mfTrend ?? []) {
-      if (d.delta_pct != null) map[d.fund] = d;
-    }
-    return map;
-  }, [mfTrend]);
+  const { peers, financials, streetConsensus, percentileByNormalizedKey, oldestFreshness, mfDeltaByFund } =
+    useResultsPageData(report.symbol, report);
 
   const rec = (a?.recommendation ?? 'HOLD') as 'BUY' | 'SELL' | 'HOLD';
   const cfg = REC_CONFIG[rec];
