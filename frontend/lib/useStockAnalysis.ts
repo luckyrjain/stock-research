@@ -10,6 +10,73 @@ function initStatus(): Record<TaskName, TaskStatus> {
   return Object.fromEntries(ALL_TASKS.map(t => [t, 'idle'])) as Record<TaskName, TaskStatus>;
 }
 
+// Everything reduceSSEMessage needs to decide the next transition — just the
+// refreshingRef-mirrored flag (background-refresh fencing, see STATE-01
+// above) and the symbol the stream is for (only used to word the refresh-
+// failure toast). Deliberately NOT the full hook state — task_done's status
+// merge is expressed as a `taskUpdate` the caller folds into its own prior
+// taskStatus, so the reducer never needs to see it.
+export interface SSEReducerState {
+  refreshing: boolean;
+  symbol: string;
+}
+
+// A partial update: only the fields a given message actually changes are
+// present. The caller (useStockAnalysis's onmessage handler) applies each
+// one via its existing setState/ref-mutation calls; this function itself
+// never touches state, a ref, or the EventSource.
+export interface SSEReducerResult {
+  taskStatus?: Record<TaskName, TaskStatus>;           // full replacement (start)
+  taskUpdate?: { task: TaskName; status: TaskStatus }; // merge into prior taskStatus (task_done)
+  phase?: Phase;
+  report?: Report;
+  refreshing?: boolean;
+  done?: boolean;          // doneRef.current = true
+  closeStream?: boolean;   // es.close()
+  toastMessage?: string;   // showError(...) — background-refresh failure
+  errorMessage?: string;   // setError(...) — foreground failure
+}
+
+// Pure "given the current refreshing/symbol and an incoming SSE message,
+// what changes" function — see this file's own module comment for why this
+// was pulled out of the onmessage switch.
+export function reduceSSEMessage(state: SSEReducerState, msg: SSEMessage): SSEReducerResult {
+  switch (msg.event) {
+    case 'start': {
+      if (state.refreshing) return {};
+      const next = initStatus();
+      // cached tasks stay marked cached; everything else (stale + fresh) is running
+      ALL_TASKS.forEach(t => {
+        next[t] = msg.cached.includes(t) ? 'cached' : 'running';
+      });
+      return { taskStatus: next };
+    }
+    case 'task_done': {
+      if (state.refreshing) return {};
+      return { taskUpdate: { task: msg.task as TaskName, status: msg.ok ? 'ok' : 'fail' } };
+    }
+    case 'analysing': {
+      if (state.refreshing) return {};
+      return { phase: 'analysing' };
+    }
+    case 'done': {
+      return { done: true, report: msg.report, phase: 'done', refreshing: false, closeStream: true };
+    }
+    case 'error': {
+      if (state.refreshing) {
+        // Old report stays on screen (STATE-01) — a background-refresh
+        // failure is a toast, not a page-blocking error state.
+        return {
+          toastMessage: `Couldn't refresh ${state.symbol}. ${msg.message}`,
+          refreshing: false,
+          closeStream: true,
+        };
+      }
+      return { errorMessage: msg.message, phase: 'error', closeStream: true };
+    }
+  }
+}
+
 // The per-symbol SSE analysis pipeline (open EventSource, track task-by-task
 // progress, land on a done/error phase), extracted from the home page so
 // /compare can run one of these per column without duplicating the state
@@ -65,54 +132,26 @@ export function useStockAnalysis() {
       let msg: SSEMessage;
       try { msg = JSON.parse(e.data); } catch { return; }
 
-      switch (msg.event) {
-        case 'start': {
-          if (!refreshingRef.current) {
-            const next = initStatus();
-            // cached tasks stay marked cached; everything else (stale + fresh) is running
-            ALL_TASKS.forEach(t => {
-              next[t] = msg.cached.includes(t) ? 'cached' : 'running';
-            });
-            setTaskStatus(next);
-          }
-          break;
-        }
-        case 'task_done': {
-          if (!refreshingRef.current) {
-            setTaskStatus(prev => ({
-              ...prev,
-              [msg.task as TaskName]: msg.ok ? 'ok' : 'fail',
-            }));
-          }
-          break;
-        }
-        case 'analysing': {
-          if (!refreshingRef.current) setPhase('analysing');
-          break;
-        }
-        case 'done': {
-          doneRef.current = true;
-          reportRef.current = msg.report;
-          setReport(msg.report);
-          setPhase('done');
-          setRefreshing(false);
-          es.close();
-          break;
-        }
-        case 'error': {
-          if (refreshingRef.current) {
-            // Old report stays on screen (STATE-01) — a background-refresh
-            // failure is a toast, not a page-blocking error state.
-            showError(`Couldn't refresh ${symbol}. ${msg.message}`);
-            setRefreshing(false);
-          } else {
-            setError(msg.message);
-            setPhase('error');
-          }
-          es.close();
-          break;
-        }
+      // The hook's own job now: own the EventSource, parse the message, ask
+      // the pure reducer what changed, apply it via the usual setState/ref
+      // calls. See reduceSSEMessage above for the actual transition logic.
+      const result = reduceSSEMessage({ refreshing: refreshingRef.current, symbol }, msg);
+
+      if (result.taskStatus) setTaskStatus(result.taskStatus);
+      if (result.taskUpdate) {
+        const { task, status } = result.taskUpdate;
+        setTaskStatus(prev => ({ ...prev, [task]: status }));
       }
+      if (result.phase) setPhase(result.phase);
+      if (result.report !== undefined) {
+        reportRef.current = result.report;
+        setReport(result.report);
+      }
+      if (result.refreshing !== undefined) setRefreshing(result.refreshing);
+      if (result.done) doneRef.current = true;
+      if (result.toastMessage) showError(result.toastMessage);
+      if (result.errorMessage !== undefined) setError(result.errorMessage);
+      if (result.closeStream) es.close();
     };
 
     es.onerror = () => {

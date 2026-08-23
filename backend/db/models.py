@@ -362,17 +362,38 @@ corporate_actions = Table(
 # ── Portfolio Aggregator (personal net-worth tracker, unrelated to the
 # `positions` table above — see CLAUDE.md's "Portfolio aggregator" section
 # for the distinction between this and the existing /portfolio page) ────────
-# No auth/ownership column by design (localhost/Tailscale-only personal
-# tool, tens of users at most) — `profiles` is a bare picker, not an
-# account system; keeps the door open for real auth later without forcing
-# it now.
+# Ownership shape matches watchlist_items exactly: an anonymous per-browser
+# client_id, or a signed-in account's user_id, never both, never neither
+# (ck_profiles_exactly_one_owner). Every account/asset/broker_connection row
+# hangs off a profile via profile_id/account_id, so scoping ownership here is
+# enough to scope the whole feature — routes/portfolio_aggregator.py resolves
+# the caller's owner the same way routes/watchlist.py::resolve_owner() does
+# and checks it on every profile/account/asset lookup.
+#
+# A pre-existing deployment's profile rows (from before this column existed)
+# have neither column set and will violate the CHECK below — an operator
+# upgrading from that state must backfill client_id/user_id by hand (or
+# delete those rows) before this migration will apply cleanly. Acceptable at
+# this feature's real scale (a personal/small-household tool that only
+# recently shipped) rather than a silent grandfather clause that would leave
+# old rows permanently unowned and invisible to every owner-scoped query.
 
 profiles = Table(
     "profiles",
     metadata,
     Column("id",         Integer, primary_key=True, autoincrement=True),
-    Column("name",       String(60), nullable=False, unique=True),
+    Column("client_id",  String(36)),
+    Column("user_id",    Integer, ForeignKey("users.id")),
+    Column("name",       String(60), nullable=False),
     Column("created_at", DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint(
+        "(client_id IS NULL) <> (user_id IS NULL)",
+        name="ck_profiles_exactly_one_owner",
+    ),
+    UniqueConstraint("client_id", "name", name="uq_profiles_client_name"),
+    UniqueConstraint("user_id", "name", name="uq_profiles_user_name"),
+    Index("idx_profiles_client", "client_id"),
+    Index("idx_profiles_user", "user_id"),
 )
 
 accounts = Table(

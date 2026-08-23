@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback } from 'react';
 import { useToast } from '@/components/toast';
+import { createSharedResource } from '@/lib/shared-resource';
 
 export interface WatchlistItem {
   symbol: string;
@@ -38,65 +39,40 @@ export function getClientId(): string {
   return id;
 }
 
-// Module-level shared cache: every mounted useWatchlist() instance on a page
-// (one per star button, potentially dozens on the Market Picks table) reads
-// from and subscribes to this single cache instead of each independently
-// fetching /api/watchlist on mount.
-let cachedItems: WatchlistItem[] | null = null;
-// Resolves to null on failure (never rejects) — null means "keep whatever
-// cachedItems already had," not "the watchlist is empty."
-let inFlight: Promise<WatchlistItem[] | null> | null = null;
-// Bumped by refreshWatchlist() so a fetch already in flight when the
-// caller's identity changes (e.g. a slow anonymous request still running at
-// the moment of sign-in/sign-out) can't clobber the fresher result if it
-// resolves after the refresh's own fetch — same fix as lib/auth.ts's
-// fetchMe()/refreshAuth(), and just as important here: on logout, a stale
-// account-scoped response arriving late would otherwise briefly re-display
-// the signed-out-from account's rows, not just show outdated data.
-let generation = 0;
-const listeners = new Set<() => void>();
-
-function notify(): void {
-  listeners.forEach(fn => fn());
-}
-
-async function fetchItems(): Promise<WatchlistItem[]> {
-  const myGeneration = generation;
-  if (!inFlight) {
-    const clientId = getClientId();
-    // client_id is always sent, but the backend transparently prefers a
-    // valid account session over it when one is present (see api.py's
-    // _resolve_watchlist_owner) — this fetch doesn't need to know which
-    // identity actually served the request.
-    inFlight = fetch(`/api/watchlist?client_id=${encodeURIComponent(clientId)}`, { cache: 'no-store' })
-      .then(res => (res.ok ? res.json() : { items: null }))
-      .then((data: { items?: WatchlistItem[] | null }) => data.items ?? null)
-      .catch(() => null)
-      .finally(() => { inFlight = null; });
-  }
-  const items = await inFlight;
-  if (myGeneration !== generation) {
-    // A refresh (identity change) superseded this fetch — its own, later
-    // request owns the cache now; don't let a straggler overwrite it.
-    return cachedItems ?? [];
-  }
+// Shared cross-component cache: every mounted useWatchlist() instance on a
+// page (one per star button, potentially dozens on the Market Picks table)
+// reads from and subscribes to this single resource instead of each
+// independently fetching /api/watchlist on mount. See lib/shared-resource.ts
+// for the cache/inFlight/generation/listeners machinery this builds on —
+// the generation fencing matters here just as much as in lib/auth.ts's
+// fetchMe()/refreshAuth(): on logout, a stale account-scoped response
+// arriving late would otherwise briefly re-display the signed-out-from
+// account's rows, not just show outdated data.
+async function fetchItems(previous: WatchlistItem[] | undefined): Promise<WatchlistItem[]> {
+  const clientId = getClientId();
+  // client_id is always sent, but the backend transparently prefers a
+  // valid account session over it when one is present (see api.py's
+  // _resolve_watchlist_owner) — this fetch doesn't need to know which
+  // identity actually served the request.
+  const items = await fetch(`/api/watchlist?client_id=${encodeURIComponent(clientId)}`, { cache: 'no-store' })
+    .then(res => (res.ok ? res.json() : { items: null }))
+    .then((data: { items?: WatchlistItem[] | null }) => data.items ?? null)
+    .catch(() => null);
   // A failure (items === null) leaves the previous value in place rather
   // than wiping a populated watchlist to empty, matching toggle()/remove()
   // below's "leave state as-is" convention on a failed mutation.
-  cachedItems = items ?? cachedItems ?? [];
-  notify();
-  return cachedItems;
+  return items ?? previous ?? [];
 }
+
+const resource = createSharedResource<WatchlistItem[]>(fetchItems, []);
 
 /** Re-fetches /api/watchlist and updates every subscribed useWatchlist()
  * instance — call after sign-in/sign-out so the watchlist switches between
  * the account's rows and the anonymous client_id's rows without a full page
- * reload (the module-level cache above otherwise has no way to know the
- * caller's identity changed). */
+ * reload (the shared cache above otherwise has no way to know the caller's
+ * identity changed). */
 export function refreshWatchlist(): Promise<WatchlistItem[]> {
-  generation++;
-  inFlight = null;
-  return fetchItems();
+  return resource.refresh();
 }
 
 export interface ClaimResult {
@@ -121,10 +97,8 @@ export async function claimWatchlist(clientId: string): Promise<ClaimResult | nu
     });
     if (!res.ok) return null;
     const data = await res.json() as { claimed: number; skipped_over_cap: number; items: WatchlistItem[] };
-    generation++;
-    inFlight = null;
-    cachedItems = data.items;
-    notify();
+    resource.bumpGeneration();
+    resource.setCache(data.items);
     return { claimed: data.claimed, skippedOverCap: data.skipped_over_cap };
   } catch {
     return null;
@@ -138,19 +112,7 @@ export async function claimWatchlist(clientId: string): Promise<ClaimResult | nu
  * backend resolves that per request. */
 export function useWatchlist() {
   const { showError } = useToast();
-  const [items, setItems] = useState<WatchlistItem[]>(cachedItems ?? []);
-  const [loading, setLoading] = useState(cachedItems === null);
-
-  useEffect(() => {
-    const onChange = () => setItems(cachedItems ?? []);
-    listeners.add(onChange);
-    if (cachedItems === null) {
-      fetchItems().finally(() => setLoading(false));
-    } else {
-      setLoading(false);
-    }
-    return () => { listeners.delete(onChange); };
-  }, []);
+  const { value: items, loading } = resource.useValue();
 
   const isWatched = useCallback(
     (symbol: string) => items.some(i => i.symbol === symbol.toUpperCase()),
@@ -160,14 +122,14 @@ export function useWatchlist() {
   const toggle = useCallback(async (item: { symbol: string; company: string; exchange: string }) => {
     const symbol = item.symbol.toUpperCase();
     const clientId = getClientId();
-    const currentlyWatched = (cachedItems ?? []).some(i => i.symbol === symbol);
+    const currentlyWatched = (resource.getCache() ?? []).some(i => i.symbol === symbol);
     // Captured before the await, same generation-guard convention as
     // fetchItems() above — without this, a toggle in flight when the
     // caller's identity changes mid-request (e.g. signing out right after
     // starring a stock) can resolve after refreshWatchlist()'s own fetch and
     // silently overwrite the fresher (post-refresh) list with this stale,
     // now-wrong-identity one.
-    const myGeneration = generation;
+    const myGeneration = resource.getGeneration();
 
     try {
       if (currentlyWatched) {
@@ -176,8 +138,8 @@ export function useWatchlist() {
         });
         if (!res.ok) { showError("Couldn't update your watchlist — try again."); return; }
         const data = await res.json() as { items: WatchlistItem[] };
-        if (myGeneration !== generation) return;
-        cachedItems = data.items;
+        if (!resource.isCurrent(myGeneration)) return;
+        resource.setCache(data.items);
       } else {
         const res = await fetch('/api/watchlist', {
           method: 'POST',
@@ -186,10 +148,9 @@ export function useWatchlist() {
         });
         if (!res.ok) { showError("Couldn't update your watchlist — try again."); return; }
         const data = await res.json() as { items: WatchlistItem[] };
-        if (myGeneration !== generation) return;
-        cachedItems = data.items;
+        if (!resource.isCurrent(myGeneration)) return;
+        resource.setCache(data.items);
       }
-      notify();
     } catch {
       // Backend unreachable — leave state as-is rather than optimistically
       // flipping the star to something that didn't actually save.
@@ -199,16 +160,15 @@ export function useWatchlist() {
 
   const remove = useCallback(async (symbol: string) => {
     const clientId = getClientId();
-    const myGeneration = generation;
+    const myGeneration = resource.getGeneration();
     try {
       const res = await fetch(`/api/watchlist/${encodeURIComponent(symbol.toUpperCase())}?client_id=${encodeURIComponent(clientId)}`, {
         method: 'DELETE',
       });
       if (!res.ok) { showError("Couldn't remove from your watchlist — try again."); return; }
       const data = await res.json() as { items: WatchlistItem[] };
-      if (myGeneration !== generation) return;
-      cachedItems = data.items;
-      notify();
+      if (!resource.isCurrent(myGeneration)) return;
+      resource.setCache(data.items);
     } catch {
       // silently ignore in state — the row just won't disappear; user can retry
       showError("Couldn't reach the server — try again.");

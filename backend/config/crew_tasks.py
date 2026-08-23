@@ -4,6 +4,11 @@ from pathlib import Path
 _analyst_cfg = json.loads((Path(__file__).parent / "analyst.json").read_text())
 
 ANALYST_SECTIONS: dict[str, str] = _analyst_cfg["sections"]
+_OUTPUT_SCHEMA: dict = _analyst_cfg["output_schema"]
+# analyst.json previously also carried an "expected_output" string -- a prose summary of
+# output_schema's own fields with no reader anywhere in this codebase. Removed rather than
+# wired in, since it duplicated output_schema (now the single source of truth below) with
+# no distinct content of its own.
 # "instructions"/"valuation_guidance" were previously parsed here and never
 # referenced anywhere else in this module -- an operator editing either list
 # in analyst.json (e.g. to tune the filings-materiality guidance or the P/E
@@ -24,6 +29,12 @@ def build_analysis_prompt(symbol: str, all_data: dict[str, dict]) -> str:
         parts.append(f"### {label}\n{json.dumps(clean, indent=2)}")
     instructions_block = "\n".join(f"- {line}" for line in _INSTRUCTIONS)
     valuation_guidance_block = "\n".join(f"- {line}" for line in _VALUATION_GUIDANCE)
+    # Rendered from config/analyst.json's own "output_schema" -- previously this was a
+    # second, hand-duplicated copy of the schema hardcoded here, which meant editing
+    # analyst.json's output_schema had zero effect on what the LLM actually saw. The
+    # "<SYMBOL>" placeholder in that config is swapped for the real symbol, matching
+    # this prompt's previous behavior of showing the actual ticker in the illustration.
+    schema_block = json.dumps(_OUTPUT_SCHEMA, indent=2).replace("<SYMBOL>", symbol)
     return (
         f"""You are a professional equity research analyst.
             You are given structured data for the NSE-listed stock: {symbol}.
@@ -55,23 +66,7 @@ def build_analysis_prompt(symbol: str, all_data: dict[str, dict]) -> str:
             REQUIRED JSON SCHEMA
             =====================
 
-            {{
-            "symbol": "{symbol}",
-            "recommendation": "BUY | SELL | HOLD",
-            "confidence": "HIGH | MEDIUM | LOW",
-            "summary": "string",
-            "valuation": {{
-                "verdict": "Undervalued | Fairly Valued | Overvalued",
-                "comment": "string"
-            }},
-            "business_quality": "string",
-            "bull_factors": ["string", "string", "string"],
-            "bear_factors": ["string", "string"],
-            "key_risks": ["string", "string", "string"],
-            "news_sentiment": "Positive | Neutral | Negative",
-            "news_highlights": "string",
-            "institutional_trend": "string"
-            }}
+            {schema_block}
 
             =====================
             CRITICAL CONSTRAINTS

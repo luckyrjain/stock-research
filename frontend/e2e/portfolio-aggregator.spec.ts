@@ -6,17 +6,17 @@ const ACCOUNT = { id: 1, profile_id: 1, name: 'HDFC Savings', institution: null,
 
 test.describe('Net Worth (portfolio aggregator)', () => {
   test('has no axe violations once a profile is selected', async ({ page }) => {
-    await page.route('**/api/portfolio/profiles', route => {
+    await page.route('**/api/portfolio/profiles*', route => {
       if (route.request().method() === 'POST') {
         return route.fulfill({ json: PROFILE });
       }
       return route.fulfill({ json: { profiles: [PROFILE] } });
     });
-    await page.route('**/api/portfolio/accounts?profile_id=1', route => route.fulfill({ json: { accounts: [] } }));
-    await page.route('**/api/portfolio/networth?profile_id=1', route => route.fulfill({
+    await page.route('**/api/portfolio/accounts?profile_id=1*', route => route.fulfill({ json: { accounts: [] } }));
+    await page.route('**/api/portfolio/networth?profile_id=1*', route => route.fulfill({
       json: { total: 0, by_type: {}, by_account: [] },
     }));
-    await page.route('**/api/portfolio/broker/connections?profile_id=1', route => route.fulfill({ json: { connections: [] } }));
+    await page.route('**/api/portfolio/broker/connections?profile_id=1*', route => route.fulfill({ json: { connections: [] } }));
 
     await page.goto('/portfolio-aggregator');
     await page.getByRole('button', { name: PROFILE.name }).click();
@@ -31,12 +31,12 @@ test.describe('Net Worth (portfolio aggregator)', () => {
     // valuations" updating the displayed number left the edit box showing
     // a stale figure, silently reverting a just-refreshed value on save.
     let assetValue = 100000;
-    await page.route('**/api/portfolio/profiles', route => {
+    await page.route('**/api/portfolio/profiles*', route => {
       if (route.request().method() === 'POST') return route.fulfill({ json: PROFILE });
       return route.fulfill({ json: { profiles: [PROFILE] } });
     });
-    await page.route('**/api/portfolio/accounts?profile_id=1', route => route.fulfill({ json: { accounts: [ACCOUNT] } }));
-    await page.route('**/api/portfolio/assets?account_id=1', route => route.fulfill({
+    await page.route('**/api/portfolio/accounts?profile_id=1*', route => route.fulfill({ json: { accounts: [ACCOUNT] } }));
+    await page.route('**/api/portfolio/assets?account_id=1*', route => route.fulfill({
       json: {
         assets: [{
           id: 1, account_id: 1, type: 'cash', name: 'Emergency Fund', symbol: null, meta: {},
@@ -44,11 +44,11 @@ test.describe('Net Worth (portfolio aggregator)', () => {
         }],
       },
     }));
-    await page.route('**/api/portfolio/networth?profile_id=1', route => route.fulfill({
+    await page.route('**/api/portfolio/networth?profile_id=1*', route => route.fulfill({
       json: { total: assetValue, by_type: { cash: assetValue }, by_account: [{ account_id: 1, account_name: ACCOUNT.name, value: assetValue }] },
     }));
-    await page.route('**/api/portfolio/broker/connections?profile_id=1', route => route.fulfill({ json: { connections: [] } }));
-    await page.route('**/api/portfolio/refresh-valuations', route => {
+    await page.route('**/api/portfolio/broker/connections?profile_id=1*', route => route.fulfill({ json: { connections: [] } }));
+    await page.route('**/api/portfolio/refresh-valuations*', route => {
       assetValue = 150000;
       return route.fulfill({ json: { valued: 1, skipped: 0 } });
     });

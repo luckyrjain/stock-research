@@ -57,6 +57,5 @@
     "news_sentiment": "Positive | Neutral | Negative",
     "news_highlights": "<cite 1-2 specific headlines from the news data and what they signal>",
     "institutional_trend": "<cite specific Promoter %, FII %, DII % from the shareholding data; if only one period is shown, describe it as a snapshot and say trend data is unavailable>"
-  },
-  "expected_output": "A single valid JSON object with: symbol, recommendation (BUY/SELL/HOLD), confidence (HIGH/MEDIUM/LOW), summary (4 sentences with specific numbers), valuation (verdict + comment with actual P/E, ROCE, ROE values), business_quality (2 sentences on ratios), bull_factors (3+ items each citing a specific metric), bear_factors (2+ items each citing a data point), key_risks (3 company-specific risks), news_sentiment, news_highlights, institutional_trend (citing actual % figures)."
+  }
 }

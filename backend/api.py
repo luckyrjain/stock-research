@@ -1,8 +1,6 @@
 import asyncio
-import hmac
 import json
 import os
-import threading
 import time
 import uuid
 import re
@@ -32,6 +30,10 @@ from pipelines.market_picks_pipeline import load_picks_cache as _load_picks_cach
 from pipelines.market_picks_pipeline import save_picks_cache as _save_picks_cache
 from core import rate_limiter
 from core import state_store
+from routes._shared import (
+    _TRUSTED_PROXY_SECRET, _TICKER_RE, _bearer_token_from_request, _check_rate_limit, _client_ip,
+    _get_db_engine, _rate_limit,
+)
 # Re-exported under their original names since this file (and its existing
 # tests) call them as api._compute_peer_percentiles / api._compute_valuation_anchor —
 # see analytics/peer_analytics.py's own docstring for why the math itself lives there.
@@ -67,8 +69,6 @@ def _release_llm_slot() -> None:
 # core/rate_limiter.py lock — Redis-shared across workers when REDIS_URL is set,
 # so two workers can no longer both start a refresh at once (previously a
 # single-process-only guard; see docs/deployment.md).
-_DB_ENGINE = None
-_DB_ENGINE_LOCK = threading.Lock()
 _SME_REFRESH_LOCK_NAME = "sme_refresh"
 _SME_REFRESH_LOCK_TTL_SECONDS = 3600  # generous upper bound on one pipeline run
 
@@ -82,70 +82,11 @@ _MARKET_PICKS_REFRESH_LOCK_NAME = "market_picks_refresh"
 _MARKET_PICKS_REFRESH_LOCK_TTL_SECONDS = 3600  # generous upper bound on one pipeline run
 
 
-def _get_db_engine():
-    global _DB_ENGINE
-    if _DB_ENGINE is None:
-        with _DB_ENGINE_LOCK:
-            if _DB_ENGINE is None:  # re-check: another thread may have won the race
-                from db.models import get_engine
-                _DB_ENGINE = get_engine()
-    return _DB_ENGINE
-
-
-# ── Rate limiting ─────────────────────────────────────────────────────────────
-# Sliding-window limiter, keyed by (bucket, client IP). Only guards the
-# expensive/abusable routes (fresh LLM calls, forced full rescans, forced SME
-# pipeline runs). Backed by core/rate_limiter.py — Redis-shared across workers when
-# REDIS_URL is set, an in-memory per-process counter otherwise.
-
-# Every browser request reaches this backend via the Next.js proxy routes,
-# server-to-server (see "Proxy routes" in CLAUDE.md) — so request.client.host
-# is always the Next.js server's own IP, never the real visitor's. Left
-# unfixed, every one of the per-IP limiters below collapses into one shared
-# bucket for the whole site, the opposite of what they're for: one abusive
-# visitor throttles everyone, and there's no per-visitor signal at all.
-# TRUSTED_PROXY_SECRET (also set on the frontend — see
-# frontend/lib/proxy-headers.ts) lets a request prove it really came through
-# the Next.js proxy layer via X-Internal-Proxy-Secret, in which case the
-# X-Forwarded-For value it forwarded is trusted as the real client IP.
-# Without a configured secret (the default), or without a match, the header
-# is ignored — an untrusted caller could otherwise spoof X-Forwarded-For to
-# dodge its own rate limit or frame someone else's IP into being blocked.
-_TRUSTED_PROXY_SECRET = os.getenv("TRUSTED_PROXY_SECRET")
-
-
-def _client_ip(request: Request) -> str:
-    secret = request.headers.get("x-internal-proxy-secret", "")
-    if _TRUSTED_PROXY_SECRET and hmac.compare_digest(secret, _TRUSTED_PROXY_SECRET):
-        forwarded = request.headers.get("x-forwarded-for", "")
-        parts = [p.strip() for p in forwarded.split(",")] if forwarded else []
-        # A correctly configured single-hop reverse proxy in "replace" mode
-        # (see docs/deployment.md) always produces exactly one IP here. More
-        # than one usually means an "append" mode misconfiguration (e.g.
-        # nginx's $proxy_add_x_forwarded_for) letting a client-supplied
-        # X-Forwarded-For survive alongside the real one — and since a
-        # browser/curl can set this header directly on a request to the
-        # reverse proxy, the leftmost entry in that case would be the
-        # attacker's own claimed value, not the one the proxy actually
-        # observed. Refuse to trust an ambiguous chain rather than guess
-        # which entry is real; this also naturally handles an empty/blank
-        # header the same way.
-        if len(parts) == 1 and parts[0]:
-            return parts[0]
-    return request.client.host if request.client else "unknown"
-
-
-def _check_rate_limit(key: str, max_calls: int, window_seconds: float) -> None:
-    if not rate_limiter.is_allowed(key, max_calls, window_seconds):
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded: max {max_calls} requests per {int(window_seconds)}s on this endpoint. Try again later.",
-        )
-
-
-def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: float) -> None:
-    client_ip = _client_ip(request)
-    _check_rate_limit(f"{bucket}:{client_ip}", max_calls, window_seconds)
+# ── DB engine + rate limiting ─────────────────────────────────────────────────
+# _get_db_engine/_rate_limit/_bearer_token_from_request/_TICKER_RE/
+# _TRUSTED_PROXY_SECRET now live in routes/_shared.py (imported above) — see
+# that module's own docstring for why (a former import-order landmine between
+# this file and routes/watchlist.py/positions.py).
 
 
 # A dedicated, explicitly-sized executor for this app's blocking work (LLM
@@ -243,7 +184,6 @@ def _is_isin(s: str) -> bool:
     return bool(re.match(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$", s))
 
 
-_TICKER_RE = re.compile(r"^[A-Z0-9&\-]{1,20}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Every REST endpoint already sanitizes an internal exception to this shape
@@ -2545,14 +2485,6 @@ _FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000").rstrip("
 
 class AuthRequestLinkRequest(BaseModel):
     email: str
-
-
-def _bearer_token_from_request(request: Request) -> str | None:
-    header = request.headers.get("authorization", "")
-    if header.lower().startswith("bearer "):
-        token = header[7:].strip()
-        return token or None
-    return None
 
 
 @app.post("/api/auth/request-link")

@@ -14,6 +14,7 @@ from core import cache
 from core import rate_limiter
 from core import state_store
 from state_store_harness import isolated_state_store
+import routes._shared as _shared
 import routes.positions as routes_positions
 
 client = TestClient(api.app)
@@ -217,7 +218,7 @@ class ClientIpTrustedProxyTest(unittest.TestCase):
 
     def test_no_secret_configured_ignores_forwarded_for(self) -> None:
         req = self._make_request("10.0.0.5", {"x-forwarded-for": "203.0.113.5"})
-        with patch("api._TRUSTED_PROXY_SECRET", None):
+        with patch("routes._shared._TRUSTED_PROXY_SECRET", None):
             self.assertEqual(api._client_ip(req), "10.0.0.5")
 
     def test_matching_secret_trusts_forwarded_for(self) -> None:
@@ -225,7 +226,7 @@ class ClientIpTrustedProxyTest(unittest.TestCase):
             "x-forwarded-for": "203.0.113.5",
             "x-internal-proxy-secret": "s3cr3t",
         })
-        with patch("api._TRUSTED_PROXY_SECRET", "s3cr3t"):
+        with patch("routes._shared._TRUSTED_PROXY_SECRET", "s3cr3t"):
             self.assertEqual(api._client_ip(req), "203.0.113.5")
 
     def test_mismatched_secret_falls_back_to_client_host(self) -> None:
@@ -233,7 +234,7 @@ class ClientIpTrustedProxyTest(unittest.TestCase):
             "x-forwarded-for": "203.0.113.5",
             "x-internal-proxy-secret": "wrong-value",
         })
-        with patch("api._TRUSTED_PROXY_SECRET", "s3cr3t"):
+        with patch("routes._shared._TRUSTED_PROXY_SECRET", "s3cr3t"):
             self.assertEqual(api._client_ip(req), "10.0.0.5")
 
     def test_trusted_caller_with_multi_value_chain_falls_back(self) -> None:
@@ -251,7 +252,7 @@ class ClientIpTrustedProxyTest(unittest.TestCase):
             "x-forwarded-for": "203.0.113.5, 10.0.0.1",
             "x-internal-proxy-secret": "s3cr3t",
         })
-        with patch("api._TRUSTED_PROXY_SECRET", "s3cr3t"):
+        with patch("routes._shared._TRUSTED_PROXY_SECRET", "s3cr3t"):
             self.assertEqual(api._client_ip(req), "10.0.0.5")
 
     def test_trusted_caller_with_blank_forwarded_header_falls_back(self) -> None:
@@ -259,12 +260,12 @@ class ClientIpTrustedProxyTest(unittest.TestCase):
             "x-forwarded-for": ", 203.0.113.5",
             "x-internal-proxy-secret": "s3cr3t",
         })
-        with patch("api._TRUSTED_PROXY_SECRET", "s3cr3t"):
+        with patch("routes._shared._TRUSTED_PROXY_SECRET", "s3cr3t"):
             self.assertEqual(api._client_ip(req), "10.0.0.5")
 
     def test_trusted_caller_without_forwarded_header_falls_back(self) -> None:
         req = self._make_request("10.0.0.5", {"x-internal-proxy-secret": "s3cr3t"})
-        with patch("api._TRUSTED_PROXY_SECRET", "s3cr3t"):
+        with patch("routes._shared._TRUSTED_PROXY_SECRET", "s3cr3t"):
             self.assertEqual(api._client_ip(req), "10.0.0.5")
 
     def test_rate_limit_buckets_by_trusted_forwarded_ip_not_proxy_ip(self) -> None:
@@ -280,7 +281,7 @@ class ClientIpTrustedProxyTest(unittest.TestCase):
             "x-forwarded-for": "203.0.113.2",
             "x-internal-proxy-secret": "s3cr3t",
         })
-        with patch("api._TRUSTED_PROXY_SECRET", "s3cr3t"), patch("api.time.monotonic", return_value=500.0):
+        with patch("routes._shared._TRUSTED_PROXY_SECRET", "s3cr3t"), patch("api.time.monotonic", return_value=500.0):
             api._rate_limit(req_a, "bucket_trusted", max_calls=1, window_seconds=60)
             # Same proxy IP, different real visitor — must not be blocked.
             api._rate_limit(req_b, "bucket_trusted", max_calls=1, window_seconds=60)
@@ -1512,7 +1513,7 @@ class ShareholdingDetailEndpointTest(unittest.TestCase):
         # inline, so the real _get_db_engine() still runs to produce that argument
         # even though the function receiving it is mocked. Regression test: this
         # was missing, so the test only ever passed by accident when an earlier
-        # test in the same process had already populated api._DB_ENGINE's module-
+        # test in the same process had already populated _shared._DB_ENGINE's module-
         # level cache (via a real or fake DATABASE_URL) — on a fresh process (a
         # clean CI runner with no DATABASE_URL set at all, or this test simply
         # running first) it failed with a bare KeyError('DATABASE_URL') instead.
@@ -1886,13 +1887,13 @@ class ValuationAnchorHelperTest(unittest.TestCase):
 class SmeSignalsEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_rate_limited_returns_429(self) -> None:
@@ -2092,13 +2093,13 @@ class SmeSignalsEndpointTest(unittest.TestCase):
 class SmeSignalHistoryEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_rate_limited_returns_429(self) -> None:
@@ -2279,13 +2280,13 @@ def _fake_screener_engine(rows, total, total_monitored, industries, last_run):
 class ScreenerEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_rate_limited_returns_429(self) -> None:
@@ -2403,13 +2404,13 @@ class WatchlistEndpointsTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_get_missing_database_url_returns_503(self) -> None:
@@ -2437,7 +2438,7 @@ class WatchlistEndpointsTest(unittest.TestCase):
         ]
         fake_engine = MagicMock()
         fake_engine.connect.return_value = _FakeConn([rows_result])
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.watchlist._get_db_engine", return_value=fake_engine):
             resp = client.get("/api/watchlist?client_id=client-abc")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -2446,7 +2447,7 @@ class WatchlistEndpointsTest(unittest.TestCase):
 
     def test_get_db_error_returns_sanitized_503(self) -> None:
         os.environ["DATABASE_URL"] = "postgresql://fake/fake"
-        with patch("api._get_db_engine", side_effect=RuntimeError("connection refused: password exposed")):
+        with patch("routes.watchlist._get_db_engine", side_effect=RuntimeError("connection refused: password exposed")):
             resp = client.get("/api/watchlist?client_id=client-abc")
         self.assertEqual(resp.status_code, 503)
         self.assertNotIn("password", resp.json()["detail"])
@@ -2494,7 +2495,7 @@ class WatchlistEndpointsTest(unittest.TestCase):
         fake_engine.begin.return_value = _FakeConn([lock_result, count_result, existing_result, insert_result])
         fake_engine.connect.return_value = _FakeConn([rows_result])
 
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.watchlist._get_db_engine", return_value=fake_engine):
             resp = client.post("/api/watchlist", json={
                 "client_id": "client-abc", "symbol": "TCS", "exchange": "bse",
             })
@@ -2517,7 +2518,7 @@ class WatchlistEndpointsTest(unittest.TestCase):
         fake_engine.begin.return_value = _FakeConn([lock_result, count_result, existing_result, insert_result])
         fake_engine.connect.return_value = _FakeConn([rows_result])
 
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.watchlist._get_db_engine", return_value=fake_engine):
             resp = client.post("/api/watchlist", json={
                 "client_id": "client-abc", "symbol": "tcs",
                 "company": "Tata Consultancy Services", "exchange": "NSE",
@@ -2534,7 +2535,7 @@ class WatchlistEndpointsTest(unittest.TestCase):
         existing_result.first.return_value = None
         fake_engine = MagicMock()
         fake_engine.begin.return_value = _FakeConn([lock_result, count_result, existing_result])
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.watchlist._get_db_engine", return_value=fake_engine):
             resp = client.post("/api/watchlist", json={"client_id": "client-abc", "symbol": "TCS"})
         self.assertEqual(resp.status_code, 422)
 
@@ -2559,7 +2560,7 @@ class WatchlistEndpointsTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.begin.return_value = _FakeConn([lock_result, count_result, existing_result, insert_result])
         fake_engine.connect.return_value = _FakeConn([rows_result])
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.watchlist._get_db_engine", return_value=fake_engine):
             resp = client.post("/api/watchlist", json={"client_id": "client-abc", "symbol": "TCS"})
         self.assertEqual(resp.status_code, 200)
 
@@ -2576,7 +2577,7 @@ class WatchlistEndpointsTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.begin.return_value = _FakeConn([delete_result])
         fake_engine.connect.return_value = _FakeConn([rows_result])
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.watchlist._get_db_engine", return_value=fake_engine):
             resp = client.delete("/api/watchlist/TCS?client_id=client-abc")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["items"], [])
@@ -2731,13 +2732,13 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_get_with_valid_session_queries_by_user_id_ignoring_client_id(self) -> None:
@@ -2751,7 +2752,7 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.connect.return_value = conn
 
-        with patch("api._get_db_engine", return_value=fake_engine), \
+        with patch("routes.watchlist._get_db_engine", return_value=fake_engine), \
              patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
             resp = client.get(
                 "/api/watchlist?client_id=client-abc",
@@ -2773,7 +2774,7 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.connect.return_value = conn
 
-        with patch("api._get_db_engine", return_value=fake_engine):
+        with patch("routes.watchlist._get_db_engine", return_value=fake_engine):
             resp = client.get("/api/watchlist?client_id=client-abc")
 
         self.assertEqual(resp.status_code, 200)
@@ -2791,7 +2792,7 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.connect.return_value = conn
 
-        with patch("api._get_db_engine", return_value=fake_engine), \
+        with patch("routes.watchlist._get_db_engine", return_value=fake_engine), \
              patch("auth.get_user_for_session", return_value=None):
             resp = client.get(
                 "/api/watchlist?client_id=client-abc",
@@ -2825,7 +2826,7 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
         fake_engine.begin.return_value = begin_conn
         fake_engine.connect.return_value = connect_conn
 
-        with patch("api._get_db_engine", return_value=fake_engine), \
+        with patch("routes.watchlist._get_db_engine", return_value=fake_engine), \
              patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
             # No client_id in the body at all — the account identity is sufficient.
             resp = client.post(
@@ -2857,7 +2858,7 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
         fake_engine = MagicMock()
         fake_engine.begin.return_value = begin_conn
 
-        with patch("api._get_db_engine", return_value=fake_engine), \
+        with patch("routes.watchlist._get_db_engine", return_value=fake_engine), \
              patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
             resp = client.post(
                 "/api/watchlist", json={"symbol": "TCS"},
@@ -2880,7 +2881,7 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
         fake_engine.begin.return_value = begin_conn
         fake_engine.connect.return_value = connect_conn
 
-        with patch("api._get_db_engine", return_value=fake_engine), \
+        with patch("routes.watchlist._get_db_engine", return_value=fake_engine), \
              patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
             resp = client.delete("/api/watchlist/TCS", headers={"Authorization": "Bearer sometoken"})
 
@@ -2903,13 +2904,13 @@ class WatchlistClaimEndpointTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_without_session_returns_401(self) -> None:
@@ -2959,7 +2960,7 @@ class WatchlistClaimEndpointTest(unittest.TestCase):
         fake_engine.begin.return_value = begin_conn
         fake_engine.connect.return_value = connect_conn
 
-        with patch("api._get_db_engine", return_value=fake_engine), \
+        with patch("routes.watchlist._get_db_engine", return_value=fake_engine), \
              patch("auth.get_user_for_session", return_value={"id": 42, "email": "user@example.com"}):
             resp = client.post(
                 "/api/watchlist/claim", json={"client_id": "client-abc"},
@@ -3011,13 +3012,13 @@ class PositionsEndpointsTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_get_missing_database_url_returns_503(self) -> None:
@@ -3202,13 +3203,13 @@ class PositionsAccountLinkingTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_get_with_valid_session_queries_by_user_id_ignoring_client_id(self) -> None:
@@ -3314,13 +3315,13 @@ class PositionsClaimEndpointTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_without_session_returns_401(self) -> None:
@@ -3465,13 +3466,13 @@ class ComputeSectorConcentrationTest(unittest.TestCase):
 class PortfolioConcentrationEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_missing_database_url_returns_503(self) -> None:
@@ -3672,13 +3673,13 @@ class ConsolidatedEndpointTest(unittest.TestCase):
         self.addCleanup(self._cache_patch.stop)
 
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        api._DB_ENGINE = None
+        _shared._DB_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_invalid_symbol_returns_422(self) -> None:

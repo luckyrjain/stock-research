@@ -132,7 +132,54 @@ def parse_json_object(raw: str) -> dict | None:
         return None
 
 
-def _source_text(all_data: dict[str, dict]) -> str:
+def _signal_context_text(signal_context: dict | None) -> list[str]:
+    """Renders signal_context's technical/macro values (RSI/EMA posture,
+    FII/DII flow, repo rate, CPI) as readable text lines, so a cited quant
+    value is visible to the same free-text grounding checks that already
+    scan _source_text()'s output — without this, "QUANT SIGNALS" data shown
+    to the model in the prompt was structurally invisible here, no matter
+    how many named checks existed in _NUMERIC_FIELD_CHECKS. Only the two
+    signals that carry citable numeric values (technical, macro) are
+    rendered; missing/absent meta fields are skipped, never guessed."""
+    if not signal_context:
+        return []
+
+    signals = signal_context.get("signals") or {}
+    parts: list[str] = []
+
+    technical = signals.get("technical") or {}
+    tech_meta = technical.get("meta") or {}
+    bits = []
+    if tech_meta.get("rsi14") is not None:
+        bits.append(f"RSI14={tech_meta['rsi14']}")
+    ema_above = tech_meta.get("ema20_above_ema50")
+    if ema_above is True:
+        bits.append("EMA20 above EMA50")
+    elif ema_above is False:
+        bits.append("EMA20 below EMA50")
+    if technical.get("value"):
+        bits.append(f"posture={technical['value']}")
+    if bits:
+        parts.append("Technical: " + ", ".join(bits))
+
+    macro = signals.get("macro") or {}
+    macro_meta = macro.get("meta") or {}
+    bits = []
+    if macro_meta.get("net_institutional_flow_cr") is not None:
+        bits.append(f"FII/DII net flow={macro_meta['net_institutional_flow_cr']} Cr")
+    if macro_meta.get("repo_rate_pct") is not None:
+        bits.append(f"repo rate={macro_meta['repo_rate_pct']}%")
+    if macro_meta.get("cpi_inflation_pct") is not None:
+        bits.append(f"CPI inflation={macro_meta['cpi_inflation_pct']}%")
+    if macro.get("value"):
+        bits.append(f"posture={macro['value']}")
+    if bits:
+        parts.append("Macro: " + ", ".join(bits))
+
+    return parts
+
+
+def _source_text(all_data: dict[str, dict], signal_context: dict | None = None) -> str:
     stock_info = all_data.get("stock_info", {}) or {}
     research = all_data.get("research", {}) or {}
     news = all_data.get("news", {}) or {}
@@ -144,6 +191,7 @@ def _source_text(all_data: dict[str, dict]) -> str:
         str(stock_info.get("sector", "")),
         str(stock_info.get("industry", "")),
     ]
+    text_parts.extend(_signal_context_text(signal_context))
 
     for article in news.get("articles", []) or []:
         if not isinstance(article, dict):
@@ -167,12 +215,14 @@ def _source_text(all_data: dict[str, dict]) -> str:
     return " ".join(part for part in text_parts if part).lower()
 
 
-def _analysis_support_issues(data: dict | None, all_data: dict[str, dict] | None) -> list[str]:
+def _analysis_support_issues(
+    data: dict | None, all_data: dict[str, dict] | None, signal_context: dict | None = None,
+) -> list[str]:
     if data is None or not all_data:
         return []
 
     issues: list[str] = []
-    source_text = _source_text(all_data)
+    source_text = _source_text(all_data, signal_context)
     shareholding = (all_data.get("shareholding", {}) or {}).get("shareholding_pattern", {}) or {}
     has_single_snapshot = bool(shareholding) and isinstance(shareholding, dict)
 
@@ -360,11 +410,19 @@ _NUMERIC_FIELD_CHECKS = [
 ]
 
 
-def _analysis_numeric_issues(data: dict | None, all_data: dict[str, dict] | None) -> list[str]:
+def _analysis_numeric_issues(  # pylint: disable=unused-argument
+    data: dict | None, all_data: dict[str, dict] | None, signal_context: dict | None = None,
+) -> list[str]:
     """Compares numbers the analyst LLM cites in prose against the actual
     source data, catching transcription errors like a 0.46 dividend yield
     being written as "47%". A 2x-tolerance mismatch is flagged; anything
-    closer is assumed to be legitimate rounding/rephrasing."""
+    closer is assumed to be legitimate rounding/rephrasing.
+
+    `signal_context` isn't consulted by `_NUMERIC_FIELD_CHECKS` yet (adding
+    RSI/EMA/macro-specific checks there is separate, tracked follow-up
+    work) — it's accepted here so this function's signature doesn't block
+    a future check from reading it, matching `_source_text()`'s own
+    already-wired use of it in `_analysis_support_issues`."""
     if data is None or not all_data:
         return []
 
@@ -594,7 +652,10 @@ def _validate_analysis_payload(  # pylint: disable=too-many-return-statements
                 "Confidence 'HIGH' is not supported by a near-neutral quant signal score "
                 f"({final_score}); use MEDIUM or LOW instead."
             )
-    support_issues = _analysis_support_issues(data, all_data) + _analysis_numeric_issues(data, all_data)
+    support_issues = (
+        _analysis_support_issues(data, all_data, signal_context)
+        + _analysis_numeric_issues(data, all_data, signal_context)
+    )
     if support_issues:
         return False, f"Unsupported claims found: {'; '.join(support_issues)}."
     return True, data

@@ -21,13 +21,14 @@ broker module that produced it, counted here, never guessed.
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import insert, select, text, update
 
 from core.observability import get_logger, log_event
 from db.models import assets as assets_t
+from db.models import broker_connections as broker_connections_t
 from db.models import holdings as holdings_t
 from db.models import transactions as transactions_t
 
@@ -364,3 +365,60 @@ def sync_trades(conn, account_id: int, normalized_trades: list[dict | None], met
         seen.add(t["trade_id"])
         synced += 1
     return {"trades_synced": synced, "trades_skipped": skipped, "trades_duplicate": duplicates}
+
+
+def run_broker_sync(
+    engine,
+    account_id: int,
+    broker_name: str,
+    meta_source: str,
+    normalized_holdings: list[dict | None],
+    normalized_trades: list[dict | None],
+    *,
+    logger,
+    completed_event: str,
+    partial_error: str | None = None,
+    owner: tuple[str, str | int] | None = None,
+) -> dict:
+    """The copy-pasted second half of every broker module's own
+    `sync_account()` — kite_sync.py/hdfc_sync.py/paytm_sync.py each fetch and
+    normalize their own broker-shaped data differently (that stays in each
+    module), then hand the resulting common-shape lists here for the part
+    that was byte-identical three times over: open the one transaction,
+    write holdings + trades, stamp `last_synced_at`, log completion, and
+    return the summary dict `routes/portfolio_aggregator.py::broker_sync()`
+    stores as `last_sync_summary`.
+
+    Only called once a caller has decided there's something to write —
+    each module still returns its own `{"error": ...}` *before* ever
+    calling this when a fetch fails outright (Kite/Paytm: one combined
+    try/except around both fetches; HDFC: only when BOTH independent
+    fetches fail), so this function never needs a "nothing to sync, bail
+    without writing" branch of its own.
+
+    `partial_error` is HDFC's own case: one of its two independent fetches
+    failed while the other succeeded, so there IS real data to write, but
+    the caller still wants the failure surfaced. Attached to the summary
+    dict as `"error"` after the write completes — never before, since the
+    counts in that same summary need to reflect what was actually written.
+    Kite/Paytm never set this (both their fetches always succeed or fail
+    together)."""
+    today = datetime.now(timezone.utc).date()
+    with engine.begin() as conn:
+        summary: dict = {}
+        summary.update(sync_holdings(conn, account_id, normalized_holdings, meta_source, today, owner=owner))
+        summary.update(sync_trades(conn, account_id, normalized_trades, meta_source))
+        conn.execute(
+            update(broker_connections_t)
+            .where(
+                broker_connections_t.c.account_id == account_id,
+                broker_connections_t.c.broker == broker_name,
+            )
+            .values(last_synced_at=datetime.now(timezone.utc))
+        )
+
+    if partial_error is not None:
+        summary["error"] = partial_error
+
+    log_event(logger, completed_event, account_id=account_id, **summary)
+    return summary
