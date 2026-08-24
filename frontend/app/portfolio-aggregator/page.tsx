@@ -8,6 +8,7 @@ import { usePositions } from '@/lib/positions';
 import { getClientId } from '@/lib/watchlist';
 import { useToast } from '@/components/toast';
 import { fmtInr, fmtTimestampIST } from '@/lib/format';
+import { useBrokerSyncStatus } from '@/lib/use-broker-sync-status';
 import type {
   PortfolioProfile, PortfolioAccount, PortfolioAccountType,
   PortfolioAsset, PortfolioAssetType, PortfolioNetWorth,
@@ -401,8 +402,7 @@ function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
   account: PortfolioAccount; connection: BrokerConnection | undefined; onSynced: () => void; onPoll: () => void;
 }) {
   const label = 'HDFC Securities';
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
+  const { busy, setBusy, msg, setMsg, syncing } = useBrokerSyncStatus(connection, onSynced, onPoll);
   const [showCreds, setShowCreds] = useState(!connection);
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
@@ -413,12 +413,6 @@ function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
   // identity changes, so a stale in-progress login from a different
   // account/connection can never bleed into this one.
   const [otpRequired, setOtpRequired] = useState(false);
-  // Guards the completion-refresh below against firing more than once per
-  // sync: `onPoll` (the 2s-interval poller while syncing) only refetches
-  // `connections` to stay under the read-rate-limit, so a real refresh()
-  // must run once when the job finishes — but connections' own object
-  // identity changes on every unrelated refresh too, not just this one.
-  const handledSyncRef = useRef<string | null>(null);
   const [otp, setOtp] = useState('');
 
   useEffect(() => {
@@ -504,50 +498,6 @@ function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
       setBusy(false);
     }
   }
-
-  useEffect(() => {
-    if (connection?.sync_status !== 'syncing') return;
-    const id = setInterval(onPoll, 2000);
-    return () => clearInterval(id);
-  }, [connection?.sync_status, onPoll]);
-
-  useEffect(() => {
-    if (connection?.sync_status === 'success' && connection.last_sync_summary) {
-      const r = connection.last_sync_summary;
-      const archived = r.holdings_archived ? `, ${r.holdings_archived} archived` : '';
-      setMsg(`Synced ${r.holdings_synced} holdings, ${r.trades_synced} trades${archived}.`);
-      setBusy(false);
-      // The lightweight onPoll used while syncing only refetches
-      // `connections` (rate-limit reasons — see onPoll's own comment) —
-      // accounts/assets/net-worth are still whatever they were before this
-      // sync started until a real refresh runs. `last_synced_at` is a
-      // stable per-sync key, so this only fires once per completed sync,
-      // not on every later unrelated refresh that also touches `connection`.
-      const key = `${connection.id}:${connection.last_synced_at}`;
-      if (handledSyncRef.current !== key) {
-        handledSyncRef.current = key;
-        onSynced();
-      }
-    } else if (connection?.sync_status === 'error' && connection.last_sync_error) {
-      // A partial-fetch failure (e.g. holdings synced, tradebook fetch
-      // failed) still carries real synced counts in last_sync_summary
-      // alongside the error — shown together so the user isn't left
-      // thinking nothing happened when some data actually landed.
-      const r = connection.last_sync_summary;
-      const synced = r && ((r.holdings_synced ?? 0) > 0 || (r.trades_synced ?? 0) > 0);
-      setMsg(synced ? `${connection.last_sync_error} (${r.holdings_synced} holdings, ${r.trades_synced} trades synced.)` : connection.last_sync_error);
-      setBusy(false);
-      if (synced) {
-        const key = `${connection.id}:${connection.last_synced_at}`;
-        if (handledSyncRef.current !== key) {
-          handledSyncRef.current = key;
-          onSynced();
-        }
-      }
-    }
-  }, [connection?.sync_status, connection?.last_sync_summary, connection?.last_sync_error, connection?.id, connection?.last_synced_at, onSynced]);
-
-  const syncing = busy || connection?.sync_status === 'syncing';
 
   return (
     <span className="flex flex-col gap-1">
@@ -644,8 +594,7 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
   account: PortfolioAccount; broker: { id: string; label: string; experimental?: boolean };
   connection: BrokerConnection | undefined; onSynced: () => void; onPoll: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
+  const { busy, setBusy, msg, setMsg, syncing } = useBrokerSyncStatus(connection, onSynced, onPoll);
   // Credential form starts open until an app has been registered for this
   // (account, broker) — after that, "Connect"/"Reconnect" reuses the saved
   // key/secret (see BrokerLoginUrlRequest) and this stays collapsed behind
@@ -654,9 +603,6 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
   const [showCreds, setShowCreds] = useState(!connection);
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
-  // Guards the completion-refresh below against firing more than once per
-  // sync — see HdfcBrokerRow's identical ref for the full reasoning.
-  const handledSyncRef = useRef<string | null>(null);
 
   async function connect() {
     setBusy(true);
@@ -734,55 +680,6 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
       setBusy(false);
     }
   }
-
-  // Polls the parent's connections list via the lightweight `onPoll`
-  // (connections only, not a full refresh() — that blew through the
-  // portfolio_agg_read rate limit at 2s intervals, see pollConnections'
-  // own comment) while a background sync is in flight, so "Syncing…"
-  // actually clears once the job finishes — stops itself the moment
-  // sync_status leaves "syncing". The status-resolution effect below
-  // runs one real refresh() when the job completes, since polling alone
-  // never touches accounts/assets/net-worth.
-  useEffect(() => {
-    if (connection?.sync_status !== 'syncing') return;
-    const id = setInterval(onPoll, 2000);
-    return () => clearInterval(id);
-  }, [connection?.sync_status, onPoll]);
-
-  useEffect(() => {
-    if (connection?.sync_status === 'success' && connection.last_sync_summary) {
-      const r = connection.last_sync_summary;
-      const archived = r.holdings_archived ? `, ${r.holdings_archived} archived` : '';
-      setMsg(`Synced ${r.holdings_synced} holdings, ${r.trades_synced} trades${archived}.`);
-      setBusy(false);
-      // See HdfcBrokerRow's identical effect for why this is needed: onPoll
-      // only refetches `connections` while syncing, so a real refresh has
-      // to run once here or accounts/assets/net-worth stay stale.
-      const key = `${connection.id}:${connection.last_synced_at}`;
-      if (handledSyncRef.current !== key) {
-        handledSyncRef.current = key;
-        onSynced();
-      }
-    } else if (connection?.sync_status === 'error' && connection.last_sync_error) {
-      // A partial-fetch failure (e.g. holdings synced, tradebook fetch
-      // failed) still carries real synced counts in last_sync_summary
-      // alongside the error — shown together so the user isn't left
-      // thinking nothing happened when some data actually landed.
-      const r = connection.last_sync_summary;
-      const synced = r && ((r.holdings_synced ?? 0) > 0 || (r.trades_synced ?? 0) > 0);
-      setMsg(synced ? `${connection.last_sync_error} (${r.holdings_synced} holdings, ${r.trades_synced} trades synced.)` : connection.last_sync_error);
-      setBusy(false);
-      if (synced) {
-        const key = `${connection.id}:${connection.last_synced_at}`;
-        if (handledSyncRef.current !== key) {
-          handledSyncRef.current = key;
-          onSynced();
-        }
-      }
-    }
-  }, [connection?.sync_status, connection?.last_sync_summary, connection?.last_sync_error, connection?.id, connection?.last_synced_at, onSynced]);
-
-  const syncing = busy || connection?.sync_status === 'syncing';
 
   return (
     <span className="flex flex-col gap-1">
