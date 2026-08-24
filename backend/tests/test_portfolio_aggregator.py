@@ -322,6 +322,28 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         resp = client.get(f"/api/portfolio/networth?profile_id={pid}")
         self.assertEqual(resp.json()["total"], 0.0)
 
+    def test_networth_excludes_asset_with_no_valuation_row(self) -> None:
+        # get_networth()'s own EXISTS (SELECT 1 FROM valuations ...) clause,
+        # untested until now -- compute_networth() (the pure half) is
+        # covered above, but the raw SQL that decides which rows even reach
+        # it wasn't. POST /api/portfolio/assets always writes an initial
+        # valuation, so a genuinely never-valued asset (the shape
+        # broker_sync_common.py::find_or_create_asset() actually produces --
+        # a stock asset synced before its first valuation write) can only
+        # be set up by inserting the assets row directly, bypassing the
+        # endpoint.
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        self._mk_asset(acc, type="cash", name="valued", symbol=None, units=None, value=1000.0)
+        with self.engine.begin() as conn:
+            from sqlalchemy import insert as _insert
+            conn.execute(_insert(assets).values(account_id=acc, type="stock", name="never valued", symbol="XYZ"))
+        resp = client.get(f"/api/portfolio/networth?profile_id={pid}")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["total"], 1000.0)
+        self.assertNotIn("stock", body["by_type"])  # never-valued asset contributes no entry at all
+
     # ── valuation refresh / xirr ─────────────────────────────────────────────
 
     def test_refresh_valuations_endpoint_values_priced_stock(self) -> None:
