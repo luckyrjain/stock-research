@@ -1,25 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import type { Concall, FinancialStatement, FinancialStatementsResponse } from '@/types';
 import InfoTooltip from './info-tooltip';
 import { Card } from './dashboard-primitives';
 import { fmt, safeExternalHref } from '@/lib/format';
+import { useSymbolResource } from '@/lib/use-symbol-resource';
 
 export function useFinancials(symbol: string): FinancialStatementsResponse | null {
-  const [data, setData] = useState<FinancialStatementsResponse | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setData(null);
-    fetch(`/api/financials/${encodeURIComponent(symbol)}`)
-      .then(res => (res.ok ? res.json() : null))
-      .then((d: FinancialStatementsResponse | null) => { if (!cancelled) setData(d); })
-      .catch(() => { if (!cancelled) setData(null); });
-    return () => { cancelled = true; };
-  }, [symbol]);
-
-  return data;
+  return useSymbolResource<FinancialStatementsResponse>(symbol, 'financials');
 }
 
 // One collapsible <details> table per statement — up to 10 years x however

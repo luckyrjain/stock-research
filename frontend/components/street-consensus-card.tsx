@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import type { StreetConsensus } from '@/types';
 import InfoTooltip from './info-tooltip';
 import { Card } from './dashboard-primitives';
 import { safeExternalHref } from '@/lib/format';
+import { useSymbolResource } from '@/lib/use-symbol-resource';
 
 function fmtConsensusDate(publishedAt: string | null): string | null {
   if (!publishedAt) return null;
@@ -14,19 +14,7 @@ function fmtConsensusDate(publishedAt: string | null): string | null {
 }
 
 export function useStreetConsensus(symbol: string): StreetConsensus | null {
-  const [consensus, setConsensus] = useState<StreetConsensus | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setConsensus(null);
-    fetch(`/api/street-consensus/${encodeURIComponent(symbol)}`)
-      .then(res => (res.ok ? res.json() : null))
-      .then((data: StreetConsensus | null) => { if (!cancelled) setConsensus(data); })
-      .catch(() => { if (!cancelled) setConsensus(null); });
-    return () => { cancelled = true; };
-  }, [symbol]);
-
-  return consensus;
+  return useSymbolResource<StreetConsensus>(symbol, 'street-consensus');
 }
 
 function _consensusRatingTone(rating: string): string {
