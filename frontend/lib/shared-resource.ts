@@ -33,6 +33,23 @@ export interface SharedResource<T> {
    * only after an `isCurrent` check (or right after `bumpGeneration()`,
    * when the caller already knows the write is authoritative). */
   setCache(value: T): void;
+  /** Runs `work` (the caller's own fetch + response parsing + error
+   * messaging — must never reject, same convention `fetchFn` itself
+   * follows), then applies the generation guard and `setCache` for it: the
+   * result is only written if `work` resolved to something other than
+   * `undefined` AND no identity change superseded the generation captured
+   * before `work` started. `undefined` means "no update" — a failed
+   * request, or a caller that already showed its own error and has
+   * nothing to write. No `version` check: `version` exists to stop a
+   * passive background fetch from clobbering a fresher mutation's write,
+   * and `mutate()`'s own `setCache()` call is what advances `version` —
+   * there's nothing for it to be stale against here. Collapses the
+   * capture-generation/await/isCurrent-check/setCache sequence every plain
+   * mutation (toggle/remove/add) already repeated identically; a mutation
+   * with its own extra ordering guard on top (e.g. per-key request
+   * sequencing) isn't a good fit and should keep doing that part by
+   * hand. */
+  mutate(work: () => Promise<T | undefined>): Promise<void>;
 }
 
 /**
@@ -116,6 +133,18 @@ export function createSharedResource<T>(
     notify();
   }
 
+  async function mutate(work: () => Promise<T | undefined>): Promise<void> {
+    // Captured before `work` starts, same convention fetchValue() itself
+    // uses — a later identity change (sign-in/sign-out) while this
+    // mutation's request is in flight must not let its result overwrite
+    // whatever that change's own refresh() already wrote.
+    const myGeneration = generation;
+    const value = await work();
+    if (value !== undefined && myGeneration === generation) {
+      setCache(value);
+    }
+  }
+
   function useValue(): { value: T; loading: boolean } {
     const [value, setValue] = useState<T>(cache ?? emptyValue);
     const [loading, setLoading] = useState(cache === undefined);
@@ -143,5 +172,6 @@ export function createSharedResource<T>(
     getGeneration: () => generation,
     isCurrent: (gen: number) => gen === generation,
     setCache,
+    mutate,
   };
 }

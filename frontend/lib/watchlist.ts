@@ -123,56 +123,58 @@ export function useWatchlist() {
     const symbol = item.symbol.toUpperCase();
     const clientId = getClientId();
     const currentlyWatched = (resource.getCache() ?? []).some(i => i.symbol === symbol);
-    // Captured before the await, same generation-guard convention as
-    // fetchItems() above — without this, a toggle in flight when the
-    // caller's identity changes mid-request (e.g. signing out right after
-    // starring a stock) can resolve after refreshWatchlist()'s own fetch and
-    // silently overwrite the fresher (post-refresh) list with this stale,
-    // now-wrong-identity one.
-    const myGeneration = resource.getGeneration();
 
-    try {
-      if (currentlyWatched) {
-        const res = await fetch(`/api/watchlist/${encodeURIComponent(symbol)}?client_id=${encodeURIComponent(clientId)}`, {
-          method: 'DELETE',
-        });
-        if (!res.ok) { showError("Couldn't update your watchlist — try again."); return; }
-        const data = await res.json() as { items: WatchlistItem[] };
-        if (!resource.isCurrent(myGeneration)) return;
-        resource.setCache(data.items);
-      } else {
-        const res = await fetch('/api/watchlist', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ client_id: clientId, symbol, company: item.company, exchange: item.exchange }),
-        });
-        if (!res.ok) { showError("Couldn't update your watchlist — try again."); return; }
-        const data = await res.json() as { items: WatchlistItem[] };
-        if (!resource.isCurrent(myGeneration)) return;
-        resource.setCache(data.items);
-      }
-    } catch {
-      // Backend unreachable — leave state as-is rather than optimistically
-      // flipping the star to something that didn't actually save.
-      showError("Couldn't reach the server — your watchlist wasn't updated.");
+    if (currentlyWatched) {
+      await resource.mutate(async () => {
+        try {
+          const res = await fetch(`/api/watchlist/${encodeURIComponent(symbol)}?client_id=${encodeURIComponent(clientId)}`, {
+            method: 'DELETE',
+          });
+          if (!res.ok) { showError("Couldn't update your watchlist — try again."); return undefined; }
+          const data = await res.json() as { items: WatchlistItem[] };
+          return data.items;
+        } catch {
+          // Backend unreachable — leave state as-is rather than optimistically
+          // flipping the star to something that didn't actually save.
+          showError("Couldn't reach the server — your watchlist wasn't updated.");
+          return undefined;
+        }
+      });
+    } else {
+      await resource.mutate(async () => {
+        try {
+          const res = await fetch('/api/watchlist', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ client_id: clientId, symbol, company: item.company, exchange: item.exchange }),
+          });
+          if (!res.ok) { showError("Couldn't update your watchlist — try again."); return undefined; }
+          const data = await res.json() as { items: WatchlistItem[] };
+          return data.items;
+        } catch {
+          showError("Couldn't reach the server — your watchlist wasn't updated.");
+          return undefined;
+        }
+      });
     }
   }, [showError]);
 
   const remove = useCallback(async (symbol: string) => {
     const clientId = getClientId();
-    const myGeneration = resource.getGeneration();
-    try {
-      const res = await fetch(`/api/watchlist/${encodeURIComponent(symbol.toUpperCase())}?client_id=${encodeURIComponent(clientId)}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok) { showError("Couldn't remove from your watchlist — try again."); return; }
-      const data = await res.json() as { items: WatchlistItem[] };
-      if (!resource.isCurrent(myGeneration)) return;
-      resource.setCache(data.items);
-    } catch {
-      // silently ignore in state — the row just won't disappear; user can retry
-      showError("Couldn't reach the server — try again.");
-    }
+    await resource.mutate(async () => {
+      try {
+        const res = await fetch(`/api/watchlist/${encodeURIComponent(symbol.toUpperCase())}?client_id=${encodeURIComponent(clientId)}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) { showError("Couldn't remove from your watchlist — try again."); return undefined; }
+        const data = await res.json() as { items: WatchlistItem[] };
+        return data.items;
+      } catch {
+        // silently ignore in state — the row just won't disappear; user can retry
+        showError("Couldn't reach the server — try again.");
+        return undefined;
+      }
+    });
   }, [showError]);
 
   return { items, loading, isWatched, toggle, remove };

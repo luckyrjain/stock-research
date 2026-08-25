@@ -95,46 +95,41 @@ export function usePositions() {
   const addPosition = useCallback(async (pos: Omit<Position, 'bought_at' | 'shares'>) => {
     const symbol = pos.symbol.toUpperCase();
     const clientId = getClientId();
-    // Captured before the await, same generation-guard convention as
-    // fetchPositions() above and lib/watchlist.ts's own toggle()/remove() —
-    // without this, a mutation in flight when the caller's identity changes
-    // mid-request (e.g. signing out right after marking a position) can
-    // resolve after refreshPositions()'s own fetch and silently overwrite
-    // the fresher (post-refresh) list with this stale, now-wrong-identity
-    // one.
-    const myGeneration = resource.getGeneration();
-    try {
-      const res = await fetch('/api/positions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ client_id: clientId, ...pos, symbol }),
-      });
-      if (!res.ok) { showError("Couldn't save this position — try again."); return; }
-      const data = await res.json() as { items: Position[] };
-      if (!resource.isCurrent(myGeneration)) return;
-      resource.setCache(data.items);
-    } catch {
-      // Backend unreachable — leave state as-is, same convention as
-      // useWatchlist()'s toggle()/remove().
-      showError("Couldn't reach the server — this position wasn't saved.");
-    }
+    await resource.mutate(async () => {
+      try {
+        const res = await fetch('/api/positions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ client_id: clientId, ...pos, symbol }),
+        });
+        if (!res.ok) { showError("Couldn't save this position — try again."); return undefined; }
+        const data = await res.json() as { items: Position[] };
+        return data.items;
+      } catch {
+        // Backend unreachable — leave state as-is, same convention as
+        // useWatchlist()'s toggle()/remove().
+        showError("Couldn't reach the server — this position wasn't saved.");
+        return undefined;
+      }
+    });
   }, [showError]);
 
   const removePosition = useCallback(async (symbol: string) => {
     const clientId = getClientId();
-    const myGeneration = resource.getGeneration();
-    try {
-      const res = await fetch(`/api/positions/${encodeURIComponent(symbol.toUpperCase())}?client_id=${encodeURIComponent(clientId)}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok) { showError("Couldn't remove this position — try again."); return; }
-      const data = await res.json() as { items: Position[] };
-      if (!resource.isCurrent(myGeneration)) return;
-      resource.setCache(data.items);
-    } catch {
-      // silently ignore in state — the row just won't disappear; user can retry
-      showError("Couldn't reach the server — try again.");
-    }
+    await resource.mutate(async () => {
+      try {
+        const res = await fetch(`/api/positions/${encodeURIComponent(symbol.toUpperCase())}?client_id=${encodeURIComponent(clientId)}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) { showError("Couldn't remove this position — try again."); return undefined; }
+        const data = await res.json() as { items: Position[] };
+        return data.items;
+      } catch {
+        // silently ignore in state — the row just won't disappear; user can retry
+        showError("Couldn't reach the server — try again.");
+        return undefined;
+      }
+    });
   }, [showError]);
 
   // Filled in after the fact, typically from the Portfolio page — asking for
