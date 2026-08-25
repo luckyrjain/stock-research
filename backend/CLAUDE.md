@@ -1167,7 +1167,7 @@ this one).
    new `portfolio/<broker>_sync.py` module (point 3 below). `broker_connections` itself carries
    no `client_id`/`user_id` of its own — it inherits ownership transitively via `account_id` →
    `profile_id` (see "Portfolio aggregator" point 4 above for how `profiles` itself is owned),
-   and `routes/portfolio_aggregator.py`'s broker endpoints resolve/check that owner the same way
+   and `routes/broker_sync.py`'s broker endpoints resolve/check that owner the same way
    every other profile/account/asset-scoped endpoint does before touching a connection row.
 2. **Credentials are per-connection, never a deployment-wide env var.** This was the actual design
    mistake in the first version of this feature, caught in review before it shipped: Kite
@@ -1186,7 +1186,7 @@ this one).
 3. **Sync modules** (`portfolio/`) — `kite_sync.py` and `paytm_sync.py` expose the identical
    `get_login_url(api_key)` / `exchange_request_token(api_key, api_secret, request_token)` /
    `sync_account(engine, account_id, access_token, api_key)` interface (both are real
-   browser-redirect OAuth-style logins), so `routes/portfolio_aggregator.py::_broker_sync_module(broker)`
+   browser-redirect OAuth-style logins), so `routes/broker_sync.py::_broker_sync_module(broker)`
    dispatches on `broker` with a plain `if/elif` over three known module imports rather than any
    string-built import path. **`hdfc_sync.py` does not share that interface** — HDFC Securities'
    real API has no browser redirect at all (confirmed via a real, working set of curl commands,
@@ -1199,7 +1199,7 @@ this one).
    `hdfc_sync.py`'s own module docstring for the full request/response shape of each step.
    `sync_account(engine, account_id, access_token, api_key)` is still the one function every
    module (including `hdfc_sync.py`) exposes identically — that's the interface
-   `routes/portfolio_aggregator.py`'s `POST /broker/{broker}/sync` dispatches through; only the
+   `routes/broker_sync.py`'s `POST /broker/{broker}/sync` dispatches through; only the
    *login* half diverges for HDFC. `sync_account()` wraps its holdings + trades writes in **one**
    `engine.begin()` transaction —
    an insert failing partway through rolls back everything from that sync attempt, never a mix of
@@ -1233,7 +1233,7 @@ this one).
      an entire portfolio on that ambiguity would be worse than the stale-ghost-holding problem
      this exists to fix; it only reconciles when at least one real holding was actually returned.
    - **Concurrent syncs for the same connection are locked out**, not just DB-constraint-protected
-     — `routes/portfolio_aggregator.py`'s `POST .../sync` takes `core/rate_limiter.py`'s
+     — `routes/broker_sync.py`'s `POST .../sync` takes `core/rate_limiter.py`'s
      `try_acquire_lock("broker_sync:{account_id}:{broker}", 300)` before calling `sync_account()`
      (same `try_acquire_lock`/`release_lock` pattern the SME/screener/market-picks refresh
      endpoints already use for the identical "don't let two runs of the same thing overlap"
@@ -1310,8 +1310,9 @@ this one).
    convention applies. Zerodha's own module carries the equivalent disclosure for the same reason
    (no outbound internet to kite.trade in this sandbox either) — its exact response field names
    are taken from Kite's own published docs.
-4. **API** (`routes/portfolio_aggregator.py`, still under the `/api/portfolio` prefix) —
-   `POST /broker/{broker}/login-url`, `POST /broker/{broker}/connect`, `POST /broker/{broker}/sync`,
+4. **API** (`routes/broker_sync.py`, under the same `/api/portfolio` prefix as
+   `routes/portfolio_aggregator.py` — see "Route module extraction" above for why they're
+   split) — `POST /broker/{broker}/login-url`, `POST /broker/{broker}/connect`, `POST /broker/{broker}/sync`,
    `GET /broker/connections?profile_id=`. `login-url` is two modes in one endpoint since they
    share almost everything: supplying both `api_key` and `api_secret` in the body registers (or
    replaces) that connection's credentials — and clears any previously-obtained
@@ -2414,6 +2415,25 @@ endpoints) to warrant its own module from the start.
    `routes/*.py` modules is future work, the same disclosed "first increment, not the full
    file" scope call this codebase already makes elsewhere (e.g. `tests_live/`'s own coverage
    note). `api.py` is smaller after this pass, not fully decomposed.
+7. **`routes/broker_sync.py`** is the next increment of the same pattern, one level deeper —
+   the Portfolio Aggregator's own broker login/connect/sync endpoints (Zerodha/HDFC
+   Securities/Paytm Money) had grown to outweigh its CRUD half (profiles/accounts/assets/
+   valuations/net-worth/CAS-CSV-import), which stayed in `routes/portfolio_aggregator.py`.
+   Same registration shape (own `router = APIRouter(prefix="/api/portfolio")`, a second
+   `app.include_router(...)` call in `api.py`, same prefix as its sibling, distinct
+   sub-paths). `broker_sync.py` imports `_owned_account_id`/`_owned_profile_id` from
+   `routes/portfolio_aggregator.py` rather than duplicating them or promoting them to
+   `routes/_shared.py` — they're Portfolio-Aggregator-schema-specific (profiles → accounts →
+   assets ownership checks), not generic across every router the way `_shared.py`'s own
+   primitives are, so this follows point 4's precedent exactly: the domain that first needed
+   a primitive keeps it, a second domain of the same feature imports it rather than getting
+   its own copy. `unittest.mock.patch(...)` test targets moved to match, same as point 2 —
+   `tests/test_broker_routes.py` and the one broker-touching test in
+   `tests/test_portfolio_aggregator.py` (`test_other_owners_profile_account_and_asset_are_all_404`,
+   which also exercises `GET /broker/connections`) now patch `routes.broker_sync.resolve_owner`
+   *in addition to* `routes.portfolio_aggregator.resolve_owner` — both are real, independent
+   references to the same underlying `routes.watchlist.resolve_owner` function, so a caller
+   that only patches one leaves the other module's calls unmocked.
 
 ### Dashboard component extraction
 

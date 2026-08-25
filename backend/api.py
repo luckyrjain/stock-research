@@ -2349,6 +2349,13 @@ from routes.portfolio_aggregator import router as _portfolio_aggregator_router
 
 app.include_router(_portfolio_aggregator_router)
 
+# Broker login/connect/sync endpoints — split out of routes/portfolio_aggregator.py
+# into their own file (routes/broker_sync.py's own docstring explains why);
+# same /api/portfolio prefix, distinct sub-paths, no collision.
+from routes.broker_sync import router as _broker_sync_router
+
+app.include_router(_broker_sync_router)
+
 # ── Consolidated view ──────────────────────────────────────────────────────────
 # "What does AlphaPulse think about X" spans three independently-run pipelines
 # today, so answering it means visiting three pages. This endpoint answers it

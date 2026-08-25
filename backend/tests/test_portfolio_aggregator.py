@@ -92,11 +92,19 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         self._old_engine = _shared._DB_ENGINE
         _shared._DB_ENGINE = self.engine
         rate_limiter._memory_calls.clear()
+        # test_other_owners_profile_account_and_asset_are_all_404 below also
+        # exercises GET /broker/connections, which resolves its owner via
+        # routes/broker_sync.py's own resolve_owner import (split out of
+        # routes/portfolio_aggregator.py) -- both need patching for the
+        # class-wide fixed owner to apply consistently.
         self._owner_patcher = patch("routes.portfolio_aggregator.resolve_owner", return_value=_TEST_OWNER)
         self._owner_patcher.start()
+        self._broker_owner_patcher = patch("routes.broker_sync.resolve_owner", return_value=_TEST_OWNER)
+        self._broker_owner_patcher.start()
 
     def tearDown(self) -> None:
         self._owner_patcher.stop()
+        self._broker_owner_patcher.stop()
         _shared._DB_ENGINE = self._old_engine
         if self._old_db_url is None:
             os.environ.pop("DATABASE_URL", None)
@@ -153,7 +161,8 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         aid = self._mk_asset(acc)
 
         other_owner = ("client", "other-owner-0000-0000-0000-000000000000")
-        with patch("routes.portfolio_aggregator.resolve_owner", return_value=other_owner):
+        with patch("routes.portfolio_aggregator.resolve_owner", return_value=other_owner), \
+             patch("routes.broker_sync.resolve_owner", return_value=other_owner):
             self.assertEqual(client.get(f"/api/portfolio/accounts?profile_id={pid}").status_code, 404)
             self.assertEqual(
                 client.post("/api/portfolio/accounts", json={"profile_id": pid, "name": "x", "type": "bank"}).status_code,

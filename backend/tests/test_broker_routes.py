@@ -1,10 +1,10 @@
-"""Endpoint tests for the broker-API routes in routes/portfolio_aggregator.py
+"""Endpoint tests for the broker-API routes in routes/broker_sync.py
 (docs/PRD-gmail-portfolio-intelligence.md Phase 1) — same SQLite-in-memory
 approach as test_portfolio_aggregator.py's own reference design.
 
 Credentials are per-connection (account_id, broker), never a deployment-wide
 env var — see db/models.py's broker_connections comment and
-routes/portfolio_aggregator.py's BrokerLoginUrlIn for why: a Kite Connect/
+routes/broker_sync.py's BrokerLoginUrlIn for why: a Kite Connect/
 HDFC Securities/Paytm Money "app" is always registered under one specific
 broker login, so a single global env var would only ever work for one
 person's one broker account, not "whoever connects an account." Every test
@@ -53,8 +53,15 @@ class BrokerRoutesTest(unittest.TestCase):
         os.environ["DATABASE_URL"] = "sqlite://"
         self._old_engine = _shared._DB_ENGINE
         _shared._DB_ENGINE = self.engine
+        # _mk_profile()/_mk_account() below hit the CRUD endpoints
+        # (routes/portfolio_aggregator.py's own resolve_owner import) while
+        # the broker endpoints under test in this file hit
+        # routes/broker_sync.py's own resolve_owner import -- both need
+        # patching for the class-wide fixed owner to apply consistently.
         self._owner_patcher = patch("routes.portfolio_aggregator.resolve_owner", return_value=_TEST_OWNER)
         self._owner_patcher.start()
+        self._broker_owner_patcher = patch("routes.broker_sync.resolve_owner", return_value=_TEST_OWNER)
+        self._broker_owner_patcher.start()
 
         self._old_enc_key = os.environ.get("PORTFOLIO_ENCRYPTION_KEY")
         os.environ["PORTFOLIO_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
@@ -70,6 +77,7 @@ class BrokerRoutesTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._owner_patcher.stop()
+        self._broker_owner_patcher.stop()
         _shared._DB_ENGINE = self._old_engine
         for var, old in [
             ("DATABASE_URL", self._old_db_url),
@@ -111,8 +119,8 @@ class BrokerRoutesTest(unittest.TestCase):
         client_id: str | None = None,
     ) -> dict:
         """POST .../sync now kicks off sync_account() on a background
-        executor and returns 202 immediately (see routes/
-        portfolio_aggregator.py's broker_sync) — polls GET
+        executor and returns 202 immediately (see routes/broker_sync.py's
+        broker_sync()) — polls GET
         /broker/connections until this (account, broker) row's
         sync_status leaves "syncing", the same way the real frontend
         polls after seeing {"status": "syncing"}."""
@@ -437,7 +445,7 @@ class BrokerRoutesTest(unittest.TestCase):
         404 (no connection) is enough to prove the guard itself works."""
         pid = self._mk_profile()
         acc = self._mk_account(pid)
-        from routes.portfolio_aggregator import _BROKER_SYNC_RATE_LIMIT_MAX_CALLS
+        from routes.broker_sync import _BROKER_SYNC_RATE_LIMIT_MAX_CALLS
 
         for _ in range(_BROKER_SYNC_RATE_LIMIT_MAX_CALLS):
             resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
@@ -481,7 +489,7 @@ class BrokerRoutesTest(unittest.TestCase):
         """Regression test: resolve_owner() used to run synchronously in the
         async broker_sync() handler itself, directly on the event loop,
         rather than inside _prepare() (which run_owned_db_call() already
-        offloads to an executor thread) — see routes/portfolio_aggregator.py's
+        offloads to an executor thread) — see routes/broker_sync.py's
         broker_sync() for the fix. This only proves the owner still reaches
         sync_account() correctly after that move, not the event-loop-blocking
         behavior itself (not practically observable from a synchronous
@@ -489,6 +497,7 @@ class BrokerRoutesTest(unittest.TestCase):
         fixed-owner patch) with one consistent client_id threaded through
         setup and the sync call itself, so ownership lines up throughout."""
         self._owner_patcher.stop()
+        self._broker_owner_patcher.stop()
         client_id = "11111111-1111-1111-1111-111111111111"
         mock_login_url.return_value = "https://kite.trade/connect/login?v=3"
         mock_exchange.return_value = {"access_token": "token-1"}
@@ -517,6 +526,7 @@ class BrokerRoutesTest(unittest.TestCase):
         pid = self._mk_profile()
         acc = self._mk_account(pid)
         self._owner_patcher.stop()
+        self._broker_owner_patcher.stop()
 
         resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
         self.assertEqual(resp.status_code, 422)
@@ -532,12 +542,12 @@ class BrokerRoutesTest(unittest.TestCase):
         confirming every single one is still a plain 404, never a 429 —
         which would only be possible if the rate limiter had never been
         touched by the unauthorized caller."""
-        from routes.portfolio_aggregator import _BROKER_SYNC_RATE_LIMIT_MAX_CALLS
+        from routes.broker_sync import _BROKER_SYNC_RATE_LIMIT_MAX_CALLS
 
         pid = self._mk_profile()
         acc = self._mk_account(pid)
 
-        with patch("routes.portfolio_aggregator.resolve_owner",
+        with patch("routes.broker_sync.resolve_owner",
                    return_value=("client", "attacker-0000-0000-0000-000000000000")):
             for _ in range(_BROKER_SYNC_RATE_LIMIT_MAX_CALLS + 3):
                 resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
