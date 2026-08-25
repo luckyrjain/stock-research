@@ -16,6 +16,12 @@ Normalized trade dict: {"trade_id", "order_id" (optional), "symbol",
 "price" (Decimal), "trade_date" (date)}. A `None` in either list means
 "this raw record was skipped as malformed" — already logged by the
 broker module that produced it, counted here, never guessed.
+
+`sync_holdings()` also mirrors every synced holding into `positions` — a
+different feature's table (see portfolio/positions_mirror.py's own
+docstring) — via an imported function rather than SQL defined here, since
+that write is a genuine cross-feature concern this module only calls, not
+one it owns.
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from db.models import broker_connections as broker_connections_t
 from db.models import holdings as holdings_t
 from db.models import transactions as transactions_t
 from portfolio.portfolio_valuation import upsert_valuation
+from portfolio.positions_mirror import upsert_position_from_holding
 
 LOGGER = get_logger("portfolio.broker_sync_common")
 
@@ -143,54 +150,6 @@ def upsert_holding(conn, asset_id: int, units: Decimal, avg_cost: Decimal | None
         conn.execute(
             insert(holdings_t).values(asset_id=asset_id, units=units, avg_cost=avg_cost)
         )
-
-
-def upsert_position_from_holding(
-    conn, owner: tuple[str, str | int], symbol: str, exchange: str | None,
-    quantity: Decimal, avg_price: Decimal | None,
-) -> None:
-    """Mirrors a synced broker holding into `positions` (the separate manual
-    "I bought this" tracker's own table) so it shows up on /portfolio too —
-    see routes/portfolio_aggregator.py's broker_sync() for why `owner` only
-    ever comes from the request that kicked off the sync, never stored on
-    accounts/profiles themselves (Portfolio Aggregator has no owner concept
-    at all otherwise).
-
-    `owner` is a resolved routes.watchlist.WatchlistOwner tuple
-    (`("user", user_id)` or `("client", client_id)`), not a raw client_id —
-    written to whichever column GET /api/positions actually reads for that
-    same caller (routes.watchlist.resolve_owner prefers a valid session
-    over client_id). Writing every synced position under client_id
-    unconditionally would make it invisible on /portfolio for anyone
-    signed in, since that page then reads by user_id.
-
-    `owner_type`/`owner_value` are never raw user input interpolated into
-    SQL — `owner_type` is always exactly "user" or "client" (resolve_owner's
-    own return-type guarantee), so the column-name f-string below is a
-    closed-set substitution, same convention as
-    routes/_shared.py::claim_anonymous_rows_sync's own comment about why
-    that's safe.
-
-    Only `entry_price`/`shares`/`exchange` are overwritten on every sync —
-    `target_price`/`stop_loss` (manual, no broker equivalent) and
-    `bought_at` (first-seen timestamp) are left untouched by the `DO
-    UPDATE`, whether this row started as a manual entry or a previous
-    sync's. `company` is left NULL: none of the three brokers' normalized
-    holding dicts carry a company name today (see broker_sync_common's own
-    module docstring for the normalized shape), and guessing one from the
-    symbol isn't worth the drift risk for a field the Positions UI already
-    treats as optional."""
-    owner_type, owner_value = owner
-    column = "user_id" if owner_type == "user" else "client_id"
-    conn.execute(
-        text(
-            f"INSERT INTO positions ({column}, symbol, exchange, entry_price, shares) "
-            f"VALUES (:owner_value, :symbol, :exchange, :entry_price, :shares) "
-            f"ON CONFLICT ({column}, symbol) DO UPDATE SET "
-            f"exchange = EXCLUDED.exchange, entry_price = EXCLUDED.entry_price, shares = EXCLUDED.shares"
-        ),
-        {"owner_value": owner_value, "symbol": symbol, "exchange": exchange, "entry_price": avg_price, "shares": quantity},
-    )
 
 
 def existing_trade_ids(conn, account_id: int, meta_source: str) -> set[str]:

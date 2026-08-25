@@ -247,7 +247,7 @@ class BrokerConnectIn(OwnedRequest):
 class BrokerSyncIn(OwnedRequest):
     """client_id (inherited from OwnedRequest) is used only to mirror synced
     holdings into `positions` (see
-    portfolio/broker_sync_common.py's upsert_position_from_holding) — not an
+    portfolio/positions_mirror.py's upsert_position_from_holding) — not an
     ownership check here; ownership resolves via account_id -> profile_id."""
     account_id: int
 

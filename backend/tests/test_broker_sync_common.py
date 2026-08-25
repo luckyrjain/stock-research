@@ -14,7 +14,8 @@ from sqlalchemy import create_engine, event, insert, select
 from sqlalchemy.pool import StaticPool
 
 from db.models import accounts, assets, holdings, metadata, positions, profiles, users
-from portfolio.broker_sync_common import call_with_backoff, sync_holdings, upsert_position_from_holding
+from portfolio.broker_sync_common import call_with_backoff, sync_holdings
+from portfolio.positions_mirror import upsert_position_from_holding
 
 
 class _HttpError(Exception):
