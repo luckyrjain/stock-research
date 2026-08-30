@@ -1,4 +1,9 @@
-"""Scrapers for Indian financial platforms to collect weekly stock picks."""
+"""Scrapers for Indian financial platforms to collect weekly stock picks.
+
+SOURCES / SCRAPER_FNS (the source registry the pipeline runs) live at the
+BOTTOM of this file, not here — each entry's function reference needs every
+fetch_*() below already defined.
+"""
 
 import time
 from datetime import datetime, timedelta, timezone
@@ -18,32 +23,11 @@ _HEADERS = {
 }
 _CUTOFF_DAYS = 14  # look back 2 weeks to capture more articles
 
-from tools.hdfc_sec_agent import HDFC_SEC_SOURCES, HDFC_SEC_SCRAPERS
-from tools.nse_bulk_block_deals import NSE_BULK_SOURCES, NSE_BULK_SCRAPERS
-from tools.nse_insider_trades import INSIDER_SOURCES, INSIDER_SCRAPERS
-from tools.screener_scanner import SCREENER_SCAN_SOURCES, SCREENER_SCAN_SCRAPERS
-from tools.trendlyne_agent import TRENDLYNE_SOURCES, TRENDLYNE_SCRAPERS
-
-# Registry used by the pipeline to run all scrapers
-SOURCES = [
-    # ── News RSS feeds ──────────────────────────────────────────────────────────
-    ("ET Markets",                          "news",      "fetch_et_markets"),
-    ("LiveMint",                            "news",      "fetch_livemint"),
-    ("NDTV Profit",                         "news",      "fetch_ndtv_profit"),
-    ("Hindu BusinessLine",                  "news",      "fetch_hindu_bl"),
-    ("Zerodha Z-Connect",                   "brokerage", "fetch_zerodha"),
-    ("GNews — Moneycontrol",                "news",      "fetch_gnews_moneycontrol"),
-    ("GNews — Business Standard",           "news",      "fetch_gnews_business_standard"),
-    ("GNews — Financial Express",           "news",      "fetch_gnews_financial_express"),
-    # ── Global bulge-bracket & research firms ───────────────────────────────────
-    ("Morgan Stanley / JPMorgan",           "brokerage", "fetch_gnews_ms_jpm"),
-    ("Jefferies / Macquarie / Citi",        "brokerage", "fetch_gnews_jefferies_mac_citi"),
-    ("HSBC / BofA / Bernstein / Investec",  "brokerage", "fetch_gnews_intl_banks"),
-    # ── India-focused brokerages ────────────────────────────────────────────────
-    ("ShareKhan / Mirae Asset",             "brokerage", "fetch_gnews_sharekhan_mirae"),
-    ("SMIFS / IDBI Capital / Geojit / Deven Choksey", "brokerage", "fetch_gnews_india_brokers"),
-    ("Motilal Oswal / ICICI Direct / Axis Securities", "brokerage", "fetch_gnews_motilal_icici_axis"),
-] + HDFC_SEC_SOURCES + NSE_BULK_SOURCES + INSIDER_SOURCES + SCREENER_SCAN_SOURCES + TRENDLYNE_SOURCES
+from tools.hdfc_sec_agent import HDFC_SEC_SOURCES
+from tools.nse_bulk_block_deals import NSE_BULK_SOURCES
+from tools.nse_insider_trades import INSIDER_SOURCES
+from tools.screener_scanner import SCREENER_SCAN_SOURCES
+from tools.trendlyne_agent import TRENDLYNE_SOURCES
 
 
 def _session() -> requests.Session:
@@ -198,25 +182,30 @@ def fetch_gnews_financial_express() -> dict:
     return {"source": "GNews — Financial Express", "type": "news", "articles": arts}
 
 
+# Registry used by the pipeline to run all scrapers — third element is the
+# scraper function itself (not a name string), so SCRAPER_FNS below is
+# derived from this one list instead of being a second, independently
+# hand-synced dict. Placed here rather than near the top of the file since
+# the tuples need every fetch_*() function already defined above.
+SOURCES = [
+    # ── News RSS feeds ──────────────────────────────────────────────────────────
+    ("ET Markets",                          "news",      fetch_et_markets),
+    ("LiveMint",                            "news",      fetch_livemint),
+    ("NDTV Profit",                         "news",      fetch_ndtv_profit),
+    ("Hindu BusinessLine",                  "news",      fetch_hindu_bl),
+    ("Zerodha Z-Connect",                   "brokerage", fetch_zerodha),
+    ("GNews — Moneycontrol",                "news",      fetch_gnews_moneycontrol),
+    ("GNews — Business Standard",           "news",      fetch_gnews_business_standard),
+    ("GNews — Financial Express",           "news",      fetch_gnews_financial_express),
+    # ── Global bulge-bracket & research firms ───────────────────────────────────
+    ("Morgan Stanley / JPMorgan",           "brokerage", fetch_gnews_ms_jpm),
+    ("Jefferies / Macquarie / Citi",        "brokerage", fetch_gnews_jefferies_mac_citi),
+    ("HSBC / BofA / Bernstein / Investec",  "brokerage", fetch_gnews_intl_banks),
+    # ── India-focused brokerages ────────────────────────────────────────────────
+    ("ShareKhan / Mirae Asset",             "brokerage", fetch_gnews_sharekhan_mirae),
+    ("SMIFS / IDBI Capital / Geojit / Deven Choksey", "brokerage", fetch_gnews_india_brokers),
+    ("Motilal Oswal / ICICI Direct / Axis Securities", "brokerage", fetch_gnews_motilal_icici_axis),
+] + HDFC_SEC_SOURCES + NSE_BULK_SOURCES + INSIDER_SOURCES + SCREENER_SCAN_SOURCES + TRENDLYNE_SOURCES
+
 # Map source name → function (used by pipeline)
-SCRAPER_FNS: dict = {
-    "ET Markets":                                     fetch_et_markets,
-    "LiveMint":                                       fetch_livemint,
-    "NDTV Profit":                                    fetch_ndtv_profit,
-    "Hindu BusinessLine":                             fetch_hindu_bl,
-    "Zerodha Z-Connect":                              fetch_zerodha,
-    "GNews — Moneycontrol":                           fetch_gnews_moneycontrol,
-    "GNews — Business Standard":                      fetch_gnews_business_standard,
-    "GNews — Financial Express":                      fetch_gnews_financial_express,
-    "Morgan Stanley / JPMorgan":                      fetch_gnews_ms_jpm,
-    "Jefferies / Macquarie / Citi":                   fetch_gnews_jefferies_mac_citi,
-    "HSBC / BofA / Bernstein / Investec":             fetch_gnews_intl_banks,
-    "ShareKhan / Mirae Asset":                        fetch_gnews_sharekhan_mirae,
-    "SMIFS / IDBI Capital / Geojit / Deven Choksey":  fetch_gnews_india_brokers,
-    "Motilal Oswal / ICICI Direct / Axis Securities": fetch_gnews_motilal_icici_axis,
-    **HDFC_SEC_SCRAPERS,
-    **NSE_BULK_SCRAPERS,
-    **INSIDER_SCRAPERS,
-    **SCREENER_SCAN_SCRAPERS,
-    **TRENDLYNE_SCRAPERS,
-}
+SCRAPER_FNS: dict = {name: fn for name, _type, fn in SOURCES}

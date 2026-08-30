@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 
 from pipelines.market_picks_pipeline import _SOURCE_CREDIBILITY
 from tools.market_picks_tools import (
-    SCRAPER_FNS,
     SOURCES,
     _current_year,
     _parse_rss,
@@ -29,9 +28,11 @@ def _pit_row(**overrides) -> dict:
 
 
 class SourceRegistryTest(unittest.TestCase):
-    def test_every_source_has_a_scraper_fn(self) -> None:
-        for name, _type, _fn in SOURCES:
-            self.assertIn(name, SCRAPER_FNS, f"Source '{name}' missing from SCRAPER_FNS")
+    # test_every_source_has_a_scraper_fn / test_scraper_fn_names_match_registry
+    # (SCRAPER_FNS as a hand-written dict that could drift from SOURCES) no
+    # longer apply -- SCRAPER_FNS is now derived directly from SOURCES'
+    # third element (the function itself, not a name string to keep in
+    # sync), so both are structurally guaranteed rather than worth asserting.
 
     def test_every_source_has_a_credibility_weight(self) -> None:
         for name, _type, _fn in SOURCES:
@@ -39,10 +40,6 @@ class SourceRegistryTest(unittest.TestCase):
                 name, _SOURCE_CREDIBILITY,
                 f"Source '{name}' missing from _SOURCE_CREDIBILITY (would default to 0.50)",
             )
-
-    def test_scraper_fn_names_match_registry(self) -> None:
-        for name, _type, fn_name in SOURCES:
-            self.assertEqual(SCRAPER_FNS[name].__name__, fn_name)
 
 
 class GnewsQueryYearTest(unittest.TestCase):

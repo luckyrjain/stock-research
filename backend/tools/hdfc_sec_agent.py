@@ -50,13 +50,9 @@ def fetch_hdfc_sec_technical() -> dict:
     return {"source": "HDFC Securities Technical", "type": "brokerage", "articles": arts}
 
 
-# Registration structures — merged into SOURCES / SCRAPER_FNS in market_picks_tools.py
+# Merged into SOURCES in market_picks_tools.py, which derives SCRAPER_FNS
+# from the merged list — no separate *_SCRAPERS dict to hand-sync here.
 HDFC_SEC_SOURCES = [
-    ("HDFC Securities Fundamental", "brokerage", "fetch_hdfc_sec_fundamental"),
-    ("HDFC Securities Technical",   "brokerage", "fetch_hdfc_sec_technical"),
+    ("HDFC Securities Fundamental", "brokerage", fetch_hdfc_sec_fundamental),
+    ("HDFC Securities Technical",   "brokerage", fetch_hdfc_sec_technical),
 ]
-
-HDFC_SEC_SCRAPERS: dict = {
-    "HDFC Securities Fundamental": fetch_hdfc_sec_fundamental,
-    "HDFC Securities Technical":   fetch_hdfc_sec_technical,
-}

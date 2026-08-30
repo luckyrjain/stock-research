@@ -497,10 +497,13 @@ Scrapers live in `tools/market_picks_tools.py`, `tools/hdfc_sec_agent.py`,
 
 ### Source registry (20 sources)
 
-`SOURCES`/`SCRAPER_FNS` in `tools/market_picks_tools.py` merge in five other modules' own
-`*_SOURCES`/`*_SCRAPERS` exports (`HDFC_SEC_SOURCES`, `NSE_BULK_SOURCES`, `INSIDER_SOURCES`,
-`SCREENER_SCAN_SOURCES`, `TRENDLYNE_SOURCES`) — 14 defined directly in that file + 2 (HDFC) + 1
-(NSE bulk/block) + 1 (NSE insider) + 1 (Screener.in scan) + 1 (Trendlyne) = **20 total**.
+`SOURCES` in `tools/market_picks_tools.py` merges in five other modules' own `*_SOURCES` exports
+(`HDFC_SEC_SOURCES`, `NSE_BULK_SOURCES`, `INSIDER_SOURCES`, `SCREENER_SCAN_SOURCES`,
+`TRENDLYNE_SOURCES`) — 14 defined directly in that file + 2 (HDFC) + 1 (NSE bulk/block) + 1 (NSE
+insider) + 1 (Screener.in scan) + 1 (Trendlyne) = **20 total**. Each tuple's third element is the
+scraper function itself (not a name string), so `SCRAPER_FNS` (`{name: fn for name, _type, fn in
+SOURCES}`) is derived from `SOURCES` rather than a second, independently hand-synced dict — there's
+no `*_SCRAPERS` export anymore, one list is the single source of truth.
 Credibility weights (`_SOURCE_CREDIBILITY` in `pipelines/market_picks_pipeline.py`) — sources not listed
 default to **0.50** (`_DEFAULT_CREDIBILITY`):
 
@@ -545,8 +548,9 @@ can therefore change from `brokerage` to `news` at runtime.
 ### Adding a new source
 
 1. Define scraper functions in a new module (e.g. `tools/my_brokerage.py`)
-2. Export `MY_SOURCES` (list of `(name, type, fn_name)` tuples) and `MY_SCRAPERS` (dict of `name → fn`)
-3. Import and merge into `SOURCES` and `SCRAPER_FNS` at the bottom of `tools/market_picks_tools.py`
+2. Export `MY_SOURCES` — a list of `(name, type, fn)` tuples, `fn` the scraper function itself
+3. Import and concatenate into `SOURCES` in `tools/market_picks_tools.py` (near the bottom of the
+   file, after every `fetch_*()` function is defined — `SCRAPER_FNS` derives from it automatically)
 4. Add a credibility entry in `_SOURCE_CREDIBILITY` in `pipelines/market_picks_pipeline.py`
 
 ---

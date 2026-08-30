@@ -153,10 +153,8 @@ def fetch_screener_scanner() -> dict:
     return {"source": "Screener.in Fundamental Screen", "type": "brokerage", "articles": articles}
 
 
+# Merged into SOURCES in market_picks_tools.py, which derives SCRAPER_FNS
+# from the merged list — no separate *_SCRAPERS dict to hand-sync here.
 SCREENER_SCAN_SOURCES = [
-    ("Screener.in Fundamental Screen", "brokerage", "fetch_screener_scanner"),
+    ("Screener.in Fundamental Screen", "brokerage", fetch_screener_scanner),
 ]
-
-SCREENER_SCAN_SCRAPERS: dict = {
-    "Screener.in Fundamental Screen": fetch_screener_scanner,
-}

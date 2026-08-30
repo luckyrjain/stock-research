@@ -243,10 +243,8 @@ def fetch_insider_trades_for_symbol(symbol: str, lookback_days: int = _SYMBOL_LO
     return {"symbol": sym, "trades": trades}
 
 
+# Merged into SOURCES in market_picks_tools.py, which derives SCRAPER_FNS
+# from the merged list — no separate *_SCRAPERS dict to hand-sync here.
 INSIDER_SOURCES = [
-    ("NSE Insider Trades", "brokerage", "fetch_insider_trades"),
+    ("NSE Insider Trades", "brokerage", fetch_insider_trades),
 ]
-
-INSIDER_SCRAPERS: dict = {
-    "NSE Insider Trades": fetch_insider_trades,
-}

@@ -82,10 +82,8 @@ def fetch_trendlyne_consensus_for_symbol(symbol: str, max_results: int = 10) -> 
     return {"symbol": sym, "articles": articles}
 
 
+# Merged into SOURCES in market_picks_tools.py, which derives SCRAPER_FNS
+# from the merged list — no separate *_SCRAPERS dict to hand-sync here.
 TRENDLYNE_SOURCES = [
-    ("Trendlyne / Analyst Consensus", "brokerage", "fetch_trendlyne_consensus"),
+    ("Trendlyne / Analyst Consensus", "brokerage", fetch_trendlyne_consensus),
 ]
-
-TRENDLYNE_SCRAPERS: dict = {
-    "Trendlyne / Analyst Consensus": fetch_trendlyne_consensus,
-}
