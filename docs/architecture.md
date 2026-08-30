@@ -10,8 +10,8 @@ and links into rather than duplicating. Frontend detail lives in `frontend/CLAUD
 A FastAPI backend (`backend/api.py` + `backend/routes/`) talks to yfinance, Screener.in, NSE, BSE,
 AMFI, Trendlyne, RBI, and Google News, normalizes what it scrapes, runs a deterministic quant
 signal engine over it, and (for the flagship single-stock flow) calls an LLM for a structured
-recommendation. It serves **61 HTTP routes** (29 in `api.py`, 5 + 6 + 21 across the three
-extracted `routes/` modules; 59 of them under `/api/*`, plus `/` and `/health`). A
+recommendation. It serves **63 HTTP routes** (29 in `api.py`, 5 + 6 + 23 across the three
+extracted `routes/` modules; 61 of them under `/api/*`, plus `/` and `/health`). A
 Next.js 15 frontend never talks to FastAPI directly — every call goes through a same-shaped proxy
 route under `frontend/app/api/*` first. PostgreSQL (via SQLAlchemy Core, migrated with Alembic)
 is the shared, persistent store for anything cross-session: accounts, watchlist, positions,
@@ -36,9 +36,129 @@ system** (magic-link auth — optional; anonymous `client_id` usage works everyw
 cached for one symbol, with zero new fetching. Behind all of it, an **EOD price store** ingests
 NSE bhavcopy + AMFI NAV nightly — no endpoint of its own, it exists to feed the valuation engine.
 
+### Component diagram
+
+Every arrow is a real, live call this codebase makes today — nothing speculative or planned. The
+Postgres/Redis/file-cache stack, and the "no direct browser→FastAPI" proxy rule, are described in
+prose above; this is the same picture as a diagram.
+
+```mermaid
+graph TB
+    Browser["Browser<br/>(Next.js :3000 pages)"]
+
+    subgraph FE["Next.js 15 — frontend/"]
+        Proxy["Proxy routes<br/>app/api/*/route.ts<br/>(pipe SSE, forward session cookie<br/>as Authorization: Bearer)"]
+    end
+
+    subgraph BE["FastAPI — backend/ (single process)"]
+        API["api.py<br/>29 routes"]
+        Routes["routes/<br/>watchlist · positions · portfolio_aggregator<br/>34 routes"]
+        Signals["signals/<br/>quant signal engine"]
+        Analyst["analyst/crew.py<br/>LLM call + guardrails + failover"]
+        Tools["tools/<br/>scrapers (never raise)"]
+        Pipelines["pipelines/<br/>SME · Screener · EOD prices ·<br/>Market Picks · Watchlist alerts"]
+        Portfolio["portfolio/<br/>valuation · CAS/CSV import · broker sync"]
+    end
+
+    FileCache[("File cache<br/>output/ (TTL'd, regenerable)")]
+    PG[("PostgreSQL<br/>23 tables")]
+    Redis[("Redis<br/>(optional — rate limits + cache,<br/>degrades to in-process when unset)")]
+
+    subgraph Ext["Scraped data sources"]
+        NSE["NSE / BSE"]
+        Screener["Screener.in"]
+        YF["yfinance"]
+        AMFI["AMFI"]
+        Trendlyne["Trendlyne"]
+        RBI["RBI"]
+        GNews["Google News (gnews)"]
+    end
+
+    subgraph LLM["LLM providers — one primary + one failover"]
+        Anthropic["Anthropic"]
+        OpenAI["OpenAI"]
+        Groq["Groq"]
+        Gemini["Google Gemini"]
+        OpenRouter["OpenRouter"]
+        Ollama["Ollama (self-hosted)"]
+    end
+
+    subgraph Brokers["Broker APIs (Portfolio Aggregator)"]
+        Kite["Zerodha Kite Connect"]
+        HDFC["HDFC Securities"]
+        PaytmM["Paytm Money"]
+    end
+
+    subgraph Cron["GitHub Actions — cron"]
+        SmeCron["sme-cron"]
+        ScreenerCron["screener-cron"]
+        EodCron["eod-prices-cron"]
+        AlertsCron["watchlist-alerts-cron"]
+        PicksCron["market-picks-cron"]
+        LiveCheck["live-contract-check (weekly)"]
+    end
+
+    SMTP["SMTP<br/>(magic-link + watchlist-alert email)"]
+    Sentry["Sentry<br/>(optional error tracking)"]
+
+    Browser -- "EventSource / fetch" --> Proxy
+    Proxy -- "server-to-server, same request shape" --> API
+    Proxy --> Routes
+    API --> Routes
+    API --> Tools
+    API --> Signals
+    API --> Analyst
+    Tools --> Ext
+    Analyst --> LLM
+    API --> FileCache
+    API --> PG
+    API --> Redis
+    Routes --> PG
+    Pipelines --> PG
+    Pipelines --> Tools
+    Portfolio --> Brokers
+    Portfolio --> PG
+    Cron -- "?force=true HTTP trigger, or direct run" --> Pipelines
+    API --> SMTP
+    Pipelines --> SMTP
+    API --> Sentry
+```
+
 ---
 
 ## Request flow: stock analysis
+
+The flagship end-to-end journey — one SSE request from browser to final report:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Browser
+    participant FE as Next.js proxy route
+    participant BE as FastAPI (api.py)
+    participant Cache as File cache (output/)
+    participant Tools as tools/* scrapers
+    participant Sig as signals/engine
+    participant LLM as LLM provider
+    participant DB as PostgreSQL
+
+    U->>FE: EventSource GET /api/analyse/{symbol}
+    FE->>BE: proxy, server-to-server
+    BE->>Cache: is_fresh() for each of 6 tasks
+    BE-->>U: SSE "start" (stale vs. cached tasks)
+    par stale tasks, dispatched concurrently
+        BE->>Tools: get_stock_quote / get_fundamentals / get_latest_news / ...
+        Tools-->>BE: raw payload (or {"error": ...}, never raises)
+        BE->>Cache: schemas.normalize() then save()
+        BE-->>U: SSE "task_done" (one per completed task)
+    end
+    BE->>Sig: run_signal_engine(symbol, all_data)
+    Sig-->>BE: signal_context + verdict
+    BE->>LLM: run_analysis_with_fallback() (primary, then failover on error)
+    LLM-->>BE: structured BUY/HOLD/SELL recommendation
+    BE->>DB: verdict_history.save_snapshot() (fire-and-forget)
+    BE-->>U: SSE "done" (merged report)
+```
 
 ```text
 Browser (Next.js :3000)
@@ -121,7 +241,7 @@ Six sequential phases inside one `MarketPicksPipeline.run()`, all blocking work 
 
 | Phase | Does | Fan-out |
 |---|---|---|
-| `_phase_scrape` | Fetches **20 sources** — 5 direct RSS (ET Markets, LiveMint, NDTV Profit, Hindu BusinessLine, Zerodha Z-Connect), 12 GNews-mediated (Moneycontrol/BS/FE, 3 global-brokerage groups, 3 India-brokerage groups, 2 HDFC Securities, Trendlyne), 3 structured (NSE bulk/block deals, NSE insider trades, Screener.in fundamental screen). `SOURCES`/`SCRAPER_FNS` in `tools/market_picks_tools.py` merge the five satellite modules' `*_SOURCES`/`*_SCRAPERS` exports at import time | 6 workers |
+| `_phase_scrape` | Fetches **20 sources** — 5 direct RSS (ET Markets, LiveMint, NDTV Profit, Hindu BusinessLine, Zerodha Z-Connect), 12 GNews-mediated (Moneycontrol/BS/FE, 3 global-brokerage groups, 3 India-brokerage groups, 2 HDFC Securities, Trendlyne), 3 structured (NSE bulk/block deals, NSE insider trades, Screener.in fundamental screen). `SOURCES` in `tools/market_picks_tools.py` merges the five satellite modules' `*_SOURCES` exports at import time; `SCRAPER_FNS` is derived from it, not a second hand-synced dict | 6 workers |
 | `_phase_extract` | One LLM call per source; checks `output/_extract_cache/` (6h, content-aware key) first; Jaccard ≥ 0.60 syndication detection down-weights the same story appearing across sources | 6 workers |
 | `_phase_consolidate` | Groups by ticker, validates against the NSE equity master, confirms a live yfinance price (guards pre-IPO/unlisted names), rapidfuzz company-name matching | — |
 | `_phase_research` | Per candidate: `stock_info` + `research` + `run_signal_engine()` + absolute valuation anchor via `peer_analytics.build_peer_result()` — sharing the same `"peers"` cache entry as `GET /api/peers/{symbol}`, so a re-scan doesn't re-scrape Screener for every candidate | 3-4 workers, ≤ `_MAX_STOCKS` (35) |
@@ -236,8 +356,14 @@ prices → portfolio valuations.
 A **separate** personal net-worth tracker (`/portfolio-aggregator`), distinct from `/portfolio` —
 the "I bought this" Market Picks P&L tracker backed by the `positions` table. The two share a
 `/api/portfolio` URL prefix by accident of routing, nothing else: different tables, different
-lifecycle, different purpose. This one has **no auth** — profiles are a bare picker with no
-credentials, a deliberate personal-scale-tool decision, not an oversight.
+lifecycle, different purpose. `profiles` carries the same `client_id`/`user_id` ownership shape
+as `watchlist_items`/`positions` (added by migration `ec7850b73d2f`, after this feature's
+original no-auth design) — every profile/account/asset-scoped endpoint resolves the caller's
+owner and 404s on one it doesn't control. `profiles` is still a bare picker with no credentials
+of its own, not this app's `users`/`sessions` account system, and this remains a
+personal-scale-tool decision, not a multi-tenant one — see "Watchlist, Positions & the
+claim-to-account flow" below for the shared ownership shape, and `docs/database.md` for
+`profiles`' own column-level detail.
 
 - **Foundation** (`routes/portfolio_aggregator.py`, mounted at `/api/portfolio`): `profiles` →
   `accounts` (bank/broker/amc/epfo/other) → `assets` (mf/stock/fd/epf/ppf/cash/manual/loan, with a
@@ -696,11 +822,12 @@ routes/
 │                              positions table only, unrelated to the Portfolio Aggregator
 │                              despite the shared /api/portfolio prefix, which it lands on
 │                              because this router has no prefix= of its own)
-└── portfolio_aggregator.py (21)  APIRouter(prefix="/api/portfolio") — profiles, accounts,
+└── portfolio_aggregator.py (23)  APIRouter(prefix="/api/portfolio") — profiles, accounts,
                                assets (+/valuations), networth, refresh-valuations, xirr,
                                import-cas, import-csv(/preview), broker/{broker}/login-url,
                                broker/{broker}/connect, broker/{broker}/sync,
-                               broker/connections. Full CRUD, hence the count
+                               broker/connections, broker/hdfc_securities/login-start,
+                               broker/hdfc_securities/verify-otp. Full CRUD, hence the count
 ```
 
 **`run_owned_db_call(request, rate_limit_name, max_calls, sync_fn, event_prefix, window_seconds=60)`**

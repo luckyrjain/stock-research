@@ -457,9 +457,13 @@ def _print_report(all_data: dict, analysis: dict) -> None:  # pylint: disable=to
             price = quote.get("current_price")
             if price is None:
                 continue
-            print(f"    {exchange:<4} Rs{price}  ({quote.get('change_pct', 0):+.2f}%)")
+            change_pct = quote.get("change_pct")
+            change_str = f"{change_pct:+.2f}%" if change_pct is not None else "n/a"
+            print(f"    {exchange:<4} Rs{price}  ({change_str})")
     if stock.get("current_price"):
-        print(f"  Price    : Rs{stock['current_price']}  ({stock.get('change_pct', 0):+.2f}%)")
+        change_pct = stock.get("change_pct")
+        change_str = f"{change_pct:+.2f}%" if change_pct is not None else "n/a"
+        print(f"  Price    : Rs{stock['current_price']}  ({change_str})")
     if stock.get("market_cap_cr"):
         print(f"  Mkt Cap  : Rs{stock['market_cap_cr']:,.0f} Cr")
     if stock.get("pe_ratio"):

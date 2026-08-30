@@ -761,6 +761,44 @@ def _compute_confidence(
     return round(min(100.0, max(0.0, signal_comp + mention_comp + recency_comp + valuation_nudge)), 1)
 
 
+_BUY_THRESHOLD       = 0.35
+_WATCHLIST_THRESHOLD = 0.15
+_SELL_THRESHOLD      = -0.30
+_BUY_SIGNAL_GATE     = -0.30  # a BUY additionally needs the quant signal to not be bearish
+
+
+def _classify_recommendation(net_signal: float, signal_score: float) -> tuple[str, float]:
+    """
+    4-tier recommendation (BUY / WATCHLIST / HOLD / SELL), thresholded on
+    `combined_dir` — a clamped blend of source consensus and the quant
+    signal engine, range ≈ -1..1+. Returns `(recommendation, combined_dir)`;
+    the caller also needs `combined_dir` for `action_score`, so it's
+    returned rather than silently recomputed a second time at the call site.
+
+    `signal_score >= _BUY_SIGNAL_GATE` is BUY's own quant veto — a strong
+    source consensus alone can't earn a BUY if the quant signal is bearish.
+    An earlier version of this function also had a second, explicit
+    "demote BUY to WATCHLIST when signal_score < -0.3" block below the
+    branches — that was dead code, since the BUY branch's own guard already
+    makes `signal_score < _BUY_SIGNAL_GATE and rec == "BUY"` impossible.
+    Removed as an adversarial-review finding rather than left as misleading,
+    unreachable code; this docstring is what's left of the explanation.
+    """
+    consensus_norm = min(1.0, max(-1.0, net_signal / 5.0))
+    combined_dir   = 0.55 * consensus_norm + 0.45 * signal_score
+
+    if combined_dir >= _BUY_THRESHOLD and signal_score >= _BUY_SIGNAL_GATE:
+        rec = "BUY"
+    elif combined_dir >= _WATCHLIST_THRESHOLD:
+        rec = "WATCHLIST"
+    elif combined_dir <= _SELL_THRESHOLD:
+        rec = "SELL"
+    else:
+        rec = "HOLD"
+
+    return rec, combined_dir
+
+
 def _aggregate_source_stats(
     raw_sources: dict,
     raw_picks: list[dict],
@@ -1665,28 +1703,8 @@ Return ONLY this JSON (no markdown):
             confidence    = _compute_confidence(signal_score, sources, max_eff_signal, si, valuation_pct)
 
             # ── 4-tier recommendation (thresholded, not binary) ────────────────
-            # combined_dir: clamped consensus + quant signal, range ≈ -1..1+
-            net_signal     = _effective_signal(sources)
-            consensus_norm = min(1.0, max(-1.0, net_signal / 5.0))
-            combined_dir   = 0.55 * consensus_norm + 0.45 * signal_score
-
-            if combined_dir >= 0.35 and signal_score >= -0.3:
-                rec = "BUY"
-            elif combined_dir >= 0.15:
-                rec = "WATCHLIST"
-            elif combined_dir <= -0.30:
-                rec = "SELL"
-            else:
-                rec = "HOLD"
-
-            # NOTE: a "quant veto" block used to live here (demoting BUY to
-            # WATCHLIST when signal_score < -0.3), but it was dead code —
-            # the BUY branch above already requires signal_score >= -0.3, so
-            # `signal_score < -0.3 and rec == "BUY"` could never be true.
-            # Removed rather than left as misleading, unreachable code (an
-            # adversarial-review finding); the BUY branch's own
-            # `signal_score >= -0.3` guard is the real (and only) quant veto
-            # on this recommendation tier.
+            net_signal       = _effective_signal(sources)
+            rec, combined_dir = _classify_recommendation(net_signal, signal_score)
 
             # ── Action score: magnitude of conviction (0–1) ───────────────────
             action_score = round(min(1.0, max(0.0, abs(combined_dir))), 3)
@@ -1730,7 +1748,7 @@ Return ONLY this JSON (no markdown):
                 "trend":            trend["trend"],
                 "trend_delta":      trend["delta"],
                 "current_price":    price,
-                "change_pct":       si.get("change_pct", 0),
+                "change_pct":       si.get("change_pct"),
                 "pe_ratio":         si.get("pe_ratio"),
                 "market_cap_cr":    si.get("market_cap_cr"),
                 "summary":          analysis.get("summary") or rd.get("signal_insight", ""),

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from core import cache
 import main
-from main import _build_report, _fetch_task, _save_report, _strip_meta
+from main import _build_report, _fetch_task, _print_report, _save_report, _strip_meta
 
 
 class SaveReportTest(unittest.TestCase):
@@ -282,6 +282,25 @@ class CliPreflightProviderCheckTest(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 main.main()
         self.assertIs(ctx.exception, sentinel)
+
+
+class PrintReportNullChangePctTest(unittest.TestCase):
+    """Regression test: change_pct is None (never a fabricated 0.0) when
+    previousClose is unavailable — _print_report used to format it with
+    `:+.2f}` unconditionally, which crashes on None."""
+
+    def test_does_not_crash_on_null_change_pct(self) -> None:
+        all_data = {
+            "stock_info": {
+                "company_name": "Chandan Steel",
+                "current_price": 45.0,
+                "change_pct": None,
+                "prices_by_exchange": {
+                    "NSE": {"current_price": 45.0, "change_pct": None},
+                },
+            },
+        }
+        _print_report(all_data, {})  # must not raise
 
 
 if __name__ == "__main__":

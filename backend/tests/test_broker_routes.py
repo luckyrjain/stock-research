@@ -1,10 +1,10 @@
-"""Endpoint tests for the broker-API routes in routes/portfolio_aggregator.py
+"""Endpoint tests for the broker-API routes in routes/broker_sync.py
 (docs/PRD-gmail-portfolio-intelligence.md Phase 1) — same SQLite-in-memory
 approach as test_portfolio_aggregator.py's own reference design.
 
 Credentials are per-connection (account_id, broker), never a deployment-wide
 env var — see db/models.py's broker_connections comment and
-routes/portfolio_aggregator.py's BrokerLoginUrlIn for why: a Kite Connect/
+routes/broker_sync.py's BrokerLoginUrlIn for why: a Kite Connect/
 HDFC Securities/Paytm Money "app" is always registered under one specific
 broker login, so a single global env var would only ever work for one
 person's one broker account, not "whoever connects an account." Every test
@@ -22,10 +22,18 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.pool import StaticPool
 
 import api
+import routes._shared as _shared
 from core import rate_limiter
 from db.models import accounts, broker_connections, metadata, profiles
 
 client = TestClient(api.app)
+
+# See test_portfolio_aggregator.py's identical comment — every endpoint here
+# now resolves an owner via routes.watchlist.resolve_owner() and scopes
+# accounts to it. Fixed for the whole class except where a test explicitly
+# exercises real owner resolution (the two client_id/sync tests below stop
+# this patch and thread a real client_id through their own setup instead).
+_TEST_OWNER = ("client", "test-owner-0000-0000-0000-000000000000")
 
 
 def _silence_sqlite_date_adapter_warning() -> None:
@@ -43,8 +51,17 @@ class BrokerRoutesTest(unittest.TestCase):
         metadata.create_all(self.engine, tables=[profiles, accounts, broker_connections])
         self._old_db_url = os.environ.get("DATABASE_URL")
         os.environ["DATABASE_URL"] = "sqlite://"
-        self._old_engine = api._DB_ENGINE
-        api._DB_ENGINE = self.engine
+        self._old_engine = _shared._DB_ENGINE
+        _shared._DB_ENGINE = self.engine
+        # _mk_profile()/_mk_account() below hit the CRUD endpoints
+        # (routes/portfolio_aggregator.py's own resolve_owner import) while
+        # the broker endpoints under test in this file hit
+        # routes/broker_sync.py's own resolve_owner import -- both need
+        # patching for the class-wide fixed owner to apply consistently.
+        self._owner_patcher = patch("routes.portfolio_aggregator.resolve_owner", return_value=_TEST_OWNER)
+        self._owner_patcher.start()
+        self._broker_owner_patcher = patch("routes.broker_sync.resolve_owner", return_value=_TEST_OWNER)
+        self._broker_owner_patcher.start()
 
         self._old_enc_key = os.environ.get("PORTFOLIO_ENCRYPTION_KEY")
         os.environ["PORTFOLIO_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
@@ -59,7 +76,9 @@ class BrokerRoutesTest(unittest.TestCase):
         rate_limiter._memory_locks.clear()
 
     def tearDown(self) -> None:
-        api._DB_ENGINE = self._old_engine
+        self._owner_patcher.stop()
+        self._broker_owner_patcher.stop()
+        _shared._DB_ENGINE = self._old_engine
         for var, old in [
             ("DATABASE_URL", self._old_db_url),
             ("PORTFOLIO_ENCRYPTION_KEY", self._old_enc_key),
@@ -71,33 +90,44 @@ class BrokerRoutesTest(unittest.TestCase):
         rate_limiter._memory_calls.clear()
         rate_limiter._memory_locks.clear()
 
-    def _mk_profile(self) -> int:
-        res = client.post("/api/portfolio/profiles", json={"name": "me"})
+    def _mk_profile(self, client_id: str | None = None) -> int:
+        body = {"name": "me"}
+        if client_id:
+            body["client_id"] = client_id
+        res = client.post("/api/portfolio/profiles", json=body)
         self.assertEqual(res.status_code, 201, res.text)
         return res.json()["id"]
 
-    def _mk_account(self, profile_id: int, type_: str = "broker") -> int:
-        res = client.post("/api/portfolio/accounts", json={
-            "profile_id": profile_id, "name": "My Broker", "type": type_,
-        })
+    def _mk_account(self, profile_id: int, type_: str = "broker", client_id: str | None = None) -> int:
+        body = {"profile_id": profile_id, "name": "My Broker", "type": type_}
+        if client_id:
+            body["client_id"] = client_id
+        res = client.post("/api/portfolio/accounts", json=body)
         self.assertEqual(res.status_code, 201, res.text)
         return res.json()["id"]
 
-    def _register_credentials(self, broker: str, account_id: int, api_key: str, api_secret: str):
-        return client.post(f"/api/portfolio/broker/{broker}/login-url", json={
-            "account_id": account_id, "api_key": api_key, "api_secret": api_secret,
-        })
+    def _register_credentials(
+        self, broker: str, account_id: int, api_key: str, api_secret: str, client_id: str | None = None,
+    ):
+        body = {"account_id": account_id, "api_key": api_key, "api_secret": api_secret}
+        if client_id:
+            body["client_id"] = client_id
+        return client.post(f"/api/portfolio/broker/{broker}/login-url", json=body)
 
-    def _wait_for_sync_status(self, profile_id: int, broker: str, account_id: int, *, timeout: float = 2.0) -> dict:
+    def _wait_for_sync_status(
+        self, profile_id: int, broker: str, account_id: int, *, timeout: float = 2.0,
+        client_id: str | None = None,
+    ) -> dict:
         """POST .../sync now kicks off sync_account() on a background
-        executor and returns 202 immediately (see routes/
-        portfolio_aggregator.py's broker_sync) — polls GET
+        executor and returns 202 immediately (see routes/broker_sync.py's
+        broker_sync()) — polls GET
         /broker/connections until this (account, broker) row's
         sync_status leaves "syncing", the same way the real frontend
         polls after seeing {"status": "syncing"}."""
+        qs = f"profile_id={profile_id}" + (f"&client_id={client_id}" if client_id else "")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            resp = client.get(f"/api/portfolio/broker/connections?profile_id={profile_id}")
+            resp = client.get(f"/api/portfolio/broker/connections?{qs}")
             conn = next(
                 c for c in resp.json()["connections"]
                 if c["account_id"] == account_id and c["broker"] == broker
@@ -415,7 +445,7 @@ class BrokerRoutesTest(unittest.TestCase):
         404 (no connection) is enough to prove the guard itself works."""
         pid = self._mk_profile()
         acc = self._mk_account(pid)
-        from routes.portfolio_aggregator import _BROKER_SYNC_RATE_LIMIT_MAX_CALLS
+        from routes.broker_sync import _BROKER_SYNC_RATE_LIMIT_MAX_CALLS
 
         for _ in range(_BROKER_SYNC_RATE_LIMIT_MAX_CALLS):
             resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
@@ -459,57 +489,82 @@ class BrokerRoutesTest(unittest.TestCase):
         """Regression test: resolve_owner() used to run synchronously in the
         async broker_sync() handler itself, directly on the event loop,
         rather than inside _prepare() (which run_owned_db_call() already
-        offloads to an executor thread) — see routes/portfolio_aggregator.py's
+        offloads to an executor thread) — see routes/broker_sync.py's
         broker_sync() for the fix. This only proves the owner still reaches
         sync_account() correctly after that move, not the event-loop-blocking
         behavior itself (not practically observable from a synchronous
-        TestClient call)."""
+        TestClient call). Uses the real resolve_owner (stops the class-wide
+        fixed-owner patch) with one consistent client_id threaded through
+        setup and the sync call itself, so ownership lines up throughout."""
+        self._owner_patcher.stop()
+        self._broker_owner_patcher.stop()
+        client_id = "11111111-1111-1111-1111-111111111111"
         mock_login_url.return_value = "https://kite.trade/connect/login?v=3"
         mock_exchange.return_value = {"access_token": "token-1"}
         mock_sync.return_value = {"holdings_synced": 1, "trades_synced": 0}
 
-        pid = self._mk_profile()
-        acc = self._mk_account(pid)
-        self._register_credentials("zerodha", acc, "k", "s")
+        pid = self._mk_profile(client_id=client_id)
+        acc = self._mk_account(pid, client_id=client_id)
+        self._register_credentials("zerodha", acc, "k", "s", client_id=client_id)
         client.post("/api/portfolio/broker/zerodha/connect",
-                     json={"account_id": acc, "request_token": "rt"})
+                     json={"account_id": acc, "request_token": "rt", "client_id": client_id})
 
-        client_id = "11111111-1111-1111-1111-111111111111"
         resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc, "client_id": client_id})
         self.assertEqual(resp.status_code, 202)
 
-        conn = self._wait_for_sync_status(pid, "zerodha", acc)
+        conn = self._wait_for_sync_status(pid, "zerodha", acc, client_id=client_id)
         self.assertEqual(conn["sync_status"], "success")
         mock_sync.assert_called_once()
         self.assertEqual(mock_sync.call_args.kwargs["owner"], ("client", client_id))
 
-    @patch("portfolio.portfolio_valuation.refresh_valuations")
-    @patch("portfolio.kite_sync.sync_account")
-    @patch("portfolio.kite_sync.exchange_request_token")
-    @patch("portfolio.kite_sync.get_login_url")
-    def test_sync_with_no_client_id_and_no_session_passes_no_owner(
-        self, mock_login_url, mock_exchange, mock_sync, _mock_refresh,
-    ) -> None:
-        """A malformed/missing client_id and no session must not fail the
-        sync itself — position-mirroring is purely additive (see
-        broker_sync()'s own comment) — sync_account() just gets owner=None."""
-        mock_login_url.return_value = "https://kite.trade/connect/login?v=3"
-        mock_exchange.return_value = {"access_token": "token-1"}
-        mock_sync.return_value = {"holdings_synced": 1, "trades_synced": 0}
+    def test_sync_without_owner_is_422(self) -> None:
+        """Ownership is now mandatory for every Portfolio Aggregator action
+        (see routes/portfolio_aggregator.py's module docstring) — a sync
+        call with neither a client_id nor a session can't be scoped to
+        anyone's account, so it's rejected before it ever reaches
+        sync_account(), unlike the pre-ownership behavior this replaces."""
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        self._owner_patcher.stop()
+        self._broker_owner_patcher.stop()
+
+        resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_sync_for_another_owners_account_never_touches_rate_limit_or_lock(self) -> None:
+        """Regression test: the ownership check in broker_sync()'s _prepare()
+        used to run AFTER the rate-limit check and lock acquisition — both
+        keyed only by (account_id, broker), never by caller identity — so a
+        caller who doesn't own this account could still burn through the
+        real owner's rate-limit budget and take/release their sync lock
+        before ever hitting a 404. Proven here by making more than
+        _BROKER_SYNC_RATE_LIMIT_MAX_CALLS unauthorized attempts and
+        confirming every single one is still a plain 404, never a 429 —
+        which would only be possible if the rate limiter had never been
+        touched by the unauthorized caller."""
+        from routes.broker_sync import _BROKER_SYNC_RATE_LIMIT_MAX_CALLS
 
         pid = self._mk_profile()
         acc = self._mk_account(pid)
-        self._register_credentials("zerodha", acc, "k", "s")
-        client.post("/api/portfolio/broker/zerodha/connect",
-                     json={"account_id": acc, "request_token": "rt"})
 
-        resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
-        self.assertEqual(resp.status_code, 202)
+        with patch("routes.broker_sync.resolve_owner",
+                   return_value=("client", "attacker-0000-0000-0000-000000000000")):
+            for _ in range(_BROKER_SYNC_RATE_LIMIT_MAX_CALLS + 3):
+                resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
+                self.assertEqual(resp.status_code, 404, resp.text)
 
-        conn = self._wait_for_sync_status(pid, "zerodha", acc)
-        self.assertEqual(conn["sync_status"], "success")
-        mock_sync.assert_called_once()
-        self.assertIsNone(mock_sync.call_args.kwargs["owner"])
+        # The real owner's own sync attempt must still work — proof the
+        # attacker's requests never consumed the shared rate-limit bucket
+        # or the per-connection lock keyed off this same account_id.
+        with patch("portfolio.kite_sync.get_login_url", return_value="https://kite.trade/connect/login?v=3"), \
+             patch("portfolio.kite_sync.exchange_request_token", return_value={"access_token": "token-1"}), \
+             patch("portfolio.kite_sync.sync_account", return_value={"holdings_synced": 1, "trades_synced": 0}), \
+             patch("portfolio.portfolio_valuation.refresh_valuations"):
+            self._register_credentials("zerodha", acc, "k", "s")
+            client.post("/api/portfolio/broker/zerodha/connect",
+                         json={"account_id": acc, "request_token": "rt"})
+            resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
+            self.assertEqual(resp.status_code, 202, resp.text)
 
     # ── the actual bug this redesign fixes: credentials are per-account,
     # not a shared global — two accounts connecting the same broker must

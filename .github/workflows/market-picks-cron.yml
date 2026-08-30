@@ -10,10 +10,18 @@ on:
     - cron: '30 1 * * 1'
   workflow_dispatch:
 
+# See sme-cron.yml's identical comment — prevents an overlapping run of
+# this same workflow (e.g. a workflow_dispatch fired while the weekly
+# schedule is still in flight).
+concurrency:
+  group: market-picks-cron
+  cancel-in-progress: false
+
 jobs:
   trigger-refresh:
     name: Trigger a fresh market picks scan
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check MARKET_PICKS_API_URL is configured
         env:

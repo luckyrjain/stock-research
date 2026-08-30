@@ -8,10 +8,20 @@ on:
     - cron: '0 13 * * 1-5'
   workflow_dispatch:
 
+# Prevents a slow/hung run (NSE rate-limiting, a stuck DB connection) from
+# overlapping a later scheduled or manually-dispatched run of this same
+# workflow — the second run waits for the first to finish rather than
+# racing it. This pipeline's upserts are idempotent, so an overlap here is
+# wasteful, not corrupting, but there's no reason to allow it.
+concurrency:
+  group: sme-cron
+  cancel-in-progress: false
+
 jobs:
   run-pipeline:
     name: Run SME EMA pipeline
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: backend

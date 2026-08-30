@@ -1,0 +1,177 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+
+export interface SharedResource<T> {
+  /** React hook: current value + whether the first fetch is still in
+   * flight. Every mounted instance across the page shares one cache, one
+   * in-flight fetch, and one listener set. */
+  useValue(): { value: T; loading: boolean };
+  /** Current cached value, or `undefined` if never fetched. */
+  getCache(): T | undefined;
+  /** Fetches (joining an in-flight fetch if one exists); updates the cache
+   * and notifies subscribers only if this fetch's generation is still
+   * current when it resolves. */
+  fetch(): Promise<T>;
+  /** Bumps the generation, clears any in-flight fetch, and re-fetches —
+   * call after an identity change (sign-in/sign-out) so a fetch already in
+   * flight under the old identity can't clobber the fresher result. */
+  refresh(): Promise<T>;
+  /** Bumps the generation and clears any in-flight fetch WITHOUT
+   * re-fetching — for callers about to set the cache directly (claim
+   * endpoints, logout) instead of re-fetching. */
+  bumpGeneration(): void;
+  /** The generation to capture BEFORE starting a mutation's own request, so
+   * the mutation can later confirm (via `isCurrent`) that no identity
+   * change superseded it while the request was in flight. */
+  getGeneration(): number;
+  /** True if `gen` still matches the current generation. Call AFTER an
+   * await, with `gen` captured BEFORE it, to guard a mutation's cache write
+   * against a stale, out-of-order response. */
+  isCurrent(gen: number): boolean;
+  /** Overwrites the cache and notifies subscribers unconditionally — call
+   * only after an `isCurrent` check (or right after `bumpGeneration()`,
+   * when the caller already knows the write is authoritative). */
+  setCache(value: T): void;
+  /** Runs `work` (the caller's own fetch + response parsing + error
+   * messaging — must never reject, same convention `fetchFn` itself
+   * follows), then applies the generation guard and `setCache` for it: the
+   * result is only written if `work` resolved to something other than
+   * `undefined` AND no identity change superseded the generation captured
+   * before `work` started. `undefined` means "no update" — a failed
+   * request, or a caller that already showed its own error and has
+   * nothing to write. No `version` check: `version` exists to stop a
+   * passive background fetch from clobbering a fresher mutation's write,
+   * and `mutate()`'s own `setCache()` call is what advances `version` —
+   * there's nothing for it to be stale against here. Collapses the
+   * capture-generation/await/isCurrent-check/setCache sequence every plain
+   * mutation (toggle/remove/add) already repeated identically; a mutation
+   * with its own extra ordering guard on top (e.g. per-key request
+   * sequencing) isn't a good fit and should keep doing that part by
+   * hand. */
+  mutate(work: () => Promise<T | undefined>): Promise<void>;
+}
+
+/**
+ * Generic module-level shared-resource cache: one cache / one in-flight
+ * fetch / one listener Set per resource, shared by every mounted hook
+ * instance on the page, plus a generation counter that fences stale
+ * responses after an identity change (sign-in/sign-out). Factored out of
+ * lib/watchlist.ts, lib/positions.ts, and lib/auth.ts, which each
+ * independently reimplemented this exact pattern — those files are now thin
+ * domain wrappers (their own fetch function + their own mutation methods)
+ * built on this shared machinery.
+ *
+ * `fetchFn` must never reject (catch internally) and must resolve to a
+ * concrete `T`. It receives the previously cached value so it can implement
+ * its own "keep stale data on failure" fallback (the
+ * `data.items ?? previous ?? []` convention watchlist/positions use) — or
+ * ignore it and always overwrite, as auth's fetchFn does.
+ *
+ * `emptyValue` is what `useValue()` reports before the first fetch
+ * resolves. `T` must not itself use `undefined` as a valid loaded value,
+ * since `undefined` is the internal "never fetched" sentinel.
+ */
+export function createSharedResource<T>(
+  fetchFn: (previous: T | undefined) => Promise<T>,
+  emptyValue: T,
+): SharedResource<T> {
+  let cache: T | undefined;
+  let inFlight: Promise<T> | null = null;
+  let generation = 0;
+  // Bumped by every cache write, whether from a resolved fetch or a direct
+  // setCache() (a mutation like toggle()/addPosition()). Lets a fetch that
+  // was already in flight when a same-identity mutation landed detect that
+  // its own (possibly stale/failed-fallback) result is no longer the
+  // freshest thing known and skip overwriting it — generation alone only
+  // fences an identity change (sign-in/out), not a same-identity mutation.
+  let version = 0;
+  const listeners = new Set<() => void>();
+
+  function notify(): void {
+    listeners.forEach(fn => fn());
+  }
+
+  async function fetchValue(): Promise<T> {
+    // Both captured BEFORE joining/creating the in-flight fetch — a later
+    // refresh()/bumpGeneration() call can advance `generation`, and a later
+    // setCache() call can advance `version`, while this fetch is still
+    // pending; the write below must be able to tell either happened.
+    const myGeneration = generation;
+    const myVersion = version;
+    if (!inFlight) {
+      inFlight = fetchFn(cache).finally(() => { inFlight = null; });
+    }
+    const value = await inFlight;
+    if (myGeneration === generation && myVersion === version) {
+      cache = value;
+      version++;
+      notify();
+    }
+    // No caller of fetch()/refresh() in this codebase uses the resolved
+    // value for correctness (they rely on the cache+notify side effect
+    // above, e.g. `fetchValue().finally(() => setLoading(false))`) —
+    // returning it even when stale keeps this usable as a plain fetch for
+    // any future caller that does.
+    return value;
+  }
+
+  function refresh(): Promise<T> {
+    generation++;
+    inFlight = null;
+    return fetchValue();
+  }
+
+  function bumpGeneration(): void {
+    generation++;
+    inFlight = null;
+  }
+
+  function setCache(value: T): void {
+    cache = value;
+    version++;
+    notify();
+  }
+
+  async function mutate(work: () => Promise<T | undefined>): Promise<void> {
+    // Captured before `work` starts, same convention fetchValue() itself
+    // uses — a later identity change (sign-in/sign-out) while this
+    // mutation's request is in flight must not let its result overwrite
+    // whatever that change's own refresh() already wrote.
+    const myGeneration = generation;
+    const value = await work();
+    if (value !== undefined && myGeneration === generation) {
+      setCache(value);
+    }
+  }
+
+  function useValue(): { value: T; loading: boolean } {
+    const [value, setValue] = useState<T>(cache ?? emptyValue);
+    const [loading, setLoading] = useState(cache === undefined);
+
+    useEffect(() => {
+      const onChange = () => setValue(cache ?? emptyValue);
+      listeners.add(onChange);
+      if (cache === undefined) {
+        fetchValue().finally(() => setLoading(false));
+      } else {
+        setLoading(false);
+      }
+      return () => { listeners.delete(onChange); };
+    }, []);
+
+    return { value, loading };
+  }
+
+  return {
+    useValue,
+    getCache: () => cache,
+    fetch: fetchValue,
+    refresh,
+    bumpGeneration,
+    getGeneration: () => generation,
+    isCurrent: (gen: number) => gen === generation,
+    setCache,
+    mutate,
+  };
+}

@@ -29,7 +29,7 @@ def _norm_exchange_quote(d: dict) -> dict:
         "company_name":       d.get("company_name", ""),
         "current_price":      _pick(d, "current_price", "regularMarketPrice"),
         "previous_close":     d.get("previous_close"),
-        "change_pct":         d.get("change_pct", 0.0),
+        "change_pct":         d.get("change_pct"),
         "volume":             d.get("volume"),
         "avg_volume_10d":     d.get("avg_volume_10d"),
         "market_cap_cr":      d.get("market_cap_cr"),
@@ -171,6 +171,29 @@ CONTRACTS: dict[str, dict] = {
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+def type_mismatches(task_name: str, data: dict) -> list[str]:
+    """Compare data's present container fields against
+    CONTRACTS[task_name]["types"]. Returns human-readable mismatch
+    descriptions (empty if none, or if the task has no "types" map). A field
+    that's simply absent is not a mismatch — this codebase's "never invent"
+    convention means a legitimately-thin optional field is expected, not
+    drift. Shared by validate() (hard enforcement — a present-but-wrong-shaped
+    field fails validation) and core/schema_drift.py's check_drift() (soft
+    warning/telemetry) so the type-comparison logic itself isn't duplicated
+    between the two."""
+    expected_types = CONTRACTS.get(task_name, {}).get("types", {})
+    problems = []
+    for field, expected_type in expected_types.items():
+        if field not in data:
+            continue  # legitimately absent for this symbol — not drift
+        value = data[field]
+        if value is not None and not isinstance(value, expected_type):
+            problems.append(
+                f"'{field}' expected {expected_type.__name__}, got {type(value).__name__}"
+            )
+    return problems
+
+
 def normalize(task_name: str, data: dict) -> dict:
     """Map raw tool output to the canonical shape. Returns data unchanged if no contract."""
     if data.get("error"):
@@ -201,6 +224,10 @@ def validate(task_name: str, data: dict) -> tuple[bool, str]:
     for field in contract["required"]:
         if not data.get(field):
             return False, f"Required field '{field}' is missing or empty"
+
+    problems = type_mismatches(task_name, data)
+    if problems:
+        return False, f"Field type drift detected: {'; '.join(problems)}"
 
     return True, ""
 

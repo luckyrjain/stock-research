@@ -1,8 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback } from 'react';
 import { refreshWatchlist } from '@/lib/watchlist';
 import { refreshPositions } from '@/lib/positions';
+import { createSharedResource } from '@/lib/shared-resource';
 
 export interface AuthUser {
   id: number;
@@ -10,74 +11,36 @@ export interface AuthUser {
   tier: 'free' | 'pro';
 }
 
-// Module-level shared cache, same pattern as watchlist.ts's useWatchlist():
-// every mounted useAuth() instance (AuthWidget in each page's nav bar) reads
-// from and subscribes to this single cache instead of each independently
-// hitting /api/auth/me on mount. `undefined` = not yet loaded, `null` = loaded
-// and signed out.
-let cachedUser: AuthUser | null | undefined;
-let inFlight: Promise<AuthUser | null> | null = null;
-// Bumped by refreshAuth() so a stale fetch already in flight (started before
-// a refresh was requested) can't clobber the fresher result if it happens to
-// resolve after it — the classic out-of-order-response race.
-let generation = 0;
-const listeners = new Set<() => void>();
-
-function notify(): void {
-  listeners.forEach(fn => fn());
-}
-
+// Shared cross-component cache, built on lib/shared-resource.ts's generic
+// createSharedResource() — same machinery lib/watchlist.ts's useWatchlist()
+// uses: every mounted useAuth() instance (AuthWidget in each page's nav bar)
+// reads from and subscribes to this single resource instead of each
+// independently hitting /api/auth/me on mount.
 async function fetchMe(): Promise<AuthUser | null> {
-  // Capture the generation BEFORE checking/joining an in-flight fetch —
-  // same ordering as lib/watchlist.ts's fetchItems()/lib/positions.ts's
-  // fetchPositions(). Not currently a live bug here (no caller of fetchMe()
-  // or refreshAuth() actually consumes their resolved return value — every
-  // caller relies on the cachedUser/notify() side effect below instead, so
-  // a joining caller returning a stale value directly would be discarded
-  // anyway), but keeping the same shape as the other two hooks avoids this
-  // becoming a real bug the moment a future caller DOES start using the
-  // return value directly.
-  const myGeneration = generation;
-  if (inFlight) return inFlight;
-  inFlight = fetch('/api/auth/me', { cache: 'no-store' })
+  return fetch('/api/auth/me', { cache: 'no-store' })
     .then(res => (res.ok ? res.json() : { user: null }))
     .then((data: { user?: AuthUser | null }) => data.user ?? null)
-    .catch(() => null)
-    .finally(() => { inFlight = null; });
-  const user = await inFlight;
-  if (myGeneration === generation) {
-    cachedUser = user;
-    notify();
-  }
-  return user;
+    .catch(() => null);
 }
+
+// `null` (not the "previous" param) is always what a failed/unauthenticated
+// fetch resolves to — unlike watchlist/positions, auth doesn't fall back to
+// keeping a stale cached user on failure; a network error is treated the
+// same as "signed out."
+const resource = createSharedResource<AuthUser | null>(() => fetchMe(), null);
 
 /** Re-fetches /api/auth/me and updates every subscribed useAuth() instance —
  * call after a successful /auth/verify so the nav bar picks up the new
  * session without a full page reload. */
 export function refreshAuth(): Promise<AuthUser | null> {
-  generation++;
-  inFlight = null;
-  return fetchMe();
+  return resource.refresh();
 }
 
 /** Shared cross-component auth state, backed by an httpOnly session cookie
  * the Next.js proxy routes manage — this hook never touches the cookie or
  * token directly, only the /api/auth/* JSON endpoints. */
 export function useAuth() {
-  const [user, setUser] = useState<AuthUser | null>(cachedUser ?? null);
-  const [loading, setLoading] = useState(cachedUser === undefined);
-
-  useEffect(() => {
-    const onChange = () => setUser(cachedUser ?? null);
-    listeners.add(onChange);
-    if (cachedUser === undefined) {
-      fetchMe().finally(() => setLoading(false));
-    } else {
-      setLoading(false);
-    }
-    return () => { listeners.delete(onChange); };
-  }, []);
+  const { value: user, loading } = resource.useValue();
 
   const requestLink = useCallback(async (email: string) => {
     const res = await fetch('/api/auth/request-link', {
@@ -102,12 +65,10 @@ export function useAuth() {
       // silently revert cachedUser back to the signed-in user: the nav
       // bar would keep showing "signed in" after a real logout, with no
       // self-correction until something else calls refreshAuth().
-      generation++;
-      inFlight = null;
-      cachedUser = null;
-      notify();
-      // The watchlist's and positions' own module-level caches have no way
-      // to know the caller's identity just changed back to the anonymous
+      resource.bumpGeneration();
+      resource.setCache(null);
+      // The watchlist's and positions' own shared caches have no way to
+      // know the caller's identity just changed back to the anonymous
       // client_id — without this they'd keep showing the account's rows
       // post-logout.
       refreshWatchlist();

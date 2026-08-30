@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
+import { useFocusTrap } from '@/lib/use-focus-trap';
 
 interface Props {
   title: string;
@@ -14,13 +15,12 @@ interface Props {
 export default function InfoTooltip({ title, children, className = '', align = 'center' }: Props) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
+  const panelRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [open]);
+  // Same inert-background + Tab-wrap + Escape treatment as ConsolidatedCard
+  // and SourcesPopover (A11Y-11) — this dialog's content is caller-supplied
+  // and can hold links, so it gets the full trap rather than Escape-only.
+  useFocusTrap(panelRef, open, { onEscape: () => setOpen(false) });
 
   return (
     <span className={`relative inline-flex ${className}`}>
@@ -51,9 +51,11 @@ export default function InfoTooltip({ title, children, className = '', align = '
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
           <div
+            ref={panelRef}
             id={panelId}
             role="dialog"
             aria-label={title}
+            tabIndex={-1}
             className={`absolute top-full mt-2 z-20 w-64 bg-card border border-border rounded-xl
                         shadow-2xl shadow-black/60 p-3
                         ${align === 'center' ? 'left-1/2 -translate-x-1/2' : 'left-0'}`}

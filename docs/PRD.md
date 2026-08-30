@@ -25,6 +25,10 @@ trustworthy enough that its own track record, not its confidence, is the pitch. 
 (§13) is to be the one place an Indian retail investor's research and portfolio tracking happens.
 
 This is a single-engineer project today (§17.1) — real, and disclosed rather than hidden.
+Present-day distribution is scoped down from the long-term audience above: today this runs
+privately for the operator's own circle of friends and family, not offered to the public or for
+consideration (§17.4) — the personas in §5 describe that same circle's use cases, not a public
+user base yet.
 
 ---
 
@@ -67,6 +71,12 @@ Explicitly out of scope for the foreseeable future:
   The product is built on a batch-fetch, disciplined-analysis model (see Data Freshness in the
   Feature Catalog), not a streaming feed.
 - **Global (non-Indian) markets.** NSE/BSE stays the entire universe.
+- **Public or commercial distribution, for now.** Decided scope, not an oversight (§17.4): this
+  runs privately for the operator's own circle of friends and family — nobody outside that circle
+  signs up, no fee is charged, and it isn't advertised or offered to the public. This is what
+  keeps the SEBI-registration question (§17.4) closed for the current scope; it reopens the moment
+  distribution grows past a private circle, becomes public/advertised, or a fee is introduced (§11
+  already has no real payment processing, consistent with this).
 
 ---
 
@@ -344,9 +354,9 @@ order.
 | LLM hallucination / fabricated numeric claim | Medium (mitigated) | High if unmitigated | The Trust Framework (§7) exists for this — guardrails, numeric-misread check, degraded-fallback labeling |
 | Broad market crash / regime shift | Low-Medium | Medium — signal weights aren't back-tested, so calibration is unproven in a real drawdown | Disclosed gap (Feature Catalog, "Known Gaps"); a backtest harness is the mitigation, not yet built |
 | Scraper/API rate-limit or cost spike (LLM or data source) | Medium | Medium — degraded freshness or a blown cost budget | Per-call LLM cost instrumentation with a daily running total; Redis-backed sliding-window rate limiting; a global LLM concurrency ceiling |
-| Regulatory status of issuing BUY/SELL calls to Indian retail investors is unassessed | Unknown (unassessed) | High if SEBI registration turns out to be required | See §17.4 — requires qualified counsel, not an engineering fix |
-| No legal/compliance review of the scraping surface | Unknown (unassessed) | High if a source objects | See §17.2 — requires a licensed professional |
-| Bus factor of one | High (certain, today) | High for anyone relying on this as durable infrastructure | See §17.1 — requires a real second engineer or a written handoff plan |
+| Distribution scope (private friends/family, non-public, no fee) expands past what §17.4's SEBI determination is contingent on | Low today (operator-controlled) | High if it happens without re-checking §17.4 first | See §17.4 — reopens the registration question; needs qualified counsel before, not after, any such expansion |
+| A scraped source objects (rate-limits, blocks, or sends a cease-and-desist) before legal review ever happens | Low-Medium | High if it happens — see §17.2's stop-immediately posture | See §17.2 — accepted risk for current non-commercial, low-volume scope; reopens on objection or scale-up |
+| Operator becomes unavailable (bus factor of one) | High (certain, today) | High for anyone relying on this as durable infrastructure, low for informal friends/family use with no SLA | See §17.1 — accepted risk for current scope; reopens if usage starts being depended on like infrastructure |
 
 ---
 
@@ -355,21 +365,57 @@ order.
 These are **not engineering problems** — no further code work closes them. Restated here because a
 PRD that omitted them would misrepresent the product's readiness for scale.
 
-### 17.1 Bus factor of one
+### 17.1 Bus factor of one — accepted risk for current scope
 The entire commit history traces to a single human author (with AI pair-programming assistance).
 The density of the `CLAUDE.md` files is real engineering discipline, but it is not evidence a team
-exists. **Needs:** a second engineer, or at minimum a written handoff plan, before this is treated
-as infrastructure a business depends on.
+exists, and no amount of documentation makes it one.
 
-### 17.2 No legal/compliance review of the scraping surface
+**Decision (operator, current scope): accepted as-is, not mitigated today.** Unlike §17.4, this
+isn't something a fact pattern can resolve — it will stay true for as long as one person writes
+all the code, and a second engineer or a written handoff plan is the only thing that actually
+changes it. What's decided here is narrower: given the product runs privately for the operator's
+own circle (§3), with no SLA, no paying customers, and no external party depending on its uptime,
+the operator has judged that building a handoff plan or bringing on a second engineer isn't
+justified by what's at stake today. The accepted downside if the operator becomes unavailable is
+that the tool simply stops running — a real cost to the friends-and-family users, but not one that
+obligates anyone or breaches a commitment, since none was made.
+
+**This is contingent, not permanent.** It reopens — needs a real second engineer or a written
+handoff plan before the gap is treated as closed — if this project starts being depended on the
+way infrastructure is depended on: if anyone's real financial decisions come to rely on its
+uptime, or if distribution scope changes per §17.4's own contingency (at that point the audience
+also has a claim on continuity, not just on the SEBI question).
+
+### 17.2 No legal/compliance review of the scraping surface — accepted risk for current scope
 AlphaPulse scrapes `screener.in`, `nseindia.com`/`nsearchives.nseindia.com`,
 `bseindia.com`/`api.bseindia.com`, `trendlyne.com`, `rbi.org.in`, and AMFI, plus GNews-mediated
-coverage of several news publishers, on a recurring schedule at a scale beyond casual use — with
-no confirmed Terms-of-Service review by qualified counsel. (This is also *why* Watchlist/Positions
-ownership is never auto-migrated on sign-in, and why the claim flow is tightly rate-limited and
-audit-logged — the default posture throughout is "ask, disclose, bound the blast radius.")
-**Needs:** a licensed professional reviewing each source's actual ToS and applicable Indian
-data-protection/scraping law before scaling traffic materially.
+coverage of several news publishers, on a recurring schedule at a scale beyond casual manual
+browsing — with no confirmed Terms-of-Service review by qualified counsel. (This is also *why*
+Watchlist/Positions ownership is never auto-migrated on sign-in, and why the claim flow is tightly
+rate-limited and audit-logged — the default posture throughout is "ask, disclose, bound the blast
+radius.")
+
+**Decision (operator, current scope): accepted as-is, not blocking on legal review today.**
+Note what this decision does *not* rest on: unlike §17.4, this isn't an audience-size argument —
+the scheduled pipelines (`pipelines/sme_ema_pipeline.py`, `screener_pipeline.py`,
+`eod_prices_pipeline.py`, `market_picks_pipeline.py`) hit these sources on the same cron schedule
+at the same request volume regardless of how many people view the results, so "it's just for
+friends and family" doesn't reduce the actual scraping load on any of these sites the way it
+reduced the SEBI "advising the public" question. The basis here is narrower and different: the
+data pulled is used for personal, non-commercial research, not resold, republished, or offered as
+a paid feed to anyone outside the operator's own circle; nothing in the code is built to evade
+rate limits, defeat CAPTCHAs, or misrepresent the client as something other than an automated
+fetcher; and the operator's stated posture is to comply immediately (throttle, pause, or drop a
+source) if any site operator objects, rather than to contest it. That's a risk-acceptance by the
+operator, not a legal conclusion that this scraping is permitted — nobody has read these sites'
+actual ToS against Indian law and confirmed it.
+
+**This is contingent, not permanent.** It reopens — needs a licensed professional's actual review
+before continuing, not after — if request volume increases materially beyond the current cron
+cadence, if any scraped data is resold, redistributed, or offered as a paid feed, if distribution
+scope changes per §17.4's own contingency, or if any source sends a cease-and-desist, rate-limits
+the operator's requests specifically, or otherwise objects — at which point the response is to
+stop scraping that source, not to keep going while seeking counsel.
 
 ### 17.3 No real payment processing
 `users.tier` and the informational `/pricing` page exist specifically to *stop short* of a
@@ -378,30 +424,42 @@ hand. Disclosed by design: standing up billing is a business decision (processor
 India-specific tax/compliance, refunds) that must precede engineering. **Needs:** those decisions
 first; the engineering that follows is then a normal, scoped task.
 
-### 17.4 Regulatory status of the recommendations themselves — unassessed
-The product issues BUY/HOLD/SELL calls with confidence levels, price targets, and stop-losses to
-Indian retail investors, and publishes its own track record against them. Whether that constitutes
-regulated activity under SEBI's Research Analyst or Investment Adviser regulations — and what
-registration, disclosure, or disclaimer obligations would follow — has **not** been assessed by
-qualified counsel. Notably, "financial advisory" was *deliberately not* listed as a non-goal in
-§3: the product's positioning on this question is genuinely open, which makes getting a real
-answer more urgent, not less. **Needs:** a SEBI-competent professional's read on the current
-feature set before any material distribution push. Recorded here as an open question, not as an
-implied claim in either direction.
+### 17.4 Regulatory status of the recommendations themselves — decided for current scope
 
-**Partial mitigation shipped — explicitly not a substitute for the above.** Every surface that
-carries a recommendation now states that AlphaPulse is *not registered with SEBI as a Research
-Analyst or Investment Adviser*, alongside the pre-existing "not investment advice" language: the
-global footer (`app/layout.tsx`), the single-stock verdict (`results-dashboard.tsx`), and the
-Market Picks list (`market-picks-dashboard.tsx`). Those disclaimers were also raised from
-`text-muted/50`–`/60` to full `text-muted` — they had been rendering at **2.41:1 and 2.95:1**
-contrast, the least legible text in the product, which is a poor property for a legal notice as
-well as an accessibility failure. At full `muted` they measure 6.12:1.
+**Decision (operator, current scope): SEBI Research Analyst / Investment Adviser registration is
+not required today.** The product issues BUY/HOLD/SELL calls with confidence levels, price
+targets, and stop-losses, and publishes its own track record against them — but SEBI's Research
+Analyst and Investment Adviser regulations are aimed at a person carrying on the *business* of
+advising the public (or clients) for consideration. That fact pattern is what was genuinely open
+in an earlier version of this section. It's closed now because the distribution fact pattern is
+fixed and stated as a non-goal (§3): this runs privately for the operator's own circle of friends
+and family — nobody outside that circle has access, no fee is charged for it, and it is not
+advertised, marketed, or offered to the public. This is the operator's own scope-based
+determination, **not a formal opinion from qualified counsel** — recorded as a decision this
+project is operating under, not as a claim that a lawyer has signed off on it.
 
-Two caveats, stated so this isn't mistaken for resolution:
-1. **A disclaimer is risk-reduction, not compliance.** If the activity does fall within SEBI's
-   Research Analyst regulations, disclaiming registration does not cure the absence of it. This
-   buys honesty with users, not a legal position.
+**This determination is contingent on the stated facts, not permanent.** It holds only as long as
+distribution stays inside a private, unpaid, non-public circle (§3's non-goal). If any of that
+changes — the circle grows into something that reads as "the public," a fee is introduced, it's
+advertised or marketed, or usage otherwise scales past personal/informal sharing — this question
+reopens and needs a SEBI-competent professional's actual read before that expansion, not after.
+`PRD.md`'s own "Needs a human decision" framing (`docs/backlog.md`) tracked this as open; it now
+tracks it as decided-for-current-scope with that reopening condition attached, not as resolved
+outright.
+
+**Disclaimer language kept as continued good practice, not as the thing that makes the above
+determination true.** Every surface that carries a recommendation still states that AlphaPulse is
+*not registered with SEBI as a Research Analyst or Investment Adviser*, alongside the pre-existing
+"not investment advice" language: the global footer (`app/layout.tsx`), the single-stock verdict
+(`results-dashboard.tsx`), and the Market Picks list (`market-picks-dashboard.tsx`). Those
+disclaimers were also raised from `text-muted/50`–`/60` to full `text-muted` — they had been
+rendering at **2.41:1 and 2.95:1** contrast, the least legible text in the product, a poor
+property for a legal notice as well as an accessibility failure. At full `muted` they measure
+6.12:1. Two things this still doesn't do:
+1. **A disclaimer is risk-reduction, not compliance, on its own.** The real reason registration
+   isn't required today is the private/non-commercial distribution scope above, not this text —
+   but keeping the disclaimer costs nothing and stays honest with the friends/family circle using
+   this about what it is and isn't.
 2. **The non-registration statement is an assumption, not a verified fact.** It reflects that no
    registration is known to exist for this project. If the operator *is* SEBI-registered, that
    copy is wrong and must be corrected in the three files named above.

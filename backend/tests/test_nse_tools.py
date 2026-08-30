@@ -46,10 +46,17 @@ class BuildQuotePayloadTest(unittest.TestCase):
         self.assertEqual(payload["change_pct"], 10.0)
         self.assertEqual(payload["market_cap_cr"], 1000.0)
 
-    def test_missing_previous_close_falls_back_to_price_with_zero_change(self) -> None:
+    def test_missing_previous_close_yields_null_change_pct_not_zero(self) -> None:
+        # Regression test: change_pct used to fall back to a fabricated 0.0
+        # ("flat today") whenever yfinance's info had no previousClose at
+        # all — indistinguishable from a genuine flat day, and read by
+        # signals/volume.py's volume_signal() as a real "not a down day",
+        # silently resolving a data gap toward accumulation. previous_close
+        # itself still falls back to price for display purposes; only the
+        # derived change_pct (what the signal engine acts on) changed.
         payload = _build_quote_payload("TCS", "NSE", {"currentPrice": 110, "marketCap": 1e10})
         self.assertEqual(payload["previous_close"], 110)
-        self.assertEqual(payload["change_pct"], 0.0)
+        self.assertIsNone(payload["change_pct"])
 
     def test_dividend_yield_as_decimal_is_converted_to_percent(self) -> None:
         payload = _build_quote_payload("TCS", "NSE", {"currentPrice": 100, "dividendYield": 0.025})
@@ -185,6 +192,16 @@ class ScreenerFallbackQuoteTest(unittest.TestCase):
     def test_returns_none_on_fetch_exception(self) -> None:
         with patch("tools.screener_tools._fetch_soup", side_effect=ConnectionError("boom")):
             self.assertIsNone(_screener_fallback_quote("NOSUCH"))
+
+    def test_change_pct_is_null_not_fabricated_zero(self) -> None:
+        # Regression test: this fallback has no real previous-close to compute
+        # a change% from, so change_pct must be None (never invent), matching
+        # _build_quote_payload's own "missing previousClose -> None" fix.
+        soup = self._soup_with_ratios({"Current Price": "120"})
+        with patch("tools.screener_tools._fetch_soup", return_value=soup), \
+             patch("tools.nse_tools._stockanalysis_extra_fields", return_value={}):
+            result = _screener_fallback_quote("CHANDAN")
+        self.assertIsNone(result["change_pct"])
 
 
 class StockanalysisExtraFieldsTest(unittest.TestCase):

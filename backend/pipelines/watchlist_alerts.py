@@ -15,8 +15,9 @@ import argparse
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date
 
-from core import cache
+from core import cache, state_store
 from analytics import verdict_history
 from analyst.crew import ALL_DATA_TASKS, run_analysis_with_fallback
 from db.models import get_engine
@@ -28,6 +29,71 @@ from core.schemas import normalize as schema_normalize
 from signals.engine import run_signal_engine
 
 LOGGER = get_logger("watchlist_alerts")
+
+# Guards against sending the same day's digest twice -- save_snapshot()
+# upserts today's verdict_history row, so a second run on the same day (a
+# GitHub Actions workflow_dispatch retry, a manual --force rerun while
+# cache.is_fresh() is still true) recomputes an identical "yesterday ->
+# today" diff and, without this, would re-email every affected user. Keyed
+# by calendar date so only "was this (user, symbol, kind) already alerted
+# today" needs checking -- older days are pruned each run since nothing
+# ever reads past today's key (see run()'s own delete_older_than call).
+_ALERTED_NAMESPACE = "watchlist_alerts_sent"
+_ALERTED_RETENTION_DAYS = 3
+
+
+def _alert_key(user_id: int, symbol: str, kind: str) -> str:
+    return f"{user_id}:{symbol}:{kind}"
+
+
+def _claim_alert_keys(today: str, keys: set[str]) -> set[str]:
+    """Atomically claims `keys` as sent-for-today, returning only the subset
+    NOT already claimed by another run — the ones this run is now
+    responsible for actually sending. Must be called BEFORE sending, not
+    after: a read-then-send-then-record ordering (checking
+    already-claimed, sending, then recording) leaves a window where two
+    genuinely concurrent runs (an operator's manual rerun racing an
+    in-flight cron run, the GitHub Actions concurrency guard notwithstanding)
+    can both read "not yet sent," both dispatch the same email, and only
+    then race to record it — by which point the duplicate has already gone
+    out. Claiming first closes that window: only one caller's `mutate()`
+    can ever see a given key as unclaimed, so at most one of two racing
+    callers is ever told to send it.
+
+    Fails closed on any storage error: if `state_store.mutate()`'s own
+    transaction fails after `_claim` already ran (a connection blip, a
+    serialization error) it returns `None` — the write never actually
+    committed, so the local `claimed` set populated as `_claim`'s side
+    effect would otherwise report keys as claimed that were never really
+    recorded, letting a later run re-claim (and re-send) them for real.
+    Adversarial-review finding: an earlier version of this function
+    returned the side-effect set unconditionally, regardless of whether
+    `mutate()` itself succeeded."""
+    if not keys:
+        return set()
+    claimed: set[str] = set()
+
+    def _claim(current: dict) -> dict:
+        existing = set((current or {}).get("keys", []))
+        claimed.update(keys - existing)
+        return {"keys": sorted(existing | keys)}
+
+    result = state_store.mutate(_ALERTED_NAMESPACE, today, _claim, default={"keys": []})
+    return claimed if result is not None else set()
+
+
+def _release_alert_keys(today: str, keys: set[str]) -> None:
+    """Un-claims `keys` — called when a claimed batch's send actually
+    failed (SMTP error, etc.), so a transient failure doesn't permanently
+    look like "already sent" and silently swallow a real alert forever."""
+    if not keys:
+        return
+
+    def _release(current: dict) -> dict:
+        existing = set((current or {}).get("keys", []))
+        return {"keys": sorted(existing - keys)}
+
+    state_store.mutate(_ALERTED_NAMESPACE, today, _release, default={"keys": []})
 
 # This job runs the full (data-fetch + LLM analyst) pipeline per symbol, so
 # an unbounded watchlist fan-in means an unbounded daily LLM bill — same
@@ -195,6 +261,7 @@ def run(force: bool = False) -> bool:
         symbols = symbols[:_MAX_ALERT_SYMBOLS]
 
     run_id = uuid.uuid4().hex[:12]
+    today = date.today().isoformat()
     alerts_by_user: dict[int, dict] = {}
     analyzed, failed = 0, 0
 
@@ -216,20 +283,46 @@ def run(force: bool = False) -> bool:
         if not symbol_alerts:
             continue
         for watcher in by_symbol[symbol]:
-            entry = alerts_by_user.setdefault(watcher["user_id"], {"email": watcher["email"], "alerts": []})
+            entry = alerts_by_user.setdefault(
+                watcher["user_id"], {"email": watcher["email"], "alerts": []},
+            )
             entry["alerts"].extend(symbol_alerts)
 
-    for user in alerts_by_user.values():
-        sent = send_watchlist_alert_email(user["email"], user["alerts"])
+    # Dedup happens here, at send time, as an atomic claim-then-send per
+    # user -- not as an upfront filter against a plain read of "already
+    # sent" (see _claim_alert_keys' own docstring for why that ordering
+    # can't prevent two genuinely concurrent runs from both sending).
+    deduped, notified_users = 0, 0
+    for user_id, user in alerts_by_user.items():
+        if not user["alerts"]:
+            continue
+        alert_keys = [
+            (_alert_key(user_id, a["symbol"], a["kind"]), a) for a in user["alerts"]
+        ]
+        wanted_keys = {k for k, _ in alert_keys}
+        claimed = _claim_alert_keys(today, wanted_keys)
+        deduped += len(wanted_keys) - len(claimed)
+        alerts_to_send = [a for k, a in alert_keys if k in claimed]
+        if not alerts_to_send:
+            continue  # every alert for this user was already claimed by another run
+        notified_users += 1
+        sent = send_watchlist_alert_email(user["email"], alerts_to_send)
         log_event(
             LOGGER, "watchlist_alert_email_sent" if sent else "watchlist_alert_email_failed",
             level="info" if sent else "warning",
-            alert_count=len(user["alerts"]),
+            alert_count=len(alerts_to_send),
         )
+        if not sent:
+            # The claim already recorded these as "sent" -- release them so
+            # a transient SMTP failure doesn't permanently look like a
+            # delivered alert and get silently dropped on every future run.
+            _release_alert_keys(today, claimed)
+    state_store.delete_older_than(_ALERTED_NAMESPACE, days=_ALERTED_RETENTION_DAYS)
 
     log_event(
         LOGGER, "watchlist_alerts_completed",
-        symbols=len(symbols), analyzed=analyzed, failed=failed, users_notified=len(alerts_by_user),
+        symbols=len(symbols), analyzed=analyzed, failed=failed,
+        users_notified=notified_users, deduped=deduped,
     )
 
     if symbols and (failed / len(symbols)) > _MAX_ACCEPTABLE_ERROR_RATE:

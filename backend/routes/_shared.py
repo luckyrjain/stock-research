@@ -1,17 +1,233 @@
-"""Shared plumbing for routes/watchlist.py and routes/positions.py — the two
-domains that share the exact same anonymous-client_id-or-account-user_id
-ownership shape (see routes/watchlist.py's own docstring for the full
-reasoning) and, until this module existed, each independently repeated the
-same rate-limit → DB-configured-check → run_in_executor → sanitize-error
-wrapper around every read/write.
-"""
-from fastapi import HTTPException
+"""Shared plumbing for api.py, routes/watchlist.py, routes/positions.py,
+routes/portfolio_aggregator.py, and routes/broker_sync.py — the primitives
+these modules need (a cached DB engine, per-IP rate limiting, bearer-token
+parsing, the ticker regex, and structured logging), plus the read/write
+wrapper the domain route modules build on and the OwnedRequest Pydantic base
+their write-endpoint bodies inherit.
 
-import api
+These used to be defined in api.py itself and reached into by
+routes/watchlist.py and routes/positions.py via `import api` + dotted
+attribute access (`api._get_db_engine()`) — a real dependency, but one that
+only worked because api.py happened to define all of them before it called
+`app.include_router(...)` for those two routers near the bottom of that file,
+not because of any actual import direction. A future reorder of api.py could
+have silently broken it. They now live here instead, and api.py imports them
+FROM this module the same way the two route modules do — this file has no
+dependency on api.py at all, so there's no import-order landmine left for
+api.py to trip over.
+"""
+import asyncio
+import hmac
+import os
+import re
+import threading
+
+from fastapi import HTTPException, Request, UploadFile
+from pydantic import BaseModel
+
+from core import rate_limiter
+from core.observability import get_logger, log_event
+
+LOGGER = get_logger("api")
+
+_TICKER_RE = re.compile(r"^[A-Z0-9&\-]{1,20}$")
+
+
+class OwnedRequest(BaseModel):
+    """Base for every write-endpoint body across watchlist/positions/
+    portfolio_aggregator that carries the anonymous browser identity
+    (lib/watchlist.ts's getClientId()) a request resolves against when
+    there's no signed-in session (see routes.watchlist.resolve_owner()). A
+    shared base rather than each model re-declaring this field means a new
+    write-endpoint model inherits it structurally instead of relying on
+    every author remembering to add it by hand."""
+    client_id: str | None = None
+
+
+def _bearer_token_from_request(request: Request) -> str | None:
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        token = header[7:].strip()
+        return token or None
+    return None
+
+
+def _fetch_live_price_sync(sym: str) -> dict:
+    """LTP + day change% for one NSE/BSE symbol via yfinance, trying the .NS
+    then .BO suffix. Returns {} (never raises) if neither resolves — shared by
+    GET /api/prices (bulk), GET /api/verdict-history/{symbol} (single-symbol,
+    for scoring past verdicts against today's price), and
+    GET /api/portfolio/concentration (routes/positions.py)."""
+    import yfinance as yf
+    for suffix in (".NS", ".BO"):
+        # Each suffix attempt is independently guarded — a genuine BSE-only
+        # symbol (never listed on NSE, or delisted from it) can make the
+        # .NS attempt raise outright rather than just return empty data; a
+        # shared try/except around the whole loop would abort before .BO is
+        # even tried, silently losing a real, resolvable price.
+        try:
+            fi = yf.Ticker(sym + suffix).fast_info
+            price = getattr(fi, "last_price", None)
+            prev  = getattr(fi, "previous_close", None)
+            if price and price > 0:
+                # None (never a fabricated 0.0 "flat today") when prev isn't
+                # available — same "never invent" convention as everywhere
+                # else in this codebase; a real flat day and a missing
+                # previous-close aren't the same fact.
+                chg = round((price - prev) / prev * 100, 2) if prev else None
+                return {"price": round(price, 2), "change_pct": chg}
+        except Exception:
+            continue
+    return {}
+
+
+# ── Cached DB engine ──────────────────────────────────────────────────────────
+_DB_ENGINE = None
+_DB_ENGINE_LOCK = threading.Lock()
+
+
+def _get_db_engine():
+    global _DB_ENGINE
+    if _DB_ENGINE is None:
+        with _DB_ENGINE_LOCK:
+            if _DB_ENGINE is None:  # re-check: another thread may have won the race
+                from db.models import get_engine
+                _DB_ENGINE = get_engine()
+    return _DB_ENGINE
+
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+# Sliding-window limiter, keyed by (bucket, client IP). Backed by
+# core/rate_limiter.py — Redis-shared across workers when REDIS_URL is set, an
+# in-memory per-process counter otherwise.
+
+# Every browser request reaches this backend via the Next.js proxy routes,
+# server-to-server (see "Proxy routes" in CLAUDE.md) — so request.client.host
+# is always the Next.js server's own IP, never the real visitor's. Left
+# unfixed, every one of the per-IP limiters collapses into one shared bucket
+# for the whole site, the opposite of what they're for: one abusive visitor
+# throttles everyone, and there's no per-visitor signal at all.
+# TRUSTED_PROXY_SECRET (also set on the frontend — see
+# frontend/lib/proxy-headers.ts) lets a request prove it really came through
+# the Next.js proxy layer via X-Internal-Proxy-Secret, in which case the
+# X-Forwarded-For value it forwarded is trusted as the real client IP.
+# Without a configured secret (the default), or without a match, the header
+# is ignored — an untrusted caller could otherwise spoof X-Forwarded-For to
+# dodge its own rate limit or frame someone else's IP into being blocked.
+_TRUSTED_PROXY_SECRET = os.getenv("TRUSTED_PROXY_SECRET")
+
+
+def _client_ip(request: Request) -> str:
+    secret = request.headers.get("x-internal-proxy-secret", "")
+    if _TRUSTED_PROXY_SECRET and hmac.compare_digest(secret, _TRUSTED_PROXY_SECRET):
+        forwarded = request.headers.get("x-forwarded-for", "")
+        parts = [p.strip() for p in forwarded.split(",")] if forwarded else []
+        # A correctly configured single-hop reverse proxy in "replace" mode
+        # (see docs/deployment.md) always produces exactly one IP here. More
+        # than one usually means an "append" mode misconfiguration (e.g.
+        # nginx's $proxy_add_x_forwarded_for) letting a client-supplied
+        # X-Forwarded-For survive alongside the real one — and since a
+        # browser/curl can set this header directly on a request to the
+        # reverse proxy, the leftmost entry in that case would be the
+        # attacker's own claimed value, not the one the proxy actually
+        # observed. Refuse to trust an ambiguous chain rather than guess
+        # which entry is real; this also naturally handles an empty/blank
+        # header the same way.
+        if len(parts) == 1 and parts[0]:
+            return parts[0]
+    return request.client.host if request.client else "unknown"
+
+
+def _check_rate_limit(key: str, max_calls: int, window_seconds: float) -> None:
+    if not rate_limiter.is_allowed(key, max_calls, window_seconds):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded: max {max_calls} requests per {int(window_seconds)}s on this endpoint. Try again later.",
+        )
+
+
+def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: float) -> None:
+    client_ip = _client_ip(request)
+    _check_rate_limit(f"{bucket}:{client_ip}", max_calls, window_seconds)
+
+
+# Applies to every multipart file upload in this app (CAS PDF, broker
+# CSV/XLSX import) — these endpoints previously called `await file.read()`
+# unconditionally, reading an arbitrarily large request body fully into
+# memory (and, for `preview`, doing so on every keystroke of a client
+# retrying) before any parsing could reject it. 20 MB comfortably covers a
+# real CAS statement or broker tradebook export (typically well under 1 MB)
+# while bounding the worst case to a small, fixed amount of memory per
+# request.
+#
+# Disclosed limitation: FastAPI's automatic `UploadFile = File(...)` param
+# injection parses the multipart body via Starlette's own `request.form()`
+# with its hardcoded default `max_part_size` (1 MB as of the installed
+# Starlette version) BEFORE this function — or any endpoint code — ever
+# runs, and FastAPI exposes no way to override that default through the
+# declarative `File(...)` marker. So for a file between 1 MB and this 20 MB
+# cap, Starlette's own parser rejects it first with a generic 400, and this
+# function's friendlier 413 never actually fires. Not a security gap (the
+# effective ceiling today is *tighter* than 20 MB, not looser) but the 413
+# message here is aspirational for that size range until the 3 upload
+# endpoints are rewritten to call `request.form(max_part_size=...)`
+# manually instead of relying on FastAPI's automatic injection — a larger,
+# separate change not attempted here. See docs/backlog.md.
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
+
+async def read_upload_capped(file: UploadFile, max_bytes: int = _MAX_UPLOAD_BYTES) -> bytes:
+    """Reads an UploadFile's body, rejecting (413) anything over `max_bytes`
+    rather than buffering an unbounded amount of it first. Reads one byte
+    past the cap so a file exactly at the limit isn't misreported as over
+    it, without ever holding more than `max_bytes + 1` bytes in memory.
+
+    See this module's own disclosed limitation above: for files between
+    Starlette's own default per-part limit (1 MB) and `max_bytes`,
+    Starlette's multipart parser rejects the upload before this function
+    ever runs, with a less specific 400 rather than this function's 413.
+
+    Prefer `rate_limited_upload()` below over calling this directly for a
+    new upload endpoint — it couples the rate-limit check to the read so
+    the two can't be separated by a future edit."""
+    data = await file.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {max_bytes // (1024 * 1024)} MB).",
+        )
+    return data
+
+
+async def rate_limited_upload(
+    request, rate_limit_name: str, max_calls: int, file: UploadFile,
+    max_bytes: int = _MAX_UPLOAD_BYTES, window_seconds: float = 60,
+) -> bytes:
+    """Rate-limits `request`, then reads `file`'s capped body — always in
+    that order, as one call, for every upload endpoint. An earlier version
+    of the 3 upload endpoints below called `api._rate_limit()` and
+    `read_upload_capped()` as two separate statements, ahead of a
+    `run_owned_db_call(..., skip_rate_limit=True)`. An adversarial-review
+    pass on that version confirmed no live bug in the 3 endpoints it
+    touched, but flagged the shape itself as a footgun for a *future*
+    upload endpoint: the unsafe combination (an explicit `_rate_limit()`
+    call copy-pasted in, `skip_rate_limit` left at its default `False`)
+    needs no deliberate action to reach, while the safe one requires
+    remembering an extra kwarg at a call site physically far from the
+    `_rate_limit()` line it depends on — silently halving that new
+    endpoint's rate limit via a double-counted bucket, the exact bug this
+    whole mechanism exists to prevent. This function exists so a caller
+    literally cannot do one step without the other. Callers still pass
+    `skip_rate_limit=True` to `run_owned_db_call()` afterward — this
+    function only replaces the read_upload_capped()-plus-a-separate-
+    _rate_limit()-call pair, not `run_owned_db_call()` itself."""
+    _rate_limit(request, rate_limit_name, max_calls=max_calls, window_seconds=window_seconds)
+    return await read_upload_capped(file, max_bytes)
 
 
 async def run_owned_db_call(
     request, rate_limit_name: str, max_calls: int, sync_fn, event_prefix: str, window_seconds: float = 60,
+    skip_rate_limit: bool = False,
 ):
     """Runs `sync_fn` (a zero-arg callable doing the actual DB work) off the
     event loop, with the exact shape every watchlist/positions endpoint
@@ -26,12 +242,22 @@ async def run_owned_db_call(
     window with a much lower cap (same per-address-not-just-per-IP
     precedent as the magic-link request-link endpoint's 5/hour) — a
     sensitive, low-frequency, exclusive-reassignment operation shouldn't
-    share the same generous per-minute budget as an ordinary star/unstar."""
-    api._rate_limit(request, rate_limit_name, max_calls=max_calls, window_seconds=window_seconds)
-    if not api.os.environ.get("DATABASE_URL"):
+    share the same generous per-minute budget as an ordinary star/unstar.
+
+    `skip_rate_limit=True` is for a caller that already called
+    `_rate_limit(request, rate_limit_name, ...)` itself earlier in the
+    request — e.g. the CAS/CSV upload endpoints, which need the rate-limit
+    check to run BEFORE `read_upload_capped()` reads the file, not after
+    (see `rate_limited_upload()` above). Calling `_rate_limit()` a second
+    time here with the *same* bucket name would silently consume two slots
+    from one sliding window per request, halving the effective limit —
+    this flag exists so that never happens."""
+    if not skip_rate_limit:
+        _rate_limit(request, rate_limit_name, max_calls=max_calls, window_seconds=window_seconds)
+    if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
 
-    loop = api.asyncio.get_running_loop()
+    loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(None, sync_fn)
     except HTTPException:
@@ -52,7 +278,7 @@ async def run_owned_db_call(
     except PermissionError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
     except Exception as exc:
-        api.log_event(api.LOGGER, f"{event_prefix}_failed", level="error", error=str(exc))
+        log_event(LOGGER, f"{event_prefix}_failed", level="error", error=str(exc))
         raise HTTPException(status_code=503, detail="Database error. See server logs.")
 
 

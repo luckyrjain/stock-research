@@ -16,6 +16,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
 import api
+import routes._shared as _shared
 from core import rate_limiter
 from db.models import (
     accounts, assets, holdings, metadata, mf_nav_daily, prices_daily, profiles,
@@ -24,6 +25,15 @@ from db.models import (
 from routes.portfolio_aggregator import compute_networth
 
 client = TestClient(api.app)
+
+# Every endpoint in routes/portfolio_aggregator.py now resolves an owner via
+# routes.watchlist.resolve_owner() and scopes profiles/accounts/assets to it
+# (see that module's own docstring) — these endpoint tests predate ownership
+# and exercise CRUD/validation behavior that's orthogonal to it, so resolve_owner
+# is patched to a single fixed owner for the whole class rather than threading
+# a client_id through every one of ~30 test methods' request bodies/params.
+# Cross-owner isolation itself is covered by its own dedicated test below.
+_TEST_OWNER = ("client", "test-owner-0000-0000-0000-000000000000")
 
 
 def _silence_sqlite_date_adapter_warning() -> None:
@@ -79,12 +89,23 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         ])
         self._old_db_url = os.environ.get("DATABASE_URL")
         os.environ["DATABASE_URL"] = "sqlite://"
-        self._old_engine = api._DB_ENGINE
-        api._DB_ENGINE = self.engine
+        self._old_engine = _shared._DB_ENGINE
+        _shared._DB_ENGINE = self.engine
         rate_limiter._memory_calls.clear()
+        # test_other_owners_profile_account_and_asset_are_all_404 below also
+        # exercises GET /broker/connections, which resolves its owner via
+        # routes/broker_sync.py's own resolve_owner import (split out of
+        # routes/portfolio_aggregator.py) -- both need patching for the
+        # class-wide fixed owner to apply consistently.
+        self._owner_patcher = patch("routes.portfolio_aggregator.resolve_owner", return_value=_TEST_OWNER)
+        self._owner_patcher.start()
+        self._broker_owner_patcher = patch("routes.broker_sync.resolve_owner", return_value=_TEST_OWNER)
+        self._broker_owner_patcher.start()
 
     def tearDown(self) -> None:
-        api._DB_ENGINE = self._old_engine
+        self._owner_patcher.stop()
+        self._broker_owner_patcher.stop()
+        _shared._DB_ENGINE = self._old_engine
         if self._old_db_url is None:
             os.environ.pop("DATABASE_URL", None)
         else:
@@ -126,6 +147,45 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         os.environ.pop("DATABASE_URL", None)
         resp = client.get("/api/portfolio/profiles")
         self.assertEqual(resp.status_code, 503)
+
+    # ── ownership isolation ──────────────────────────────────────────────────
+
+    def test_other_owners_profile_account_and_asset_are_all_404(self) -> None:
+        """The class-wide resolve_owner patch above stands in for one fixed
+        caller everywhere else in this file — this test instead proves the
+        real ownership check itself: a second, different owner can't read,
+        modify, or delete another owner's profile/account/asset, even by id.
+        """
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        aid = self._mk_asset(acc)
+
+        other_owner = ("client", "other-owner-0000-0000-0000-000000000000")
+        with patch("routes.portfolio_aggregator.resolve_owner", return_value=other_owner), \
+             patch("routes.broker_sync.resolve_owner", return_value=other_owner):
+            self.assertEqual(client.get(f"/api/portfolio/accounts?profile_id={pid}").status_code, 404)
+            self.assertEqual(
+                client.post("/api/portfolio/accounts", json={"profile_id": pid, "name": "x", "type": "bank"}).status_code,
+                404,
+            )
+            self.assertEqual(client.patch(f"/api/portfolio/accounts/{acc}", json={"name": "x"}).status_code, 404)
+            self.assertEqual(client.delete(f"/api/portfolio/accounts/{acc}").status_code, 404)
+            self.assertEqual(client.get(f"/api/portfolio/assets?account_id={acc}").status_code, 404)
+            self.assertEqual(client.patch(f"/api/portfolio/assets/{aid}", json={"name": "x"}).status_code, 404)
+            self.assertEqual(client.delete(f"/api/portfolio/assets/{aid}").status_code, 404)
+            self.assertEqual(
+                client.post(f"/api/portfolio/assets/{aid}/valuations", json={"value": 1.0}).status_code, 404,
+            )
+            self.assertEqual(client.get(f"/api/portfolio/networth?profile_id={pid}").status_code, 404)
+            self.assertEqual(client.get(f"/api/portfolio/xirr?profile_id={pid}").status_code, 404)
+            self.assertEqual(
+                client.get(f"/api/portfolio/broker/connections?profile_id={pid}").status_code, 404,
+            )
+
+        # Sanity check: the true owner still has full access to everything above.
+        resp = client.get(f"/api/portfolio/accounts?profile_id={pid}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()["accounts"]), 1)
 
     # ── profiles ─────────────────────────────────────────────────────────────
 
@@ -271,6 +331,28 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         resp = client.get(f"/api/portfolio/networth?profile_id={pid}")
         self.assertEqual(resp.json()["total"], 0.0)
 
+    def test_networth_excludes_asset_with_no_valuation_row(self) -> None:
+        # get_networth()'s own EXISTS (SELECT 1 FROM valuations ...) clause,
+        # untested until now -- compute_networth() (the pure half) is
+        # covered above, but the raw SQL that decides which rows even reach
+        # it wasn't. POST /api/portfolio/assets always writes an initial
+        # valuation, so a genuinely never-valued asset (the shape
+        # broker_sync_common.py::find_or_create_asset() actually produces --
+        # a stock asset synced before its first valuation write) can only
+        # be set up by inserting the assets row directly, bypassing the
+        # endpoint.
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        self._mk_asset(acc, type="cash", name="valued", symbol=None, units=None, value=1000.0)
+        with self.engine.begin() as conn:
+            from sqlalchemy import insert as _insert
+            conn.execute(_insert(assets).values(account_id=acc, type="stock", name="never valued", symbol="XYZ"))
+        resp = client.get(f"/api/portfolio/networth?profile_id={pid}")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["total"], 1000.0)
+        self.assertNotIn("stock", body["by_type"])  # never-valued asset contributes no entry at all
+
     # ── valuation refresh / xirr ─────────────────────────────────────────────
 
     def test_refresh_valuations_endpoint_values_priced_stock(self) -> None:
@@ -339,6 +421,44 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(resp.json()["assets_created"], 1)
 
+    def test_import_cas_endpoint_consumes_exactly_one_rate_limit_slot(self) -> None:
+        # Regression test (adversarial-review finding): the upload cap was
+        # added ahead of run_owned_db_call's own internal rate-limit check,
+        # which already rate-limits every call to this endpoint. A naive
+        # fix that called _rate_limit() a second time with the SAME bucket
+        # name before reading the file would silently consume two slots per
+        # request from one sliding window, halving the effective per-minute
+        # limit without changing the advertised max_calls anywhere.
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        # _mk_profile/_mk_account above already consumed their own slots
+        # from this same shared "portfolio_agg_write" bucket (every
+        # portfolio-aggregator write endpoint shares one rate-limit pool) --
+        # measure the DELTA from this one import-cas call, not the raw count.
+        before = len(rate_limiter._memory_calls.get("portfolio_agg_write:testclient", []))
+        parsed = {"cas_type": "DETAILED", "folios": []}
+        with patch("portfolio.cas_import.parse_cas", return_value=parsed):
+            resp = client.post(
+                "/api/portfolio/import-cas",
+                files={"file": ("cas.pdf", b"fake", "application/pdf")},
+                data={"password": "pw", "account_id": acc},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        after = len(rate_limiter._memory_calls.get("portfolio_agg_write:testclient", []))
+        self.assertEqual(after - before, 1)
+
+    def test_import_cas_endpoint_is_still_rate_limited(self) -> None:
+        # Confirms skip_rate_limit=True didn't disable rate limiting
+        # entirely -- the endpoint calls it explicitly itself instead.
+        acc = self._mk_account(self._mk_profile())
+        rate_limiter._memory_calls["portfolio_agg_write:testclient"] = [rate_limiter.time.monotonic()] * 60
+        resp = client.post(
+            "/api/portfolio/import-cas",
+            files={"file": ("cas.pdf", b"fake", "application/pdf")},
+            data={"password": "pw", "account_id": acc},
+        )
+        self.assertEqual(resp.status_code, 429)
+
     # ── CSV import ───────────────────────────────────────────────────────────
 
     def test_import_csv_preview_returns_headers_and_suggestion(self) -> None:
@@ -354,6 +474,20 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         resp = client.post("/api/portfolio/import-csv/preview",
                            files={"file": ("trades.csv", b"", "text/csv")})
         self.assertEqual(resp.status_code, 422)
+
+    def test_import_csv_preview_consumes_exactly_one_rate_limit_slot(self) -> None:
+        # Same regression coverage as import-cas's own version of this test
+        # (see test_import_cas_endpoint_consumes_exactly_one_rate_limit_slot)
+        # — added for this endpoint too per an adversarial-review finding
+        # that only import-cas had it, even though all three upload
+        # endpoints share the same rate-limit-before-read pattern.
+        before = len(rate_limiter._memory_calls.get("portfolio_agg_write:testclient", []))
+        content = b"symbol,side,qty,price\nTCS,buy,10,100\n"
+        resp = client.post("/api/portfolio/import-csv/preview",
+                           files={"file": ("trades.csv", content, "text/csv")})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        after = len(rate_limiter._memory_calls.get("portfolio_agg_write:testclient", []))
+        self.assertEqual(after - before, 1)
 
     def test_import_csv_endpoint_422_on_missing_required_mapping_field(self) -> None:
         pid = self._mk_profile()
@@ -397,6 +531,26 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         body = resp.json()
         self.assertEqual(body["imported"], 1)
         self.assertEqual(body["assets_created"], 1)
+
+    def test_import_csv_endpoint_consumes_exactly_one_rate_limit_slot(self) -> None:
+        # Same regression coverage as import-cas's own version of this test.
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        content = b"date,symbol,side,qty,price\n2024-01-01,TCS,buy,10,100\n"
+        mapping = {"date": "date", "symbol": "symbol", "side": "side",
+                  "quantity": "qty", "price": "price"}
+        before = len(rate_limiter._memory_calls.get("portfolio_agg_write:testclient", []))
+        with patch("portfolio.csv_import.resolve_symbol", return_value={
+            "symbol": None, "exchange": None, "confidence": "unresolved", "candidate_name": None,
+        }), patch("portfolio.csv_import.get_full_securities_master", return_value=[]):
+            resp = client.post(
+                "/api/portfolio/import-csv",
+                files={"file": ("trades.csv", content, "text/csv")},
+                data={"mapping": json.dumps(mapping), "account_id": acc, "broker": "zerodha"},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        after = len(rate_limiter._memory_calls.get("portfolio_agg_write:testclient", []))
+        self.assertEqual(after - before, 1)
 
 
 if __name__ == "__main__":

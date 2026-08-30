@@ -361,7 +361,7 @@ Each item in `picks`:
 | `trend` | string | `rising` / `falling` / `stable` / `new` |
 | `trend_delta` | number\|null | Confidence delta vs prior 3-day average |
 | `current_price` | number\|null | Last traded price |
-| `change_pct` | number | % change today |
+| `change_pct` | number\|null | % change today — `null` (never a fabricated `0.0`) when the underlying quote had no previous close to compute it from |
 | `pe_ratio` | number\|null | Trailing P/E |
 | `market_cap_cr` | number\|null | Market cap in crores |
 | `valuation_percentile` | number\|null | 0–100, where current P/E sits vs. this stock's own 3–5y Screener-published P/E history (absolute anchor, not peer-relative); `null` when Screener didn't have a parseable band. Also folded into `confidence_score` as a small ±3-point nudge (≤33rd percentile +3, ≥67th percentile −3) |
@@ -606,9 +606,9 @@ contributes (e.g. no positions have a share count yet).
 
 A separate personal net-worth tracker. `profiles`/`accounts`/`assets` are plain CRUD returning
 standard `{"id": N}` / `{"ok": true}` / `{"<collection>": [...]}` shapes — see
-[api-reference.md § Portfolio Aggregator](api-reference.md#portfolio-aggregator-4157) for their
-full request contract (including the disclosed no-auth, no-ownership-scoping design). The
-computed and import endpoints have less obvious bodies:
+[api-reference.md § Portfolio Aggregator](api-reference.md#portfolio-aggregator-4163) for their
+full request contract (including the ownership model — owned via `client_id`/`user_id`, same
+shape as Watchlist/Positions). The computed and import endpoints have less obvious bodies:
 
 **`POST /api/portfolio/refresh-valuations`** — auto-values every non-archived `mf`/`stock` asset
 with a `holdings` row, from `prices_daily`/`mf_nav_daily` (live yfinance quote as a stock fallback):

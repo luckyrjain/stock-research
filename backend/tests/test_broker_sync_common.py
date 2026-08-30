@@ -14,7 +14,8 @@ from sqlalchemy import create_engine, event, insert, select
 from sqlalchemy.pool import StaticPool
 
 from db.models import accounts, assets, holdings, metadata, positions, profiles, users
-from portfolio.broker_sync_common import call_with_backoff, sync_holdings, upsert_position_from_holding
+from portfolio.broker_sync_common import call_with_backoff, sync_holdings
+from portfolio.positions_mirror import upsert_position_from_holding
 
 
 class _HttpError(Exception):
@@ -106,7 +107,7 @@ def _sqlite_engine():
 
 def _mk_account(engine) -> int:
     with engine.begin() as conn:
-        pid = conn.execute(insert(profiles).values(name="p")).inserted_primary_key[0]
+        pid = conn.execute(insert(profiles).values(name="p", client_id="test-client-0000-0000-0000-000000000000")).inserted_primary_key[0]
         return conn.execute(insert(accounts).values(profile_id=pid, name="a", type="broker")).inserted_primary_key[0]
 
 

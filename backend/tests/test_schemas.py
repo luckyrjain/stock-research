@@ -97,6 +97,36 @@ class ValidateTest(unittest.TestCase):
         ok, _ = schemas.validate("filings", {"filings": []})
         self.assertTrue(ok)
 
+    def test_present_but_wrong_typed_field_fails_validation(self) -> None:
+        # Regression test: a field that flips container type (e.g. a
+        # scraper's target site restructuring a table so `ratios` arrives as
+        # a list instead of a dict) used to satisfy validate()'s truthy
+        # "required" check — a non-empty list is truthy — and pass straight
+        # through into the cache/signal engine/analyst prompt with nothing
+        # but a warning log (core/schema_drift.py) to show for it. It must
+        # now fail validation exactly like a missing required field does.
+        ok, err = schemas.validate("research", {"symbol": "TCS", "ratios": ["not", "a", "dict"]})
+        self.assertFalse(ok)
+        self.assertIn("ratios", err)
+
+    def test_absent_typed_field_still_passes(self) -> None:
+        # The legitimate "never invent" case — a typed-but-optional field
+        # (quarterly_trend) that's simply not present for this symbol must
+        # not be treated as drift. Only a present-but-wrong-shaped field
+        # should fail. ("ratios" must be non-empty here since it's also a
+        # required field — this test is isolating the type-check behavior,
+        # not the pre-existing required-field check.)
+        ok, _ = schemas.validate("research", {"symbol": "TCS", "ratios": {"P/E": "28"}})
+        self.assertTrue(ok)
+
+    def test_none_typed_field_still_passes(self) -> None:
+        # A typed field explicitly present-but-None is also not a type
+        # mismatch (mirrors schema_drift.check_drift()'s own guard).
+        ok, _ = schemas.validate("research", {
+            "symbol": "TCS", "ratios": {"P/E": "28"}, "quarterly_trend": None,
+        })
+        self.assertTrue(ok)
+
 
 if __name__ == "__main__":
     unittest.main()

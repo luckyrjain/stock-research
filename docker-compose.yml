@@ -1,7 +1,8 @@
 # Local/self-hosted deployment. Needs a .env file (copy .env.example) with
-# at least one LLM provider key; DATABASE_URL and REDIS_URL are set here to
-# point at the postgres/redis services below, so leave both unset in .env
-# for this compose setup.
+# at least one LLM provider key and a real POSTGRES_PASSWORD (see
+# .env.example — compose refuses to start without one); DATABASE_URL and
+# REDIS_URL are set here to point at the postgres/redis services below, so
+# leave both unset in .env for this compose setup.
 #
 #   docker compose up --build
 #
@@ -16,7 +17,12 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-stockresearch}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stockresearch}
+      # No weak default here on purpose — this used to fall back to a
+      # fixed, publicly-documented password ("stockresearch") that would
+      # silently work in any deployment that copied .env.example without
+      # setting this. Compose refuses to start rather than accept that
+      # default; see .env.example for how to generate a real one.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before running docker compose up (see .env.example)}
       POSTGRES_DB: ${POSTGRES_DB:-stockresearch}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -51,7 +57,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-stockresearch}:${POSTGRES_PASSWORD:-stockresearch}@postgres:5432/${POSTGRES_DB:-stockresearch}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-stockresearch}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before running docker compose up (see .env.example)}@postgres:5432/${POSTGRES_DB:-stockresearch}
       REDIS_URL: redis://redis:6379/0
       ALLOWED_ORIGINS: http://localhost:3000
       # Only load-bearing once a reverse proxy sits in front of the frontend

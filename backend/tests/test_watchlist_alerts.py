@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import date
 from unittest.mock import MagicMock, patch
 
 from pipelines import watchlist_alerts
@@ -195,8 +196,26 @@ class RunTest(unittest.TestCase):
                 "GROQ_API_KEY", "GOOGLE_API_KEY", "LLM_PROVIDER",
             )
         }
+        # Most RunTest cases don't care about the same-day dedup guard —
+        # default _claim_alert_keys to "claim everything asked for" (nothing
+        # was already claimed by another run) and _release_alert_keys to a
+        # no-op, so they don't need their own state_store plumbing (and
+        # don't accidentally try a real DB connection off the fake
+        # DATABASE_URL these tests set). Tests that DO exercise dedup
+        # override these.
+        self._claim_patch = patch(
+            "pipelines.watchlist_alerts._claim_alert_keys", side_effect=lambda today, keys: set(keys))
+        self._claim_patch.start()
+        self._release_patch = patch("pipelines.watchlist_alerts._release_alert_keys")
+        self._release_patch.start()
+        self._delete_older_patch = patch(
+            "pipelines.watchlist_alerts.state_store.delete_older_than")
+        self._delete_older_patch.start()
 
     def tearDown(self) -> None:
+        self._claim_patch.stop()
+        self._release_patch.stop()
+        self._delete_older_patch.stop()
         for k, v in self._env.items():
             if v is not None:
                 os.environ[k] = v
@@ -341,6 +360,187 @@ class RunTest(unittest.TestCase):
         self.assertEqual(mock_detect.call_count, 2)
         called_symbols = {call.args[0] for call in mock_detect.call_args_list}
         self.assertEqual(called_symbols, {"TCS", "INFY"})
+
+    def test_already_claimed_today_suppresses_duplicate_email(self) -> None:
+        # Regression test: a second run on the same day (a workflow_dispatch
+        # retry, a manual --force rerun) used to recompute the identical
+        # "yesterday -> today" diff and re-send the exact same digest.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        os.environ["ANTHROPIC_API_KEY"] = "fake"
+        by_symbol = {"TCS": [{"user_id": 1, "email": "a@example.com"}]}
+        change = {"kind": "recommendation_change", "symbol": "TCS", "old_recommendation": "HOLD", "new_recommendation": "BUY", "confidence": "HIGH"}
+        self._claim_patch.stop()  # override this test's own default (claims everything)
+        try:
+            with patch("pipelines.watchlist_alerts.get_engine", return_value=MagicMock()), \
+                 patch("pipelines.watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
+                 patch("pipelines.watchlist_alerts._analyze_symbol", return_value={"recommendation": "BUY"}), \
+                 patch("pipelines.watchlist_alerts._detect_change", return_value=change), \
+                 patch("pipelines.watchlist_alerts._detect_price_move", return_value=None), \
+                 patch(
+                     "pipelines.watchlist_alerts._claim_alert_keys",
+                     return_value=set(),  # nothing newly claimed -- already claimed by another run
+                 ), \
+                 patch("pipelines.watchlist_alerts.send_watchlist_alert_email") as send_email:
+                result = watchlist_alerts.run()
+        finally:
+            self._claim_patch.start()  # restore for tearDown's .stop()
+
+        self.assertTrue(result)
+        send_email.assert_not_called()
+
+    def test_new_alert_for_a_different_kind_still_sends_when_one_kind_already_claimed(self) -> None:
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        os.environ["ANTHROPIC_API_KEY"] = "fake"
+        by_symbol = {"TCS": [{"user_id": 1, "email": "a@example.com"}]}
+        change = {"kind": "recommendation_change", "symbol": "TCS", "old_recommendation": "HOLD", "new_recommendation": "BUY", "confidence": "HIGH"}
+        move = {"kind": "price_move", "symbol": "TCS", "old_price": 100.0, "new_price": 115.0, "change_pct": 15.0}
+        self._claim_patch.stop()
+
+        def fake_claim(today, keys):
+            # Only the price_move key is newly claimable; recommendation_change
+            # was already claimed by another run.
+            return {k for k in keys if k == watchlist_alerts._alert_key(1, "TCS", "price_move")}
+
+        try:
+            with patch("pipelines.watchlist_alerts.get_engine", return_value=MagicMock()), \
+                 patch("pipelines.watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
+                 patch("pipelines.watchlist_alerts._analyze_symbol", return_value={"recommendation": "BUY"}), \
+                 patch("pipelines.watchlist_alerts._detect_change", return_value=change), \
+                 patch("pipelines.watchlist_alerts._detect_price_move", return_value=move), \
+                 patch("pipelines.watchlist_alerts._claim_alert_keys", side_effect=fake_claim), \
+                 patch("pipelines.watchlist_alerts.send_watchlist_alert_email", return_value=True) as send_email:
+                result = watchlist_alerts.run()
+        finally:
+            self._claim_patch.start()
+
+        self.assertTrue(result)
+        # Only the newly-claimed price_move should reach the email.
+        send_email.assert_called_once_with("a@example.com", [move])
+
+    def test_failed_send_releases_the_just_claimed_keys(self) -> None:
+        # Regression test: if _claim_alert_keys already recorded a batch as
+        # sent but send_watchlist_alert_email then fails (SMTP down), those
+        # keys must be released -- otherwise a transient failure would
+        # permanently look like "already sent" and the alert would never
+        # reach the user on any future run.
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        os.environ["ANTHROPIC_API_KEY"] = "fake"
+        by_symbol = {"TCS": [{"user_id": 1, "email": "a@example.com"}]}
+        change = {"kind": "recommendation_change", "symbol": "TCS", "old_recommendation": "HOLD", "new_recommendation": "BUY", "confidence": "HIGH"}
+        self._claim_patch.stop()
+        self._release_patch.stop()
+        try:
+            with patch("pipelines.watchlist_alerts.get_engine", return_value=MagicMock()), \
+                 patch("pipelines.watchlist_alerts._get_watched_symbols", return_value=by_symbol), \
+                 patch("pipelines.watchlist_alerts._analyze_symbol", return_value={"recommendation": "BUY"}), \
+                 patch("pipelines.watchlist_alerts._detect_change", return_value=change), \
+                 patch("pipelines.watchlist_alerts._detect_price_move", return_value=None), \
+                 patch("pipelines.watchlist_alerts._claim_alert_keys",
+                       return_value={watchlist_alerts._alert_key(1, "TCS", "recommendation_change")}), \
+                 patch("pipelines.watchlist_alerts._release_alert_keys") as release_keys, \
+                 patch("pipelines.watchlist_alerts.send_watchlist_alert_email", return_value=False):
+                result = watchlist_alerts.run()
+        finally:
+            self._claim_patch.start()
+            self._release_patch.start()
+
+        self.assertTrue(result)
+        release_keys.assert_called_once_with(
+            date.today().isoformat(), {watchlist_alerts._alert_key(1, "TCS", "recommendation_change")})
+
+    def test_claim_alert_keys_merges_into_existing_keys_under_a_lock(self) -> None:
+        # _claim_alert_keys must use state_store.mutate() (a row-locked
+        # read-modify-write), not load()-then-save() -- two overlapping
+        # runs racing this same write must not silently clobber each
+        # other's already-claimed keys.
+        captured = {}
+
+        def fake_mutate(namespace, key, fn, default):
+            captured["namespace"] = namespace
+            captured["key"] = key
+            return fn({"keys": ["1:TCS:recommendation_change"]})
+
+        self._claim_patch.stop()  # test the real function, not the RunTest default mock
+        try:
+            with patch("pipelines.watchlist_alerts.state_store.mutate", side_effect=fake_mutate) as mutate:
+                newly_claimed = watchlist_alerts._claim_alert_keys(
+                    "2024-01-01", {"1:TCS:recommendation_change", "2:INFY:price_move"})
+        finally:
+            self._claim_patch.start()
+
+        mutate.assert_called_once()
+        self.assertEqual(captured["namespace"], watchlist_alerts._ALERTED_NAMESPACE)
+        self.assertEqual(captured["key"], "2024-01-01")
+        # Only the key that WASN'T already in the stored set is newly claimed.
+        self.assertEqual(newly_claimed, {"2:INFY:price_move"})
+
+    def test_claim_alert_keys_returns_empty_set_when_mutate_fails(self) -> None:
+        # Regression test: _claim_alert_keys used to return the local
+        # `claimed` set (populated as a side effect of the callback passed
+        # to state_store.mutate()) unconditionally -- even when mutate()
+        # itself failed AFTER the callback already ran (a connection blip,
+        # a serialization error on the final UPDATE) and returned None,
+        # meaning the claim was never actually persisted. run() would then
+        # treat those keys as successfully claimed and send the email
+        # anyway, even though a later run's DB read would show them as
+        # still unclaimed -- reintroducing the exact duplicate-send this
+        # whole mechanism exists to prevent, via a DB-failure window
+        # instead of a concurrency window.
+        # side_effect actually invokes the callback (so the local `claimed`
+        # set genuinely gets populated as a side effect, matching the real
+        # failure timing) and only then returns None, the same shape
+        # state_store.mutate() itself produces when its own transaction
+        # fails after the callback already ran.
+        def fake_mutate_that_fails_after_callback(namespace, key, fn, default):
+            fn({"keys": []})  # runs the callback, populating `claimed`...
+            return None       # ...but the write itself failed.
+
+        self._claim_patch.stop()
+        try:
+            with patch("pipelines.watchlist_alerts.state_store.mutate",
+                       side_effect=fake_mutate_that_fails_after_callback):
+                newly_claimed = watchlist_alerts._claim_alert_keys("2024-01-01", {"1:TCS:recommendation_change"})
+        finally:
+            self._claim_patch.start()
+
+        self.assertEqual(newly_claimed, set())
+
+    def test_claim_alert_keys_is_a_noop_for_an_empty_key_set(self) -> None:
+        self._claim_patch.stop()
+        try:
+            with patch("pipelines.watchlist_alerts.state_store.mutate") as mutate:
+                result = watchlist_alerts._claim_alert_keys("2024-01-01", set())
+            mutate.assert_not_called()
+            self.assertEqual(result, set())
+        finally:
+            self._claim_patch.start()
+
+    def test_release_alert_keys_removes_only_the_given_keys(self) -> None:
+        captured = {}
+
+        def fake_mutate(namespace, key, fn, default):
+            captured["namespace"] = namespace
+            captured["key"] = key
+            return fn({"keys": ["1:TCS:recommendation_change", "2:INFY:price_move"]})
+
+        self._release_patch.stop()
+        try:
+            with patch("pipelines.watchlist_alerts.state_store.mutate", side_effect=fake_mutate) as mutate:
+                watchlist_alerts._release_alert_keys("2024-01-01", {"1:TCS:recommendation_change"})
+        finally:
+            self._release_patch.start()
+
+        mutate.assert_called_once()
+        self.assertEqual(captured["namespace"], watchlist_alerts._ALERTED_NAMESPACE)
+
+    def test_release_alert_keys_is_a_noop_for_an_empty_key_set(self) -> None:
+        self._release_patch.stop()
+        try:
+            with patch("pipelines.watchlist_alerts.state_store.mutate") as mutate:
+                watchlist_alerts._release_alert_keys("2024-01-01", set())
+            mutate.assert_not_called()
+        finally:
+            self._release_patch.start()
 
 
 if __name__ == "__main__":

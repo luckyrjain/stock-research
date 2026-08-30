@@ -53,8 +53,8 @@ access to a public `/api/v1/*` surface.
 | [Feature Catalog](feature-catalog.md) | Detailed inventory of every shipped feature area (the former PRD §3) |
 | [Setup & Configuration](setup.md) | Backend/frontend install, environment variables, local development |
 | [Deployment](deployment.md) | Docker Compose, manual production deployment, scaling caveats |
-| [Architecture](architecture.md) | Request flows, pipeline phases, caching, agent layers, file layout |
-| [API Reference](api-reference.md) | All 61 endpoints — auth, params, request bodies, status codes, rate limits, SSE event streams |
+| [Architecture](architecture.md) | Component + end-to-end sequence diagrams, request flows, pipeline phases, caching, agent layers, file layout |
+| [API Reference](api-reference.md) | All 63 endpoints — auth, params, request bodies, status codes, rate limits, SSE event streams |
 | [Database](database.md) | All 23 tables — columns, constraints, indexes, ownership model, migrations, retention |
 | [Tools Reference](tools.md) | Data-fetching tools, market picks scrapers, sources, and output shapes |
 | [Output Schema](output-schema.md) | Report JSON structure and response payload shapes (the contract itself lives in the API Reference) |

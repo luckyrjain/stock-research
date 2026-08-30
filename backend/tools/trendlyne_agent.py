@@ -15,33 +15,12 @@ Source type: brokerage — aggregated analyst consensus is institutional-grade.
 """
 
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
+
+from tools._gnews_client import fetch_gnews
 
 
 def _gnews(query: str, max_results: int = 12) -> list[dict]:
-    try:
-        import tools._gnews_timeout  # noqa: F401 — sets a socket default timeout for GNews calls below
-        from gnews import GNews
-        gn   = GNews(language="en", country="IN", period="14d", max_results=max_results)
-        arts = gn.get_news(query)
-        out: list[dict] = []
-        for a in arts:
-            pub_iso: str | None = None
-            try:
-                raw = a.get("published date") or ""
-                if raw:
-                    pub_iso = parsedate_to_datetime(raw).isoformat()
-            except Exception:
-                pass
-            out.append({
-                "title":        a.get("title", ""),
-                "summary":      (a.get("description") or "")[:500],
-                "url":          a.get("url", ""),
-                "published_at": pub_iso,
-            })
-        return out
-    except Exception:
-        return []
+    return fetch_gnews(query, period="14d", max_results=max_results, summary_len=500)
 
 
 def _queries() -> list[str]:
@@ -103,10 +82,8 @@ def fetch_trendlyne_consensus_for_symbol(symbol: str, max_results: int = 10) -> 
     return {"symbol": sym, "articles": articles}
 
 
+# Merged into SOURCES in market_picks_tools.py, which derives SCRAPER_FNS
+# from the merged list — no separate *_SCRAPERS dict to hand-sync here.
 TRENDLYNE_SOURCES = [
-    ("Trendlyne / Analyst Consensus", "brokerage", "fetch_trendlyne_consensus"),
+    ("Trendlyne / Analyst Consensus", "brokerage", fetch_trendlyne_consensus),
 ]
-
-TRENDLYNE_SCRAPERS: dict = {
-    "Trendlyne / Analyst Consensus": fetch_trendlyne_consensus,
-}

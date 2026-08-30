@@ -1,4 +1,4 @@
-import { getSessionTokenFromRequest } from '@/lib/auth-cookie';
+import { authHeaders } from '@/lib/auth-cookie';
 import { clientIpHeaders } from '@/lib/proxy-headers';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
@@ -14,7 +14,6 @@ function unavailable() {
 // real 401 here, not a fall-back-to-client_id case, since this endpoint's
 // only caller already knows a session exists.
 export async function POST(req: Request) {
-  const token = getSessionTokenFromRequest(req);
   const body = await req.text();
 
   let upstream: Response;
@@ -24,7 +23,7 @@ export async function POST(req: Request) {
       headers: {
         'Content-Type': 'application/json',
         ...clientIpHeaders(req),
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...authHeaders(req),
       },
       body,
       cache: 'no-store',

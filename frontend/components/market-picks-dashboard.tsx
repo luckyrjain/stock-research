@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo, useEffect, useId } from 'react';
+import React, { useState, useMemo, useEffect, useId, useRef } from 'react';
 import type { MarketPick, PickSource } from '@/types';
 import InfoTooltip from './info-tooltip';
 import WatchlistButton from './watchlist-button';
@@ -10,6 +10,7 @@ import { getClientId } from '@/lib/watchlist';
 import { safeExternalHref, fmtPrice } from '@/lib/format';
 import { REC_TONE_4TIER, REC_LABEL_4TIER } from '@/lib/tone';
 import { SortableTh, FilterChip } from './data-table-ui';
+import { useFocusTrap } from '@/lib/use-focus-trap';
 
 type SortKey    = 'confidence_score' | 'change_pct' | 'pe_ratio' | 'valuation_percentile';
 type ConfFilter = 'all' | 'high' | 'medium' | 'low';
@@ -139,13 +140,13 @@ function RankBadge({ rank }: { rank: number }) {
 function SourcesPopover({ sources }: { sources: PickSource[] }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
+  const panelRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [open]);
+  // Real focus-stealing dialog, not a plain tooltip: it holds interactive
+  // content (per-source "View article ->" links), so it gets the same
+  // inert-background + Tab-wrap + initial-focus + Escape treatment as
+  // ConsolidatedCard (A11Y-11).
+  useFocusTrap(panelRef, open, { onEscape: () => setOpen(false) });
 
   return (
     <div className="relative">
@@ -166,11 +167,14 @@ function SourcesPopover({ sources }: { sources: PickSource[] }) {
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
           <div
+            ref={panelRef}
             id={panelId}
             role="dialog"
+            aria-modal="true"
             aria-label="Reported by"
+            tabIndex={-1}
             className="absolute left-0 top-full mt-2 z-20 w-64 bg-card border border-border
-                          rounded-xl shadow-2xl shadow-black/60 overflow-hidden">
+                          rounded-xl shadow-2xl shadow-black/60 overflow-hidden outline-none">
             <div className="px-3 py-2.5 border-b border-border">
               <span className="text-[10px] font-bold text-muted uppercase tracking-wider">Reported by</span>
             </div>

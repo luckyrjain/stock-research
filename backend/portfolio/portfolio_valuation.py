@@ -17,6 +17,7 @@ transaction rows; this function reads whatever they've written so far.
 """
 
 from datetime import date
+from decimal import Decimal
 
 from dotenv import load_dotenv
 from sqlalchemy import select, text
@@ -132,6 +133,24 @@ def _yfinance_price(symbol: str) -> float | None:
 
 # ── Valuation refresh ─────────────────────────────────────────────────────────
 
+def upsert_valuation(conn, asset_id: int, as_of: date, value: float | Decimal) -> None:
+    """One row per (asset_id, as_of) in `valuations` — a same-day re-write
+    (a re-run of refresh_valuations(), or a broker re-sync the same day)
+    updates the existing row in place rather than accumulating duplicates.
+    Takes an already-open `conn` rather than opening its own transaction,
+    since portfolio/broker_sync_common.py's callers write several rows
+    (holdings, trades, valuations) inside one larger transaction — this
+    function is the single place that SQL lives, shared by this module's
+    own refresh_valuations() and every broker-sync module."""
+    conn.execute(
+        text(
+            "INSERT INTO valuations (asset_id, as_of, value) VALUES (:asset_id, :as_of, :value) "
+            "ON CONFLICT (asset_id, as_of) DO UPDATE SET value = EXCLUDED.value"
+        ),
+        {"asset_id": asset_id, "as_of": as_of, "value": value},
+    )
+
+
 def refresh_valuations(engine) -> dict:
     """Value every non-archived mf/stock asset that has a holdings row.
 
@@ -176,11 +195,7 @@ def refresh_valuations(engine) -> dict:
         price, price_date = found
         value = round(float(row["units"]) * price, 2)
         with engine.begin() as conn:
-            conn.execute(text(
-                "INSERT INTO valuations (asset_id, as_of, value) "
-                "VALUES (:aid, :as_of, :value) "
-                "ON CONFLICT (asset_id, as_of) DO UPDATE SET value = EXCLUDED.value"
-            ), {"aid": row["id"], "as_of": today, "value": value})
+            upsert_valuation(conn, row["id"], today, value)
         detail.update(status="valued", price=price, price_date=price_date, value=value)
         details.append(detail)
 

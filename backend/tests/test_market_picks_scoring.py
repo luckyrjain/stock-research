@@ -19,6 +19,7 @@ from pipelines.market_picks_pipeline import (
     MarketPicksPipeline,
     _apply_sector_balance,
     _build_ranking_reasons,
+    _classify_recommendation,
     _compute_confidence,
     _dedup_key,
     _effective_signal,
@@ -328,6 +329,84 @@ class ComputeConfidenceTest(unittest.TestCase):
         sources = [_source(credibility=1.0, article_age_days=0) for _ in range(20)]
         score = _compute_confidence(1.0, sources, max_effective_signal=1.0, stock_info={}, valuation_percentile=10.0)
         self.assertLessEqual(score, 100.0)
+
+
+class RecommendationClassificationTest(unittest.TestCase):
+    """_classify_recommendation() owns the 4-tier threshold decision that
+    used to sit inline in _phase_score with zero test coverage, even though
+    every input feeding it (_effective_signal, _compute_confidence,
+    _trade_levels, _select_target_price) already had dedicated tests above.
+
+    Boundary tests use net_signal=0.0 to isolate combined_dir to purely
+    0.45 * signal_score -- consensus_norm's own 0.55 contribution drops out
+    entirely, which keeps the arithmetic legible without the clamp involved
+    too."""
+
+    def test_clearly_bullish_signals_recommend_buy(self) -> None:
+        rec, combined_dir = _classify_recommendation(net_signal=5.0, signal_score=0.8)
+        self.assertEqual(rec, "BUY")
+        self.assertGreaterEqual(combined_dir, 0.35)
+
+    def test_clearly_bearish_signals_recommend_sell(self) -> None:
+        rec, combined_dir = _classify_recommendation(net_signal=-5.0, signal_score=-0.8)
+        self.assertEqual(rec, "SELL")
+        self.assertLessEqual(combined_dir, -0.30)
+
+    def test_mild_positive_signals_recommend_watchlist(self) -> None:
+        rec, _ = _classify_recommendation(net_signal=1.0, signal_score=0.2)
+        self.assertEqual(rec, "WATCHLIST")
+
+    def test_near_zero_signals_recommend_hold(self) -> None:
+        rec, combined_dir = _classify_recommendation(net_signal=0.0, signal_score=0.0)
+        self.assertEqual(rec, "HOLD")
+        self.assertEqual(combined_dir, 0.0)
+
+    def test_buy_watchlist_boundary_is_inclusive(self) -> None:
+        at_boundary    = 0.35 / 0.45
+        below_boundary = at_boundary - 0.05
+        rec_at, dir_at = _classify_recommendation(net_signal=0.0, signal_score=at_boundary)
+        rec_below, _   = _classify_recommendation(net_signal=0.0, signal_score=below_boundary)
+        self.assertEqual(rec_at, "BUY")
+        self.assertAlmostEqual(dir_at, 0.35, places=5)
+        self.assertEqual(rec_below, "WATCHLIST")
+
+    def test_watchlist_hold_boundary_is_inclusive(self) -> None:
+        at_boundary    = 0.15 / 0.45
+        below_boundary = at_boundary - 0.05
+        rec_at, dir_at = _classify_recommendation(net_signal=0.0, signal_score=at_boundary)
+        rec_below, _   = _classify_recommendation(net_signal=0.0, signal_score=below_boundary)
+        self.assertEqual(rec_at, "WATCHLIST")
+        self.assertAlmostEqual(dir_at, 0.15, places=5)
+        self.assertEqual(rec_below, "HOLD")
+
+    def test_hold_sell_boundary_is_inclusive(self) -> None:
+        at_boundary    = -0.30 / 0.45
+        above_boundary = at_boundary + 0.05
+        rec_at, dir_at = _classify_recommendation(net_signal=0.0, signal_score=at_boundary)
+        rec_above, _   = _classify_recommendation(net_signal=0.0, signal_score=above_boundary)
+        self.assertEqual(rec_at, "SELL")
+        self.assertAlmostEqual(dir_at, -0.30, places=5)
+        self.assertEqual(rec_above, "HOLD")
+
+    def test_buy_signal_gate_demotes_to_watchlist_not_buy(self) -> None:
+        # combined_dir clears the 0.35 BUY threshold via max consensus
+        # (net_signal=5.0 -> consensus_norm=1.0 -> +0.55) alone, but
+        # signal_score=-0.31 is just past the -0.3 gate -- the BUY branch's
+        # own guard must demote this to WATCHLIST rather than let strong
+        # consensus override a bearish quant signal. Regression case for the
+        # dead "quant veto" code this function's docstring explains.
+        rec, combined_dir = _classify_recommendation(net_signal=5.0, signal_score=-0.31)
+        self.assertGreaterEqual(combined_dir, 0.35)
+        self.assertEqual(rec, "WATCHLIST")
+
+    def test_consensus_norm_is_clamped_beyond_plus_minus_5(self) -> None:
+        # net_signal beyond +-5 must not let consensus_norm exceed +-1.0 --
+        # otherwise a large pile-on of sources could push combined_dir past
+        # what a maxed-out consensus should ever contribute.
+        rec_over, dir_over = _classify_recommendation(net_signal=10.0, signal_score=1.0)
+        rec_at_cap, dir_at_cap = _classify_recommendation(net_signal=5.0, signal_score=1.0)
+        self.assertEqual(dir_over, dir_at_cap)
+        self.assertEqual(rec_over, rec_at_cap)
 
 
 class BuildRankingReasonsTest(unittest.TestCase):

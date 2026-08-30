@@ -1,8 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback } from 'react';
 import { getClientId } from '@/lib/watchlist';
 import { useToast } from '@/components/toast';
+import { createSharedResource } from '@/lib/shared-resource';
 
 export interface Position {
   symbol: string;
@@ -19,21 +20,25 @@ export interface Position {
   bought_at: string;   // ISO timestamp, set when the user marks the pick as bought
 }
 
-// Module-level shared cache + generation counter, same pattern as
-// lib/watchlist.ts's useWatchlist() — this used to be a pure-localStorage
-// feature (no backend, no accounts) before Positions got the same
-// account-aware treatment Watchlist already had. `getClientId()` is reused
-// directly from watchlist.ts rather than duplicated: it's the same opaque
-// per-browser identifier grouping one browser's anonymous rows in Postgres,
-// not something specific to either feature.
-let cachedPositions: Position[] | null = null;
-let inFlight: Promise<Position[] | null> | null = null;
-// Bumped by refreshPositions() so a fetch already in flight when the
-// caller's identity changes (sign-in/sign-out) can't clobber the fresher
-// result if it resolves after the refresh's own fetch — same fix as
-// lib/watchlist.ts's fetchItems()/refreshWatchlist().
-let generation = 0;
-const listeners = new Set<() => void>();
+// Shared cross-component cache, built on lib/shared-resource.ts's generic
+// createSharedResource() — same machinery lib/watchlist.ts's useWatchlist()
+// uses. This used to be a pure-localStorage feature (no backend, no
+// accounts) before Positions got the same account-aware treatment Watchlist
+// already had. `getClientId()` is reused directly from watchlist.ts rather
+// than duplicated: it's the same opaque per-browser identifier grouping one
+// browser's anonymous rows in Postgres, not something specific to either
+// feature.
+async function fetchPositions(previous: Position[] | undefined): Promise<Position[]> {
+  const clientId = getClientId();
+  const items = await fetch(`/api/positions?client_id=${encodeURIComponent(clientId)}`, { cache: 'no-store' })
+    .then(res => (res.ok ? res.json() : { items: null }))
+    .then((data: { items?: Position[] | null }) => data.items ?? null)
+    .catch(() => null);
+  return items ?? previous ?? [];
+}
+
+const resource = createSharedResource<Position[]>(fetchPositions, []);
+
 // Per-symbol send-order sequence for updateShares() -- the Portfolio page's
 // Shares input fires a PATCH on every keystroke with no debounce, so several
 // requests for the same symbol can be in flight at once. Network responses
@@ -43,37 +48,12 @@ const listeners = new Set<() => void>();
 // value the user already typed past.
 const shareUpdateSeq = new Map<string, number>();
 
-function notify(): void {
-  listeners.forEach(fn => fn());
-}
-
-async function fetchPositions(): Promise<Position[]> {
-  const myGeneration = generation;
-  if (!inFlight) {
-    const clientId = getClientId();
-    inFlight = fetch(`/api/positions?client_id=${encodeURIComponent(clientId)}`, { cache: 'no-store' })
-      .then(res => (res.ok ? res.json() : { items: null }))
-      .then((data: { items?: Position[] | null }) => data.items ?? null)
-      .catch(() => null)
-      .finally(() => { inFlight = null; });
-  }
-  const items = await inFlight;
-  if (myGeneration !== generation) {
-    return cachedPositions ?? [];
-  }
-  cachedPositions = items ?? cachedPositions ?? [];
-  notify();
-  return cachedPositions;
-}
-
 /** Re-fetches /api/positions and updates every subscribed usePositions()
  * instance — call after sign-in/sign-out so positions switch between the
  * account's rows and the anonymous client_id's rows without a full page
  * reload, same reasoning as refreshWatchlist(). */
 export function refreshPositions(): Promise<Position[]> {
-  generation++;
-  inFlight = null;
-  return fetchPositions();
+  return resource.refresh();
 }
 
 /** Opt-in migration of the anonymous browser's positions onto the account
@@ -89,10 +69,8 @@ export async function claimPositions(clientId: string): Promise<{ claimed: numbe
     });
     if (!res.ok) return null;
     const data = await res.json() as { claimed: number; skipped_over_cap: number; items: Position[] };
-    generation++;
-    inFlight = null;
-    cachedPositions = data.items;
-    notify();
+    resource.bumpGeneration();
+    resource.setCache(data.items);
     return { claimed: data.claimed, skippedOverCap: data.skipped_over_cap };
   } catch {
     return null;
@@ -107,19 +85,7 @@ export async function claimPositions(clientId: string): Promise<{ claimed: numbe
  * a later pipeline run changes those levels. */
 export function usePositions() {
   const { showError } = useToast();
-  const [positions, setPositions] = useState<Position[]>(cachedPositions ?? []);
-  const [loading, setLoading] = useState(cachedPositions === null);
-
-  useEffect(() => {
-    const onChange = () => setPositions(cachedPositions ?? []);
-    listeners.add(onChange);
-    if (cachedPositions === null) {
-      fetchPositions().finally(() => setLoading(false));
-    } else {
-      setLoading(false);
-    }
-    return () => { listeners.delete(onChange); };
-  }, []);
+  const { value: positions, loading } = resource.useValue();
 
   const isPositioned = useCallback(
     (symbol: string) => positions.some(p => p.symbol === symbol.toUpperCase()),
@@ -129,48 +95,41 @@ export function usePositions() {
   const addPosition = useCallback(async (pos: Omit<Position, 'bought_at' | 'shares'>) => {
     const symbol = pos.symbol.toUpperCase();
     const clientId = getClientId();
-    // Captured before the await, same generation-guard convention as
-    // fetchPositions() above and lib/watchlist.ts's own toggle()/remove() —
-    // without this, a mutation in flight when the caller's identity changes
-    // mid-request (e.g. signing out right after marking a position) can
-    // resolve after refreshPositions()'s own fetch and silently overwrite
-    // the fresher (post-refresh) list with this stale, now-wrong-identity
-    // one.
-    const myGeneration = generation;
-    try {
-      const res = await fetch('/api/positions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ client_id: clientId, ...pos, symbol }),
-      });
-      if (!res.ok) { showError("Couldn't save this position — try again."); return; }
-      const data = await res.json() as { items: Position[] };
-      if (myGeneration !== generation) return;
-      cachedPositions = data.items;
-      notify();
-    } catch {
-      // Backend unreachable — leave state as-is, same convention as
-      // useWatchlist()'s toggle()/remove().
-      showError("Couldn't reach the server — this position wasn't saved.");
-    }
+    await resource.mutate(async () => {
+      try {
+        const res = await fetch('/api/positions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ client_id: clientId, ...pos, symbol }),
+        });
+        if (!res.ok) { showError("Couldn't save this position — try again."); return undefined; }
+        const data = await res.json() as { items: Position[] };
+        return data.items;
+      } catch {
+        // Backend unreachable — leave state as-is, same convention as
+        // useWatchlist()'s toggle()/remove().
+        showError("Couldn't reach the server — this position wasn't saved.");
+        return undefined;
+      }
+    });
   }, [showError]);
 
   const removePosition = useCallback(async (symbol: string) => {
     const clientId = getClientId();
-    const myGeneration = generation;
-    try {
-      const res = await fetch(`/api/positions/${encodeURIComponent(symbol.toUpperCase())}?client_id=${encodeURIComponent(clientId)}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok) { showError("Couldn't remove this position — try again."); return; }
-      const data = await res.json() as { items: Position[] };
-      if (myGeneration !== generation) return;
-      cachedPositions = data.items;
-      notify();
-    } catch {
-      // silently ignore in state — the row just won't disappear; user can retry
-      showError("Couldn't reach the server — try again.");
-    }
+    await resource.mutate(async () => {
+      try {
+        const res = await fetch(`/api/positions/${encodeURIComponent(symbol.toUpperCase())}?client_id=${encodeURIComponent(clientId)}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) { showError("Couldn't remove this position — try again."); return undefined; }
+        const data = await res.json() as { items: Position[] };
+        return data.items;
+      } catch {
+        // silently ignore in state — the row just won't disappear; user can retry
+        showError("Couldn't reach the server — try again.");
+        return undefined;
+      }
+    });
   }, [showError]);
 
   // Filled in after the fact, typically from the Portfolio page — asking for
@@ -178,7 +137,7 @@ export function usePositions() {
   // meant to be a one-click action while browsing Market Picks.
   const updateShares = useCallback(async (symbol: string, shares: number | null) => {
     const clientId = getClientId();
-    const myGeneration = generation;
+    const myGeneration = resource.getGeneration();
     const upperSymbol = symbol.toUpperCase();
     const mySeq = (shareUpdateSeq.get(upperSymbol) ?? 0) + 1;
     shareUpdateSeq.set(upperSymbol, mySeq);
@@ -190,13 +149,12 @@ export function usePositions() {
       });
       if (!res.ok) return;
       const data = await res.json() as { items: Position[] };
-      if (myGeneration !== generation) return;
+      if (!resource.isCurrent(myGeneration)) return;
       // A later keystroke may already have sent its own PATCH for the same
       // symbol — only the most recently SENT request's response is ever
       // applied, regardless of which one's network response resolves first.
       if (shareUpdateSeq.get(upperSymbol) !== mySeq) return;
-      cachedPositions = data.items;
-      notify();
+      resource.setCache(data.items);
     } catch {
       // silently ignore — same "leave state as-is on a failed mutation"
       // convention as every other write in this hook

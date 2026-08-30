@@ -4,7 +4,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine, select
 from sqlalchemy.pool import StaticPool
 
-from portfolio.cas_import import _scrub, import_cas, parse_cas
+from portfolio.cas_import import ARCHIVE_NAMESPACE, _scrub, archive_parsed, import_cas, parse_cas
 from db.models import accounts, assets, holdings, metadata, profiles, transactions
 
 
@@ -17,7 +17,7 @@ def _sqlite_engine():
 def _mk_account(engine) -> int:
     from sqlalchemy import insert
     with engine.begin() as conn:
-        pid = conn.execute(insert(profiles).values(name="p")).inserted_primary_key[0]
+        pid = conn.execute(insert(profiles).values(name="p", client_id="test-client-0000-0000-0000-000000000000")).inserted_primary_key[0]
         return conn.execute(insert(accounts).values(profile_id=pid, name="a", type="broker")).inserted_primary_key[0]
 
 
@@ -73,6 +73,20 @@ class ScrubTest(unittest.TestCase):
         self.assertEqual(clean["folios"][0]["folio"], "123")
 
 
+class ArchiveParsedTest(unittest.TestCase):
+    def test_prunes_old_archives_after_each_save(self) -> None:
+        # Regression test: cas_archive stores one full scrubbed parse per
+        # import (potentially years of MF transaction history) with no
+        # retention -- violating this codebase's own "unbounded per-run
+        # growth namespaces must call delete_older_than()" rule.
+        with patch("portfolio.cas_import.state_store.save", return_value=True) as save, \
+             patch("portfolio.cas_import.state_store.delete_older_than") as prune:
+            archive_parsed({"cas_type": "DETAILED", "folios": []})
+        save.assert_called_once()
+        self.assertEqual(save.call_args.args[0], ARCHIVE_NAMESPACE)
+        prune.assert_called_once_with(ARCHIVE_NAMESPACE, days=90)
+
+
 class ImportCasTest(unittest.TestCase):
     def setUp(self) -> None:
         self.engine = _sqlite_engine()
@@ -109,6 +123,55 @@ class ImportCasTest(unittest.TestCase):
             hold_count = conn.execute(select(holdings)).mappings().fetchall()
         self.assertTrue(asset["archived"])
         self.assertEqual(hold_count, [])
+
+    def test_two_folios_same_scheme_closed_folio_first_asset_not_left_archived(self) -> None:
+        # Regression test: a scheme held via two folios (e.g. two SIP
+        # folios) resolves to one asset via the by_amfi/by_isin backfill.
+        # If the folio with a zero closing balance is processed FIRST, the
+        # asset used to be created archived=True and stay that way forever,
+        # even though a later folio's positive balance gave it real units.
+        parsed = {"folios": [
+            {"folio": "F1", "schemes": [
+                _scheme(close=0.0, txns=[_txn("2024-01-01", "PURCHASE"), _txn("2024-06-01", "REDEMPTION")]),
+            ]},
+            {"folio": "F2", "schemes": [
+                _scheme(close=50.0, txns=[_txn("2024-07-01", "PURCHASE")]),
+            ]},
+        ]}
+        result = import_cas(self.engine, parsed, self.account_id)
+        self.assertEqual(result["assets_created"], 1)
+        self.assertEqual(result["assets_matched"], 1)
+        with self.engine.connect() as conn:
+            asset = conn.execute(select(assets)).mappings().first()
+            hold = conn.execute(select(holdings)).mappings().first()
+        self.assertFalse(asset["archived"])
+        self.assertEqual(float(hold["units"]), 50.0)
+
+    def test_existing_open_asset_re_archived_when_this_statement_shows_it_fully_redeemed(self) -> None:
+        # Regression test: the first version of the archived-reconciliation
+        # fix only summed folios with close > 0 (holdings_close_by_asset),
+        # so an asset whose EVERY folio in this statement closes at <= 0
+        # never appeared in that dict at all -- the reconciliation loop
+        # never even considered it, leaving archived=False (correct before
+        # this import, stale after it) untouched instead of flipping to
+        # True. Must reconcile off the true combined close across every
+        # folio (total_close_by_asset), not just the positive ones.
+        from sqlalchemy import insert
+        with self.engine.begin() as conn:
+            asset_id = conn.execute(insert(assets).values(
+                account_id=self.account_id, type="mf", name="Test Fund",
+                symbol="INF090I01239", meta={"isin": "INF090I01239"},
+                archived=False,
+            )).inserted_primary_key[0]
+
+        parsed = {"folios": [{"folio": "F1", "schemes": [
+            _scheme(close=0.0, txns=[_txn("2024-01-01", "PURCHASE"), _txn("2024-08-01", "REDEMPTION")]),
+        ]}]}
+        result = import_cas(self.engine, parsed, self.account_id)
+        self.assertEqual(result["assets_matched"], 1)
+        with self.engine.connect() as conn:
+            asset = conn.execute(select(assets).where(assets.c.id == asset_id)).mappings().first()
+        self.assertTrue(asset["archived"])
 
     def test_closed_folio_with_no_transactions_skipped_entirely(self) -> None:
         parsed = {"folios": [{"folio": "F1", "schemes": [_scheme(close=0.0, txns=[])]}]}
@@ -152,6 +215,36 @@ class ImportCasTest(unittest.TestCase):
         result = import_cas(self.engine, parsed, self.account_id)
         self.assertEqual(result["transactions"], 1)
         self.assertEqual(result["skipped_rows"], 1)
+
+    def test_same_scheme_across_two_folios_in_one_statement_is_one_asset(self) -> None:
+        # Regression test: by_amfi/by_isin were snapshotted once before the
+        # folio loop started and never updated when a new asset was created
+        # mid-loop. A scheme held via two SIP folios (or split across a
+        # folio merger) that appears under neither folio's existing DB row
+        # yet used to create two separate mf assets for the same scheme
+        # instead of matching the one this same import just created.
+        parsed = {"folios": [
+            {"folio": "F1", "schemes": [_scheme(close=50.0, txns=[_txn("2024-01-01", "PURCHASE")])]},
+            {"folio": "F2", "schemes": [_scheme(close=30.0, txns=[_txn("2024-02-01", "PURCHASE")])]},
+        ]}
+        result = import_cas(self.engine, parsed, self.account_id)
+        self.assertEqual(result["assets_created"], 1)
+        self.assertEqual(result["assets_matched"], 1)
+        with self.engine.connect() as conn:
+            asset_rows = conn.execute(select(assets)).mappings().fetchall()
+            txn_rows = conn.execute(select(transactions)).mappings().fetchall()
+            hold = conn.execute(select(holdings)).mappings().first()
+        self.assertEqual(len(asset_rows), 1)
+        self.assertEqual(len(txn_rows), 2)
+        self.assertTrue(all(t["asset_id"] == asset_rows[0]["id"] for t in txn_rows))
+        # Regression test: each folio's own holdings write used to run
+        # per-folio via a plain "ON CONFLICT DO UPDATE SET units =
+        # EXCLUDED.units" upsert -- once both folios resolved to the same
+        # asset (the fix above), that overwrote rather than summed, so the
+        # final stored total was only the LAST-processed folio's balance
+        # (30.0) instead of the true combined holding across both folios
+        # (50.0 + 30.0 = 80.0), silently losing units.
+        self.assertEqual(float(hold["units"]), 80.0)
 
     def test_matches_existing_asset_by_amfi_and_backfills_isin(self) -> None:
         from sqlalchemy import insert

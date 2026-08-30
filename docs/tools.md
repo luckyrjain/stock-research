@@ -34,7 +34,7 @@ Returns quote and company metadata:
 | `company_name` | string | Full company name |
 | `current_price` | number | Last traded price |
 | `previous_close` | number | Prior session close |
-| `change_pct` | number | % change from previous close |
+| `change_pct` | number \| null | % change from previous close — `null` (never a fabricated `0.0`) when there's no previous close to compute it from |
 | `volume` | number | Session volume |
 | `avg_volume_10d` | number | 10-day average volume |
 | `market_cap_cr` | number | Market cap in crores |
@@ -61,7 +61,8 @@ for a price/market-cap/P-E/book-value/dividend-yield instead of hard-failing the
 EPS and price-to-book are derived from price÷P-E and price÷book-value (Screener's widget doesn't
 carry either directly); `_stockanalysis_extra_fields()` additionally scrapes stockanalysis.com for
 a real EPS/52-week-range/volume where reachable, overriding the derived EPS when available. No
-intraday change % is available from this path (`change_pct` is `0.0`).
+intraday change % is available from this path — `change_pct` is `null` (never a fabricated
+`0.0`), same "never invent" convention as the primary yfinance path.
 
 ---
 
@@ -225,6 +226,32 @@ never a fabricated one.
 
 ---
 
+### `bse_shareholding.get_shareholding_detail`
+
+- File: `tools/bse_shareholding.py`
+- Source: BSE's own `SHPQNewFormat` endpoint (scripcode-keyed, not symbol-keyed — unlike every
+  NSE endpoint in this doc), scraping the same quarterly shareholding filing but served as
+  **inline XBRL** (facts under `ix:nonNumeric`/`ix:nonFraction`, embedded in an XHTML wrapper),
+  which needs its own parser distinct from NSE's plain XBRL XML.
+
+The BSE-only fallback for `get_shareholding_detail` above — `GET
+/api/shareholding-detail/{symbol}` calls this only when NSE's own shareholding master genuinely
+returns zero records for the symbol (a real, permanent "not on NSE," confirmed via NSE's own
+specific `_NO_SHAREHOLDING_RECORDS_MSG` error, never any other NSE failure) and the securities
+master resolves the symbol to a real BSE scrip code. Reuses NSE's own XXE-safe
+`etree.XMLParser(resolve_entities=False)` settings and the same `NameOfTheShareholder`/
+`ShareholdingAsAPercentageOfTotalNumberOfShares` concept names — BSE's SEBI-mandated
+shareholding taxonomy happens to use identical concept names to NSE's. Same response shape as
+`get_shareholding_detail` (`promoters`, `shareholder_categories`), reusing NSE's own
+`_percent_from_ambiguous_value` plausibility ceiling.
+
+**Confirmed against a real live filing** (AG Ventures Ltd, scripcode 506579), not a guess —
+including one real, fixed bug found live: BSE's API hangs indefinitely (no response, no clean
+reject) on a connection-pooled/keep-alive `requests` call, so every request here sends
+`Connection: close` explicitly.
+
+---
+
 ### `get_latest_news`
 
 - File: `tools/news_tools.py`
@@ -262,7 +289,7 @@ These feed the standalone, on-demand endpoints (`/api/peers`, `/api/financials`,
 
 ### `portfolio/dcf_valuation.py::compute_dcf_estimate`
 
-- File: **`backend/dcf_valuation.py`** (backend root, *not* under `tools/`) — a pure computation module, not a scraper
+- File: **`backend/portfolio/dcf_valuation.py`** (under `portfolio/`, *not* under `tools/`) — a pure computation module, not a scraper
 - Input: the `cash_flow` dict from `get_financial_statements`, plus `current_price` and `market_cap_cr`
 
 A deterministic two-stage DCF off the cash-flow table's Operating Activity row — never
@@ -470,10 +497,13 @@ Scrapers live in `tools/market_picks_tools.py`, `tools/hdfc_sec_agent.py`,
 
 ### Source registry (20 sources)
 
-`SOURCES`/`SCRAPER_FNS` in `tools/market_picks_tools.py` merge in five other modules' own
-`*_SOURCES`/`*_SCRAPERS` exports (`HDFC_SEC_SOURCES`, `NSE_BULK_SOURCES`, `INSIDER_SOURCES`,
-`SCREENER_SCAN_SOURCES`, `TRENDLYNE_SOURCES`) — 14 defined directly in that file + 2 (HDFC) + 1
-(NSE bulk/block) + 1 (NSE insider) + 1 (Screener.in scan) + 1 (Trendlyne) = **20 total**.
+`SOURCES` in `tools/market_picks_tools.py` merges in five other modules' own `*_SOURCES` exports
+(`HDFC_SEC_SOURCES`, `NSE_BULK_SOURCES`, `INSIDER_SOURCES`, `SCREENER_SCAN_SOURCES`,
+`TRENDLYNE_SOURCES`) — 14 defined directly in that file + 2 (HDFC) + 1 (NSE bulk/block) + 1 (NSE
+insider) + 1 (Screener.in scan) + 1 (Trendlyne) = **20 total**. Each tuple's third element is the
+scraper function itself (not a name string), so `SCRAPER_FNS` (`{name: fn for name, _type, fn in
+SOURCES}`) is derived from `SOURCES` rather than a second, independently hand-synced dict — there's
+no `*_SCRAPERS` export anymore, one list is the single source of truth.
 Credibility weights (`_SOURCE_CREDIBILITY` in `pipelines/market_picks_pipeline.py`) — sources not listed
 default to **0.50** (`_DEFAULT_CREDIBILITY`):
 
@@ -518,8 +548,9 @@ can therefore change from `brokerage` to `news` at runtime.
 ### Adding a new source
 
 1. Define scraper functions in a new module (e.g. `tools/my_brokerage.py`)
-2. Export `MY_SOURCES` (list of `(name, type, fn_name)` tuples) and `MY_SCRAPERS` (dict of `name → fn`)
-3. Import and merge into `SOURCES` and `SCRAPER_FNS` at the bottom of `tools/market_picks_tools.py`
+2. Export `MY_SOURCES` — a list of `(name, type, fn)` tuples, `fn` the scraper function itself
+3. Import and concatenate into `SOURCES` in `tools/market_picks_tools.py` (near the bottom of the
+   file, after every `fetch_*()` function is defined — `SCRAPER_FNS` derives from it automatically)
 4. Add a credibility entry in `_SOURCE_CREDIBILITY` in `pipelines/market_picks_pipeline.py`
 
 ---

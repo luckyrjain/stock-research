@@ -62,13 +62,11 @@ on every call, including the unauthenticated login step.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 import requests
-from sqlalchemy import update
 
 from core.observability import get_logger, log_event
-from db.models import broker_connections as broker_connections_t
 from portfolio import broker_sync_common
 from tools.securities_master import get_full_securities_master, resolve_symbol
 
@@ -416,33 +414,16 @@ def sync_account(engine, account_id: int, access_token: str, api_key: str, owner
     # all); only skipped when there's genuinely nothing to resolve.
     master = get_full_securities_master(engine) if (raw_holdings or raw_trades) else None
 
-    today = datetime.now(timezone.utc).date()
-    with engine.begin() as conn:
-        summary = {}
-        summary.update(broker_sync_common.sync_holdings(
-            conn, account_id,
-            [_normalize_holding(h, engine, master) for h in (raw_holdings or [])],
-            _META_SOURCE, today,
-            owner=owner,
-        ))
-        summary.update(broker_sync_common.sync_trades(
-            conn, account_id,
-            [_normalize_trade(t, engine, master) for t in (raw_trades or [])],
-            _META_SOURCE,
-        ))
-        conn.execute(
-            update(broker_connections_t)
-            .where(
-                broker_connections_t.c.account_id == account_id,
-                broker_connections_t.c.broker == BROKER_NAME,
-            )
-            .values(last_synced_at=datetime.now(timezone.utc))
-        )
-
+    partial_error = None
     if holdings_error is not None:
-        summary["error"] = f"holdings fetch failed (trades synced normally): {holdings_error}"
+        partial_error = f"holdings fetch failed (trades synced normally): {holdings_error}"
     elif trades_error is not None:
-        summary["error"] = f"tradebook fetch failed (holdings synced normally): {trades_error}"
+        partial_error = f"tradebook fetch failed (holdings synced normally): {trades_error}"
 
-    log_event(LOGGER, "hdfc_sync_completed", account_id=account_id, **summary)
-    return summary
+    return broker_sync_common.run_broker_sync(
+        engine, account_id, BROKER_NAME, _META_SOURCE,
+        [_normalize_holding(h, engine, master) for h in (raw_holdings or [])],
+        [_normalize_trade(t, engine, master) for t in (raw_trades or [])],
+        logger=LOGGER, completed_event="hdfc_sync_completed",
+        partial_error=partial_error, owner=owner,
+    )

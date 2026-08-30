@@ -42,7 +42,11 @@ export async function expectNoA11yViolations(page: Page): Promise<void> {
 
 export function sseAnalysisBody(
   symbol: string,
-  opts: { degraded?: boolean; stockInfoOverrides?: Record<string, unknown> } = {},
+  opts: {
+    degraded?: boolean;
+    stockInfoOverrides?: Record<string, unknown>;
+    signalsOverrides?: Record<string, unknown>;
+  } = {},
 ): string {
   const events = [
     { event: 'start', stale: ['stock_info', 'research', 'news', 'shareholding', 'mf_holdings'], cached: [] },
@@ -82,7 +86,7 @@ export function sseAnalysisBody(
         signals: {
           final_score: 0.6,
           verdict: 'BUY',
-          signals: {},
+          signals: { ...opts.signalsOverrides },
         },
         stock_info: {
           symbol,

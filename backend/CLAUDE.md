@@ -93,8 +93,10 @@ These tool functions are decorated with `@tool` from `crewai.tools` purely for a
 | `_phase_analyze` | Batched LLM calls (8 stocks/batch, parallel) for qualitative summary + bull/bear factors. Does NOT ask the LLM for prices. |
 | `_phase_score` | Deterministic confidence scoring (`_compute_confidence`: 50% signal engine + 30% consensus + 20% recency, 0–100, plus a small ±3-point valuation nudge layered on top — see below). The 4-tier rec (BUY / WATCHLIST / HOLD / SELL) is a *separate* formula on top — `combined_dir = 0.55 × consensus + 0.45 × signal_score`, thresholded, with a quant-veto that demotes BUY → WATCHLIST on a strongly negative signal score. Entry/target/stop-loss computed from price and signal score — no LLM. Sector-balanced (`_apply_sector_balance()`): max 2 stocks per sector promoted to the primary list, excess deferred to the end — `sector` stays on every pick in the response (real, filterable data, not popped like the old internal-only `_sector`). Saves a daily snapshot under the `market_picks_history` namespace in `core/state_store.py` for trend tracking. |
 
-**Deliberately not decomposed in this pass**: at ~1,600 lines, `pipelines/market_picks_pipeline.py` is the
-single largest Python module in this repo, and `_phase_extract`/`_phase_consolidate` are each
+**Deliberately not decomposed in this pass**: at ~1,830 lines, `pipelines/market_picks_pipeline.py` is
+the single largest module in `pipelines/` (`api.py` itself, at ~2,730 lines, is the largest Python
+module in the repo overall — see "Route module extraction" below for the ongoing effort to shrink
+it), and `_phase_extract`/`_phase_consolidate` are each
 150-200+ lines mixing scraping, LLM calls, fuzzy matching, and validation — the same
 maintainability gap the `routes/` split (below) and the `results-dashboard.tsx` component
 extraction (further below) already closed for their own respective files. Flagged directly by a
@@ -1096,9 +1098,13 @@ nav-bar label "Net Worth" so the two aren't confused for the same feature).
    (sums each account's assets' latest valuation, loans subtracted since they're stored positive
    — a pure function, `compute_networth()`, unit-tested with fabricated rows rather than a live
    DB). Reuses `routes/_shared.py::run_owned_db_call()` for the rate-limit → DB-configured-check →
-   run_in_executor → sanitize-error wrapper every other route module already shares, even though
-   this feature has no ownership concept to speak of (see point 4) — the wrapper's shape doesn't
-   actually require one. **Fixed a latent gap in that shared wrapper while wiring this up**: it
+   run_in_executor → sanitize-error wrapper every other route module already shares — this
+   feature's `profiles` row now carries the exact same `client_id`/`user_id` ownership shape as
+   `watchlist_items`/`positions` (see point 4), so every profile/account/asset-scoped handler
+   also resolves the caller's owner via `routes.watchlist.resolve_owner()` and checks it via
+   `_owned_profile_id()`/`_owned_account_id()`/`_owned_asset_id()` before doing anything —
+   never a 403, always a 404, so a caller can't probe for another owner's ids. **Fixed a latent
+   gap in that shared wrapper while wiring this up**: it
    had no `except HTTPException: raise` before its generic `except Exception` catch, so a 404
    raised from inside a route's own `sync_fn` (e.g. "asset not found") would have been silently
    swallowed into an opaque 503 — invisible until now because `routes/watchlist.py`/
@@ -1109,7 +1115,7 @@ nav-bar label "Net Worth" so the two aren't confused for the same feature).
    Two of the read queries (`list_assets`, `get_networth`) need each asset's *latest* valuation —
    written as a correlated scalar subquery, not a `LEFT JOIN LATERAL`, since SQLite (this
    codebase's test backend for these tables) doesn't parse the `LATERAL` keyword at all. At this
-   feature's real scale (a personal, single-household tool — see point 4) the extra correlated
+   feature's real scale (a personal, small-household tool — see point 4) the extra correlated
    lookup per asset is not a meaningful cost next to Postgres's own query planner.
 3. **Frontend** (`frontend/app/portfolio-aggregator/page.tsx`) — a profile picker (selection
    persisted in `localStorage`, distinct key from anything the positions/watchlist features use)
@@ -1120,15 +1126,23 @@ nav-bar label "Net Worth" so the two aren't confused for the same feature).
    the backend — Next.js resolves the sibling static route
    `frontend/app/api/portfolio/concentration/route.ts` first for its own exact path, so the two
    coexist without conflict.
-4. **No auth, by design** — inherited unchanged from this feature's original design intent: a
-   personal, localhost/Tailscale-only tool for a household or small circle, not a multi-tenant
-   product. `profiles` is a bare picker (no credentials, no password), not this app's real
-   account system (`users`/`sessions`/magic-link auth, see "Account & magic-link auth flow"
-   above) — the two are unconnected on purpose. This is a disclosed, deliberate scope call, the
-   same instinct as this codebase's other "explicitly out of scope for now" notes elsewhere in
-   this doc, not an oversight: adding real auth here is a bigger, separate decision (who are the
-   users, what does a signed-in session even mean for a household-shared net-worth view) that
-   this increment doesn't make on its own.
+4. **Ownership was added later, migration `ec7850b73d2f`** — `profiles` originally had no
+   ownership column at all (a bare picker, no credentials, no password, deliberately
+   unconnected to `users`/`sessions`/magic-link auth), the same personal-scale, no-multi-tenant
+   design call this codebase makes elsewhere. That gap — "any caller who knows a `profile_id`/
+   `account_id`/`asset_id` can read or mutate it" — was flagged directly by a security review
+   and closed by giving `profiles` the identical `client_id`/`user_id` ownership shape
+   `watchlist_items`/`positions` already had: an anonymous per-browser `client_id` until the
+   caller signs in, then the account's `user_id`, resolved via
+   `routes.watchlist.resolve_owner()` and enforced at every profile/account/asset-scoped
+   endpoint (see point 2 above). `profiles` itself is still a bare name picker with no
+   credentials of its own — signing in doesn't create a profile, it just changes which owner
+   column new/existing profiles resolve against — and this remains a personal-scale tool, not a
+   multi-tenant product: `POST /refresh-valuations` is still deliberately unscoped (see point 5
+   below), and there's still no UI concept of "share this profile with another signed-in
+   account." Migration `ec7850b73d2f`'s own docstring discloses the residual risk of upgrading a
+   deployment that already has unowned rows (they'd violate the new `CHECK` constraint) —
+   read it before running this migration against a real, populated database.
 5. **Explicitly out of scope for this increment** (tracked as later, dependent work): charts and
    reports. Automatic pricing/valuation refresh and XIRR are no longer deferred — see "Portfolio
    valuation engine" below — and neither is `transactions` writers: CAS PDF import and broker
@@ -1150,10 +1164,11 @@ this one).
    `access_token_enc` (Fernet, nullable until the OAuth-style handshake completes at least once).
    `broker` is a plain string checked against a closed allowlist at the route layer
    (`_SUPPORTED_BROKERS`), not a DB enum — adding a fourth broker needs no schema change, just a
-   new `portfolio/<broker>_sync.py` module (point 3 below). Keyed to `profiles`/`accounts`, not a
-   `user_id` — reuses the Portfolio Aggregator's existing no-auth model rather than the separate
-   `users`/`sessions` magic-link system, the same disclosed personal-use-only deviation the rest
-   of this feature area already makes (see "No auth, by design" above).
+   new `portfolio/<broker>_sync.py` module (point 3 below). `broker_connections` itself carries
+   no `client_id`/`user_id` of its own — it inherits ownership transitively via `account_id` →
+   `profile_id` (see "Portfolio aggregator" point 4 above for how `profiles` itself is owned),
+   and `routes/broker_sync.py`'s broker endpoints resolve/check that owner the same way
+   every other profile/account/asset-scoped endpoint does before touching a connection row.
 2. **Credentials are per-connection, never a deployment-wide env var.** This was the actual design
    mistake in the first version of this feature, caught in review before it shipped: Kite
    Connect/HDFC/Paytm Money "apps" are each registered under one specific broker login (e.g.
@@ -1171,7 +1186,7 @@ this one).
 3. **Sync modules** (`portfolio/`) — `kite_sync.py` and `paytm_sync.py` expose the identical
    `get_login_url(api_key)` / `exchange_request_token(api_key, api_secret, request_token)` /
    `sync_account(engine, account_id, access_token, api_key)` interface (both are real
-   browser-redirect OAuth-style logins), so `routes/portfolio_aggregator.py::_broker_sync_module(broker)`
+   browser-redirect OAuth-style logins), so `routes/broker_sync.py::_broker_sync_module(broker)`
    dispatches on `broker` with a plain `if/elif` over three known module imports rather than any
    string-built import path. **`hdfc_sync.py` does not share that interface** — HDFC Securities'
    real API has no browser redirect at all (confirmed via a real, working set of curl commands,
@@ -1184,7 +1199,7 @@ this one).
    `hdfc_sync.py`'s own module docstring for the full request/response shape of each step.
    `sync_account(engine, account_id, access_token, api_key)` is still the one function every
    module (including `hdfc_sync.py`) exposes identically — that's the interface
-   `routes/portfolio_aggregator.py`'s `POST /broker/{broker}/sync` dispatches through; only the
+   `routes/broker_sync.py`'s `POST /broker/{broker}/sync` dispatches through; only the
    *login* half diverges for HDFC. `sync_account()` wraps its holdings + trades writes in **one**
    `engine.begin()` transaction —
    an insert failing partway through rolls back everything from that sync attempt, never a mix of
@@ -1218,7 +1233,7 @@ this one).
      an entire portfolio on that ambiguity would be worse than the stale-ghost-holding problem
      this exists to fix; it only reconciles when at least one real holding was actually returned.
    - **Concurrent syncs for the same connection are locked out**, not just DB-constraint-protected
-     — `routes/portfolio_aggregator.py`'s `POST .../sync` takes `core/rate_limiter.py`'s
+     — `routes/broker_sync.py`'s `POST .../sync` takes `core/rate_limiter.py`'s
      `try_acquire_lock("broker_sync:{account_id}:{broker}", 300)` before calling `sync_account()`
      (same `try_acquire_lock`/`release_lock` pattern the SME/screener/market-picks refresh
      endpoints already use for the identical "don't let two runs of the same thing overlap"
@@ -1295,8 +1310,9 @@ this one).
    convention applies. Zerodha's own module carries the equivalent disclosure for the same reason
    (no outbound internet to kite.trade in this sandbox either) — its exact response field names
    are taken from Kite's own published docs.
-4. **API** (`routes/portfolio_aggregator.py`, still under the `/api/portfolio` prefix) —
-   `POST /broker/{broker}/login-url`, `POST /broker/{broker}/connect`, `POST /broker/{broker}/sync`,
+4. **API** (`routes/broker_sync.py`, under the same `/api/portfolio` prefix as
+   `routes/portfolio_aggregator.py` — see "Route module extraction" above for why they're
+   split) — `POST /broker/{broker}/login-url`, `POST /broker/{broker}/connect`, `POST /broker/{broker}/sync`,
    `GET /broker/connections?profile_id=`. `login-url` is two modes in one endpoint since they
    share almost everything: supplying both `api_key` and `api_secret` in the body registers (or
    replaces) that connection's credentials — and clears any previously-obtained
@@ -1974,15 +1990,17 @@ logging of their own — a silent layout change there degrades with no log line 
    real user's request degraded, unlike a scheduled batch job where a single bad run is
    expected background noise. Never raises. `get_error_count(scraper_name)` is a non-mutating
    read for tests and a future ops surface.
-2. Wired into 6 call sites across the 4 standalone endpoints named in the review — each now
-   distinguishes a genuine `{"error": ...}` tool-function result from a legitimate empty one
-   before deciding whether to count/log: `GET /api/peers/{symbol}` (`"peers"`),
-   `GET /api/financials/{symbol}` (`"financials"`), `GET /api/insider-activity/{symbol}`'s two
-   independent sub-fetches (`"insider_trades"`, `"bulk_block_deals"`), and
-   `GET /api/street-consensus/{symbol}`'s two independent sub-fetches
-   (`"trendlyne_articles"`, `"trendlyne_numeric_consensus"`). A legitimate empty result (no
-   `"error"` key) never touches this module — same "don't manufacture noise from the expected
-   common case" instinct `telemetry/source_health.py` already applies.
+2. Wired into 7 call sites across the 4 standalone endpoints named in the review, plus
+   `GET /api/shareholding-detail/{symbol}` (added afterward, following the exact same
+   convention) — each now distinguishes a genuine `{"error": ...}` tool-function result from a
+   legitimate empty one before deciding whether to count/log: `GET /api/peers/{symbol}`
+   (`"peers"`), `GET /api/financials/{symbol}` (`"financials"`),
+   `GET /api/shareholding-detail/{symbol}` (`"shareholding_detail"`),
+   `GET /api/insider-activity/{symbol}`'s two independent sub-fetches (`"insider_trades"`,
+   `"bulk_block_deals"`), and `GET /api/street-consensus/{symbol}`'s two independent
+   sub-fetches (`"trendlyne_articles"`, `"trendlyne_numeric_consensus"`). A legitimate empty
+   result (no `"error"` key) never touches this module — same "don't manufacture noise from
+   the expected common case" instinct `telemetry/source_health.py` already applies.
 3. **Deliberately not a full observability platform** — this is a grep-able counter file plus
    a log line, not a metrics dashboard, alerting integration, or a new `/api/*` status
    endpoint. Consistent with this codebase's other disclosed "first increment" scope calls
@@ -2338,44 +2356,84 @@ broker-statement/CSV import, tracked separately.
 ### Route module extraction (`routes/`)
 
 `api.py` had grown to ~2900 lines with every endpoint defined inline — a maintainability
-gap a deep engineering/CTO-lens review called out directly. Watchlist and Positions were
-the first (and, as of this pass, only) two domains split out, chosen because they're the
-most duplicated: 8 endpoints total, each repeating the exact same rate-limit → 503-if-no-
-`DATABASE_URL` → `run_in_executor` → sanitize-error wrapper.
+gap a deep engineering/CTO-lens review called out directly. Watchlist, Positions, and the
+Portfolio Aggregator (see its own section below) are the three domains split out so far,
+chosen because Watchlist/Positions were the most duplicated (8 endpoints total, each
+repeating the exact same rate-limit → 503-if-no-`DATABASE_URL` → `run_in_executor` →
+sanitize-error wrapper) and the Portfolio Aggregator was large enough on its own (~20
+endpoints) to warrant its own module from the start.
 
-1. `routes/watchlist.py` and `routes/positions.py` are `APIRouter` modules, registered via
-   `app.include_router(...)` in `api.py` (placed after the shared helpers they depend on —
-   `_get_db_engine`, `_rate_limit`, `_bearer_token_from_request`, `LOGGER`, `log_event` —
-   are already defined). Each still owns its own routes exactly as before the split — this
-   is a file reorganization, not a behavior or URL change.
-2. Both modules import `api` itself (`import api`), not `from api import X` — reaching
-   shared state via dotted access (`api._get_db_engine()`) rather than a copied reference.
-   This avoids a circular-import ordering problem (`api.py` imports these routers, so they
-   can't import `api.py`'s names at their own top-level before those names exist yet) and
-   preserves this app's existing `unittest.mock.patch("api._get_db_engine", ...)` test
-   convention — a patch only takes effect on code that looks the name up through the module
-   object at call time, not on a name a `from api import X` already copied at import time.
+1. `routes/watchlist.py`, `routes/positions.py`, and `routes/portfolio_aggregator.py` are
+   `APIRouter` modules, registered via `app.include_router(...)` in `api.py`. Each still
+   owns its own routes exactly as before any split — this is a file reorganization, not a
+   behavior or URL change.
+2. All three import their shared primitives (`_get_db_engine`, `_bearer_token_from_request`,
+   `LOGGER`, `log_event`, and `_rate_limit`/`_TICKER_RE` where needed) directly from
+   `routes/_shared.py` — `from routes._shared import (...)`, not `import api` +
+   dotted-attribute access. This used to be `import api` for all three (the router modules
+   reaching into `api.py` itself, since `api.py` originally defined these primitives before
+   `app.include_router(...)` called them near the bottom of that file) — an ordering
+   coincidence, not a real dependency direction, since `routes/_shared.py` has no dependency
+   on `api.py` at all. Fixed one module at a time (`watchlist.py` first, then `api.py` itself,
+   then `positions.py`/`portfolio_aggregator.py`); each router's own module docstring explains
+   why. `unittest.mock.patch(...)` test targets moved to match — e.g.
+   `patch("routes.positions._get_db_engine", ...)`, not `patch("api._get_db_engine", ...)`,
+   for anything routed through `positions.py`. `_fetch_live_price_sync()` (the one function
+   `get_portfolio_concentration()` used to reach into `api` for via a local `import api`) now
+   lives in `_shared.py` too, since it has no dependency on `api.py`'s own app/state — `api.py`
+   itself now imports it back from `_shared.py`, the same direction every other primitive here
+   already goes.
 3. `routes/_shared.py::run_owned_db_call(request, rate_limit_name, max_calls, sync_fn,
    event_prefix)` is the extracted wrapper itself — the repeated rate-limit/DATABASE_URL-
-   check/executor/sanitize-error shape both domains' 6 CRUD endpoints (of 8 total; the two
-   list-shaped calendar/read-only paths that don't fit this exact shape stay inline) now
-   call instead of re-implementing.
+   check/executor/sanitize-error shape most of these domains' CRUD endpoints now call
+   instead of re-implementing (a few list-shaped calendar/read-only paths that don't fit
+   this exact shape stay inline). `routes/_shared.py::OwnedRequest` is the equivalent
+   dedup on the request-body side — a Pydantic base carrying `client_id: str | None =
+   None`, the field every anonymous-identity write-endpoint body needs (see "Watchlist
+   flow" below). Originally a `portfolio_aggregator.py`-local class; moved here once
+   `watchlist.py`'s `WatchlistAddRequest` and `positions.py`'s `PositionAddRequest`/
+   `PositionSharesRequest` needed the same field instead of each hand-declaring it —
+   the two multipart-upload endpoints in `portfolio_aggregator.py` (`import-cas`,
+   `import-csv`) still declare `client_id: str | None = Form(None)` by hand rather than
+   inheriting it, since a FastAPI Form-model's fields stop flattening as individual form
+   fields once an `UploadFile = File(...)` parameter sits in the same endpoint — a real
+   structural limit, not an oversight.
 4. `routes/watchlist.py` owns the ownership-resolution primitives (`resolve_owner()`,
    `owner_column()`, `WatchlistOwner`, `_VALID_EXCHANGES` — renamed from `api.py`'s original
-   `_resolve_watchlist_owner`/`_owner_column`) since positions.py imports and reuses them
-   directly rather than duplicating — nothing about "which column owns this request's rows"
-   is watchlist-specific, but watchlist was the first domain to need it.
+   `_resolve_watchlist_owner`/`_owner_column`) since positions.py and portfolio_aggregator.py
+   both import and reuse them directly rather than duplicating — nothing about "which column
+   owns this request's rows" is watchlist-specific, but watchlist was the first domain to
+   need it.
 5. `api.py` re-exports `_MAX_WATCHLIST_ITEMS_PER_CLIENT` and `_MAX_POSITIONS_PER_CLIENT`
    (`from routes.watchlist import _MAX_WATCHLIST_ITEMS_PER_CLIENT`, etc.) purely for backward
    compatibility — `tests/test_api.py` reads both as plain values (e.g.
    `count_result.scalar.return_value = api._MAX_POSITIONS_PER_CLIENT`), not just as patch
    targets, so moving the constants without a re-export would have silently broken that
    existing test code.
-6. **Deliberately scoped to these two domains only** — splitting the remaining ~25 endpoints
+6. **Deliberately scoped to these three domains only** — splitting the remaining endpoints
    (SME signals, screener, market picks, auth, API keys, financials, etc.) into their own
    `routes/*.py` modules is future work, the same disclosed "first increment, not the full
    file" scope call this codebase already makes elsewhere (e.g. `tests_live/`'s own coverage
    note). `api.py` is smaller after this pass, not fully decomposed.
+7. **`routes/broker_sync.py`** is the next increment of the same pattern, one level deeper —
+   the Portfolio Aggregator's own broker login/connect/sync endpoints (Zerodha/HDFC
+   Securities/Paytm Money) had grown to outweigh its CRUD half (profiles/accounts/assets/
+   valuations/net-worth/CAS-CSV-import), which stayed in `routes/portfolio_aggregator.py`.
+   Same registration shape (own `router = APIRouter(prefix="/api/portfolio")`, a second
+   `app.include_router(...)` call in `api.py`, same prefix as its sibling, distinct
+   sub-paths). `broker_sync.py` imports `_owned_account_id`/`_owned_profile_id` from
+   `routes/portfolio_aggregator.py` rather than duplicating them or promoting them to
+   `routes/_shared.py` — they're Portfolio-Aggregator-schema-specific (profiles → accounts →
+   assets ownership checks), not generic across every router the way `_shared.py`'s own
+   primitives are, so this follows point 4's precedent exactly: the domain that first needed
+   a primitive keeps it, a second domain of the same feature imports it rather than getting
+   its own copy. `unittest.mock.patch(...)` test targets moved to match, same as point 2 —
+   `tests/test_broker_routes.py` and the one broker-touching test in
+   `tests/test_portfolio_aggregator.py` (`test_other_owners_profile_account_and_asset_are_all_404`,
+   which also exercises `GET /broker/connections`) now patch `routes.broker_sync.resolve_owner`
+   *in addition to* `routes.portfolio_aggregator.resolve_owner` — both are real, independent
+   references to the same underlying `routes.watchlist.resolve_owner` function, so a caller
+   that only patches one leaves the other module's calls unmocked.
 
 ### Dashboard component extraction
 
@@ -2405,7 +2463,7 @@ file.
    `useStreetConsensus`, `useVerdictHistory`) stayed co-located with the one card that calls it,
    matching how they already read in the original file (defined immediately above their single
    consumer) rather than moving into a separate hooks directory.
-4. `results-dashboard.tsx` itself is now 613 lines — the main `ResultsDashboard` component plus
+4. `results-dashboard.tsx` itself is now ~660 lines — the main `ResultsDashboard` component plus
    the handful of helpers genuinely specific to its own JSX (`formatScalar`/`formatFactor` for
    the bull/bear factor lists, `formatNewsHighlights`, `summaryBullets`, and the
    `REC_CONFIG`/`CONF_COLOR`/`SENT_COLOR` tone tables) that no other card needs.
@@ -2441,7 +2499,7 @@ own, because nothing enforced a narrower blast radius).
    a genuinely empty database and verified (against a real local Postgres instance) to both
    `alembic upgrade head` cleanly onto nothing and `alembic downgrade base` cleanly back to
    nothing, producing exactly the same 11 tables, indexes, and constraints
-   `db/schema.sql`/`metadata.create_all()` already produce. **There are 9 revisions today** —
+   `db/schema.sql`/`metadata.create_all()` already produce. **There are 10 revisions today** —
    `0001_baseline_schema`, then `684c8a31e7e0_add_eod_price_store_and_corporate_` (the
    `securities`/`prices_daily`/`mf_nav_daily`/`corporate_actions` tables) and
    `8613aafc2d9d_add_portfolio_aggregator_foundation_` (`profiles`/`accounts`/`assets`/
@@ -2454,7 +2512,10 @@ own, because nothing enforced a narrower blast radius).
    `.last_sync_summary`/`.last_sync_error` (backs the background-sync poll, same section), also no
    new table; `976659233671` adds `broker_connections.pending_token_id` (HDFC Securities' real,
    non-redirect login needs a place to hold its `token_id` across steps — same section), also no
-   new table. Every revision after `0001` was autogenerated and round-trip-verified (upgrade →
+   new table; `ec7850b73d2f` adds `profiles.client_id`/`profiles.user_id` +
+   `ck_profiles_exactly_one_owner` (real ownership on the Portfolio Aggregator's root table,
+   replacing its original no-auth design — see "Portfolio aggregator" below), also no new table.
+   Every revision after `0001` was autogenerated and round-trip-verified (upgrade →
    `alembic check` clean → downgrade → upgrade) against an isolated scratch Postgres, the same way
    `0001` was.
 3. **A deployment predating Alembic must `alembic stamp 0001` and THEN
@@ -2669,7 +2730,32 @@ anonymous `client_id` row has no email to notify and is excluded at the query le
    `pipelines/market_picks_pipeline.py`'s `_MAX_STOCKS`. `_MAX_ALERT_SYMBOLS` (50) caps how many distinct
    symbols one run analyses; symbols beyond the cap are skipped for that day (logged, not
    silently dropped — no-silent-caps convention) rather than letting the bound grow unbounded.
-5. `core/email_sender.py` gained a second message builder/sender pair —
+5. **Same-day dedup, so a re-run never resends a digest.** `save_snapshot()` upserts *today's*
+   `verdict_history` row (point 2), so a second run on the same day — a `workflow_dispatch` retry,
+   a manual `--force` rerun while `cache.is_fresh()` was still true — used to recompute the
+   identical "yesterday → today" diff and resend the exact same digest. `run()` now atomically
+   *claims* each `(user_id, symbol, kind)` key against a `watchlist_alerts_sent` namespace in
+   `core/state_store.py` (keyed by date) via `_claim_alert_keys()` — a `state_store.mutate()` call
+   that returns only the subset of keys NOT already claimed by another run — **before** sending,
+   not after. An earlier version of this guard checked "already sent" up front and only recorded
+   the newly-sent keys afterward; an own-adversarial-review pass caught that this ordering can't
+   actually prevent two genuinely concurrent runs from both reading "not yet sent" and both
+   dispatching the same email before either recorded it — claiming first closes that window, since
+   at most one of two racing `mutate()` calls can ever see a given key as unclaimed. A user whose
+   digest included some already-claimed and some newly-claimed alerts only gets the new ones; a
+   user with nothing new gets no email at all. If `send_watchlist_alert_email()` itself then fails
+   (SMTP down), the just-claimed keys are released (`_release_alert_keys()`) so a transient failure
+   doesn't permanently look like "already sent" and silently drop a real alert forever — pruned to
+   3 days' retention each run regardless, since only "today" is ever read.
+   `.github/workflows/watchlist-alerts-cron.yml` also gained a `concurrency` guard to stop two runs
+   from overlapping in the first place — belt and suspenders, not either/or. `_claim_alert_keys()`
+   also fails closed on a storage error: it returns `claimed` (populated as a side effect of the
+   callback `state_store.mutate()` runs) only when `mutate()` itself actually returns non-`None` —
+   a second adversarial-review pass caught an earlier version returning that side-effect set
+   unconditionally, which meant a `mutate()` transaction failure *after* the callback ran (a
+   connection blip) would still report those keys as claimed even though the claim was never
+   actually persisted, letting a later run re-send them for real.
+6. `core/email_sender.py` gained a second message builder/sender pair —
    `send_watchlist_alert_email(to_email, alerts)` — alongside the existing magic-link one; both
    now share one `_send_via_smtp()` helper (extracted, not duplicated) for the connect/STARTTLS/
    login/send sequence. One digest email per user per run lists every alert (recommendation
@@ -2678,7 +2764,7 @@ anonymous `client_id` row has no email to notify and is excluded at the query le
    branches on each alert's `kind` to render the right line shape. Same best-effort convention
    as `send_magic_link_email`: returns `True`/`False`, never raises, and a missing `SMTP_HOST`
    just means the email never arrives.
-6. **Daily auto-run**: `.github/workflows/watchlist-alerts-cron.yml` runs at 13:30 UTC (19:00
+7. **Daily auto-run**: `.github/workflows/watchlist-alerts-cron.yml` runs at 13:30 UTC (19:00
    IST) on weekdays — after `sme-cron.yml` (13:00 UTC) so that pipeline's own writes have
    settled, and well after NSE's 15:30 IST close. Requires the same `DATABASE_URL` secret as
    `sme-cron.yml`, plus whichever LLM provider key and `SMTP_*` secrets the deployment already
@@ -2777,6 +2863,10 @@ session-cookie identity the frontend itself uses. Three independent pieces:
    `last_used_at`) and applies a per-*user*, **tier-scaled** rate limit (`api_v1:{user_id}`, a
    sliding one-hour window) rather than per-IP like the internal endpoints — a legitimate
    integration may run from a shared or rotating IP, so IP-keying would be the wrong bucket here.
+   That per-user limit only exists once a key has already resolved to a real `user_id` via a DB
+   round trip, though — `_require_api_key_user()` also runs a cheap per-IP `_rate_limit()` call
+   *before* that lookup, so a stream of invalid/garbage `X-API-Key` values is bounded too, rather
+   than each one costing an unbounded DB round trip with no limiter of any kind applying to it.
    More `/api/v1/*` routes can follow the same wrapper-around-an-existing-handler pattern later;
    this PR intentionally ships one real endpoint rather than a speculative surface no caller has
    asked for yet.
@@ -2843,7 +2933,9 @@ so both call sites stay in sync) — one independent `EventSource` per symbol, s
 columns fetch/progress/error independently of each other.
 
 Capped at 2 symbols: `ResultsDashboard`'s internal grid breakpoints (`lg:`, `md:`, `sm:`)
-are viewport-relative, not container-relative (no container-query plugin installed), so a
+are still viewport-relative, not container-relative — `@tailwindcss/container-queries` is
+installed and `ResultsDashboard`'s root carries a `@container` class, but no `@lg:`/`@md:`-style
+container-query variant is actually used on these breakpoints yet — so a
 column narrower than the component's own breakpoint would render its internal two-block
 layout compressed rather than actually reflowing. `/compare`'s own column layout only
 switches from stacked to side-by-side at `2xl:` (1536px) specifically so that by the time
@@ -3002,7 +3094,7 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
 - **Trade levels are deterministic in market picks** (entry/target/stop computed from signal score and 52w range). Do not add LLM-driven price generation — it produces null values when context overflows.
 - **Extraction cache** (`output/_extract_cache/`) avoids re-calling the LLM for the same source articles within 6 h. The cache key is content-aware (title + URL + summary hash), so edits or new articles get a fresh key automatically. Expired files aren't just ignored on read — `_prune_extract_cache()` deletes them once per pipeline run, or this directory grows by one file per (source, article-batch) forever.
 - **Source credibility weights** in `_SOURCE_CREDIBILITY` determine how much each source contributes to confidence scoring. Adding a new source requires adding a credibility entry; missing sources default to 0.50.
-- **HDFC Securities sources** live in `tools/hdfc_sec_agent.py` and are merged into `SOURCES` / `SCRAPER_FNS` at import time in `tools/market_picks_tools.py`. Adding a new brokerage source follows the same pattern: define scrapers in a separate module, export `*_SOURCES` and `*_SCRAPERS`, merge in `market_picks_tools.py`.
+- **HDFC Securities sources** live in `tools/hdfc_sec_agent.py` and are merged into `SOURCES` at import time in `tools/market_picks_tools.py`, which derives `SCRAPER_FNS` from `SOURCES` (each tuple's third element is the scraper function itself) rather than hand-syncing a second dict. Adding a new brokerage source follows the same pattern: define scrapers in a separate module, export `*_SOURCES` (name/type/fn tuples), concatenate into `SOURCES` in `market_picks_tools.py`.
 - **Rate limiting** is a sliding window (`api.py`'s `_rate_limit()` → `rate_limiter.is_allowed()`), applied only to expensive/abusable routes: `/api/analyse/{symbol}` (20 req / 5 min per IP), `/api/market-picks?force=true` (3 req / hour per IP), `/api/sme-signals/refresh` (3 req / hour per IP, on top of the existing single-run guard). Backed by Redis (shared across workers) when `REDIS_URL` is set, an in-memory per-process counter otherwise — see "Shared-state rate limiting" below. The "per IP" is `api.py::_client_ip()`, not raw `request.client.host` — see "Trusted client IP for per-IP rate limiting" below for why that distinction matters given every request arrives via the Next.js proxy routes.
 - **The `market_picks_history` snapshot schema** (`core/state_store.py`) (`symbol`, `confidence`, `effective_signal`, `mention_count`, `current_price`, `recommendation`) is read by two independent consumers: the in-pipeline `_load_trend()` (confidence trend) and `GET /api/market-picks/history` (price track record, `/market-picks/history` page). Snapshots written before `current_price`/`recommendation` were added won't have them — the history endpoint handles this by returning `change_pct: null` rather than guessing. Keep both consumers in mind if the snapshot shape changes.
 - **`GET /api/market-picks/history`** also computes an overall `win_rate` (share of tracked picks with `change_pct > 0`), a `tier_stats` breakdown keyed by `recommendation_then` (count/avg change/win rate per BUY/WATCHLIST/HOLD/SELL), and per-symbol `nifty_change_pct`/`alpha_pct` benchmarked against `^NSEI` over the same `first_seen` → `last_seen` window (`avg_alpha_pct` at the top level). The Nifty series is fetched once per request-range via `yfinance.Ticker("^NSEI").history()` — not once per snapshot date — and cached through `core/cache.py` using `"NSEI"` as a pseudo-symbol (`index_history`, 24 h TTL, re-fetched whenever a new snapshot date widens the needed range). A closed-market snapshot date (weekend/holiday) falls back to the nearest earlier trading day's close, never a later one. A yfinance outage degrades to `null` alpha fields, not a failed request.

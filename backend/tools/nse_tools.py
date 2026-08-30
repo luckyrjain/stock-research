@@ -89,8 +89,21 @@ def _is_valid_quote(info: dict) -> bool:
 
 def _build_quote_payload(sym: str, exchange: str, info: dict) -> dict:
     price = info.get("currentPrice") or info.get("regularMarketPrice")
-    prev_close = info.get("previousClose") or price
-    change_pct = round((price - prev_close) / prev_close * 100, 2) if prev_close else 0.0
+    prev_close_raw = info.get("previousClose")
+    prev_close = prev_close_raw or price
+    # change_pct is None (never a fabricated 0.0 "flat today") when
+    # yfinance's info has no previousClose at all -- same "never invent"
+    # convention as api._fetch_live_price_sync's identical guard. A missing
+    # previousClose and a genuine flat day used to both produce 0.0 here,
+    # which signals/volume.py's volume_signal() then read as a real
+    # "not a down day" -- silently resolving a real data gap toward
+    # accumulation instead of leaving the direction unknown. previous_close
+    # (below) still falls back to price for display purposes -- only the
+    # derived change_pct, which the signal engine acts on, is affected.
+    change_pct = (
+        round((price - prev_close_raw) / prev_close_raw * 100, 2)
+        if prev_close_raw else None
+    )
     market_cap = info.get("marketCap")
     company_name = (
         info.get("longName")
@@ -181,19 +194,13 @@ def _screener_fallback_quote(sym: str) -> dict | None:
     track). Supplemented with stockanalysis.com's 52-week range/EPS/volume where
     available.
 
-    Disclosed limitation: Screener's top-ratios widget has no intraday
-    change%, so `change_pct` is set to 0.0 here rather than the more
-    correct `None` — matching this same file's pre-existing
-    `_build_quote_payload()`, which has the identical "no previous close ->
-    0.0" fallback for the primary yfinance path (line ~93). Making this
-    field genuinely nullable would mean widening `change_pct` to
-    `number | null` in frontend/types/index.ts and updating several
-    consumer sites (dashboard-primitives.tsx, market-picks-dashboard.tsx,
-    watchlist/page.tsx) that currently treat it as always-a-number — a
-    real fix, but a wider one than this fallback path alone justifies.
-    Tracked here rather than silently left as a "never invent" violation:
-    a stock priced only through this fallback will show as "flat today"
-    even though that's genuinely unknown, not observed."""
+    Screener's top-ratios widget has no intraday change%, so `change_pct` is
+    `None` here (never a fabricated 0.0 "flat today") — same "never invent"
+    convention as `_build_quote_payload()`'s own identical fallback for the
+    primary yfinance path (line ~93). `frontend/types/index.ts`'s
+    `StockInfo.change_pct` is `number | null` and its one real consumer
+    (`ExchangeTable` in dashboard-primitives.tsx) already coalesces a
+    missing value to 0 for display, so this needs no further frontend work."""
     try:
         from tools.screener_tools import _clean, _fetch_soup
         soup = _fetch_soup(sym)
@@ -223,7 +230,7 @@ def _screener_fallback_quote(sym: str) -> dict | None:
             "company_name": h1.get_text(strip=True) if h1 else "",
             "current_price": price,
             "previous_close": None,
-            "change_pct": 0.0,
+            "change_pct": None,
             "volume": None,
             "avg_volume_10d": None,
             "market_cap_cr": _num(ratios.get("Market Cap")),

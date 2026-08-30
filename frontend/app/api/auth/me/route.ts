@@ -1,4 +1,4 @@
-import { getSessionTokenFromRequest } from '@/lib/auth-cookie';
+import { authHeaders, getSessionTokenFromRequest } from '@/lib/auth-cookie';
 import { clientIpHeaders } from '@/lib/proxy-headers';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
@@ -19,7 +19,7 @@ export async function GET(req: Request) {
   let upstream: Response;
   try {
     upstream = await fetch(`${API}/api/auth/me`, {
-      headers: { ...clientIpHeaders(req), Authorization: `Bearer ${token}` },
+      headers: { ...clientIpHeaders(req), ...authHeaders(req) },
       cache: 'no-store',
     });
   } catch {

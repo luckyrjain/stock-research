@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import type { InsiderActivity } from '@/types';
 import InfoTooltip from './info-tooltip';
 import { Card } from './dashboard-primitives';
 import { fmtInr } from '@/lib/format';
+import { useSymbolResource } from '@/lib/use-symbol-resource';
 
 function fmtActivityDate(dateIso: string | null, fallback: string): string {
   if (!dateIso) return fallback;
@@ -33,19 +33,7 @@ function TagBadge({ children }: { children: React.ReactNode }) {
 }
 
 function useInsiderActivity(symbol: string): InsiderActivity | null {
-  const [activity, setActivity] = useState<InsiderActivity | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setActivity(null);
-    fetch(`/api/insider-activity/${encodeURIComponent(symbol)}`)
-      .then(res => (res.ok ? res.json() : null))
-      .then((data: InsiderActivity | null) => { if (!cancelled) setActivity(data); })
-      .catch(() => { if (!cancelled) setActivity(null); });
-    return () => { cancelled = true; };
-  }, [symbol]);
-
-  return activity;
+  return useSymbolResource<InsiderActivity>(symbol, 'insider-activity');
 }
 
 // Promoter/director insider trades and institutional bulk/block deals — the

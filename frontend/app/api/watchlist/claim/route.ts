@@ -1,4 +1,4 @@
-import { getSessionTokenFromRequest } from '@/lib/auth-cookie';
+import { authHeaders } from '@/lib/auth-cookie';
 import { clientIpHeaders } from '@/lib/proxy-headers';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
@@ -15,7 +15,6 @@ function unavailable() {
 // endpoint's only caller already knows a session exists, since it only
 // fires right after sign-in completes) and returns 401 without it.
 export async function POST(req: Request) {
-  const token = getSessionTokenFromRequest(req);
   const body = await req.text();
 
   let upstream: Response;
@@ -25,7 +24,7 @@ export async function POST(req: Request) {
       headers: {
         'Content-Type': 'application/json',
         ...clientIpHeaders(req),
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...authHeaders(req),
       },
       body,
       cache: 'no-store',

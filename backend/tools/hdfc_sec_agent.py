@@ -8,34 +8,11 @@ Follows the same conventions as market_picks_tools.py:
 
 from datetime import datetime, timezone
 
-from gnews import GNews
-
-import tools._gnews_timeout  # noqa: F401 — sets a socket default timeout for GNews calls below
+from tools._gnews_client import fetch_gnews
 
 
 def _gnews(query: str, max_results: int = 10) -> list[dict]:
-    try:
-        gn = GNews(language="en", country="IN", period="7d", max_results=max_results)
-        arts = gn.get_news(query)
-        results = []
-        for a in arts:
-            pub_iso = None
-            try:
-                raw = a.get("published date") or ""
-                if raw:
-                    from email.utils import parsedate_to_datetime
-                    pub_iso = parsedate_to_datetime(raw).isoformat()
-            except Exception:
-                pass
-            results.append({
-                "title":        a.get("title", ""),
-                "summary":      (a.get("description") or "")[:400],
-                "url":          a.get("url", ""),
-                "published_at": pub_iso,
-            })
-        return results
-    except Exception:
-        return []
+    return fetch_gnews(query, period="7d", max_results=max_results, summary_len=400)
 
 
 def fetch_hdfc_sec_fundamental() -> dict:
@@ -73,13 +50,9 @@ def fetch_hdfc_sec_technical() -> dict:
     return {"source": "HDFC Securities Technical", "type": "brokerage", "articles": arts}
 
 
-# Registration structures — merged into SOURCES / SCRAPER_FNS in market_picks_tools.py
+# Merged into SOURCES in market_picks_tools.py, which derives SCRAPER_FNS
+# from the merged list — no separate *_SCRAPERS dict to hand-sync here.
 HDFC_SEC_SOURCES = [
-    ("HDFC Securities Fundamental", "brokerage", "fetch_hdfc_sec_fundamental"),
-    ("HDFC Securities Technical",   "brokerage", "fetch_hdfc_sec_technical"),
+    ("HDFC Securities Fundamental", "brokerage", fetch_hdfc_sec_fundamental),
+    ("HDFC Securities Technical",   "brokerage", fetch_hdfc_sec_technical),
 ]
-
-HDFC_SEC_SCRAPERS: dict = {
-    "HDFC Securities Fundamental": fetch_hdfc_sec_fundamental,
-    "HDFC Securities Technical":   fetch_hdfc_sec_technical,
-}

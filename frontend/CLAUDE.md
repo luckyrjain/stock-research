@@ -87,6 +87,7 @@ All UI work must follow `design.md` (AlphaPulse Design System) — the single so
 |---|---|---|
 | `API_URL` | `http://localhost:8000` | FastAPI backend URL (set in Next.js env) |
 | `TRUSTED_PROXY_SECRET` | unset | Same value as the backend's env var of the same name (see `backend/CLAUDE.md`'s "Trusted client IP for per-IP rate limiting"). Server-only (never exposed to the browser) |
+| `PORTFOLIO_AGGREGATOR_ENABLED` | `true` | Set to `"false"` to 404 every `/api/portfolio/*` sub-path in `frontend/app/api/portfolio/[...path]/route.ts` — an operator-facing kill switch, independent of the backend's own ownership model, for a deployment that isn't meant to serve this feature |
 
 ---
 

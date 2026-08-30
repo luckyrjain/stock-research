@@ -264,10 +264,8 @@ def fetch_bulk_block_deals_for_symbol(symbol: str) -> dict:
     return {"symbol": sym, "deals": deals}
 
 
+# Merged into SOURCES in market_picks_tools.py, which derives SCRAPER_FNS
+# from the merged list — no separate *_SCRAPERS dict to hand-sync here.
 NSE_BULK_SOURCES = [
-    ("NSE Bulk/Block Deals", "brokerage", "fetch_nse_bulk_block_deals"),
+    ("NSE Bulk/Block Deals", "brokerage", fetch_nse_bulk_block_deals),
 ]
-
-NSE_BULK_SCRAPERS: dict = {
-    "NSE Bulk/Block Deals": fetch_nse_bulk_block_deals,
-}

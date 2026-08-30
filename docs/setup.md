@@ -121,7 +121,7 @@ section for the full narrative on each flow.
 | Screener | `GET /api/screener`, `POST /api/screener/refresh` | NIFTY 500 custom screener (PostgreSQL-backed) |
 | Watchlist | `GET/POST /api/watchlist`, `DELETE /api/watchlist/{symbol}`, `GET /api/watchlist/calendar`, `POST /api/watchlist/claim` | Cross-mode watchlist; corporate-action calendar roll-up; claim-anonymous-rows-onto-account |
 | Positions | `GET/POST /api/positions`, `PATCH/DELETE /api/positions/{symbol}`, `POST /api/positions/claim`, `GET /api/portfolio/concentration` | "I bought this" tracking, same ownership shape as Watchlist; the concentration check lives in `routes/positions.py` despite its `/api/portfolio` prefix |
-| Portfolio Aggregator | `GET/POST /api/portfolio/profiles`, `GET/POST/PATCH/DELETE /api/portfolio/accounts[/{id}]`, `.../assets[/{id}]`, `POST .../assets/{id}/valuations`, `GET .../networth`, `POST .../refresh-valuations`, `GET .../xirr`, `POST .../import-cas`, `POST .../import-csv[/preview]`, `POST .../broker/{broker}/login-url`, `POST .../broker/{broker}/connect`, `POST .../broker/{broker}/sync`, `GET .../broker/connections` | 21 routes in `routes/portfolio_aggregator.py` — the separate net-worth tracker, no auth. See "Portfolio Aggregator" below |
+| Portfolio Aggregator | `GET/POST /api/portfolio/profiles`, `GET/POST/PATCH/DELETE /api/portfolio/accounts[/{id}]`, `.../assets[/{id}]`, `POST .../assets/{id}/valuations`, `GET .../networth`, `POST .../refresh-valuations`, `GET .../xirr`, `POST .../import-cas`, `POST .../import-csv[/preview]`, `POST .../broker/{broker}/login-url`, `POST .../broker/{broker}/connect`, `POST .../broker/{broker}/sync`, `GET .../broker/connections`, `POST .../broker/hdfc_securities/login-start`, `POST .../broker/hdfc_securities/verify-otp` | 23 routes in `routes/portfolio_aggregator.py` — the separate net-worth tracker, owned via `client_id`/`user_id` same as Watchlist. See "Portfolio Aggregator" below |
 | Consolidated | `GET /api/consolidated/{symbol}` | Pure aggregation of the three modes' caches — no new fetching |
 | Auth | `POST /api/auth/request-link`, `GET /api/auth/verify`, `GET /api/auth/me`, `POST /api/auth/logout` | Magic-link account system |
 | API keys | `GET/POST /api/api-keys`, `DELETE /api/api-keys/{id}`, `GET /api/v1/consolidated/{symbol}` | Key management + usage dashboard; the one `/api/v1/*` externally-callable route |
@@ -370,8 +370,10 @@ step — no separate schedule needed for that.
 ## Portfolio Aggregator
 
 A **separate** personal net-worth tracker at `/portfolio-aggregator` — not the same feature as the
-`/portfolio` "I bought this" P&L page above; don't confuse the two when troubleshooting. No auth,
-no `client_id` — a bare profile picker (deliberate, personal-scale-tool decision). Requires
+`/portfolio` "I bought this" P&L page above; don't confuse the two when troubleshooting. Owned via
+the same `client_id`/`user_id` shape as Watchlist/Positions (still no separate login — a signed-in
+session's `user_id` or an anonymous browser's `client_id`, same identity every other feature
+already resolves), still a personal-scale-tool decision, not a multi-tenant one. Requires
 `DATABASE_URL` for `profiles`/`accounts`/`assets`/`holdings`/`valuations`/`transactions` (created
 by the same Alembic step as everything else above).
 

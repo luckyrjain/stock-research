@@ -21,9 +21,24 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
   const validate = useCallback(async (sym: string, exchange?: string) => {
     if (!sym) { setStatus('idle'); setResult(null); validSymbol.current = null; return; }
     setStatus('loading');
+    // Cleared up front, not just in the 'invalid'/'warn' branches below —
+    // selectSuggestion() calls validate() directly without resetting this
+    // first (unlike handleChange()), so a stale symbol from a PRIOR
+    // successful validation could otherwise survive into the new 'error'
+    // branch below and still fire Enter-to-analyse on the wrong symbol.
+    validSymbol.current = null;
     try {
       const url = exchange ? `/api/validate/${sym}?exchange=${exchange}` : `/api/validate/${sym}`;
       const res  = await fetch(url);
+      if (!res.ok) {
+        // A non-2xx response (e.g. 503 when the backend is unreachable)
+        // still resolves fetch() normally rather than throwing — without
+        // this check it fell through to the same branches as a genuine
+        // "symbol not found" body, misreporting a backend outage as an
+        // invalid ticker instead of the distinct 'error' state below.
+        setStatus('error');
+        return;
+      }
       const data: ValidationResult = await res.json();
       setResult(data);
       if (data.valid) {
@@ -97,7 +112,7 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
           <input
             value={value}
             onChange={handleChange}
-            onKeyDown={e => e.key === 'Enter' && validSymbol.current && !disabled && handleAnalyse()}
+            onKeyDown={e => e.key === 'Enter' && status === 'valid' && validSymbol.current && !disabled && handleAnalyse()}
             disabled={disabled}
             placeholder="e.g. TCS, RELIANCE, INFY"
             maxLength={20}

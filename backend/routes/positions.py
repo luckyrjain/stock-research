@@ -5,14 +5,29 @@ client_id until the user signs in, then the account's user_id — so this
 module reuses that module's resolve_owner()/owner_column()/WatchlistOwner
 rather than redefining its own copy of identity-resolution logic that isn't
 actually watchlist-specific.
+
+Imports its shared primitives (`_get_db_engine`, `_bearer_token_from_request`,
+`_TICKER_RE`, `LOGGER`, `log_event`, `_fetch_live_price_sync`) from
+routes/_shared.py rather than reaching into `api` for them — see
+routes/watchlist.py's own docstring for why (a real dependency, not the
+ordering-coincidence `import api` used to be).
 """
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-import api
-from routes._shared import claim_anonymous_rows_sync, run_owned_db_call
+from routes._shared import (
+    LOGGER,
+    _TICKER_RE,
+    OwnedRequest,
+    _bearer_token_from_request,
+    _fetch_live_price_sync,
+    _get_db_engine,
+    claim_anonymous_rows_sync,
+    log_event,
+    run_owned_db_call,
+)
 from routes.watchlist import _CLIENT_ID_RE, _VALID_EXCHANGES, WatchlistOwner, owner_column, resolve_owner
 
 router = APIRouter()
@@ -20,8 +35,7 @@ router = APIRouter()
 _MAX_POSITIONS_PER_CLIENT = 200
 
 
-class PositionAddRequest(BaseModel):
-    client_id: str | None = None
+class PositionAddRequest(OwnedRequest):
     symbol: str
     company: str = Field(default="")
     exchange: str = Field(default="NSE")
@@ -30,8 +44,7 @@ class PositionAddRequest(BaseModel):
     stop_loss: float | None = None
 
 
-class PositionSharesRequest(BaseModel):
-    client_id: str | None = None
+class PositionSharesRequest(OwnedRequest):
     # None clears a previously-entered share count back to "unknown" — never
     # invented, never defaulted to 0/1.
     shares: float | None = None
@@ -41,7 +54,7 @@ def _positions_rows_sync(owner: WatchlistOwner) -> list[dict]:
     from sqlalchemy import text as _text
 
     column = owner_column(owner)
-    engine = api._get_db_engine()
+    engine = _get_db_engine()
     with engine.connect() as conn:
         rows = conn.execute(_text(f"""
             SELECT symbol, company, exchange,
@@ -56,7 +69,7 @@ def _positions_rows_sync(owner: WatchlistOwner) -> list[dict]:
 
 @router.get("/api/positions")
 async def get_positions(request: Request, client_id: str | None = Query(None)):
-    token = api._bearer_token_from_request(request)
+    token = _bearer_token_from_request(request)
 
     def _sync() -> dict:
         owner = resolve_owner(token, client_id)
@@ -68,12 +81,12 @@ async def get_positions(request: Request, client_id: str | None = Query(None)):
 @router.post("/api/positions")
 async def add_position(request: Request, body: PositionAddRequest):
     symbol = body.symbol.upper().strip()
-    if not api._TICKER_RE.match(symbol):
+    if not _TICKER_RE.match(symbol):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
     exchange = body.exchange.upper().strip()
     if exchange not in _VALID_EXCHANGES:
         raise HTTPException(status_code=422, detail="Invalid exchange.")
-    token = api._bearer_token_from_request(request)
+    token = _bearer_token_from_request(request)
 
     def _upsert_sync() -> dict:
         from sqlalchemy import text as _text
@@ -82,7 +95,7 @@ async def add_position(request: Request, body: PositionAddRequest):
         column = owner_column(owner)
         lock_key = f"positions:{owner[0]}:{owner[1]}"
 
-        engine = api._get_db_engine()
+        engine = _get_db_engine()
         with engine.begin() as conn:
             # Same advisory-lock-then-count pattern as watchlist's POST, scoped
             # to its own "positions:" lock-key namespace so it can never
@@ -127,11 +140,11 @@ async def update_position_shares(request: Request, symbol: str, body: PositionSh
     "I bought this" click-time) — a dedicated endpoint rather than folding
     into POST, since this never touches company/exchange/entry/target/stop."""
     sym = symbol.upper().strip()
-    if not api._TICKER_RE.match(sym):
+    if not _TICKER_RE.match(sym):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
     if body.shares is not None and body.shares < 0:
         raise HTTPException(status_code=422, detail="Shares cannot be negative.")
-    token = api._bearer_token_from_request(request)
+    token = _bearer_token_from_request(request)
 
     def _update_sync() -> dict:
         from sqlalchemy import text as _text
@@ -139,7 +152,7 @@ async def update_position_shares(request: Request, symbol: str, body: PositionSh
         owner = resolve_owner(token, body.client_id)
         column = owner_column(owner)
 
-        engine = api._get_db_engine()
+        engine = _get_db_engine()
         with engine.begin() as conn:
             conn.execute(_text(
                 f"UPDATE positions SET shares = :shares WHERE {column} = :owner_value AND symbol = :symbol"
@@ -152,9 +165,9 @@ async def update_position_shares(request: Request, symbol: str, body: PositionSh
 @router.delete("/api/positions/{symbol}")
 async def remove_position(request: Request, symbol: str, client_id: str | None = Query(None)):
     sym = symbol.upper().strip()
-    if not api._TICKER_RE.match(sym):
+    if not _TICKER_RE.match(sym):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
-    token = api._bearer_token_from_request(request)
+    token = _bearer_token_from_request(request)
 
     def _delete_sync() -> dict:
         from sqlalchemy import text as _text
@@ -162,7 +175,7 @@ async def remove_position(request: Request, symbol: str, client_id: str | None =
         owner = resolve_owner(token, client_id)
         column = owner_column(owner)
 
-        engine = api._get_db_engine()
+        engine = _get_db_engine()
         with engine.begin() as conn:
             conn.execute(_text(
                 f"DELETE FROM positions WHERE {column} = :owner_value AND symbol = :symbol"
@@ -193,7 +206,7 @@ async def claim_positions(request: Request, body: ClaimRequest):
     """
     if not body.client_id or not _CLIENT_ID_RE.match(body.client_id):
         raise HTTPException(status_code=422, detail="Invalid client_id.")
-    token = api._bearer_token_from_request(request)
+    token = _bearer_token_from_request(request)
     if not token:
         raise HTTPException(status_code=401, detail="Sign in required to claim anonymous data.")
 
@@ -206,11 +219,11 @@ async def claim_positions(request: Request, body: ClaimRequest):
         user_id = user["id"]
 
         claimed, skipped = claim_anonymous_rows_sync(
-            api._get_db_engine(), "positions", "bought_at",
+            _get_db_engine(), "positions", "bought_at",
             body.client_id, user_id, _MAX_POSITIONS_PER_CLIENT, "positions",
         )
-        api.log_event(
-            api.LOGGER, "positions_claimed", user_id=user_id,
+        log_event(
+            LOGGER, "positions_claimed", user_id=user_id,
             client_id=body.client_id, claimed=claimed, skipped_over_cap=skipped,
         )
         return {
@@ -268,7 +281,7 @@ async def get_portfolio_concentration(request: Request, client_id: str | None = 
     scrape, and never writes back to market-picks' own scoring/cache."""
     from core import cache as _cache
 
-    token = api._bearer_token_from_request(request)
+    token = _bearer_token_from_request(request)
 
     def _sync() -> dict:
         owner = resolve_owner(token, client_id)
@@ -285,7 +298,7 @@ async def get_portfolio_concentration(request: Request, client_id: str | None = 
         # _fetch_valuation_percentile() uses for its own per-stock fan-out).
         live_prices: dict[str, float] = {}
         with ThreadPoolExecutor(max_workers=8) as pool:
-            for sym, live in zip(symbols, pool.map(api._fetch_live_price_sync, symbols)):
+            for sym, live in zip(symbols, pool.map(_fetch_live_price_sync, symbols)):
                 if live.get("price"):
                     live_prices[sym] = live["price"]
 

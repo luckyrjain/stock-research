@@ -26,7 +26,7 @@ would have without this module.
 from typing import Any
 
 from core.observability import get_logger, log_event
-from core.schemas import CONTRACTS
+from core.schemas import type_mismatches
 
 LOGGER = get_logger("schema_drift")
 
@@ -34,21 +34,16 @@ LOGGER = get_logger("schema_drift")
 def check_drift(task_name: str, raw_data: Any) -> list[str]:
     """Compare raw_data's present container fields against
     schemas.CONTRACTS[task_name]["types"]. Returns a list of human-readable
-    drift descriptions (empty if none, or if there's nothing to check)."""
+    drift descriptions (empty if none, or if there's nothing to check).
+
+    This is a thin wrapper around schemas.type_mismatches() — the actual
+    type-comparison logic lives there so it isn't hand-duplicated between
+    this module's warning/telemetry path and schemas.validate()'s hard
+    enforcement path."""
     if not isinstance(raw_data, dict) or raw_data.get("error"):
         return []
 
-    expected_types = CONTRACTS.get(task_name, {}).get("types", {})
-    problems = []
-    for field, expected_type in expected_types.items():
-        if field not in raw_data:
-            continue  # legitimately absent for this symbol — not drift
-        value = raw_data[field]
-        if value is not None and not isinstance(value, expected_type):
-            problems.append(
-                f"'{field}' expected {expected_type.__name__}, got {type(value).__name__}"
-            )
-    return problems
+    return type_mismatches(task_name, raw_data)
 
 
 def log_drift_if_any(task_name: str, raw_data: Any, **context: Any) -> None:

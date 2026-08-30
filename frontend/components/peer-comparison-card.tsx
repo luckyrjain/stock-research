@@ -1,24 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import type { PeerComparison } from '@/types';
 import { Card } from './dashboard-primitives';
+import { useSymbolResource } from '@/lib/use-symbol-resource';
 
 export function usePeerComparison(symbol: string): PeerComparison | null {
-  const [peers, setPeers] = useState<PeerComparison | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setPeers(null);
-    fetch(`/api/peers/${encodeURIComponent(symbol)}`)
-      .then(res => (res.ok ? res.json() : null))
-      .then((data: PeerComparison | null) => { if (!cancelled) setPeers(data); })
-      .catch(() => { if (!cancelled) setPeers(null); });
-    return () => { cancelled = true; };
-  }, [symbol]);
-
-  return peers;
+  return useSymbolResource<PeerComparison>(symbol, 'peers');
 }
 
 export function PercentileBadge({ value }: { value: number }) {

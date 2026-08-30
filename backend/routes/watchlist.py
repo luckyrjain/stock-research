@@ -9,26 +9,38 @@ Signing in does NOT claim/merge an existing client_id's rows onto the
 account (see db/models.py's watchlist_items comment) — a freshly-signed-in
 user simply starts seeing whatever their account already owns.
 
-Deliberately imports `api` as a module and reaches into it via dotted
-attribute access (`api._get_db_engine()`, not `from api import
-_get_db_engine`) rather than importing shared helpers by name. Two reasons:
-this avoids a circular-import ordering problem (api.py includes this
-router, so this module can't import api.py's names at api.py's own
-top-level before they exist yet), and it preserves this app's existing
-test-patching convention — `unittest.mock.patch("api._get_db_engine", ...)`
-only takes effect on code that looks the name up through the module object
-at call time, not on a name already copied by a `from api import X` at
-import time.
+Imports its shared primitives (`_get_db_engine`, `_rate_limit`,
+`_bearer_token_from_request`, `_TICKER_RE`, `LOGGER`, `log_event`) from
+routes/_shared.py rather than reaching into `api` for them. This module used
+to do `import api` and access these via dotted attribute lookup
+(`_get_db_engine()`) — that only worked because api.py happened to
+define all of them before it called `app.include_router(...)` for this
+router near the bottom of that file, an ordering coincidence rather than a
+real import direction. They now live in routes/_shared.py, which has no
+dependency on api.py at all, so there's nothing left for a future reorder of
+api.py to break.
 """
+import asyncio
+import re
+
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-import api
-from routes._shared import claim_anonymous_rows_sync, run_owned_db_call
+from routes._shared import (
+    LOGGER,
+    _TICKER_RE,
+    OwnedRequest,
+    _bearer_token_from_request,
+    _get_db_engine,
+    _rate_limit,
+    claim_anonymous_rows_sync,
+    log_event,
+    run_owned_db_call,
+)
 
 router = APIRouter()
 
-_CLIENT_ID_RE = api.re.compile(r"^[a-zA-Z0-9-]{1,36}$")  # matches watchlist_items.client_id VARCHAR(36)
+_CLIENT_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,36}$")  # matches watchlist_items.client_id VARCHAR(36)
 _MAX_WATCHLIST_ITEMS_PER_CLIENT = 200
 _VALID_EXCHANGES = {"NSE", "BSE"}
 
@@ -61,8 +73,7 @@ def owner_column(owner: WatchlistOwner) -> str:
     return "user_id" if owner[0] == "user" else "client_id"
 
 
-class WatchlistAddRequest(BaseModel):
-    client_id: str | None = None
+class WatchlistAddRequest(OwnedRequest):
     symbol: str
     company: str = Field(default="")
     exchange: str = Field(default="NSE")
@@ -72,7 +83,7 @@ def _watchlist_rows_sync(owner: WatchlistOwner) -> list[dict]:
     from sqlalchemy import text as _text
 
     column = owner_column(owner)
-    engine = api._get_db_engine()
+    engine = _get_db_engine()
     with engine.connect() as conn:
         rows = conn.execute(_text(f"""
             SELECT symbol, company, exchange, added_at::text AS "addedAt"
@@ -85,7 +96,7 @@ def _watchlist_rows_sync(owner: WatchlistOwner) -> list[dict]:
 
 @router.get("/api/watchlist")
 async def get_watchlist(request: Request, client_id: str | None = Query(None)):
-    token = api._bearer_token_from_request(request)
+    token = _bearer_token_from_request(request)
 
     def _sync() -> dict:
         owner = resolve_owner(token, client_id)
@@ -119,14 +130,14 @@ async def get_watchlist_calendar(request: Request, symbols: str = Query(...)):
     its own (verdict_history's own read already degrades gracefully without
     one) and resolves no owner at all.
     """
-    api._rate_limit(request, "watchlist_calendar", max_calls=30, window_seconds=60)
+    _rate_limit(request, "watchlist_calendar", max_calls=30, window_seconds=60)
     # Uppercase BEFORE matching against _TICKER_RE (case-sensitive,
     # [A-Z0-9&-] only) -- matching first would silently drop a valid
     # lowercase/mixed-case symbol like "tcs", unlike every other
     # _TICKER_RE call site in this file/routes/positions.py, which all
     # uppercase first.
     upper_symbols = [s.strip().upper() for s in symbols.split(",")]
-    sym_list = [s for s in upper_symbols if api._TICKER_RE.match(s)][:_MAX_WATCHLIST_ITEMS_PER_CLIENT]
+    sym_list = [s for s in upper_symbols if _TICKER_RE.match(s)][:_MAX_WATCHLIST_ITEMS_PER_CLIENT]
     if not sym_list:
         return {"entries": []}
 
@@ -154,8 +165,8 @@ async def get_watchlist_calendar(request: Request, symbols: str = Query(...)):
             "price_move": changes["price_move"],
         }
 
-    loop = api.asyncio.get_running_loop()
-    results = await api.asyncio.gather(*[loop.run_in_executor(None, _one, s) for s in sym_list])
+    loop = asyncio.get_running_loop()
+    results = await asyncio.gather(*[loop.run_in_executor(None, _one, s) for s in sym_list])
     entries = [r for r in results if r]
     # A notable change (something to act on today) sorts first; within each
     # group, symbols with no next_results_date sort after ones that have it
@@ -172,12 +183,12 @@ async def get_watchlist_calendar(request: Request, symbols: str = Query(...)):
 @router.post("/api/watchlist")
 async def add_to_watchlist(request: Request, body: WatchlistAddRequest):
     symbol = body.symbol.upper().strip()
-    if not api._TICKER_RE.match(symbol):
+    if not _TICKER_RE.match(symbol):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
     exchange = body.exchange.upper().strip()
     if exchange not in _VALID_EXCHANGES:
         raise HTTPException(status_code=422, detail="Invalid exchange.")
-    token = api._bearer_token_from_request(request)
+    token = _bearer_token_from_request(request)
 
     def _upsert_sync() -> dict:
         from sqlalchemy import text as _text
@@ -188,7 +199,7 @@ async def add_to_watchlist(request: Request, body: WatchlistAddRequest):
         # a user_id integer can never collide on the same advisory lock.
         lock_key = f"watchlist:{owner[0]}:{owner[1]}"
 
-        engine = api._get_db_engine()
+        engine = _get_db_engine()
         with engine.begin() as conn:
             # Advisory lock scoped to this transaction (released automatically on
             # commit/rollback) serializes concurrent adds for the same owner, so
@@ -224,9 +235,9 @@ async def add_to_watchlist(request: Request, body: WatchlistAddRequest):
 @router.delete("/api/watchlist/{symbol}")
 async def remove_from_watchlist(request: Request, symbol: str, client_id: str | None = Query(None)):
     sym = symbol.upper().strip()
-    if not api._TICKER_RE.match(sym):
+    if not _TICKER_RE.match(sym):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
-    token = api._bearer_token_from_request(request)
+    token = _bearer_token_from_request(request)
 
     def _delete_sync() -> dict:
         from sqlalchemy import text as _text
@@ -234,7 +245,7 @@ async def remove_from_watchlist(request: Request, symbol: str, client_id: str | 
         owner = resolve_owner(token, client_id)
         column = owner_column(owner)
 
-        engine = api._get_db_engine()
+        engine = _get_db_engine()
         with engine.begin() as conn:
             conn.execute(_text(
                 f"DELETE FROM watchlist_items WHERE {column} = :owner_value AND symbol = :symbol"
@@ -278,7 +289,7 @@ async def claim_watchlist(request: Request, body: ClaimRequest):
     """
     if not body.client_id or not _CLIENT_ID_RE.match(body.client_id):
         raise HTTPException(status_code=422, detail="Invalid client_id.")
-    token = api._bearer_token_from_request(request)
+    token = _bearer_token_from_request(request)
     if not token:
         raise HTTPException(status_code=401, detail="Sign in required to claim anonymous data.")
 
@@ -291,15 +302,15 @@ async def claim_watchlist(request: Request, body: ClaimRequest):
         user_id = user["id"]
 
         claimed, skipped = claim_anonymous_rows_sync(
-            api._get_db_engine(), "watchlist_items", "added_at",
+            _get_db_engine(), "watchlist_items", "added_at",
             body.client_id, user_id, _MAX_WATCHLIST_ITEMS_PER_CLIENT, "watchlist",
         )
         # Audit trail distinct from run_owned_db_call's own failure-only
         # logging — a real, if imperfect, forensic signal for the residual
         # risk disclosed above (e.g. spotting one account claiming an
         # unusual number of distinct client_ids in a short window).
-        api.log_event(
-            api.LOGGER, "watchlist_claimed", user_id=user_id,
+        log_event(
+            LOGGER, "watchlist_claimed", user_id=user_id,
             client_id=body.client_id, claimed=claimed, skipped_over_cap=skipped,
         )
         return {

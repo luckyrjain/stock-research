@@ -1,4 +1,4 @@
-import { getSessionTokenFromRequest } from '@/lib/auth-cookie';
+import { authHeaders } from '@/lib/auth-cookie';
 import { clientIpHeaders } from '@/lib/proxy-headers';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
@@ -10,15 +10,12 @@ function unavailable() {
   );
 }
 
-// Forwards the session cookie (if any) as a Bearer header alongside the
-// existing client_id passthrough — same pattern as app/api/watchlist/route.ts.
-// The backend prefers the account identity when a valid session is present,
-// so a signed-in user's positions follow their account across browsers
-// instead of staying tied to one browser's anonymous client_id.
-function authHeaders(req: Request): Record<string, string> {
-  const token = getSessionTokenFromRequest(req);
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
+// Forwards the session cookie (if any) as a Bearer header (see
+// lib/auth-cookie.ts's authHeaders()) alongside the existing client_id
+// passthrough — same pattern as app/api/watchlist/route.ts. The backend
+// prefers the account identity when a valid session is present, so a
+// signed-in user's positions follow their account across browsers instead
+// of staying tied to one browser's anonymous client_id.
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);

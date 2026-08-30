@@ -1,8 +1,6 @@
 import asyncio
-import hmac
 import json
 import os
-import threading
 import time
 import uuid
 import re
@@ -32,6 +30,10 @@ from pipelines.market_picks_pipeline import load_picks_cache as _load_picks_cach
 from pipelines.market_picks_pipeline import save_picks_cache as _save_picks_cache
 from core import rate_limiter
 from core import state_store
+from routes._shared import (
+    _TRUSTED_PROXY_SECRET, _TICKER_RE, _bearer_token_from_request, _check_rate_limit, _client_ip,
+    _fetch_live_price_sync, _get_db_engine, _rate_limit,
+)
 # Re-exported under their original names since this file (and its existing
 # tests) call them as api._compute_peer_percentiles / api._compute_valuation_anchor —
 # see analytics/peer_analytics.py's own docstring for why the math itself lives there.
@@ -67,8 +69,6 @@ def _release_llm_slot() -> None:
 # core/rate_limiter.py lock — Redis-shared across workers when REDIS_URL is set,
 # so two workers can no longer both start a refresh at once (previously a
 # single-process-only guard; see docs/deployment.md).
-_DB_ENGINE = None
-_DB_ENGINE_LOCK = threading.Lock()
 _SME_REFRESH_LOCK_NAME = "sme_refresh"
 _SME_REFRESH_LOCK_TTL_SECONDS = 3600  # generous upper bound on one pipeline run
 
@@ -82,70 +82,11 @@ _MARKET_PICKS_REFRESH_LOCK_NAME = "market_picks_refresh"
 _MARKET_PICKS_REFRESH_LOCK_TTL_SECONDS = 3600  # generous upper bound on one pipeline run
 
 
-def _get_db_engine():
-    global _DB_ENGINE
-    if _DB_ENGINE is None:
-        with _DB_ENGINE_LOCK:
-            if _DB_ENGINE is None:  # re-check: another thread may have won the race
-                from db.models import get_engine
-                _DB_ENGINE = get_engine()
-    return _DB_ENGINE
-
-
-# ── Rate limiting ─────────────────────────────────────────────────────────────
-# Sliding-window limiter, keyed by (bucket, client IP). Only guards the
-# expensive/abusable routes (fresh LLM calls, forced full rescans, forced SME
-# pipeline runs). Backed by core/rate_limiter.py — Redis-shared across workers when
-# REDIS_URL is set, an in-memory per-process counter otherwise.
-
-# Every browser request reaches this backend via the Next.js proxy routes,
-# server-to-server (see "Proxy routes" in CLAUDE.md) — so request.client.host
-# is always the Next.js server's own IP, never the real visitor's. Left
-# unfixed, every one of the per-IP limiters below collapses into one shared
-# bucket for the whole site, the opposite of what they're for: one abusive
-# visitor throttles everyone, and there's no per-visitor signal at all.
-# TRUSTED_PROXY_SECRET (also set on the frontend — see
-# frontend/lib/proxy-headers.ts) lets a request prove it really came through
-# the Next.js proxy layer via X-Internal-Proxy-Secret, in which case the
-# X-Forwarded-For value it forwarded is trusted as the real client IP.
-# Without a configured secret (the default), or without a match, the header
-# is ignored — an untrusted caller could otherwise spoof X-Forwarded-For to
-# dodge its own rate limit or frame someone else's IP into being blocked.
-_TRUSTED_PROXY_SECRET = os.getenv("TRUSTED_PROXY_SECRET")
-
-
-def _client_ip(request: Request) -> str:
-    secret = request.headers.get("x-internal-proxy-secret", "")
-    if _TRUSTED_PROXY_SECRET and hmac.compare_digest(secret, _TRUSTED_PROXY_SECRET):
-        forwarded = request.headers.get("x-forwarded-for", "")
-        parts = [p.strip() for p in forwarded.split(",")] if forwarded else []
-        # A correctly configured single-hop reverse proxy in "replace" mode
-        # (see docs/deployment.md) always produces exactly one IP here. More
-        # than one usually means an "append" mode misconfiguration (e.g.
-        # nginx's $proxy_add_x_forwarded_for) letting a client-supplied
-        # X-Forwarded-For survive alongside the real one — and since a
-        # browser/curl can set this header directly on a request to the
-        # reverse proxy, the leftmost entry in that case would be the
-        # attacker's own claimed value, not the one the proxy actually
-        # observed. Refuse to trust an ambiguous chain rather than guess
-        # which entry is real; this also naturally handles an empty/blank
-        # header the same way.
-        if len(parts) == 1 and parts[0]:
-            return parts[0]
-    return request.client.host if request.client else "unknown"
-
-
-def _check_rate_limit(key: str, max_calls: int, window_seconds: float) -> None:
-    if not rate_limiter.is_allowed(key, max_calls, window_seconds):
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded: max {max_calls} requests per {int(window_seconds)}s on this endpoint. Try again later.",
-        )
-
-
-def _rate_limit(request: Request, bucket: str, max_calls: int, window_seconds: float) -> None:
-    client_ip = _client_ip(request)
-    _check_rate_limit(f"{bucket}:{client_ip}", max_calls, window_seconds)
+# ── DB engine + rate limiting ─────────────────────────────────────────────────
+# _get_db_engine/_rate_limit/_bearer_token_from_request/_TICKER_RE/
+# _TRUSTED_PROXY_SECRET now live in routes/_shared.py (imported above) — see
+# that module's own docstring for why (a former import-order landmine between
+# this file and routes/watchlist.py/positions.py).
 
 
 # A dedicated, explicitly-sized executor for this app's blocking work (LLM
@@ -243,7 +184,6 @@ def _is_isin(s: str) -> bool:
     return bool(re.match(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$", s))
 
 
-_TICKER_RE = re.compile(r"^[A-Z0-9&\-]{1,20}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Every REST endpoint already sanitizes an internal exception to this shape
@@ -1286,34 +1226,6 @@ async def get_market_picks_history(request: Request, date: str | None = Query(No
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _load_sync)
-
-
-def _fetch_live_price_sync(sym: str) -> dict:
-    """LTP + day change% for one NSE/BSE symbol via yfinance, trying the .NS
-    then .BO suffix. Returns {} (never raises) if neither resolves — shared by
-    GET /api/prices (bulk) and GET /api/verdict-history/{symbol} (single-symbol,
-    for scoring past verdicts against today's price)."""
-    import yfinance as yf
-    for suffix in (".NS", ".BO"):
-        # Each suffix attempt is independently guarded — a genuine BSE-only
-        # symbol (never listed on NSE, or delisted from it) can make the
-        # .NS attempt raise outright rather than just return empty data; a
-        # shared try/except around the whole loop would abort before .BO is
-        # even tried, silently losing a real, resolvable price.
-        try:
-            fi = yf.Ticker(sym + suffix).fast_info
-            price = getattr(fi, "last_price", None)
-            prev  = getattr(fi, "previous_close", None)
-            if price and price > 0:
-                # None (never a fabricated 0.0 "flat today") when prev isn't
-                # available — same "never invent" convention as everywhere
-                # else in this codebase; a real flat day and a missing
-                # previous-close aren't the same fact.
-                chg = round((price - prev) / prev * 100, 2) if prev else None
-                return {"price": round(price, 2), "change_pct": chg}
-        except Exception:
-            continue
-    return {}
 
 
 @app.get("/api/prices")
@@ -2437,6 +2349,13 @@ from routes.portfolio_aggregator import router as _portfolio_aggregator_router
 
 app.include_router(_portfolio_aggregator_router)
 
+# Broker login/connect/sync endpoints — split out of routes/portfolio_aggregator.py
+# into their own file (routes/broker_sync.py's own docstring explains why);
+# same /api/portfolio prefix, distinct sub-paths, no collision.
+from routes.broker_sync import router as _broker_sync_router
+
+app.include_router(_broker_sync_router)
+
 # ── Consolidated view ──────────────────────────────────────────────────────────
 # "What does AlphaPulse think about X" spans three independently-run pipelines
 # today, so answering it means visiting three pages. This endpoint answers it
@@ -2547,14 +2466,6 @@ class AuthRequestLinkRequest(BaseModel):
     email: str
 
 
-def _bearer_token_from_request(request: Request) -> str | None:
-    header = request.headers.get("authorization", "")
-    if header.lower().startswith("bearer "):
-        token = header[7:].strip()
-        return token or None
-    return None
-
-
 @app.post("/api/auth/request-link")
 async def request_magic_link(request: Request, body: AuthRequestLinkRequest):
     _rate_limit(request, "auth_request_link", max_calls=5, window_seconds=900)
@@ -2619,6 +2530,7 @@ async def verify_magic_link(request: Request, token: str = Query(...)):
 
 @app.get("/api/auth/me")
 async def get_current_user(request: Request):
+    _rate_limit(request, "auth_me", max_calls=60, window_seconds=60)
     token = _bearer_token_from_request(request)
     if not token or not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=401, detail="Not signed in.")
@@ -2634,6 +2546,7 @@ async def get_current_user(request: Request):
 
 @app.post("/api/auth/logout")
 async def logout(request: Request):
+    _rate_limit(request, "auth_logout", max_calls=60, window_seconds=60)
     token = _bearer_token_from_request(request)
     if token and os.environ.get("DATABASE_URL"):
         import auth as _auth
@@ -2760,7 +2673,14 @@ async def _require_api_key_user(request: Request) -> int:
     """Returns the owning user_id for a valid X-API-Key header, else raises
     401. Also applies a per-user, tier-scaled rate limit distinct from the
     IP-keyed limits on internal endpoints, since a legitimate integration may
-    call from a shared/rotating IP."""
+    call from a shared/rotating IP.
+
+    A cheap per-IP limit runs first, before the key is ever looked up — the
+    per-user limit below only exists once a key has already resolved to a
+    real user_id, so a stream of invalid/garbage X-API-Key values would
+    otherwise never be rate-limited at all, just DB-load-amplified (one
+    lookup per garbage attempt, unbounded)."""
+    _rate_limit(request, "api_v1_auth", max_calls=30, window_seconds=60)
     raw_key = _api_key_from_request(request)
     if not raw_key or not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header.")

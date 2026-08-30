@@ -16,20 +16,29 @@ Normalized trade dict: {"trade_id", "order_id" (optional), "symbol",
 "price" (Decimal), "trade_date" (date)}. A `None` in either list means
 "this raw record was skipped as malformed" — already logged by the
 broker module that produced it, counted here, never guessed.
+
+`sync_holdings()` also mirrors every synced holding into `positions` — a
+different feature's table (see portfolio/positions_mirror.py's own
+docstring) — via an imported function rather than SQL defined here, since
+that write is a genuine cross-feature concern this module only calls, not
+one it owns.
 """
 
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import insert, select, text, update
 
 from core.observability import get_logger, log_event
 from db.models import assets as assets_t
+from db.models import broker_connections as broker_connections_t
 from db.models import holdings as holdings_t
 from db.models import transactions as transactions_t
+from portfolio.portfolio_valuation import upsert_valuation
+from portfolio.positions_mirror import upsert_position_from_holding
 
 LOGGER = get_logger("portfolio.broker_sync_common")
 
@@ -141,66 +150,6 @@ def upsert_holding(conn, asset_id: int, units: Decimal, avg_cost: Decimal | None
         conn.execute(
             insert(holdings_t).values(asset_id=asset_id, units=units, avg_cost=avg_cost)
         )
-
-
-def upsert_position_from_holding(
-    conn, owner: tuple[str, str | int], symbol: str, exchange: str | None,
-    quantity: Decimal, avg_price: Decimal | None,
-) -> None:
-    """Mirrors a synced broker holding into `positions` (the separate manual
-    "I bought this" tracker's own table) so it shows up on /portfolio too —
-    see routes/portfolio_aggregator.py's broker_sync() for why `owner` only
-    ever comes from the request that kicked off the sync, never stored on
-    accounts/profiles themselves (Portfolio Aggregator has no owner concept
-    at all otherwise).
-
-    `owner` is a resolved routes.watchlist.WatchlistOwner tuple
-    (`("user", user_id)` or `("client", client_id)`), not a raw client_id —
-    written to whichever column GET /api/positions actually reads for that
-    same caller (routes.watchlist.resolve_owner prefers a valid session
-    over client_id). Writing every synced position under client_id
-    unconditionally would make it invisible on /portfolio for anyone
-    signed in, since that page then reads by user_id.
-
-    `owner_type`/`owner_value` are never raw user input interpolated into
-    SQL — `owner_type` is always exactly "user" or "client" (resolve_owner's
-    own return-type guarantee), so the column-name f-string below is a
-    closed-set substitution, same convention as
-    routes/_shared.py::claim_anonymous_rows_sync's own comment about why
-    that's safe.
-
-    Only `entry_price`/`shares`/`exchange` are overwritten on every sync —
-    `target_price`/`stop_loss` (manual, no broker equivalent) and
-    `bought_at` (first-seen timestamp) are left untouched by the `DO
-    UPDATE`, whether this row started as a manual entry or a previous
-    sync's. `company` is left NULL: none of the three brokers' normalized
-    holding dicts carry a company name today (see broker_sync_common's own
-    module docstring for the normalized shape), and guessing one from the
-    symbol isn't worth the drift risk for a field the Positions UI already
-    treats as optional."""
-    owner_type, owner_value = owner
-    column = "user_id" if owner_type == "user" else "client_id"
-    conn.execute(
-        text(
-            f"INSERT INTO positions ({column}, symbol, exchange, entry_price, shares) "
-            f"VALUES (:owner_value, :symbol, :exchange, :entry_price, :shares) "
-            f"ON CONFLICT ({column}, symbol) DO UPDATE SET "
-            f"exchange = EXCLUDED.exchange, entry_price = EXCLUDED.entry_price, shares = EXCLUDED.shares"
-        ),
-        {"owner_value": owner_value, "symbol": symbol, "exchange": exchange, "entry_price": avg_price, "shares": quantity},
-    )
-
-
-def upsert_valuation(conn, asset_id: int, as_of: date, value: Decimal) -> None:
-    # Same raw-SQL upsert shape as portfolio_valuation.py::refresh_valuations()
-    # — one row per (asset_id, as_of), same-day re-sync updates in place.
-    conn.execute(
-        text(
-            "INSERT INTO valuations (asset_id, as_of, value) VALUES (:asset_id, :as_of, :value) "
-            "ON CONFLICT (asset_id, as_of) DO UPDATE SET value = EXCLUDED.value"
-        ),
-        {"asset_id": asset_id, "as_of": as_of, "value": value},
-    )
 
 
 def existing_trade_ids(conn, account_id: int, meta_source: str) -> set[str]:
@@ -364,3 +313,60 @@ def sync_trades(conn, account_id: int, normalized_trades: list[dict | None], met
         seen.add(t["trade_id"])
         synced += 1
     return {"trades_synced": synced, "trades_skipped": skipped, "trades_duplicate": duplicates}
+
+
+def run_broker_sync(
+    engine,
+    account_id: int,
+    broker_name: str,
+    meta_source: str,
+    normalized_holdings: list[dict | None],
+    normalized_trades: list[dict | None],
+    *,
+    logger,
+    completed_event: str,
+    partial_error: str | None = None,
+    owner: tuple[str, str | int] | None = None,
+) -> dict:
+    """The copy-pasted second half of every broker module's own
+    `sync_account()` — kite_sync.py/hdfc_sync.py/paytm_sync.py each fetch and
+    normalize their own broker-shaped data differently (that stays in each
+    module), then hand the resulting common-shape lists here for the part
+    that was byte-identical three times over: open the one transaction,
+    write holdings + trades, stamp `last_synced_at`, log completion, and
+    return the summary dict `routes/portfolio_aggregator.py::broker_sync()`
+    stores as `last_sync_summary`.
+
+    Only called once a caller has decided there's something to write —
+    each module still returns its own `{"error": ...}` *before* ever
+    calling this when a fetch fails outright (Kite/Paytm: one combined
+    try/except around both fetches; HDFC: only when BOTH independent
+    fetches fail), so this function never needs a "nothing to sync, bail
+    without writing" branch of its own.
+
+    `partial_error` is HDFC's own case: one of its two independent fetches
+    failed while the other succeeded, so there IS real data to write, but
+    the caller still wants the failure surfaced. Attached to the summary
+    dict as `"error"` after the write completes — never before, since the
+    counts in that same summary need to reflect what was actually written.
+    Kite/Paytm never set this (both their fetches always succeed or fail
+    together)."""
+    today = datetime.now(timezone.utc).date()
+    with engine.begin() as conn:
+        summary: dict = {}
+        summary.update(sync_holdings(conn, account_id, normalized_holdings, meta_source, today, owner=owner))
+        summary.update(sync_trades(conn, account_id, normalized_trades, meta_source))
+        conn.execute(
+            update(broker_connections_t)
+            .where(
+                broker_connections_t.c.account_id == account_id,
+                broker_connections_t.c.broker == broker_name,
+            )
+            .values(last_synced_at=datetime.now(timezone.utc))
+        )
+
+    if partial_error is not None:
+        summary["error"] = partial_error
+
+    log_event(logger, completed_event, account_id=account_id, **summary)
+    return summary

@@ -9,10 +9,17 @@ on:
     - cron: '15 14 * * 1-5'
   workflow_dispatch:
 
+# See sme-cron.yml's identical comment — prevents an overlapping run of
+# this same workflow.
+concurrency:
+  group: eod-prices-cron
+  cancel-in-progress: false
+
 jobs:
   run-pipeline:
     name: Run EOD price store + corporate actions pipeline
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: backend

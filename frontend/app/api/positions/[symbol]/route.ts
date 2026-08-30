@@ -1,4 +1,4 @@
-import { getSessionTokenFromRequest } from '@/lib/auth-cookie';
+import { authHeaders } from '@/lib/auth-cookie';
 import { clientIpHeaders } from '@/lib/proxy-headers';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
@@ -8,11 +8,6 @@ function unavailable() {
     { error: 'Backend unavailable. Make sure the analysis service is running.' },
     { status: 503 },
   );
-}
-
-function authHeaders(req: Request): Record<string, string> {
-  const token = getSessionTokenFromRequest(req);
-  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 export async function DELETE(
