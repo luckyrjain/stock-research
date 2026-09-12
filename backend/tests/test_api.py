@@ -2296,6 +2296,21 @@ class ScreenerEndpointTest(unittest.TestCase):
         resp = client.get("/api/screener")
         self.assertEqual(resp.status_code, 429)
 
+    def test_invalid_param_with_exhausted_rate_limit_still_returns_422(self) -> None:
+        """Regression test for the run_db_call() extraction: query-param
+        validation runs before run_db_call() (and therefore before its
+        rate-limit check), by design — an invalid, malformed request is
+        rejected without spending a rate-limit slot or touching the DB,
+        exactly like an ownership-scoped endpoint's own pre-wrapper
+        validation already does. Pins this as an intentional contract
+        rather than an untested side effect of the extraction."""
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rate_limiter._memory_calls["screener:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/screener?ema_trend=sideways")
+        self.assertEqual(resp.status_code, 422)
+        # The exhausted bucket wasn't touched by the invalid request.
+        self.assertEqual(len(rate_limiter._memory_calls["screener:testclient"]), 60)
+
     def test_missing_database_url_returns_503(self) -> None:
         resp = client.get("/api/screener")
         self.assertEqual(resp.status_code, 503)
