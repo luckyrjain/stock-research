@@ -222,7 +222,7 @@ class AnalysisPersistedDespiteDisconnectTest(unittest.IsolatedAsyncioTestCase):
         scope = {"type": "http", "method": "GET", "headers": [], "client": ("testclient", 12345)}
         request = Request(scope)
 
-        response = await api.analyse("TCS", request, force=False)
+        response = await api.analyse(request, symbol="TCS", force=False)
         gen = response.body_iterator
 
         # Drive the generator through "start", 6x "task_done", and

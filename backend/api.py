@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from core.error_tracking import init_error_tracking
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from core.observability import get_logger, log_event
@@ -32,7 +32,7 @@ from core import rate_limiter
 from core import state_store
 from routes._shared import (
     _TRUSTED_PROXY_SECRET, _TICKER_RE, _bearer_token_from_request, _check_rate_limit, _client_ip,
-    _fetch_live_price_sync, _get_db_engine, _rate_limit,
+    _fetch_live_price_sync, _get_db_engine, _rate_limit, valid_ticker,
 )
 # Re-exported under their original names since this file (and its existing
 # tests) call them as api._compute_peer_percentiles / api._compute_valuation_anchor —
@@ -573,11 +573,9 @@ async def validate_symbol(symbol: str, request: Request, exchange: str = ""):
     return {"found": False, "valid": False, "symbol": sym, "company": "", "suggestions": []}
 
 @app.get("/api/analyse/{symbol}")
-async def analyse(symbol: str, request: Request, force: bool = False):
+async def analyse(request: Request, symbol: str = Depends(valid_ticker), force: bool = False):
     _rate_limit(request, "analyse", max_calls=20, window_seconds=300)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = symbol
     run_id = uuid.uuid4().hex[:12]
 
     async def stream():
@@ -1282,7 +1280,7 @@ def _compute_benchmark_sync(dates: list[str], closes: list[float]) -> dict | Non
 
 @app.get("/api/prices/history/{symbol}")
 async def get_price_history(
-    request: Request, symbol: str, days: int = Query(180, ge=7, le=365),
+    request: Request, symbol: str = Depends(valid_ticker), days: int = Query(180, ge=7, le=365),
     benchmark: bool = Query(False),
 ):
     """Return a daily-close series for sparklines. Cached like the six data
@@ -1297,9 +1295,7 @@ async def get_price_history(
     would be meaningless for them.
     """
     _rate_limit(request, "prices_history", max_calls=60, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = symbol
     from tools.price_history_tools import get_price_series
 
     loop = asyncio.get_running_loop()
@@ -1315,7 +1311,7 @@ async def get_price_history(
 
 
 @app.get("/api/peers/{symbol}")
-async def get_peers(request: Request, symbol: str):
+async def get_peers(request: Request, symbol: str = Depends(valid_ticker)):
     """Peer comparison table scraped from Screener.in (the company plus 3-5 sector
     peers, and Screener's own sector-median row where present), with percentile
     badges for whichever ratio columns are present for both the company and its
@@ -1327,9 +1323,7 @@ async def get_peers(request: Request, symbol: str):
     six-task analysis pipeline.
     """
     _rate_limit(request, "peers", max_calls=30, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = symbol
 
     def _fetch_sync() -> dict:
         from core import cache
@@ -1362,7 +1356,7 @@ async def get_peers(request: Request, symbol: str):
 
 
 @app.get("/api/financials/{symbol}")
-async def get_financials(request: Request, symbol: str):
+async def get_financials(request: Request, symbol: str = Depends(valid_ticker)):
     """Multi-year Profit & Loss / Balance Sheet / Cash Flow statements
     scraped from Screener.in (see tools/screener_tools.py::
     get_financial_statements) — the biggest structural gap the frontend
@@ -1392,9 +1386,7 @@ async def get_financials(request: Request, symbol: str):
     analysis pipeline.
     """
     _rate_limit(request, "financials", max_calls=30, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = symbol
 
     def _fetch_sync() -> dict:
         from core import cache
@@ -1448,7 +1440,7 @@ async def get_financials(request: Request, symbol: str):
 
 
 @app.get("/api/shareholding-detail/{symbol}")
-async def get_shareholding_breakdown(request: Request, symbol: str):
+async def get_shareholding_breakdown(request: Request, symbol: str = Depends(valid_ticker)):
     """Every individually-named shareholder disclosed in the company's most
     recent NSE shareholding XBRL filing (see tools/nse_tools.py::
     get_shareholding_detail) — a more granular view than `research.ratios`'
@@ -1471,9 +1463,7 @@ async def get_shareholding_breakdown(request: Request, symbol: str):
     analysis pipeline.
     """
     _rate_limit(request, "shareholding_detail", max_calls=30, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = symbol
 
     def _fetch_sync() -> dict:
         from core import cache
@@ -1542,7 +1532,7 @@ async def get_shareholding_breakdown(request: Request, symbol: str):
 
 
 @app.get("/api/insider-activity/{symbol}")
-async def get_insider_activity(request: Request, symbol: str):
+async def get_insider_activity(request: Request, symbol: str = Depends(valid_ticker)):
     """Structured promoter/director insider trades and bulk/block deals for
     one symbol — the same NSE feeds tools/nse_insider_trades.py and
     tools/nse_bulk_block_deals.py already scrape for the Market Picks
@@ -1556,9 +1546,7 @@ async def get_insider_activity(request: Request, symbol: str):
     is the expected common case, not an error.
     """
     _rate_limit(request, "insider_activity", max_calls=30, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = symbol
 
     def _load_cached() -> dict | None:
         from core import cache
@@ -1647,7 +1635,7 @@ async def get_insider_activity(request: Request, symbol: str):
 
 
 @app.get("/api/street-consensus/{symbol}")
-async def get_street_consensus(request: Request, symbol: str):
+async def get_street_consensus(request: Request, symbol: str = Depends(valid_ticker)):
     """Recent Trendlyne-cited analyst commentary for one symbol, plus (see
     `numeric_consensus` below) real numeric analyst consensus scraped
     directly from Trendlyne's own company page — same per-stock, on-demand
@@ -1670,9 +1658,7 @@ async def get_street_consensus(request: Request, symbol: str):
     the expected common case for most stocks on most days.
     """
     _rate_limit(request, "street_consensus", max_calls=30, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = symbol
 
     def _load_cached() -> dict | None:
         from core import cache
@@ -1800,7 +1786,7 @@ def _score_verdict_history(history: list[dict], live_price: float | None) -> lis
 
 
 @app.get("/api/verdict-history/{symbol}")
-async def get_verdict_history(request: Request, symbol: str):
+async def get_verdict_history(request: Request, symbol: str = Depends(valid_ticker)):
     """The per-day verdict/price snapshots verdict_history.save_snapshot() writes
     after every analysis run (CLI or web), letting the frontend show a "how has
     our call on this stock changed over time" strip without any new LLM or
@@ -1818,9 +1804,7 @@ async def get_verdict_history(request: Request, symbol: str):
     still useful on its own.
     """
     _rate_limit(request, "verdict_history", max_calls=60, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = symbol
 
     from analytics.verdict_history import load_history
 
@@ -2043,7 +2027,7 @@ def _compute_cross_events(series: list[dict]) -> list[dict]:
 
 
 @app.get("/api/sme-signals/{symbol}/history")
-async def get_sme_signal_history(request: Request, symbol: str):
+async def get_sme_signal_history(request: Request, symbol: str = Depends(valid_ticker)):
     """Return the stored EMA20/EMA50/close series for one SME stock, for charting
     around a golden/death cross. Up to ~63 trading days (sme_ema_pipeline._STORE_DAYS).
     Also returns cross_events: every cross in that window with its forward
@@ -2056,14 +2040,7 @@ async def get_sme_signal_history(request: Request, symbol: str):
     # this one was previously unrated-limited despite being a fully
     # anonymous, unbounded DB query, unlike every other DB-backed GET here.
     _rate_limit(request, "sme_signal_history", max_calls=60, window_seconds=60)
-    sym = symbol.upper().strip()
-    # Every sibling ticker-taking endpoint in this file validates against
-    # _TICKER_RE before use — this one didn't, an inconsistency an
-    # adversarial review flagged. Not SQL-injectable (sym is always a bind
-    # parameter below), so a garbage value would only ever have yielded a
-    # 404, but there's no reason for this endpoint to be the one exception.
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = symbol
     if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the SME pipeline first.")
 
@@ -2438,12 +2415,9 @@ async def _consolidated_payload(sym: str) -> dict:
 
 
 @app.get("/api/consolidated/{symbol}")
-async def get_consolidated(request: Request, symbol: str):
+async def get_consolidated(request: Request, symbol: str = Depends(valid_ticker)):
     _rate_limit(request, "consolidated", max_calls=30, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
-    return await _consolidated_payload(sym)
+    return await _consolidated_payload(symbol)
 
 
 # ── Account & magic-link auth ────────────────────────────────────────────────
@@ -2698,12 +2672,9 @@ async def _require_api_key_user(request: Request) -> int:
 
 
 @app.get("/api/v1/consolidated/{symbol}")
-async def get_consolidated_v1(request: Request, symbol: str):
+async def get_consolidated_v1(request: Request, symbol: str = Depends(valid_ticker)):
     await _require_api_key_user(request)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
-    return await _consolidated_payload(sym)
+    return await _consolidated_payload(symbol)
 
 
 if __name__ == "__main__":

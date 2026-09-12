@@ -32,6 +32,19 @@ LOGGER = get_logger("api")
 _TICKER_RE = re.compile(r"^[A-Z0-9&\-]{1,20}$")
 
 
+def valid_ticker(symbol: str) -> str:
+    """FastAPI dependency replacing api.py's own repeated inline
+    `sym = symbol.upper().strip(); if not _TICKER_RE.match(sym): raise ...`
+    block. Declared as `symbol: str = Depends(valid_ticker)` in place of a
+    route's own `symbol: str` path-param declaration — FastAPI resolves this
+    function's own `symbol` parameter from that same `{symbol}` path segment,
+    then passes the normalized return value through to the endpoint."""
+    sym = symbol.upper().strip()
+    if not _TICKER_RE.match(sym):
+        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    return sym
+
+
 class OwnedRequest(BaseModel):
     """Base for every write-endpoint body across watchlist/positions/
     portfolio_aggregator that carries the anonymous browser identity
