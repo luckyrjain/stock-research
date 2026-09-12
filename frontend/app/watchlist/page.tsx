@@ -5,20 +5,11 @@ import Link from 'next/link';
 import { useWatchlist } from '@/lib/watchlist';
 import PageShell from '@/components/page-shell';
 import { Skeleton } from '@/components/data-table-ui';
+import { LivePriceStatus } from '@/components/live-price-status';
+import { useLivePrices } from '@/lib/use-live-prices';
 import { fmtPrice } from '@/lib/format';
 import { REC_TONE_4TIER, exchangeTone } from '@/lib/tone';
 import type { WatchlistCalendarEntry } from '@/types';
-
-interface LivePrice {
-  // GET /api/prices returns an entry for every requested symbol, but it's
-  // `{}` (not omitted, not null) when the price lookup itself failed (e.g.
-  // yfinance had nothing for either the .NS or .BO suffix) — so `prices[sym]`
-  // being truthy does NOT imply these fields are actually present.
-  price?: number;
-  // null when the price resolved but yfinance had no previous_close to
-  // diff against — a real "change unknown", not a fabricated flat 0%.
-  change_pct?: number | null;
-}
 
 // Pure read-aggregation over each watched symbol's already-cached filings
 // (see GET /api/watchlist/calendar) — no new scrape, so a symbol that
@@ -124,43 +115,9 @@ function CalendarStrip({ entries }: { entries: WatchlistCalendarEntry[] }) {
 
 export default function WatchlistPage() {
   const { items, loading, remove } = useWatchlist();
-  const [prices, setPrices] = useState<Record<string, LivePrice>>({});
-  const [pricesLoading, setPricesLoading] = useState(true);
   const calendarEntries = useWatchlistCalendar(items.map(i => i.symbol));
-
-  // Stale/degraded (state 5, design.md's five-states rule): a poll that's been failing
-  // must not render identically to one that's fresh — `pricesStale` flips
-  // true on a failed poll (once at least one has ever succeeded) and back
-  // to false the moment one succeeds again.
-  const [pricesUpdatedAt, setPricesUpdatedAt] = useState<Date | null>(null);
-  const [pricesStale, setPricesStale] = useState(false);
-
-  useEffect(() => {
-    if (items.length === 0) { setPricesLoading(false); return; }
-    const symbols = items.map(i => i.symbol).join(',');
-
-    const fetchPrices = async () => {
-      try {
-        const res = await fetch(`/api/prices?symbols=${encodeURIComponent(symbols)}`);
-        if (!res.ok) { setPricesStale(true); return; }
-        const data = await res.json() as { prices: Record<string, LivePrice> };
-        setPrices(data.prices);
-        setPricesUpdatedAt(new Date());
-        setPricesStale(false);
-      } catch {
-        // Row still shows "—" for a symbol with no price yet — but once
-        // there IS a price on screen, a failed poll marks it stale rather
-        // than silently leaving it looking fresh forever.
-        setPricesStale(true);
-      } finally {
-        setPricesLoading(false);
-      }
-    };
-
-    fetchPrices();
-    const id = setInterval(fetchPrices, 30_000);
-    return () => clearInterval(id);
-  }, [items.map(i => i.symbol).join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
+  const { prices, stale: pricesStale, updatedAt: pricesUpdatedAt, loading: pricesLoading } =
+    useLivePrices(items.map(i => i.symbol));
 
   const sorted = [...items].sort(
     (a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime(),
@@ -211,22 +168,8 @@ export default function WatchlistPage() {
           </div>
         ) : (
           <>
-            {pricesUpdatedAt && (
-              <div className="flex justify-end mb-2">
-                {pricesStale ? (
-                  <span className="flex items-center gap-1 text-[10px] text-hold/80" title="The live-price refresh has been failing — prices below may be outdated">
-                    <span className="w-1.5 h-1.5 rounded-full bg-hold inline-block" />
-                    Prices may be outdated · last updated {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })} IST
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-1 text-[10px] text-buy/70">
-                    <span className="w-1.5 h-1.5 rounded-full bg-buy animate-pulse inline-block" />
-                    LTP {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })} IST
-                  </span>
-                )}
-              </div>
-            )}
-          <div className="rounded-xl border border-border overflow-hidden">
+            <LivePriceStatus updatedAt={pricesUpdatedAt} stale={pricesStale} />
+            <div className="rounded-xl border border-border overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>

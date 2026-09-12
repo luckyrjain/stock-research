@@ -1,16 +1,13 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { usePositions, type Position } from '@/lib/positions';
 import PageShell from '@/components/page-shell';
 import { Skeleton } from '@/components/data-table-ui';
+import { LivePriceStatus } from '@/components/live-price-status';
+import { useLivePrices } from '@/lib/use-live-prices';
 import { fmtPrice, fmtChangePct as fmtPct } from '@/lib/format';
-
-interface LivePrice {
-  price: number;
-  change_pct: number | null;
-}
 
 function pnlColor(n: number | null): string {
   if (n == null) return 'text-muted';
@@ -65,41 +62,9 @@ function fmtInr(n: number): string {
  */
 export default function PortfolioPage() {
   const { positions, loading, removePosition, updateShares } = usePositions();
-  const [prices, setPrices] = useState<Record<string, LivePrice>>({});
   const [sortDesc, setSortDesc] = useState(true);
-  // Stale/degraded (state 5, design.md's five-states rule): a poll that's been failing
-  // must not render identically to one that's fresh.
-  const [pricesUpdatedAt, setPricesUpdatedAt] = useState<Date | null>(null);
-  const [pricesStale, setPricesStale] = useState(false);
-
-  const symbolsKey = positions.map(p => p.symbol).join(',');
-
-  useEffect(() => {
-    if (positions.length === 0) return;
-    let cancelled = false;
-
-    const fetchPrices = async () => {
-      try {
-        const res = await fetch(`/api/prices?symbols=${encodeURIComponent(symbolsKey)}`);
-        if (!res.ok) { if (!cancelled) setPricesStale(true); return; }
-        const data = await res.json() as { prices: Record<string, LivePrice> };
-        if (!cancelled) {
-          setPrices(data.prices);
-          setPricesUpdatedAt(new Date());
-          setPricesStale(false);
-        }
-      } catch {
-        // silently ignore in state — same convention as PositionsStrip —
-        // but still mark the on-screen prices stale rather than leaving
-        // them looking fresh indefinitely.
-        if (!cancelled) setPricesStale(true);
-      }
-    };
-
-    fetchPrices();
-    const id = setInterval(fetchPrices, 30_000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [symbolsKey, positions.length]);
+  const { prices, stale: pricesStale, updatedAt: pricesUpdatedAt } =
+    useLivePrices(positions.map(p => p.symbol));
 
   const rows: Row[] = useMemo(() => {
     return positions.map(position => {
@@ -215,21 +180,7 @@ export default function PortfolioPage() {
           </div>
         ) : (
           <>
-            {pricesUpdatedAt && (
-              <div className="flex justify-end mb-2">
-                {pricesStale ? (
-                  <span className="flex items-center gap-1 text-[10px] text-hold/80" title="The live-price refresh has been failing — prices below may be outdated">
-                    <span className="w-1.5 h-1.5 rounded-full bg-hold inline-block" />
-                    Prices may be outdated · last updated {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })} IST
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-1 text-[10px] text-buy/70">
-                    <span className="w-1.5 h-1.5 rounded-full bg-buy animate-pulse inline-block" />
-                    LTP {pricesUpdatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })} IST
-                  </span>
-                )}
-              </div>
-            )}
+            <LivePriceStatus updatedAt={pricesUpdatedAt} stale={pricesStale} />
             {/* Aggregate stats */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
               <div className="rounded-xl border border-border bg-card px-4 py-3">

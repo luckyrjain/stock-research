@@ -1,14 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePositions } from '@/lib/positions';
+import { useLivePrices } from '@/lib/use-live-prices';
 import { fmtPrice } from '@/lib/format';
-
-interface LivePrice {
-  price: number;
-  change_pct: number | null;
-}
 
 function pnlPct(entry: number | null, current: number | null): number | null {
   if (entry == null || current == null || entry <= 0) return null;
@@ -21,35 +16,7 @@ function pnlPct(entry: number | null, current: number | null): number | null {
  * Renders nothing when the user hasn't marked any pick as bought. */
 export default function PositionsStrip() {
   const { positions, removePosition } = usePositions();
-  const [prices, setPrices] = useState<Record<string, LivePrice>>({});
-  // Stale/degraded (state 5, design.md's five-states rule): a poll that's been failing
-  // must not render identically to one that's fresh.
-  const [pricesStale, setPricesStale] = useState(false);
-
-  const symbolsKey = positions.map(p => p.symbol).join(',');
-
-  useEffect(() => {
-    if (positions.length === 0) return;
-    let cancelled = false;
-
-    const fetchPrices = async () => {
-      try {
-        const res = await fetch(`/api/prices?symbols=${encodeURIComponent(symbolsKey)}`);
-        if (!res.ok) { if (!cancelled) setPricesStale(true); return; }
-        const data = await res.json() as { prices: Record<string, LivePrice> };
-        if (!cancelled) { setPrices(data.prices); setPricesStale(false); }
-      } catch {
-        // silently ignore in state — same convention as the rest of Market
-        // Picks' price polling — but still mark prices stale rather than
-        // leaving them looking fresh indefinitely.
-        if (!cancelled) setPricesStale(true);
-      }
-    };
-
-    fetchPrices();
-    const id = setInterval(fetchPrices, 30_000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [symbolsKey, positions.length]);
+  const { prices, stale: pricesStale } = useLivePrices(positions.map(p => p.symbol));
 
   if (positions.length === 0) return null;
 
