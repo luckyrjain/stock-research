@@ -175,6 +175,7 @@ export default function SiteNav({ active, extraLabel, right, wrap = true }: Prop
           ref={menuRef}
           id="site-nav-mobile-menu"
           role="menu"
+          aria-label="Site navigation"
           tabIndex={-1}
           className="md:hidden absolute left-0 top-full mt-1 w-56 rounded-lg bg-card border border-border shadow-lg py-1 z-20"
         >
