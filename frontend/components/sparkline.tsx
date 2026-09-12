@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { formatUtcDate, nearestIndexByX } from '@/lib/chart-hover';
 
 interface Props {
   closes: number[];
@@ -22,19 +23,10 @@ const _ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // Only reformats genuine 'YYYY-MM-DD' entries (the price-history series) —
 // quarter labels like "Mar 2024" (QuarterlyTrend.quarters) are already
 // human-readable and shown as-is rather than round-tripped through Date,
-// which would silently reinterpret "Mar 2024" as a specific day.
+// which would silently reinterpret "Mar 2024" as a specific day. The UTC
+// formatting itself (and why it needs timeZone: 'UTC') lives in chart-hover.ts.
 function formatDate(d: string): string {
-  if (!_ISO_DATE_RE.test(d)) return d;
-  const parsed = new Date(d);
-  if (Number.isNaN(parsed.getTime())) return d;
-  // A bare 'YYYY-MM-DD' string parses as UTC midnight (per the Date spec),
-  // but toLocaleDateString() without an explicit timeZone renders in the
-  // browser's LOCAL timezone — for any visitor west of UTC, that silently
-  // shifts the displayed date back by one day (e.g. "2026-07-27" renders as
-  // "26 Jul" for a Pacific-time visitor). Pinning timeZone: 'UTC' here makes
-  // the render match the UTC calendar date the string actually encodes,
-  // regardless of the viewer's own timezone.
-  return parsed.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+  return _ISO_DATE_RE.test(d) ? formatUtcDate(d) : d;
 }
 
 // Vector SVG sparkline (design.md's "Data visualization" section) — stroke color tracks buy/sell (rising/falling).
@@ -61,15 +53,7 @@ export default function Sparkline({
   const points = coords.map(({ x, y }) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
 
   function nearestIndex(clientX: number, svg: SVGSVGElement): number {
-    const rect = svg.getBoundingClientRect();
-    const relX = ((clientX - rect.left) / rect.width) * width;
-    let nearest = 0;
-    let best = Infinity;
-    coords.forEach((c, i) => {
-      const d = Math.abs(c.x - relX);
-      if (d < best) { best = d; nearest = i; }
-    });
-    return nearest;
+    return nearestIndexByX(clientX, svg, width, coords.length, i => coords[i].x);
   }
 
   const hovered = hoverIdx != null ? coords[hoverIdx] : null;
