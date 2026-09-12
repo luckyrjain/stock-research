@@ -12,6 +12,7 @@ import PositionsStrip from '@/components/positions-strip';
 import PageShell from '@/components/page-shell';
 import { ErrorBanner } from '@/components/error-banner';
 import { useToast } from '@/components/toast';
+import { useLivePrices } from '@/lib/use-live-prices';
 
 interface SourceState {
   name: string;
@@ -205,7 +206,6 @@ export default function MarketPicksPage() {
   const [generatedAt, setGeneratedAt] = useState('');
   const [fromCache, setFromCache] = useState(false);
   const [error, setError]         = useState<string | null>(null);
-  const [pricesLastUpdated, setPricesLastUpdated] = useState<Date | null>(null);
   const [status, setStatus] = useState<MarketPicksStatus | null>(null);
 
   const esRef   = useRef<EventSource | null>(null);
@@ -226,29 +226,24 @@ export default function MarketPicksPage() {
   }, []);
 
   // Refresh LTP every 30 s once picks are loaded
-  useEffect(() => {
-    if (phase !== 'done' || picks.length === 0) return;
-    const symbols = picks.map(p => p.symbol).join(',');
+  const livePriceSymbols = useMemo(
+    () => (phase === 'done' ? picks.map(p => p.symbol) : []),
+    [phase, picks],
+  );
+  const { prices: livePrices, updatedAt: pricesLastUpdated } = useLivePrices(livePriceSymbols);
 
-    const fetchPrices = async () => {
-      try {
-        const res = await fetch(`/api/prices?symbols=${encodeURIComponent(symbols)}`);
-        if (!res.ok) return;
-        const data = await res.json() as { prices: Record<string, { price: number; change_pct: number }> };
-        setPicks(prev => prev.map(p => {
-          const live = data.prices[p.symbol];
-          return live ? { ...p, current_price: live.price, change_pct: live.change_pct } : p;
-        }));
-        setPricesLastUpdated(new Date());
-      } catch {
-        // silently ignore — stale price is fine
-      }
-    };
-
-    fetchPrices();
-    const id = setInterval(fetchPrices, 30_000);
-    return () => clearInterval(id);
-  }, [phase, picks.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Merge live prices into picks — keeps the last good price both on a
+  // failed poll (livePrices isn't updated, not cleared) AND on a per-symbol
+  // lookup miss inside an otherwise-successful poll (/api/prices returns
+  // `{}`, not an omitted key, for a symbol it couldn't price — a truthy
+  // empty object that must not be treated as "live data present", or a
+  // transient lookup gap would null out a real price already on screen).
+  const picksWithLivePrices = useMemo(() => picks.map(p => {
+    const live = livePrices[p.symbol];
+    return live?.price != null
+      ? { ...p, current_price: live.price, change_pct: live.change_pct ?? null }
+      : p;
+  }), [picks, livePrices]);
 
   const startScan = useCallback((force = false) => {
     esRef.current?.close();
@@ -699,7 +694,7 @@ export default function MarketPicksPage() {
         {/* ── Done ── */}
         {phase === 'done' && picks.length > 0 && (
           <MarketPicksDashboard
-            picks={picks}
+            picks={picksWithLivePrices}
             generatedAt={generatedAt}
             fromCache={fromCache}
             onRescan={() => startScan(true)}

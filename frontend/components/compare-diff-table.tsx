@@ -1,6 +1,7 @@
 'use client';
 
 import type { Report } from '@/types';
+import { REC_TONE_4TIER, REC_TONE_UNKNOWN } from '@/lib/tone';
 
 type Direction = 'lower' | 'higher' | 'neutral';
 
@@ -58,16 +59,10 @@ function parseRatioValue(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-const REC_CLS: Record<string, string> = {
-  BUY:  'bg-buy/12 text-buy border-buy/25',
-  HOLD: 'bg-hold/12 text-hold border-hold/25',
-  SELL: 'bg-sell/12 text-sell border-sell/25',
-};
-
 function RecBadge({ rec }: { rec?: string }) {
   if (!rec) return <span className="text-muted text-xs">—</span>;
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border ${REC_CLS[rec] ?? 'bg-muted/10 text-muted border-muted/20'}`}>
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border ${REC_TONE_4TIER[rec] ?? REC_TONE_UNKNOWN}`}>
       {rec}
     </span>
   );
