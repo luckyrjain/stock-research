@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from core import cache
 from telemetry import source_health
 from signals.models import Signal
+from tools._nse_dates import parse_nse_date
 from tools.macro_context_tools import get_macro_context
 from tools.nse_fii_dii_tools import get_fii_dii_flow
 
@@ -35,12 +36,8 @@ _FLOW_DATE_FORMATS = ("%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y")
 def _parse_flow_date(date_str: str | None) -> datetime | None:
     if not date_str:
         return None
-    for fmt in _FLOW_DATE_FORMATS:
-        try:
-            return datetime.strptime(date_str, fmt).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-    return None
+    parsed = parse_nse_date(date_str, _FLOW_DATE_FORMATS)
+    return parsed.replace(tzinfo=timezone.utc) if parsed is not None else None
 
 # Net FII+DII flow thresholds (₹ Cr) for a "meaningful" vs. "strong" tilt —
 # round numbers, not derived from any backtest; a coarse overlay, not a
