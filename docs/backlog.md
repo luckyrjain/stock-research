@@ -430,10 +430,10 @@ pass. Still open — most in `design.md` §10/§12:
 
 ## Engineering debt
 
-- **`api.py` is ~2,790 lines and holds 29 of the 61 routes.** Only watchlist, positions and the
-  Portfolio Aggregator have been extracted to `routes/`. A deep architecture pass this round traced
-  the full module dependency graph and found the extraction itself clean — no circular imports, no
-  business logic leaking into `api.py` beyond what's already disclosed here.
+- **`api.py` is ~2,790 lines and holds 29 of the 63 routes.** Only watchlist, positions, the
+  Portfolio Aggregator, and broker sync have been extracted to `routes/`. A deep architecture pass
+  this round traced the full module dependency graph and found the extraction itself clean — no
+  circular imports, no business logic leaking into `api.py` beyond what's already disclosed here.
 - **`pipelines/market_picks_pipeline.py` has never been decomposed** — the largest module in the repo, with
   six phases sharing mutable state and threading/async coordination. Re-audited this round for a
   thread-safety bug specifically (shared dict/list/counter written from worker threads without a
