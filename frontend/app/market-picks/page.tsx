@@ -232,11 +232,17 @@ export default function MarketPicksPage() {
   );
   const { prices: livePrices, updatedAt: pricesLastUpdated } = useLivePrices(livePriceSymbols);
 
-  // Merge live prices into picks — keeps the last good price on a failed
-  // poll, since `livePrices` itself just isn't updated rather than cleared.
+  // Merge live prices into picks — keeps the last good price both on a
+  // failed poll (livePrices isn't updated, not cleared) AND on a per-symbol
+  // lookup miss inside an otherwise-successful poll (/api/prices returns
+  // `{}`, not an omitted key, for a symbol it couldn't price — a truthy
+  // empty object that must not be treated as "live data present", or a
+  // transient lookup gap would null out a real price already on screen).
   const picksWithLivePrices = useMemo(() => picks.map(p => {
     const live = livePrices[p.symbol];
-    return live ? { ...p, current_price: live.price ?? null, change_pct: live.change_pct ?? null } : p;
+    return live?.price != null
+      ? { ...p, current_price: live.price, change_pct: live.change_pct ?? null }
+      : p;
   }), [picks, livePrices]);
 
   const startScan = useCallback((force = false) => {

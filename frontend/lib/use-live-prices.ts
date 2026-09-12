@@ -42,7 +42,19 @@ export function useLivePrices(symbols: string[]): UseLivePricesResult {
   const key = symbols.join(',');
 
   useEffect(() => {
-    if (!key) { setLoading(false); return; }
+    if (!key) {
+      // An empty symbol set isn't just "nothing to poll yet" — it can also
+      // mean the caller wiped its own list (e.g. a fresh, non-background
+      // rescan starting from zero picks). Leaving a prior symbol set's
+      // prices/updatedAt sitting in state would let them silently bleed
+      // onto a same-symbol pick that reappears in the next batch, before
+      // this hook's own fresh fetch for it resolves.
+      setPrices({});
+      setUpdatedAt(null);
+      setStale(false);
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
 
     const fetchPrices = async () => {
