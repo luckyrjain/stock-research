@@ -25,13 +25,12 @@ import csv
 import io
 import json
 import logging
-import os
-import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
 
+from core.atomic_file import atomic_write_text
 from tools._nse_session import get_nse_session
 
 logger = logging.getLogger(__name__)
@@ -67,14 +66,7 @@ def _save_cache(data: list[dict]) -> None:
     # mid-write, or two cron-triggered pipeline runs racing on the same
     # file), which every read site below then failed to parse.
     _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=_CACHE_PATH.parent, prefix=f".{_CACHE_PATH.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(data))
-        os.replace(tmp_path, _CACHE_PATH)
-    except Exception:
-        Path(tmp_path).unlink(missing_ok=True)
-        raise
+    atomic_write_text(_CACHE_PATH, json.dumps(data))
 
 
 def _load_cache() -> list[dict] | None:

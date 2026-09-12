@@ -14,8 +14,6 @@ fuzzy company-name match. Consumed by portfolio/csv_import.py's broker CSV impor
 """
 
 import json
-import os
-import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -23,6 +21,7 @@ import requests
 from rapidfuzz import fuzz, process, utils as _rf_utils
 from sqlalchemy import select
 
+from core.atomic_file import atomic_write_text
 from db.models import securities as _securities_t
 from tools.sme_tools import get_all_sme_stocks
 
@@ -68,14 +67,7 @@ def _save_cache(path: Path, data: list[dict]) -> None:
     # core/cache.py::save()/tools/sme_tools.py::_save_cache, so an interrupted
     # write never leaves a corrupt file behind for the next read to choke on.
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(data))
-        os.replace(tmp_path, path)
-    except Exception:
-        Path(tmp_path).unlink(missing_ok=True)
-        raise
+    atomic_write_text(path, json.dumps(data))
 
 
 def _load_cache(path: Path) -> list[dict] | None:
