@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback, useId } from 'react';
 import type { ValidationResult } from '@/types';
 import { exchangeTone } from '@/lib/tone';
+import { SpinIcon } from '@/components/error-banner';
 
 interface Props {
   onAnalyse: (symbol: string) => void;
@@ -92,7 +93,7 @@ export default function TickerSearch({ onAnalyse, disabled, compact = false }: P
     status === 'warn'    ? 'Symbol suspended or delisted' : '';
 
   const statusIcon =
-    status === 'loading' ? <span aria-hidden="true" className="animate-spin-slow inline-block text-muted">⟳</span> :
+    status === 'loading' ? <SpinIcon className="inline-block text-muted" /> :
     status === 'valid'   ? <span aria-hidden="true" className="text-buy">✓</span> :
     status === 'invalid' ? <span aria-hidden="true" className="text-sell">✕</span> :
     status === 'error'   ? <span aria-hidden="true" className="text-sell">✕</span> :

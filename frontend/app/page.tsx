@@ -7,6 +7,7 @@ import TickerSearch     from '@/components/ticker-search';
 import ProgressTracker  from '@/components/progress-tracker';
 import ResultsDashboard from '@/components/results-dashboard';
 import PageShell        from '@/components/page-shell';
+import { ErrorBanner }  from '@/components/error-banner';
 import { useStockAnalysis } from '@/lib/useStockAnalysis';
 
 // Matches api.py's _is_isin(). A deep-linked ISIN (used for BSE SME stocks,
@@ -114,18 +115,12 @@ function HomePageInner() {
               <p className="text-center text-muted text-xs mb-4">Resolving listing…</p>
             )}
             {resolveError && (
-              <div className="mb-6 px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm flex items-center justify-between gap-4">
-                <span>{resolveError}</span>
-                {lastDeepLinkedSymbol.current && (
-                  <button
-                    onClick={() => resolveSymbol(lastDeepLinkedSymbol.current!)}
-                    className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
-                      border border-sell/40 text-sell hover:bg-sell/10 transition-colors duration-150"
-                  >
-                    Try Again
-                  </button>
-                )}
-              </div>
+              <ErrorBanner
+                message={resolveError}
+                className="mb-6"
+                retryLabel="Try Again"
+                onRetry={lastDeepLinkedSymbol.current ? () => resolveSymbol(lastDeepLinkedSymbol.current!) : undefined}
+              />
             )}
 
             <TickerSearch onAnalyse={handleAnalyse} disabled={isRunning} />
@@ -159,19 +154,12 @@ function HomePageInner() {
             )}
 
             {phase === 'error' && error && (
-              <div className="mb-8 px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm flex items-start justify-between gap-4">
-                <span>{error}</span>
-                {currentSymbol && (
-                  <button
-                    onClick={() => handleAnalyse(currentSymbol)}
-                    className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
-                      border border-sell/40 text-sell hover:bg-sell/10
-                      transition-colors duration-150"
-                  >
-                    Try Again
-                  </button>
-                )}
-              </div>
+              <ErrorBanner
+                message={error}
+                className="mb-8"
+                retryLabel="Try Again"
+                onRetry={currentSymbol ? () => handleAnalyse(currentSymbol) : undefined}
+              />
             )}
 
             {phase === 'done' && report && (

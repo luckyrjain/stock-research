@@ -10,6 +10,7 @@ import type {
 import MarketPicksDashboard from '@/components/market-picks-dashboard';
 import PositionsStrip from '@/components/positions-strip';
 import PageShell from '@/components/page-shell';
+import { ErrorBanner } from '@/components/error-banner';
 import { useToast } from '@/components/toast';
 
 interface SourceState {
@@ -691,17 +692,7 @@ export default function MarketPicksPage() {
         {/* ── Error ── */}
         {phase === 'error' && error && (
           <div className="max-w-2xl mx-auto">
-            <div className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm
-                            flex items-start justify-between gap-4">
-              <span>{error}</span>
-              <button
-                onClick={() => startScan()}
-                className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold border border-sell/40
-                           hover:bg-sell/10 transition-colors"
-              >
-                Retry
-              </button>
-            </div>
+            <ErrorBanner message={error} onRetry={() => startScan()} />
           </div>
         )}
 

@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useRef, type ReactNode } from 'react'
 import Link from 'next/link';
 import PageShell from '@/components/page-shell';
 import { Skeleton } from '@/components/data-table-ui';
+import { ErrorBanner, SpinIcon } from '@/components/error-banner';
 import { usePositions } from '@/lib/positions';
 import { getClientId } from '@/lib/watchlist';
 import { useToast } from '@/components/toast';
@@ -139,14 +140,7 @@ function ProfilePicker({ onSelect }: { onSelect: (p: PortfolioProfile) => void }
       <h1 className="text-lg font-bold text-tx mb-1">Net Worth</h1>
       <p className="text-sm text-muted mb-5">Pick a profile to continue, or create a new one.</p>
       {loadError ? (
-        <div role="alert" className="px-4 py-3 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-5
-                        flex items-start justify-between gap-4">
-          <span>{loadError}</span>
-          <button onClick={load} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
-                                             border border-sell/40 hover:bg-sell/10 transition-colors">
-            Retry
-          </button>
-        </div>
+        <ErrorBanner message={loadError} className="mb-5" onRetry={load} />
       ) : profiles === null ? (
         <div className="flex flex-col gap-2 mb-5" aria-busy="true">
           {Array.from({ length: 2 }).map((_, i) => (
@@ -512,7 +506,7 @@ function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
         )}
         {connection?.connected && (
           <button onClick={sync} disabled={syncing} className="text-xs text-accent font-semibold disabled:opacity-50 flex items-center gap-1.5">
-            {syncing && <span className="animate-spin-slow" aria-hidden="true">⟳</span>}
+            {syncing && <SpinIcon />}
             {syncing ? 'Syncing…' : 'Sync now'}
           </button>
         )}
@@ -699,7 +693,7 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
         )}
         {connection?.connected && (
           <button onClick={sync} disabled={syncing} className="text-xs text-accent font-semibold disabled:opacity-50 flex items-center gap-1.5">
-            {syncing && <span className="animate-spin-slow" aria-hidden="true">⟳</span>}
+            {syncing && <SpinIcon />}
             {syncing ? 'Syncing…' : 'Sync now'}
           </button>
         )}
@@ -1184,16 +1178,7 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
       {showImportCas && <ImportCasForm accounts={accounts} onImported={() => { refresh(); setShowImportCas(false); }} />}
       {showImportCsv && <ImportCsvForm accounts={accounts} onImported={() => { refresh(); setShowImportCsv(false); }} />}
 
-      {networthError && (
-        <div role="alert" className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-6
-                        flex items-start justify-between gap-4">
-          <span>{networthError}</span>
-          <button onClick={refresh} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
-                                                 border border-sell/40 hover:bg-sell/10 transition-colors">
-            Retry
-          </button>
-        </div>
-      )}
+      {networthError && <ErrorBanner message={networthError} className="mb-6" onRetry={refresh} />}
       {!networth && !netWorthLoaded && (
         <div className="bg-card border border-border rounded-xl p-5 mb-6" aria-busy="true">
           <Skeleton className="h-3 w-24 mb-3" />
@@ -1246,14 +1231,7 @@ function ProfileView({ profile, onSwitch }: { profile: PortfolioProfile; onSwitc
       )}
 
       {(accountsError || connectionsError) && (
-        <div role="alert" className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-3
-                        flex items-start justify-between gap-4">
-          <span>{accountsError || connectionsError}</span>
-          <button onClick={refresh} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
-                                                 border border-sell/40 hover:bg-sell/10 transition-colors">
-            Retry
-          </button>
-        </div>
+        <ErrorBanner message={accountsError || connectionsError!} className="mb-3" onRetry={refresh} />
       )}
       {!loaded ? (
         <div className="flex flex-col gap-3" aria-busy="true">
@@ -1312,14 +1290,7 @@ export default function PortfolioAggregatorPage() {
   return (
     <PageShell active="portfolio-aggregator" maxWidth="max-w-5xl">
       {loadError ? (
-        <div role="alert" className="max-w-md mx-auto mt-12 px-5 py-4 rounded-xl bg-sell/10 border border-sell/30
-                        text-sell text-sm flex items-start justify-between gap-4">
-          <span>{loadError}</span>
-          <button onClick={loadProfile} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
-                                                     border border-sell/40 hover:bg-sell/10 transition-colors">
-            Retry
-          </button>
-        </div>
+        <ErrorBanner message={loadError} className="max-w-md mx-auto mt-12" onRetry={loadProfile} />
       ) : profile === undefined ? (
         <p className="text-sm text-muted text-center mt-12" aria-busy="true">Loading…</p>
       ) : profile === null ? (

@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useAuth } from '@/lib/auth';
 import PageShell from '@/components/page-shell';
 import { Skeleton } from '@/components/data-table-ui';
+import { ErrorBanner, SpinIcon } from '@/components/error-banner';
 import { useToast } from '@/components/toast';
 import type { ApiKey, ApiKeysResponse, ApiUsage, CreatedApiKey } from '@/types';
 
@@ -188,18 +189,14 @@ export default function ApiKeysPage() {
                 className="flex items-center gap-1.5 px-4 py-2.5 rounded-lg bg-accent text-bg text-sm font-semibold
                            hover:bg-accent/90 transition-colors disabled:opacity-50 shrink-0"
               >
-                {creating && <span aria-hidden="true" className="animate-spin-slow">⟳</span>}
+                {creating && <SpinIcon />}
                 {creating ? 'Creating…' : 'Create key'}
               </button>
             </form>
 
             {/* Form-level failure (the create-key request itself failed) — the
                 Error banner (FORM-07), not a bare paragraph or a toast. */}
-            {error && (
-              <div role="alert" className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-4">
-                {error}
-              </div>
-            )}
+            {error && <ErrorBanner message={error} className="mb-4" />}
 
             {justCreated && (
               <div className="mb-6 px-5 py-4 rounded-xl bg-buy/10 border border-buy/30 text-sm">
@@ -224,17 +221,7 @@ export default function ApiKeysPage() {
             )}
 
             {loadError && (
-              <div role="alert" className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-4
-                                           flex items-start justify-between gap-4">
-                <span>{loadError}</span>
-                <button
-                  onClick={() => loadKeys({ silent: keys.length > 0 })}
-                  className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
-                             border border-sell/40 hover:bg-sell/10 transition-colors"
-                >
-                  Retry
-                </button>
-              </div>
+              <ErrorBanner message={loadError} className="mb-4" onRetry={() => loadKeys({ silent: keys.length > 0 })} />
             )}
 
             {keysLoading ? (
