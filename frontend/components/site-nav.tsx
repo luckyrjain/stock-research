@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import HeaderSearch from './header-search';
 import AuthWidget from './auth-widget';
 import { useWatchlistAlertsBadge } from '@/lib/watchlist-alerts-badge';
+import { useFocusTrap } from '@/lib/use-focus-trap';
 
 function WatchlistAlertDot() {
   return (
@@ -84,6 +85,20 @@ export default function SiteNav({ active, extraLabel, right, wrap = true }: Prop
   // /watchlist itself. See lib/watchlist-alerts-badge.ts for the full story.
   const hasWatchlistAlerts = useWatchlistAlertsBadge();
 
+  // Tab-wrap trap (A11Y-11) — same treatment as ConsolidatedCard/
+  // InfoTooltip/SourcesPopover. Without it, Tab could walk out of the open
+  // menu into the rest of the page. The hook's own inert-background half is
+  // a no-op here specifically: this menu lives inline inside #app-content
+  // rather than as a portaled overlay, so it's the "target already contains
+  // the panel" case useFocusTrap's own doc comment already carves out —
+  // Tab-wrapping is what actually closes the gap for this caller.
+  useFocusTrap(menuRef, menuOpen, {
+    onEscape: () => {
+      setMenuOpen(false);
+      toggleRef.current?.focus();
+    },
+  });
+
   useEffect(() => {
     function onClickOutside(e: MouseEvent) {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)
@@ -91,18 +106,8 @@ export default function SiteNav({ active, extraLabel, right, wrap = true }: Prop
         setMenuOpen(false);
       }
     }
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        setMenuOpen(false);
-        toggleRef.current?.focus();
-      }
-    }
     document.addEventListener('mousedown', onClickOutside);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', onClickOutside);
-      document.removeEventListener('keydown', onKeyDown);
-    };
+    return () => document.removeEventListener('mousedown', onClickOutside);
   }, []);
 
   return (
@@ -170,6 +175,7 @@ export default function SiteNav({ active, extraLabel, right, wrap = true }: Prop
           ref={menuRef}
           id="site-nav-mobile-menu"
           role="menu"
+          tabIndex={-1}
           className="md:hidden absolute left-0 top-full mt-1 w-56 rounded-lg bg-card border border-border shadow-lg py-1 z-20"
         >
           {LINKS.map(link => (
