@@ -62,10 +62,25 @@ def _scrub(parsed: dict) -> dict:
     return clean
 
 
+def upsert_holdings_units(conn, asset_id: int, units) -> None:
+    """Upsert one asset's total units into holdings.
+
+    Shared by import_cas() (below) and csv_import.import_rows() — both
+    compute an asset's total unit count their own way, then persist it via
+    this identical statement. Lives here since CAS import was, per
+    backend/CLAUDE.md's own framing, "the first real writer into
+    transactions"; csv_import imports it rather than redefining it."""
+    from sqlalchemy import text as _text
+    conn.execute(_text(
+        "INSERT INTO holdings (asset_id, units) VALUES (:aid, :u) "
+        "ON CONFLICT (asset_id) DO UPDATE SET units = EXCLUDED.units"
+    ), {"aid": asset_id, "u": units})
+
+
 def import_cas(engine, parsed: dict, account_id: int) -> dict:
     """Write one parsed CAS into the portfolio tables. All writes in a single
     transaction. Returns a summary dict; {"error": ...} on bad account."""
-    from sqlalchemy import insert as _insert, select, text as _text, update as _update
+    from sqlalchemy import insert as _insert, select, update as _update
     from db.models import accounts as accounts_t, assets as assets_t
 
     summary = {"schemes": 0, "assets_created": 0, "assets_matched": 0,
@@ -169,10 +184,7 @@ def import_cas(engine, parsed: dict, account_id: int) -> dict:
 
         for asset_id, total_close in close_by_asset.items():
             if total_close > 0:
-                conn.execute(_text(
-                    "INSERT INTO holdings (asset_id, units) VALUES (:aid, :u) "
-                    "ON CONFLICT (asset_id) DO UPDATE SET units = EXCLUDED.units"
-                ), {"aid": asset_id, "u": total_close})
+                upsert_holdings_units(conn, asset_id, total_close)
             # A scheme matched across one or more folios (see the
             # by_amfi/by_isin backfill above -- this also covers an asset
             # matched to a SINGLE folio in THIS statement whose own close

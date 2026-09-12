@@ -22,6 +22,7 @@ import io
 from dotenv import load_dotenv
 
 from core.observability import get_logger, log_event
+from portfolio.cas_import import upsert_holdings_units
 from tools.securities_master import get_full_securities_master, resolve_symbol
 
 load_dotenv()
@@ -273,10 +274,7 @@ def import_rows(engine, rows: list[list[str]], headers: list[str],
                     f"{symbol}: derived units negative ({units}) — floored to 0; "
                     "tradebook likely incomplete")
                 units = 0.0
-            conn.execute(_text(
-                "INSERT INTO holdings (asset_id, units) VALUES (:aid, :u) "
-                "ON CONFLICT (asset_id) DO UPDATE SET units = EXCLUDED.units"
-            ), {"aid": aid, "u": units})
+            upsert_holdings_units(conn, aid, units)
         if asset_ids:
             summary["warnings"].append(
                 "derived units exclude bonus/split shares — verify against your broker")
