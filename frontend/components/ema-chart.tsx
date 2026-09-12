@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import type { SmeSignalHistoryRow } from '@/types';
+import { formatUtcDate, nearestIndexByX } from '@/lib/chart-hover';
 
 interface Props {
   series: SmeSignalHistoryRow[];
@@ -9,16 +10,9 @@ interface Props {
   height?: number;
 }
 
-function fmtDate(d: string): string {
-  const parsed = new Date(d);
-  if (Number.isNaN(parsed.getTime())) return d;
-  // trade_date is a bare 'YYYY-MM-DD' string, which Date parses as UTC
-  // midnight -- rendering without an explicit timeZone would use the
-  // browser's LOCAL timezone and silently shift the displayed date back by
-  // one day for any visitor west of UTC. timeZone: 'UTC' keeps the render
-  // matching the calendar date the string encodes.
-  return parsed.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
-}
+// trade_date is a bare 'YYYY-MM-DD' string; formatUtcDate (chart-hover.ts)
+// handles the UTC-vs-local rendering edge case.
+const fmtDate = formatUtcDate;
 
 function fmtVal(v: number | null): string {
   return v == null ? '—' : v.toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -27,8 +21,8 @@ function fmtVal(v: number | null): string {
 // Vector SVG chart (no external chart lib, per design.md) showing close price,
 // EMA20, and EMA50 over the stored window, with markers on cross days.
 // Hover/tap shows a crosshair + tooltip with that day's date/close/EMA20/EMA50
-// (and cross type, if that day was one) — same interaction sparkline.tsx
-// already has; this was previously the one chart in the app without it.
+// (and cross type, if that day was one) — see lib/chart-hover.ts for the
+// shared hover/date-format logic also used by sparkline.tsx.
 export default function EmaChart({ series, width = 640, height = 220 }: Props) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const usable = series.filter(r => r.close_price != null || r.ema20 != null || r.ema50 != null);
@@ -56,19 +50,11 @@ export default function EmaChart({ series, width = 640, height = 220 }: Props) {
     .filter(({ r }) => r.cross && r.ema20 != null);
 
   function nearestIndex(clientX: number, svg: SVGSVGElement): number {
-    const rect = svg.getBoundingClientRect();
-    const relX = ((clientX - rect.left) / rect.width) * width;
-    let nearest = 0;
-    let best = Infinity;
-    usable.forEach((_, i) => {
-      const d = Math.abs(xFor(i) - relX);
-      if (d < best) { best = d; nearest = i; }
-    });
-    return nearest;
+    return nearestIndexByX(clientX, svg, width, usable.length, xFor);
   }
 
   const hovered = hoverIdx != null ? usable[hoverIdx] : null;
-  // Clamp the tooltip's left offset the same way sparkline.tsx does, so it
+  // Clamp the tooltip's left offset (same idea as sparkline.tsx), so it
   // doesn't run off either edge of the (much wider) EMA chart.
   const tooltipLeft = hoverIdx != null ? Math.max(60, Math.min(width - 60, xFor(hoverIdx))) : 0;
 
