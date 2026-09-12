@@ -90,25 +90,27 @@ class DownloadBhavcopyTest(unittest.TestCase):
         self.assertIn("bot-block", out["error"])
         mock_make.assert_called_once()   # retry used a fresh session
 
+    @patch("tools.eod_sources.atomic_write_text")
     @patch("tools.eod_sources._archive_path")
-    def test_ok_csv_is_archived_and_returned(self, mock_path: MagicMock) -> None:
+    def test_ok_csv_is_archived_and_returned(self, mock_path: MagicMock, mock_atomic_write: MagicMock) -> None:
         mock_path.return_value.exists.return_value = False
         session = MagicMock()
         session.get.return_value = self._response(200, BHAVCOPY_FIXTURE)
         out = download_bhavcopy(date(2026, 7, 3), session)
         self.assertEqual(out["status"], "ok")
         self.assertEqual(out["csv"], BHAVCOPY_FIXTURE)
-        mock_path.return_value.write_text.assert_called_once_with(BHAVCOPY_FIXTURE)
+        mock_atomic_write.assert_called_once_with(mock_path.return_value, BHAVCOPY_FIXTURE)
 
+    @patch("tools.eod_sources.atomic_write_text")
     @patch("tools.eod_sources._archive_path")
-    def test_degenerate_200_body_is_error_and_not_archived(self, mock_path: MagicMock) -> None:
+    def test_degenerate_200_body_is_error_and_not_archived(self, mock_path: MagicMock, mock_atomic_write: MagicMock) -> None:
         mock_path.return_value.exists.return_value = False
         session = MagicMock()
         session.get.return_value = self._response(200, "garbage")
         out = download_bhavcopy(date(2026, 7, 3), session)
         self.assertEqual(out["status"], "error")
         self.assertIn("unexpected bhavcopy body", out["error"])
-        mock_path.return_value.write_text.assert_not_called()
+        mock_atomic_write.assert_not_called()
 
 
 NAVALL_FIXTURE = """Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Net Asset Value;Date

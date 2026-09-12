@@ -345,13 +345,13 @@ def picks_cache_status() -> dict:
 def save_picks_cache(picks: list, generated_at: str) -> None:
     try:
         _PICKS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _PICKS_CACHE_PATH.write_text(
+        atomic_write_text(
+            _PICKS_CACHE_PATH,
             json.dumps({
                 "picks":        picks,
                 "generated_at": generated_at,
                 "_meta":        {"fetched_at": datetime.now(timezone.utc).isoformat()},
             }, indent=2, ensure_ascii=False),
-            encoding="utf-8",
         )
     except Exception:
         pass
@@ -508,7 +508,7 @@ def _load_nse_symbol_master() -> set[str]:
         syms = {row["SYMBOL"].strip().upper() for row in reader if row.get("SYMBOL", "").strip()}
         if syms:
             _NSE_MASTER_PATH.parent.mkdir(parents=True, exist_ok=True)
-            _NSE_MASTER_PATH.write_text("\n".join(sorted(syms)))
+            atomic_write_text(_NSE_MASTER_PATH, "\n".join(sorted(syms)))
         return syms
     except Exception:
         # Fall back to stale cache rather than failing open completely
