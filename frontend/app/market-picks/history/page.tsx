@@ -5,6 +5,7 @@ import Link from 'next/link';
 import type { MarketPicksHistoryResponse, MarketPickTrackRecord, MarketPicksDailySnapshot } from '@/types';
 import PageShell from '@/components/page-shell';
 import { Skeleton } from '@/components/data-table-ui';
+import { ErrorBanner } from '@/components/error-banner';
 import { fmtChangePct as fmtPct } from '@/lib/format';
 import { REC_TONE_4TIER } from '@/lib/tone';
 
@@ -169,17 +170,7 @@ export default function MarketPicksHistoryPage() {
         )}
 
         {error && (
-          <div className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-6
-                          flex items-start justify-between gap-4">
-            <span>{error}</span>
-            <button
-              onClick={loadHistory}
-              className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold border border-sell/40
-                         hover:bg-sell/10 transition-colors"
-            >
-              Retry
-            </button>
-          </div>
+          <ErrorBanner message={error} onRetry={loadHistory} className="mb-6" />
         )}
 
         {/* Date picker — browse a specific day's full pick list, instead of
@@ -237,17 +228,10 @@ export default function MarketPicksHistoryPage() {
         {!error && selectedDate && (
           <div className="rounded-xl border border-border overflow-hidden mb-6">
             {dailyError ? (
-              <div className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm
-                              flex items-start justify-between gap-4">
-                <span>{dailyError}</span>
-                <button
-                  onClick={() => selectedDate && loadDaily(selectedDate)}
-                  className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold border border-sell/40
-                             hover:bg-sell/10 transition-colors"
-                >
-                  Retry
-                </button>
-              </div>
+              <ErrorBanner
+                message={dailyError}
+                onRetry={() => selectedDate && loadDaily(selectedDate)}
+              />
             ) : (
               <div className={`overflow-x-auto ${dailyLoading && daily ? 'opacity-50 transition-opacity' : ''}`}
                    aria-busy={dailyLoading}>

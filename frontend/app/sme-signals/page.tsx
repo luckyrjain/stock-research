@@ -8,6 +8,7 @@ import PageShell from '@/components/page-shell';
 import WatchlistButton from '@/components/watchlist-button';
 import InfoTooltip from '@/components/info-tooltip';
 import { Skeleton, FilterChip, SortableTh } from '@/components/data-table-ui';
+import { ErrorBanner } from '@/components/error-banner';
 import { fmtCr, fmtChangePct } from '@/lib/format';
 import { exchangeTone } from '@/lib/tone';
 
@@ -549,11 +550,7 @@ export default function SmeSignalsPage() {
             already loaded to fall back to; a background-poll/reload failure
             with a populated table keeps the last good render instead (see
             the stale banner below the table) — STATE-01 (design.md). */}
-        {error && signals.length === 0 && (
-          <div className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm mb-6">
-            {error}
-          </div>
-        )}
+        {error && signals.length === 0 && <ErrorBanner message={error} className="mb-6" />}
 
         {/* Table — hidden only in the exact case the error banner above
             covers instead (error with nothing loaded at all). Loading and
