@@ -23,14 +23,12 @@ to a real deployment.
 
 import csv
 import io
-import json
 import logging
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
 
-from core.atomic_file import atomic_write_text
+from core.file_list_cache import is_fresh, load_json, save_json
 from tools._nse_session import get_nse_session
 
 logger = logging.getLogger(__name__)
@@ -53,20 +51,11 @@ def _nse_session() -> requests.Session:
 
 
 def _is_fresh(path: Path) -> bool:
-    if not path.exists():
-        return False
-    age = datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)
-    return age < timedelta(hours=_CACHE_TTL_HOURS)
+    return is_fresh(path, _CACHE_TTL_HOURS)
 
 
 def _save_cache(data: list[dict]) -> None:
-    # Written atomically (tempfile + os.replace), same convention as
-    # core/cache.py::save() -- a plain write_text() left a truncated/corrupt file
-    # behind on an interrupted write (process killed/OOM/container restart
-    # mid-write, or two cron-triggered pipeline runs racing on the same
-    # file), which every read site below then failed to parse.
-    _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(_CACHE_PATH, json.dumps(data))
+    save_json(_CACHE_PATH, data)
 
 
 def _load_cache() -> list[dict] | None:
@@ -79,11 +68,7 @@ def _load_cache() -> list[dict] | None:
     usable cache" -- the mtime-based freshness check doesn't validate
     content, so without this guard a single corrupt file would keep raising
     on every call until the 24h TTL expired."""
-    try:
-        return json.loads(_CACHE_PATH.read_text())
-    except Exception as exc:
-        logger.warning("NIFTY 500 cache at %s is unreadable, treating as absent: %s", _CACHE_PATH, exc)
-        return None
+    return load_json(_CACHE_PATH, logger=logger, log_label="NIFTY 500 cache")
 
 
 def get_nifty500_constituents(force: bool = False) -> list[dict]:
