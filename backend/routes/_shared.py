@@ -32,13 +32,16 @@ LOGGER = get_logger("api")
 _TICKER_RE = re.compile(r"^[A-Z0-9&\-]{1,20}$")
 
 
-def valid_ticker(symbol: str) -> str:
-    """FastAPI dependency replacing api.py's own repeated inline
+def validate_ticker(symbol: str) -> str:
+    """Shared replacement for api.py's own repeated inline
     `sym = symbol.upper().strip(); if not _TICKER_RE.match(sym): raise ...`
-    block. Declared as `symbol: str = Depends(valid_ticker)` in place of a
-    route's own `symbol: str` path-param declaration — FastAPI resolves this
-    function's own `symbol` parameter from that same `{symbol}` path segment,
-    then passes the normalized return value through to the endpoint."""
+    block. Plain function, not a FastAPI dependency — call it explicitly from
+    inside each endpoint body, in the same position the inline block used to
+    hold relative to that endpoint's own auth/rate-limit calls. (An earlier
+    version of this wired it in as `symbol: str = Depends(valid_ticker)`, but
+    FastAPI resolves dependencies before the endpoint body runs, which
+    silently moved validation ahead of auth/rate-limit checks that need to
+    run first.)"""
     sym = symbol.upper().strip()
     if not _TICKER_RE.match(sym):
         raise HTTPException(status_code=422, detail="Invalid symbol.")

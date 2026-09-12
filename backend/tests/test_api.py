@@ -1142,6 +1142,15 @@ class PeersEndpointTest(unittest.TestCase):
         resp = client.get("/api/peers/TCS")
         self.assertEqual(resp.status_code, 429)
 
+    def test_rate_limit_gates_before_symbol_validation(self) -> None:
+        # Regression test: _rate_limit() must run before validate_ticker(),
+        # so an already-exhausted bucket rejects even an invalid-symbol
+        # request with 429 (not 422) — otherwise a request with a garbage
+        # symbol could skip rate-limiting entirely.
+        rate_limiter._memory_calls["peers:testclient"] = [api.time.monotonic()] * 30
+        resp = client.get("/api/peers/not-a-symbol!!")
+        self.assertEqual(resp.status_code, 429)
+
     def test_returns_peers_with_percentiles_and_caches(self) -> None:
         raw = json.dumps({
             "symbol": "TCS",
@@ -4136,6 +4145,16 @@ class ConsolidatedV1EndpointTest(unittest.TestCase):
     def test_invalid_api_key_returns_401(self) -> None:
         with patch("auth.get_user_for_api_key", return_value=None):
             resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "bogus"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_missing_api_key_and_invalid_symbol_returns_401_not_422(self) -> None:
+        # Regression test: _require_api_key_user() must run before ticker
+        # validation, so a request with no API key AND an invalid symbol is
+        # rejected for the missing key (401) rather than the bad symbol
+        # (422) — otherwise the auth gate (which exists specifically to
+        # rate-limit garbage keys before any DB lookup) could be skipped
+        # just by also sending an invalid symbol.
+        resp = client.get("/api/v1/consolidated/not-a-symbol!!")
         self.assertEqual(resp.status_code, 401)
 
     def test_invalid_key_is_rate_limited_before_any_db_lookup(self) -> None:
