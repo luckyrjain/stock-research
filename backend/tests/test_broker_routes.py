@@ -378,6 +378,40 @@ class BrokerRoutesTest(unittest.TestCase):
         resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
         self.assertEqual(resp.status_code, 404)
 
+    @patch("portfolio.kite_sync.exchange_request_token")
+    @patch("portfolio.kite_sync.get_login_url")
+    def test_sync_with_corrupted_access_token_is_422_with_reconnect_message(
+        self, mock_login_url, mock_exchange,
+    ) -> None:
+        """Regression test for the routes/broker_sync.py dedup: `_decrypt_or_422()`
+        is shared by 3 call sites but must still produce the ORIGINAL,
+        distinct message at each one. This covers the `broker_sync()` call
+        site specifically — the message must keep pointing the caller at
+        "reconnect this broker account", not the app-secret-registration
+        message the other 2 call sites use."""
+        mock_login_url.return_value = "https://kite.trade/connect/login?v=3"
+        mock_exchange.return_value = {"access_token": "token-1"}
+
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        self._register_credentials("zerodha", acc, "my-key", "my-secret")
+        client.post("/api/portfolio/broker/zerodha/connect",
+                     json={"account_id": acc, "request_token": "rt"})
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                broker_connections.update()
+                .where(broker_connections.c.account_id == acc, broker_connections.c.broker == "zerodha")
+                .values(access_token_enc="not-a-real-fernet-token")
+            )
+
+        resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
+        self.assertEqual(resp.status_code, 422, resp.text)
+        self.assertEqual(
+            resp.json()["detail"],
+            "stored credential could not be decrypted — reconnect this broker account",
+        )
+
     @patch("portfolio.portfolio_valuation.refresh_valuations")
     @patch("portfolio.kite_sync.sync_account")
     @patch("portfolio.kite_sync.exchange_request_token")
