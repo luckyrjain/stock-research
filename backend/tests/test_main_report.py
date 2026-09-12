@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from core import cache
 import main
-from main import _build_report, _fetch_task, _print_report, _save_report, _strip_meta
+from main import _build_report, _fetch_task, _nse_autocomplete, _print_report, _save_report, _strip_meta
 
 
 class SaveReportTest(unittest.TestCase):
@@ -301,6 +301,27 @@ class PrintReportNullChangePctTest(unittest.TestCase):
             },
         }
         _print_report(all_data, {})  # must not raise
+
+
+class NseAutocompleteTest(unittest.TestCase):
+    """Direct coverage of _nse_autocomplete() itself — previously it had
+    none at all despite api.py's own _autocomplete_sync() now delegating to
+    it, so a future edit here would have had no test pinning its contract
+    from either caller (api.py's own tests mock _autocomplete_sync wholesale,
+    which is implementation-agnostic by design)."""
+
+    def test_returns_symbols_list_on_success(self) -> None:
+        fake_session = MagicMock()
+        fake_session.get.return_value.json.return_value = {
+            "symbols": [{"symbol": "TCS", "symbol_info": "Tata Consultancy"}],
+        }
+        with patch("main.get_nse_session", return_value=fake_session):
+            result = _nse_autocomplete("TCS")
+        self.assertEqual(result, [{"symbol": "TCS", "symbol_info": "Tata Consultancy"}])
+
+    def test_degrades_to_empty_list_on_any_failure(self) -> None:
+        with patch("main.get_nse_session", side_effect=RuntimeError("network down")):
+            self.assertEqual(_nse_autocomplete("TCS"), [])
 
 
 if __name__ == "__main__":
