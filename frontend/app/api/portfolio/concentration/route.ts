@@ -1,5 +1,6 @@
 import { authHeaders } from '@/lib/auth-cookie';
 import { clientIpHeaders } from '@/lib/proxy-headers';
+import { proxyJson } from '@/lib/proxy';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
@@ -10,16 +11,9 @@ export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const qs = searchParams.toString();
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(`${API}/api/portfolio/concentration${qs ? `?${qs}` : ''}`, {
-      headers: { ...clientIpHeaders(req), ...authHeaders(req) },
-      cache: 'no-store',
-    });
-  } catch {
-    return Response.json({ by_sector: {}, concentrated_sectors: [] }, { status: 503 });
-  }
-
-  const data = await upstream.json();
-  return Response.json(data, { status: upstream.status });
+  return proxyJson(
+    `${API}/api/portfolio/concentration${qs ? `?${qs}` : ''}`,
+    { headers: { ...clientIpHeaders(req), ...authHeaders(req) }, cache: 'no-store' },
+    { by_sector: {}, concentrated_sectors: [] },
+  );
 }

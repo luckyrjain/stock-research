@@ -1,4 +1,5 @@
 import { clientIpHeaders } from '@/lib/proxy-headers';
+import { proxyJson } from '@/lib/proxy';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
@@ -11,14 +12,10 @@ export async function GET(
   const upstreamUrl = exchange
     ? `${API}/api/validate/${encodeURIComponent(symbol)}?exchange=${encodeURIComponent(exchange)}`
     : `${API}/api/validate/${encodeURIComponent(symbol)}`;
-  try {
-    const res = await fetch(upstreamUrl, { headers: clientIpHeaders(req), cache: 'no-store' });
-    const data = await res.json();
-    return Response.json(data, { status: res.status });
-  } catch {
-    return Response.json(
-      { found: false, valid: false, symbol, company: '', suggestions: [], error: 'Backend unavailable' },
-      { status: 503 },
-    );
-  }
+
+  return proxyJson(
+    upstreamUrl,
+    { headers: clientIpHeaders(req), cache: 'no-store' },
+    { found: false, valid: false, symbol, company: '', suggestions: [], error: 'Backend unavailable' },
+  );
 }
