@@ -8,6 +8,7 @@ import PageShell from '@/components/page-shell';
 import WatchlistButton from '@/components/watchlist-button';
 import InfoTooltip from '@/components/info-tooltip';
 import { Skeleton, FilterChip, SortableTh } from '@/components/data-table-ui';
+import { useSortState } from '@/lib/use-sort-state';
 import { ErrorBanner } from '@/components/error-banner';
 import { fmtCr, fmtChangePct } from '@/lib/format';
 import { exchangeTone } from '@/lib/tone';
@@ -195,8 +196,7 @@ export default function SmeSignalsPage() {
     setRsiFilter('all');
     setVolumeSpikeOnly(false);
   }, []);
-  const [sortKey, setSortKey] = useState<SortKey | null>(null);
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const { sortKey, sortDir, toggleSort } = useSortState<SortKey>();
   // Expand/collapse state is keyed by "<symbol>::<trade_date>", not bare
   // symbol -- the default "crosses" view can legitimately show more than
   // one row for the same stock (a stock can cross more than once within
@@ -299,17 +299,6 @@ export default function SmeSignalsPage() {
   }, []);
 
   const signals = data?.signals ?? [];
-
-  const toggleSort = useCallback((k: SortKey) => {
-    setSortKey(prevKey => {
-      if (prevKey === k) {
-        setSortDir(prevDir => (prevDir === 'desc' ? 'asc' : 'desc'));
-        return k;
-      }
-      setSortDir('desc');
-      return k;
-    });
-  }, []);
 
   // Exchange/RSI/volume-spike filters + sort are applied client-side — the
   // API already returns every matching row for the selected period/direction/

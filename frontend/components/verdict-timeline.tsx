@@ -1,24 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import type { VerdictHistoryEntry, VerdictHistoryResponse } from '@/types';
 import { fmt } from '@/lib/format';
 import { REC_TONE_4TIER, REC_TONE_UNKNOWN_TIMELINE } from '@/lib/tone';
+import { useSymbolResource } from '@/lib/use-symbol-resource';
 
 function useVerdictHistory(symbol: string): VerdictHistoryResponse | null {
-  const [data, setData] = useState<VerdictHistoryResponse | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setData(null);
-    fetch(`/api/verdict-history/${encodeURIComponent(symbol)}`)
-      .then(res => (res.ok ? res.json() : null))
-      .then((data: VerdictHistoryResponse | null) => { if (!cancelled) setData(data); })
-      .catch(() => { if (!cancelled) setData(null); });
-    return () => { cancelled = true; };
-  }, [symbol]);
-
-  return data;
+  return useSymbolResource<VerdictHistoryResponse>(symbol, 'verdict-history');
 }
 
 // How today's call compares to past ones for the same stock — a strip of the
