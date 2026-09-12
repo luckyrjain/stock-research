@@ -169,7 +169,7 @@ export default function WatchlistPage() {
         ) : (
           <>
             <LivePriceStatus updatedAt={pricesUpdatedAt} stale={pricesStale} />
-          <div className="rounded-xl border border-border overflow-hidden">
+            <div className="rounded-xl border border-border overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
