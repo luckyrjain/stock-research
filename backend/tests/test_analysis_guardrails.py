@@ -3,6 +3,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -24,8 +26,10 @@ sys.modules.setdefault(
     SimpleNamespace(get_latest_news=object()),
 )
 
+import core.observability as observability
 from analyst import crew
 from state_store_harness import isolated_state_store
+from test_signal_engine import _PausingSet
 
 
 def _llm_response(content: str) -> SimpleNamespace:
@@ -965,6 +969,46 @@ class CrossProviderFailoverTest(unittest.TestCase):
 
         self.assertEqual(mock_completion.call_count, 1)  # no failover attempt at all
         self.assertTrue(analysis["_degraded"])
+
+
+class LogUnmatchedSectorBucketOnceConcurrencyTest(unittest.TestCase):
+    """crew.py::_log_unmatched_sector_bucket_once() had no dedicated test
+    before this refactor consolidated it (and signals/engine.py's own
+    _log_unmatched_sector_once()) onto core.observability.warn_once()'s
+    shared lock+set mechanism — see
+    tests/test_signal_engine.py::LogUnmatchedSectorOnceConcurrencyTest for
+    the sibling test that already covered the other call site's identical
+    race. Same technique: seed observability's per-event registry with a
+    _PausingSet to force a deterministic interleaving of two threads
+    racing on the same never-before-seen sector."""
+
+    _EVENT = "sector_range_bucket_unmatched"
+
+    def setUp(self) -> None:
+        observability._warn_once_seen.pop(self._EVENT, None)
+        self.addCleanup(observability._warn_once_seen.pop, self._EVENT, None)
+
+    def test_two_concurrent_callers_for_the_same_new_sector_log_exactly_once(self) -> None:
+        pausing_set = _PausingSet()
+        observability._warn_once_seen[self._EVENT] = pausing_set
+
+        def _call():
+            crew._log_unmatched_sector_bucket_once("Some Never-Before-Seen Sector")
+
+        with patch("core.observability.log_event") as mock_log:
+            t1 = threading.Thread(target=_call)
+            t1.start()
+            self.assertTrue(pausing_set.reached_add.wait(timeout=2))
+
+            t2 = threading.Thread(target=_call)
+            t2.start()
+            time.sleep(0.1)
+            pausing_set.release_add.set()
+
+            t1.join(timeout=2)
+            t2.join(timeout=2)
+
+        self.assertEqual(mock_log.call_count, 1)
 
 
 if __name__ == "__main__":
