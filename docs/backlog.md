@@ -372,10 +372,10 @@ skip-link plus `<header>`/`<main id="main">` landmarks, and `ConsolidatedCard` h
 trap (`inert` on the background + manual Tab-wrap) — neither was tracked as fixed before this
 pass. Still open — most in `design.md` §10/§12:
 
-- **The mobile nav dropdown (`site-nav.tsx`) has no real focus trap**, unlike `ConsolidatedCard` —
-  click-outside/Escape-to-close exist, but Tab can walk out of the open menu into the (visible,
-  non-inert) background. The nav bar itself is also still a plain `<div>`, not a `<nav>` landmark
-  (only the surrounding `<header>` is real) — **heading order unaudited**.
+- **The mobile nav dropdown (`site-nav.tsx`) now has a real Tab-wrap focus trap** (`useFocusTrap`,
+  same hook as `ConsolidatedCard`) plus an accessible name on the panel itself. The nav bar as a
+  whole is still a plain `<div>`, not a `<nav>` landmark (only the surrounding `<header>` is real)
+  — **heading order unaudited**.
 - **Three inputs still use `focus:outline-none`** (down from five) and out-specify the global focus
   rule — each has its own ring/border so none are blind, but it's a second inconsistent treatment
   that also fires on mouse click.
