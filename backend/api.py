@@ -169,12 +169,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Referer": "https://www.nseindia.com",
-    "Accept": "application/json",
-}
-
 # ── ISIN resolution (NSE equity master, cached 1 h) ──────────────────────────
 
 _ISIN_CACHE: tuple[float, dict] | None = None
@@ -233,13 +227,11 @@ def _is_name_match(query: str, company: str) -> bool:
 
 
 def _quote_meta_sync(symbol: str) -> dict:
-    import requests
+    from tools._nse_session import get_nse_session
     try:
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=_NSE_HEADERS, timeout=6)
+        s = get_nse_session(timeout=6, sleep_after_prime=0)
         r = s.get(
             f"https://www.nseindia.com/api/quote-equity?symbol={symbol}",
-            headers=_NSE_HEADERS,
             timeout=6,
         )
         info = r.json().get("info", {})
@@ -336,17 +328,10 @@ def _bse_autocomplete_sync(query: str) -> list[dict]:
 
 
 def _autocomplete_sync(query: str) -> list[dict]:
-    import requests
-    try:
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=_NSE_HEADERS, timeout=6)
-        r = s.get(
-            f"https://www.nseindia.com/api/search/autocomplete?q={query}",
-            headers=_NSE_HEADERS, timeout=6,
-        )
-        return r.json().get("symbols", [])
-    except Exception:
-        return []
+    # Identical NSE autocomplete call to main._nse_autocomplete() — delegate
+    # there rather than maintaining two independent copies.
+    from main import _nse_autocomplete
+    return _nse_autocomplete(query)
 
 
 def _company_name_from_result(result: dict) -> str:

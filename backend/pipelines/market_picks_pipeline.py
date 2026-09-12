@@ -37,11 +37,6 @@ load_dotenv()
 
 LOGGER = get_logger("market_picks_pipeline")
 
-_NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Referer": "https://www.nseindia.com",
-    "Accept": "application/json",
-}
 _MAX_STOCKS = 35
 _MAX_ARTICLES_PER_SRC = 15
 _MAX_ARTICLES_TOTAL = 120
@@ -493,12 +488,8 @@ def _load_nse_symbol_master() -> set[str]:
                     return syms
         import csv
         import io as _io
-        sess = requests.Session()
-        sess.headers.update({**_NSE_HEADERS, "Accept": "text/csv,text/plain,*/*"})
-        try:
-            sess.get("https://www.nseindia.com", timeout=6)
-        except Exception:
-            pass
+        from tools._nse_session import get_nse_session
+        sess = get_nse_session(timeout=6, accept="text/csv,text/plain,*/*", sleep_after_prime=0)
         r = sess.get(
             "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
             timeout=15,
@@ -1794,12 +1785,8 @@ Return ONLY this JSON (no markdown):
     def _nse_session_get(self) -> requests.Session:
         with self._nse_session_lock:
             if not self._nse_session:
-                self._nse_session = requests.Session()
-                self._nse_session.headers.update(_NSE_HEADERS)
-                try:
-                    self._nse_session.get("https://www.nseindia.com", timeout=8)
-                except Exception:
-                    pass
+                from tools._nse_session import get_nse_session
+                self._nse_session = get_nse_session(sleep_after_prime=0)
             return self._nse_session
 
 
