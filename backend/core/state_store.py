@@ -25,28 +25,20 @@ hidden: a deployment with no `DATABASE_URL` keeps none of this state at all,
 where it previously kept it on local disk.
 """
 import os
-import threading
 from datetime import datetime, timezone
 
 from core.observability import get_logger, log_event
 
 LOGGER = get_logger("state_store")
 
-_ENGINE = None
-_ENGINE_LOCK = threading.Lock()
-
 
 def _get_engine():
-    """Lazily-built, process-wide engine — same double-checked pattern as
-    `analytics/verdict_history.py::_get_engine()`, and the same patch target tests use
-    (`patch("core.state_store._get_engine", ...)`)."""
-    global _ENGINE
-    if _ENGINE is None:
-        with _ENGINE_LOCK:
-            if _ENGINE is None:  # re-check: another thread may have won the race
-                from db.models import get_engine
-                _ENGINE = get_engine()
-    return _ENGINE
+    """Delegates to db.models.get_shared_engine() — the one process-wide
+    lazy-singleton cache every DB-touching module in this codebase now
+    shares, rather than each reimplementing its own. Same patch target tests
+    use (`patch("core.state_store._get_engine", ...)`)."""
+    from db.models import get_shared_engine
+    return get_shared_engine()
 
 
 def _enabled() -> bool:

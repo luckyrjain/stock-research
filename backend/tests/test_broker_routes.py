@@ -22,7 +22,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.pool import StaticPool
 
 import api
-import routes._shared as _shared
+import db.models as db_models
 from core import rate_limiter
 from db.models import accounts, broker_connections, metadata, profiles
 
@@ -51,8 +51,11 @@ class BrokerRoutesTest(unittest.TestCase):
         metadata.create_all(self.engine, tables=[profiles, accounts, broker_connections])
         self._old_db_url = os.environ.get("DATABASE_URL")
         os.environ["DATABASE_URL"] = "sqlite://"
-        self._old_engine = _shared._DB_ENGINE
-        _shared._DB_ENGINE = self.engine
+        # The lazily-constructed DB engine cache now lives in db/models.py
+        # (shared by every DB-touching module), not as routes/_shared.py's
+        # own module-level global — inject the test engine there instead.
+        self._old_engine = db_models._SHARED_ENGINE
+        db_models._SHARED_ENGINE = self.engine
         # _mk_profile()/_mk_account() below hit the CRUD endpoints
         # (routes/portfolio_aggregator.py's own resolve_owner import) while
         # the broker endpoints under test in this file hit
@@ -78,7 +81,7 @@ class BrokerRoutesTest(unittest.TestCase):
     def tearDown(self) -> None:
         self._owner_patcher.stop()
         self._broker_owner_patcher.stop()
-        _shared._DB_ENGINE = self._old_engine
+        db_models._SHARED_ENGINE = self._old_engine
         for var, old in [
             ("DATABASE_URL", self._old_db_url),
             ("PORTFOLIO_ENCRYPTION_KEY", self._old_enc_key),

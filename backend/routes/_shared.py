@@ -20,7 +20,6 @@ import asyncio
 import hmac
 import os
 import re
-import threading
 
 from fastapi import HTTPException, Request, UploadFile
 from pydantic import BaseModel
@@ -82,18 +81,9 @@ def _fetch_live_price_sync(sym: str) -> dict:
 
 
 # ── Cached DB engine ──────────────────────────────────────────────────────────
-_DB_ENGINE = None
-_DB_ENGINE_LOCK = threading.Lock()
-
-
 def _get_db_engine():
-    global _DB_ENGINE
-    if _DB_ENGINE is None:
-        with _DB_ENGINE_LOCK:
-            if _DB_ENGINE is None:  # re-check: another thread may have won the race
-                from db.models import get_engine
-                _DB_ENGINE = get_engine()
-    return _DB_ENGINE
+    from db.models import get_shared_engine
+    return get_shared_engine()
 
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────

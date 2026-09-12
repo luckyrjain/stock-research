@@ -1,4 +1,5 @@
 import os
+import threading
 
 from sqlalchemy import (
     JSON, BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, ForeignKey, Index,
@@ -604,6 +605,26 @@ app_state = Table(
 def get_engine(database_url: str | None = None):
     url = database_url or os.environ["DATABASE_URL"]
     return _create_engine(url)
+
+
+_SHARED_ENGINE = None
+_SHARED_ENGINE_LOCK = threading.Lock()
+
+
+def get_shared_engine():
+    """Lazily-built, process-wide default engine (built via get_engine() with
+    no override) — the single lazy-singleton cache every DB-touching module
+    in this codebase now delegates its own same-named _get_engine()/
+    _get_db_engine() to, instead of each independently reimplementing this
+    exact double-checked-locking pattern (auth.py, core/state_store.py,
+    analytics/verdict_history.py, analytics/mf_holdings_history.py,
+    routes/_shared.py)."""
+    global _SHARED_ENGINE
+    if _SHARED_ENGINE is None:
+        with _SHARED_ENGINE_LOCK:
+            if _SHARED_ENGINE is None:  # re-check: another thread may have won the race
+                _SHARED_ENGINE = get_engine()
+    return _SHARED_ENGINE
 
 
 def stamp_alembic_head() -> None:

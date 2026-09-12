@@ -12,24 +12,15 @@ swallowed, the same convention analytics/verdict_history.py and core/state_store
 for their own persistence.
 """
 import os
-import threading
 
 from core.observability import get_logger, log_event
 
 LOGGER = get_logger("mf_holdings_history")
 
-_ENGINE = None
-_ENGINE_LOCK = threading.Lock()
-
 
 def _get_engine():
-    global _ENGINE
-    if _ENGINE is None:
-        with _ENGINE_LOCK:
-            if _ENGINE is None:  # re-check: another thread may have won the race
-                from db.models import get_engine
-                _ENGINE = get_engine()
-    return _ENGINE
+    from db.models import get_shared_engine
+    return get_shared_engine()
 
 
 def save_snapshot(symbol: str, mf_holdings: dict) -> None:
