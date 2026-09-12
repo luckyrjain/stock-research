@@ -383,6 +383,95 @@ function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () =
   );
 }
 
+// Shared status/sync/connect/change-key chrome for both BrokerRow and
+// HdfcBrokerRow below — the two components' connect *flows* are genuinely
+// different (a redirect vs. two sequential forms, see HdfcBrokerRow's own
+// comment), but this line of UI is identical regardless of which flow is
+// behind the Connect button, parameterized by what each caller already
+// computes for itself.
+function BrokerStatusLine({
+  label, experimental, connection, syncing, onSync,
+  showConnectButton, connectBusy, connectLabel, onConnect,
+  showChangeKeyLink, onChangeKey, msg,
+}: {
+  label: string;
+  experimental?: boolean;
+  connection: BrokerConnection | undefined;
+  syncing: boolean;
+  onSync: () => void;
+  // `connection.connected` only means a token was obtained once — it stays
+  // true after the token expires (see sync_status/last_sync_error
+  // instead), so a caller must not gate this on `connected` alone or it
+  // hides exactly when it's needed most: right after a sync fails with an
+  // expired/invalid token.
+  showConnectButton: boolean;
+  connectBusy: boolean;
+  connectLabel: string;
+  onConnect: () => void;
+  showChangeKeyLink: boolean;
+  onChangeKey: () => void;
+  msg: string | null;
+}) {
+  return (
+    <span className="flex items-center gap-2 flex-wrap">
+      {experimental && (
+        <span className="text-xs text-hold font-semibold" title="Not yet verified against a live account — see docs/backlog.md">
+          beta
+        </span>
+      )}
+      {connection?.connected && (
+        <span className="text-xs text-muted">
+          {label} connected{connection.last_synced_at ? ` · last synced ${fmtTimestampIST(connection.last_synced_at)}` : ' · never synced'}
+        </span>
+      )}
+      {connection && !connection.connected && (
+        <span className="text-xs text-muted">{label}: API key saved, not yet connected</span>
+      )}
+      {connection?.connected && (
+        <button onClick={onSync} disabled={syncing} className="text-xs text-accent font-semibold disabled:opacity-50 flex items-center gap-1.5">
+          {syncing && <SpinIcon />}
+          {syncing ? 'Syncing…' : 'Sync now'}
+        </button>
+      )}
+      {showConnectButton && (
+        <button onClick={onConnect} disabled={connectBusy} className="text-xs text-accent font-semibold disabled:opacity-50">
+          {connectLabel}
+        </button>
+      )}
+      {showChangeKeyLink && (
+        <button onClick={onChangeKey} className="text-xs text-muted hover:text-tx">
+          change API key
+        </button>
+      )}
+      {msg && <span role="status" aria-live="polite" className={`text-xs ${MSG_TONE_CLASS[msgTone(msg)]}`}>{msg}</span>}
+    </span>
+  );
+}
+
+// Shared API-key/API-secret input pair — every broker's credential form
+// collects exactly these two fields, just with a different label.
+function ApiKeySecretFields({ label, apiKey, setApiKey, apiSecret, setApiSecret }: {
+  label: string; apiKey: string; setApiKey: (v: string) => void; apiSecret: string; setApiSecret: (v: string) => void;
+}) {
+  return (
+    <>
+      <input
+        value={apiKey}
+        onChange={e => setApiKey(e.target.value)}
+        placeholder={`${label} API key`}
+        className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-40"
+      />
+      <input
+        value={apiSecret}
+        onChange={e => setApiSecret(e.target.value)}
+        placeholder="API secret"
+        type="password"
+        className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-40"
+      />
+    </>
+  );
+}
+
 // HDFC Securities' real login has no browser redirect at all — the app
 // itself collects the HDFC username/password and relays an OTP, in two
 // steps against POST .../login-start then POST .../verify-otp (see
@@ -391,7 +480,8 @@ function AssetRow({ asset, onChanged }: { asset: PortfolioAsset; onChanged: () =
 // rather than a shared one with a redirect/no-redirect branch — the two
 // flows share almost no state shape (a URL to navigate to vs. two
 // sequential forms) and forcing one component to cover both would obscure
-// more than it'd reuse.
+// more than it'd reuse. They do share BrokerStatusLine/ApiKeySecretFields
+// above for the UI chrome that's actually identical between them.
 function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
   account: PortfolioAccount; connection: BrokerConnection | undefined; onSynced: () => void; onPoll: () => void;
 }) {
@@ -483,56 +573,23 @@ function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
 
   return (
     <span className="flex flex-col gap-1">
-      <span className="flex items-center gap-2 flex-wrap">
-        {connection?.connected && (
-          <span className="text-xs text-muted">
-            {label} connected{connection.last_synced_at ? ` · last synced ${fmtTimestampIST(connection.last_synced_at)}` : ' · never synced'}
-          </span>
-        )}
-        {connection && !connection.connected && (
-          <span className="text-xs text-muted">{label}: API key saved, not yet connected</span>
-        )}
-        {connection?.connected && (
-          <button onClick={sync} disabled={syncing} className="text-xs text-accent font-semibold disabled:opacity-50 flex items-center gap-1.5">
-            {syncing && <SpinIcon />}
-            {syncing ? 'Syncing…' : 'Sync now'}
-          </button>
-        )}
-        {/* `connection.connected` only means a token was obtained once —
-            it stays true after the token expires (see sync_status/
-            last_sync_error instead), so "Reconnect" must not be gated on
-            it alone or it hides exactly when it's needed most: right
-            after a sync fails with an expired/invalid token. */}
-        {!otpRequired && (!connection || !connection.connected || connection.sync_status === 'error' || showCreds) && (
-          <button onClick={loginStart} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
-            {busy ? 'Connecting…' : connection?.connected ? `Reconnect ${label}` : `Connect ${label}`}
-          </button>
-        )}
-        {connection && !showCreds && !otpRequired && (
-          <button onClick={() => setShowCreds(true)} className="text-xs text-muted hover:text-tx">
-            change API key
-          </button>
-        )}
-        {msg && <span role="status" aria-live="polite" className={`text-xs ${MSG_TONE_CLASS[msgTone(msg)]}`}>{msg}</span>}
-      </span>
+      <BrokerStatusLine
+        label={label}
+        connection={connection}
+        syncing={syncing}
+        onSync={sync}
+        showConnectButton={!otpRequired && (!connection || !connection.connected || connection.sync_status === 'error' || showCreds)}
+        connectBusy={busy}
+        connectLabel={busy ? 'Connecting…' : connection?.connected ? `Reconnect ${label}` : `Connect ${label}`}
+        onConnect={loginStart}
+        showChangeKeyLink={!!connection && !showCreds && !otpRequired}
+        onChangeKey={() => setShowCreds(true)}
+        msg={msg}
+      />
       {!otpRequired && (showCreds || !connection || !connection.connected || connection.sync_status === 'error') && (
         <span className="flex items-center gap-2 flex-wrap">
           {showCreds && (
-            <>
-              <input
-                value={apiKey}
-                onChange={e => setApiKey(e.target.value)}
-                placeholder="HDFC Securities API key"
-                className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-40"
-              />
-              <input
-                value={apiSecret}
-                onChange={e => setApiSecret(e.target.value)}
-                placeholder="API secret"
-                type="password"
-                className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-40"
-              />
-            </>
+            <ApiKeySecretFields label={label} apiKey={apiKey} setApiKey={setApiKey} apiSecret={apiSecret} setApiSecret={setApiSecret} />
           )}
           <input
             value={username}
@@ -646,56 +703,23 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
 
   return (
     <span className="flex flex-col gap-1">
-      <span className="flex items-center gap-2 flex-wrap">
-        {broker.experimental && (
-          <span className="text-xs text-hold font-semibold" title="Not yet verified against a live account — see docs/backlog.md">
-            beta
-          </span>
-        )}
-        {connection?.connected && (
-          <span className="text-xs text-muted">
-            {broker.label} connected{connection.last_synced_at ? ` · last synced ${fmtTimestampIST(connection.last_synced_at)}` : ' · never synced'}
-          </span>
-        )}
-        {connection && !connection.connected && (
-          <span className="text-xs text-muted">{broker.label}: API key saved, not yet connected</span>
-        )}
-        {connection?.connected && (
-          <button onClick={sync} disabled={syncing} className="text-xs text-accent font-semibold disabled:opacity-50 flex items-center gap-1.5">
-            {syncing && <SpinIcon />}
-            {syncing ? 'Syncing…' : 'Sync now'}
-          </button>
-        )}
-        {/* See HdfcBrokerRow's identical comment — `connected` alone stays
-            true after token expiry, so gate Reconnect on sync_status
-            too or it hides right when it's needed. */}
-        {(!connection || !connection.connected || connection.sync_status === 'error' || showCreds) && (
-          <button onClick={connect} disabled={busy} className="text-xs text-accent font-semibold disabled:opacity-50">
-            {busy ? 'Redirecting…' : connection?.connected ? `Reconnect ${broker.label}` : `Connect ${broker.label}`}
-          </button>
-        )}
-        {connection && !showCreds && (
-          <button onClick={() => setShowCreds(true)} className="text-xs text-muted hover:text-tx">
-            change API key
-          </button>
-        )}
-        {msg && <span role="status" aria-live="polite" className={`text-xs ${MSG_TONE_CLASS[msgTone(msg)]}`}>{msg}</span>}
-      </span>
+      <BrokerStatusLine
+        label={broker.label}
+        experimental={broker.experimental}
+        connection={connection}
+        syncing={syncing}
+        onSync={sync}
+        showConnectButton={!connection || !connection.connected || connection.sync_status === 'error' || showCreds}
+        connectBusy={busy}
+        connectLabel={busy ? 'Redirecting…' : connection?.connected ? `Reconnect ${broker.label}` : `Connect ${broker.label}`}
+        onConnect={connect}
+        showChangeKeyLink={!!connection && !showCreds}
+        onChangeKey={() => setShowCreds(true)}
+        msg={msg}
+      />
       {showCreds && (
         <span className="flex items-center gap-2">
-          <input
-            value={apiKey}
-            onChange={e => setApiKey(e.target.value)}
-            placeholder={`${broker.label} API key`}
-            className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-40"
-          />
-          <input
-            value={apiSecret}
-            onChange={e => setApiSecret(e.target.value)}
-            placeholder="API secret"
-            type="password"
-            className="px-2 py-1 rounded border border-border bg-bg text-xs text-tx w-40"
-          />
+          <ApiKeySecretFields label={broker.label} apiKey={apiKey} setApiKey={setApiKey} apiSecret={apiSecret} setApiSecret={setApiSecret} />
           {connection && (
             <button onClick={() => setShowCreds(false)} className="text-xs text-muted hover:text-tx">
               cancel
