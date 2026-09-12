@@ -12,8 +12,8 @@ export function ErrorBanner({ message, onRetry, retryLabel = 'Retry', className 
   retryLabel?: string;
   className?: string;
 }) {
-  // role="alert" is unconditional here — a disclosed accessibility fix. Six
-  // of the thirteen inline copies this replaces had silently dropped it.
+  // role="alert" is unconditional here — a disclosed accessibility fix. Seven
+  // of the fifteen inline copies this replaces had silently dropped it.
   return (
     <div
       role="alert"
