@@ -802,7 +802,7 @@ the database, not just its own two — a disclosed, not-yet-fixed footgun (see C
 
 ## Route module extraction (`routes/`)
 
-`api.py` is still the majority of the backend (~2,760 lines, **29 of the 61 routes**) — four
+`api.py` is still the majority of the backend (~2,760 lines, **29 of the 63 routes**) — four
 domains have been split out into `APIRouter` modules so far (the first two were the most
 duplicated; the third, `portfolio_aggregator.py`, is a large self-contained new domain that made
 more sense as its own router from the start; the fourth, `broker_sync.py`, is a later split of the
@@ -997,7 +997,7 @@ inside `backend/`** — the directory move changed the top-level nesting, not an
 ```text
 stock-research/
 ├── backend/
-│   ├── api.py                     FastAPI server — 29 of the 57 routes, both SSE endpoints,
+│   ├── api.py                     FastAPI server — 29 of the 63 routes, both SSE endpoints,
 │   │                               symbol validation, shared helpers routes/ depends on
 │   ├── main.py                    CLI entry point; _fetch_task/_build_report shared with api.py
 │   ├── analyst/crew.py                    Analyst guardrails, cross-provider failover, run_analysis_with_fallback
