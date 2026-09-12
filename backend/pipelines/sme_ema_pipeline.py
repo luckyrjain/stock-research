@@ -30,6 +30,7 @@ from sqlalchemy import text
 from db.models import ema_signals, get_engine, metadata, sme_stocks
 from core.error_tracking import init_error_tracking
 from core.observability import get_logger, log_event
+from signals.indicators import MIN_HISTORY_DAYS, RSI_PERIOD, compute_ema, compute_rsi
 from tools.sme_tools import get_all_sme_stocks
 
 load_dotenv()
@@ -44,8 +45,10 @@ _MAX_WORKERS   = 8
 # adjust=False, an "EMA50" computed on too few bars is really just a
 # recency-weighted average of all of them, not a converged 50-day EMA, and
 # produces spurious crosses right after listing. Require a healthy margin
-# above the 50-span before trusting a cross flag.
-_MIN_HISTORY_DAYS = 75
+# above the 50-span before trusting a cross flag. Sourced from
+# signals.indicators.MIN_HISTORY_DAYS (shared with signals/technical.py),
+# kept as a local alias since it's this module's own name for the constant.
+_MIN_HISTORY_DAYS = MIN_HISTORY_DAYS
 # If more than this fraction of monitored stocks fail their OHLCV fetch,
 # treat the whole run as unhealthy (run() returns False) rather than a normal
 # handful of delisted/renamed symbols — almost always means NSE/yfinance is
@@ -119,8 +122,8 @@ def _compute_ema_signals(result: dict) -> list[dict]:
     df = result["df"].copy()
     has_enough_history = len(df) >= _MIN_HISTORY_DAYS
 
-    df["ema20"] = df["Close"].ewm(span=20, adjust=False).mean()
-    df["ema50"] = df["Close"].ewm(span=50, adjust=False).mean()
+    df["ema20"] = compute_ema(df["Close"], 20)
+    df["ema50"] = compute_ema(df["Close"], 50)
     df["rsi14"] = _compute_rsi(df["Close"])
     df["volume_spike"] = _compute_volume_spike(df)
 
@@ -183,35 +186,10 @@ def _safe_float(val) -> float | None:
         return None
 
 
-_RSI_PERIOD = 14
-
-
-def _compute_rsi(close: pd.Series) -> pd.Series:
-    """RSI(14), Wilder-style exponential smoothing via pandas ewm — standard
-    momentum-screener confirmation alongside the EMA cross. Note this isn't a
-    bit-exact match to textbook Wilder's method (which seeds avg_gain/avg_loss
-    with a plain mean of the first 14 deltas before switching to smoothing;
-    ewm(adjust=False) instead seeds recursively from the very first delta) —
-    the difference only affects the first handful of post-warmup values and
-    has fully decayed away by the time anything here gets stored (only the
-    last _STORE_DAYS rows of a full year's fetch are ever persisted).
-    NaN for the first _RSI_PERIOD rows (not enough history to smooth over
-    yet); a completely flat price (no gains or losses at all, vanishingly
-    rare for a real stock) is treated as neutral (50), not undefined, since a
-    straight-up (avg_loss == 0, avg_gain > 0) or straight-down (avg_gain ==
-    0, avg_loss > 0) move already resolves correctly to 100/0 through plain
-    float division.
-    """
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / _RSI_PERIOD, adjust=False, min_periods=_RSI_PERIOD).mean()
-    avg_loss = loss.ewm(alpha=1 / _RSI_PERIOD, adjust=False, min_periods=_RSI_PERIOD).mean()
-    with np.errstate(divide="ignore", invalid="ignore"):
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.where(~((avg_gain == 0) & (avg_loss == 0)), 50.0)
-    return rsi
+# Sourced from signals.indicators (shared with signals/technical.py), kept
+# as local aliases — the formula itself lives there now, see its docstring.
+_RSI_PERIOD = RSI_PERIOD
+_compute_rsi = compute_rsi
 
 
 _VOLUME_SPIKE_WINDOW_DAYS = 20

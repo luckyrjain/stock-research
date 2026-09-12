@@ -9,32 +9,15 @@ reading from the `features` dict extract_features() builds.
 """
 import pandas as pd
 
+from signals.indicators import MIN_HISTORY_DAYS, compute_ema, compute_rsi
 from signals.models import Signal
 from tools.price_history_tools import get_price_series
 
-_RSI_PERIOD = 14
-# With adjust=False, an "EMA50" computed on too few bars is really just a
-# recency-weighted average of all of them, not a converged 50-day EMA — a
-# stock with less history than this is UNKNOWN, never guessed (e.g. a
-# recent IPO). Set to the same value as sme_ema_pipeline._MIN_HISTORY_DAYS
-# (75) for the same reason: a healthy margin above the 50-span, not merely
-# past it.
-_MIN_CLOSES = 75
-
-
-def _compute_rsi(close: pd.Series) -> pd.Series:
-    """RSI(14) via pandas ewm — see sme_ema_pipeline._compute_rsi for the
-    same formula and the note on why this isn't a bit-exact match to
-    textbook Wilder's method (immaterial once past the warmup window)."""
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / _RSI_PERIOD, adjust=False, min_periods=_RSI_PERIOD).mean()
-    avg_loss = loss.ewm(alpha=1 / _RSI_PERIOD, adjust=False, min_periods=_RSI_PERIOD).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.where(~((avg_gain == 0) & (avg_loss == 0)), 50.0)
-    return rsi
+# Same value as sme_ema_pipeline._MIN_HISTORY_DAYS, both now sourced from
+# signals.indicators.MIN_HISTORY_DAYS — kept as a local alias since it's this
+# module's own name for the constant.
+_MIN_CLOSES = MIN_HISTORY_DAYS
+_compute_rsi = compute_rsi  # alias: see signals/indicators.py for the formula
 
 
 def technical_signal(symbol: str) -> Signal:
@@ -46,8 +29,8 @@ def technical_signal(symbol: str) -> Signal:
         return Signal("technical", "UNKNOWN", 0, {"closes_available": len(closes)})
 
     close = pd.Series(closes)
-    ema20 = close.ewm(span=20, adjust=False).mean()
-    ema50 = close.ewm(span=50, adjust=False).mean()
+    ema20 = compute_ema(close, 20)
+    ema50 = compute_ema(close, 50)
     rsi = _compute_rsi(close)
 
     latest_rsi = round(float(rsi.iloc[-1]), 1)
