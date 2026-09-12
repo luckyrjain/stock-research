@@ -27,6 +27,7 @@ import yfinance as yf
 from dotenv import load_dotenv
 from sqlalchemy import text
 
+from db.batch import batched_execute
 from db.models import ema_signals, get_engine, metadata, sme_stocks
 from core.error_tracking import init_error_tracking
 from core.observability import get_logger, log_event
@@ -277,30 +278,22 @@ def _upsert_stocks(engine, stocks: list[dict]) -> None:
 def _upsert_signals(engine, rows: list[dict]) -> None:
     if not rows:
         return
-    batch_size = 500
-    total = 0
-    with engine.begin() as conn:
-        for i in range(0, len(rows), batch_size):
-            batch = rows[i : i + batch_size]
-            conn.execute(
-                text("""
-                    INSERT INTO ema_signals
-                        (symbol, trade_date, close_price, ema20, ema50, rsi14, volume_spike, cross_type, run_at)
-                    VALUES
-                        (:symbol, :trade_date, :close_price, :ema20, :ema50, :rsi14, :volume_spike, :cross, NOW())
-                    ON CONFLICT ON CONSTRAINT uq_ema_signals_symbol_date DO UPDATE SET
-                        close_price  = EXCLUDED.close_price,
-                        ema20        = EXCLUDED.ema20,
-                        ema50        = EXCLUDED.ema50,
-                        rsi14        = EXCLUDED.rsi14,
-                        volume_spike = EXCLUDED.volume_spike,
-                        cross_type   = EXCLUDED.cross_type,
-                        run_at       = NOW()
-                """),
-                batch,
-            )
-            total += len(batch)
-    log_event(LOGGER, "sme_signals_upserted", count=total)
+    sql = text("""
+        INSERT INTO ema_signals
+            (symbol, trade_date, close_price, ema20, ema50, rsi14, volume_spike, cross_type, run_at)
+        VALUES
+            (:symbol, :trade_date, :close_price, :ema20, :ema50, :rsi14, :volume_spike, :cross, NOW())
+        ON CONFLICT ON CONSTRAINT uq_ema_signals_symbol_date DO UPDATE SET
+            close_price  = EXCLUDED.close_price,
+            ema20        = EXCLUDED.ema20,
+            ema50        = EXCLUDED.ema50,
+            rsi14        = EXCLUDED.rsi14,
+            volume_spike = EXCLUDED.volume_spike,
+            cross_type   = EXCLUDED.cross_type,
+            run_at       = NOW()
+    """)
+    batched_execute(engine, sql, rows, batch_size=500)
+    log_event(LOGGER, "sme_signals_upserted", count=len(rows))
 
 
 def _upsert_liquidity(engine, rows: list[dict]) -> None:
