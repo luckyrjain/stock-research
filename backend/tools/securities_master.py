@@ -13,15 +13,13 @@ fuzzy company-name match. Consumed by portfolio/csv_import.py's broker CSV impor
 (new-asset resolution) — see that module for the integration.
 """
 
-import json
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
 from rapidfuzz import fuzz, process, utils as _rf_utils
 from sqlalchemy import select
 
-from core.atomic_file import atomic_write_text
+from core.file_list_cache import is_fresh, load_json, save_json
 from db.models import securities as _securities_t
 from tools.sme_tools import get_all_sme_stocks
 
@@ -56,25 +54,15 @@ def load_nse_main_board(engine) -> list[dict]:
 
 
 def _is_fresh(path: Path) -> bool:
-    if not path.exists():
-        return False
-    age = datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)
-    return age < timedelta(hours=_CACHE_TTL_HOURS)
+    return is_fresh(path, _CACHE_TTL_HOURS)
 
 
 def _save_cache(path: Path, data: list[dict]) -> None:
-    # Atomic write (tempfile + os.replace) — same convention as
-    # core/cache.py::save()/tools/sme_tools.py::_save_cache, so an interrupted
-    # write never leaves a corrupt file behind for the next read to choke on.
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, json.dumps(data))
+    save_json(path, data)
 
 
 def _load_cache(path: Path) -> list[dict] | None:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    return load_json(path)
 
 
 def fetch_bse_main_board(force: bool = False) -> list[dict]:
