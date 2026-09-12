@@ -32,7 +32,7 @@ from core import rate_limiter
 from core import state_store
 from routes._shared import (
     _TRUSTED_PROXY_SECRET, _TICKER_RE, _bearer_token_from_request, _check_rate_limit, _client_ip,
-    _fetch_live_price_sync, _get_db_engine, _rate_limit,
+    _fetch_live_price_sync, _get_db_engine, _rate_limit, run_db_call, run_locked_refresh,
 )
 # Re-exported under their original names since this file (and its existing
 # tests) call them as api._compute_peer_percentiles / api._compute_valuation_anchor —
@@ -1864,16 +1864,10 @@ async def get_sme_signals(
     lookback/direction are ignored in regime view since there's no cross-event window
     to filter by.
     """
-    import os
-
-    _rate_limit(request, "sme_signals", max_calls=60, window_seconds=60)
-
     if direction not in ("all", "golden", "death"):
         raise HTTPException(status_code=422, detail="direction must be one of: all, golden, death")
     if view not in ("crosses", "regime"):
         raise HTTPException(status_code=422, detail="view must be one of: crosses, regime")
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the SME pipeline first.")
 
     def _query_sync() -> dict:
         from sqlalchemy import text as _text
@@ -1997,12 +1991,10 @@ async def get_sme_signals(
             },
         }
 
-    loop = asyncio.get_running_loop()
-    try:
-        return await loop.run_in_executor(None, _query_sync)
-    except Exception as exc:
-        log_event(LOGGER, "sme_signals_query_failed", level="error", error=str(exc))
-        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    return await run_db_call(
+        request, "sme_signals", 60, _query_sync, "sme_signals_query",
+        db_missing_detail="DATABASE_URL not configured. Run the SME pipeline first.",
+    )
 
 
 _CROSS_OUTCOME_WINDOWS = (10, 20)
@@ -2050,12 +2042,6 @@ async def get_sme_signal_history(request: Request, symbol: str):
     return (see _compute_cross_events) — e.g. "last 3 golden crosses: +12%,
     -4%, +22% over 20d" instead of a bare "golden cross on date X."
     """
-    import os
-
-    # Same 60/min budget as the sibling /api/sme-signals list endpoint —
-    # this one was previously unrated-limited despite being a fully
-    # anonymous, unbounded DB query, unlike every other DB-backed GET here.
-    _rate_limit(request, "sme_signal_history", max_calls=60, window_seconds=60)
     sym = symbol.upper().strip()
     # Every sibling ticker-taking endpoint in this file validates against
     # _TICKER_RE before use — this one didn't, an inconsistency an
@@ -2064,8 +2050,6 @@ async def get_sme_signal_history(request: Request, symbol: str):
     # 404, but there's no reason for this endpoint to be the one exception.
     if not _TICKER_RE.match(sym):
         raise HTTPException(status_code=422, detail="Invalid symbol.")
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the SME pipeline first.")
 
     def _query_sync() -> dict:
         from sqlalchemy import text as _text
@@ -2097,12 +2081,14 @@ async def get_sme_signal_history(request: Request, symbol: str):
             "cross_events": _compute_cross_events(series),
         }
 
-    loop = asyncio.get_running_loop()
-    try:
-        result = await loop.run_in_executor(None, _query_sync)
-    except Exception as exc:
-        log_event(LOGGER, "sme_signal_history_failed", level="error", symbol=sym, error=str(exc))
-        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    # Same 60/min budget as the sibling /api/sme-signals list endpoint —
+    # this one was previously unrated-limited despite being a fully
+    # anonymous, unbounded DB query, unlike every other DB-backed GET here.
+    result = await run_db_call(
+        request, "sme_signal_history", 60, _query_sync, "sme_signal_history",
+        db_missing_detail="DATABASE_URL not configured. Run the SME pipeline first.",
+        extra_log_fields={"symbol": sym},
+    )
 
     if not result["series"]:
         raise HTTPException(status_code=404, detail=f"No stored EMA history for {sym}.")
@@ -2112,46 +2098,19 @@ async def get_sme_signal_history(request: Request, symbol: str):
 @app.post("/api/sme-signals/refresh", status_code=202)
 async def refresh_sme_signals(request: Request):
     """Run the SME EMA pipeline in the background. 409 if a run is in progress."""
-    import os
 
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
-    # Atomic claim (Redis-shared across workers when REDIS_URL is set, so two
-    # workers can no longer both pass this check and both start a refresh —
-    # unlike the old plain-bool guard this replaced). Checked before the rate
-    # limit, same order the old code used (409 takes priority over 429 when
-    # both would apply).
-    if not rate_limiter.try_acquire_lock(_SME_REFRESH_LOCK_NAME, _SME_REFRESH_LOCK_TTL_SECONDS):
-        raise HTTPException(status_code=409, detail="A refresh is already running.")
-    try:
-        _rate_limit(request, "sme_refresh", max_calls=3, window_seconds=3600)
-    except HTTPException:
-        rate_limiter.release_lock(_SME_REFRESH_LOCK_NAME)
-        raise
+    def _run_sme_pipeline() -> bool:
+        from pipelines.sme_ema_pipeline import run as run_sme_pipeline
+        return run_sme_pipeline()
 
-    loop = asyncio.get_running_loop()
-
-    def _run_pipeline():
-        try:
-            from pipelines.sme_ema_pipeline import run as run_sme_pipeline
-            healthy = run_sme_pipeline()
-            if not healthy:
-                log_event(
-                    LOGGER, "sme_refresh_unhealthy", level="warning",
-                    detail="Pipeline ran but reported an unhealthy result (empty stock list or "
-                           "too high an OHLCV fetch error rate) — see sme_ema_pipeline logs above.",
-                )
-        except Exception as exc:
-            log_event(LOGGER, "sme_refresh_failed", level="error", error=str(exc))
-        finally:
-            rate_limiter.release_lock(_SME_REFRESH_LOCK_NAME)
-
-    async def _launch():
-        await loop.run_in_executor(None, _run_pipeline)
-
-    asyncio.create_task(_launch())
-    log_event(LOGGER, "sme_refresh_started")
-    return {"started": True}
+    return await run_locked_refresh(
+        request, _SME_REFRESH_LOCK_NAME, _SME_REFRESH_LOCK_TTL_SECONDS,
+        "sme_refresh", 3, 3600, _run_sme_pipeline, "sme_refresh",
+        unhealthy_detail=(
+            "Pipeline ran but reported an unhealthy result (empty stock list or "
+            "too high an OHLCV fetch error rate) — see sme_ema_pipeline logs above."
+        ),
+    )
 
 
 # ── Custom screener ───────────────────────────────────────────────────────────
@@ -2193,16 +2152,12 @@ async def get_screener(
     currently-populated set of nse_industry values — the frontend's filter
     chips are built from this, not a hardcoded/guessed list.
     """
-    _rate_limit(request, "screener", max_calls=60, window_seconds=60)
-
     if ema_trend not in ("all", "bullish", "bearish"):
         raise HTTPException(status_code=422, detail="ema_trend must be one of: all, bullish, bearish")
     if sort not in _SCREENER_SORT_COLUMNS:
         raise HTTPException(status_code=422, detail=f"sort must be one of: {', '.join(sorted(_SCREENER_SORT_COLUMNS))}")
     if order not in ("asc", "desc"):
         raise HTTPException(status_code=422, detail="order must be asc or desc")
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the screener pipeline first.")
 
     def _query_sync() -> dict:
         from sqlalchemy import text as _text
@@ -2273,12 +2228,10 @@ async def get_screener(
             "refreshing":       rate_limiter.is_locked(_SCREENER_REFRESH_LOCK_NAME),
         }
 
-    loop = asyncio.get_running_loop()
-    try:
-        return await loop.run_in_executor(None, _query_sync)
-    except Exception as exc:
-        log_event(LOGGER, "screener_query_failed", level="error", error=str(exc))
-        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    return await run_db_call(
+        request, "screener", 60, _query_sync, "screener_query",
+        db_missing_detail="DATABASE_URL not configured. Run the screener pipeline first.",
+    )
 
 
 @app.post("/api/screener/refresh", status_code=202)
@@ -2286,39 +2239,19 @@ async def refresh_screener(request: Request):
     """Run the custom screener pipeline in the background. 409 if a run is
     already in progress — same lock-then-rate-limit pattern (and ordering)
     as /api/sme-signals/refresh."""
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
-    if not rate_limiter.try_acquire_lock(_SCREENER_REFRESH_LOCK_NAME, _SCREENER_REFRESH_LOCK_TTL_SECONDS):
-        raise HTTPException(status_code=409, detail="A refresh is already running.")
-    try:
-        _rate_limit(request, "screener_refresh", max_calls=3, window_seconds=3600)
-    except HTTPException:
-        rate_limiter.release_lock(_SCREENER_REFRESH_LOCK_NAME)
-        raise
 
-    loop = asyncio.get_running_loop()
+    def _run_screener_pipeline() -> bool:
+        from pipelines.screener_pipeline import run as run_screener_pipeline
+        return run_screener_pipeline()
 
-    def _run_pipeline():
-        try:
-            from pipelines.screener_pipeline import run as run_screener_pipeline
-            healthy = run_screener_pipeline()
-            if not healthy:
-                log_event(
-                    LOGGER, "screener_refresh_unhealthy", level="warning",
-                    detail="Pipeline ran but reported an unhealthy result (empty constituent "
-                           "list or too high a metrics-fetch error rate) — see screener_pipeline logs above.",
-                )
-        except Exception as exc:
-            log_event(LOGGER, "screener_refresh_failed", level="error", error=str(exc))
-        finally:
-            rate_limiter.release_lock(_SCREENER_REFRESH_LOCK_NAME)
-
-    async def _launch():
-        await loop.run_in_executor(None, _run_pipeline)
-
-    asyncio.create_task(_launch())
-    log_event(LOGGER, "screener_refresh_started")
-    return {"started": True}
+    return await run_locked_refresh(
+        request, _SCREENER_REFRESH_LOCK_NAME, _SCREENER_REFRESH_LOCK_TTL_SECONDS,
+        "screener_refresh", 3, 3600, _run_screener_pipeline, "screener_refresh",
+        unhealthy_detail=(
+            "Pipeline ran but reported an unhealthy result (empty constituent "
+            "list or too high a metrics-fetch error rate) — see screener_pipeline logs above."
+        ),
+    )
 
 
 # ── Watchlist + Positions ─────────────────────────────────────────────────────
