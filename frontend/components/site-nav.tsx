@@ -85,9 +85,13 @@ export default function SiteNav({ active, extraLabel, right, wrap = true }: Prop
   // /watchlist itself. See lib/watchlist-alerts-badge.ts for the full story.
   const hasWatchlistAlerts = useWatchlistAlertsBadge();
 
-  // Tab-wrap + inert-background trap (A11Y-11) — same treatment as
-  // ConsolidatedCard/InfoTooltip/SourcesPopover. Without it, Tab could walk
-  // out of the open menu into the visible, non-inert background page.
+  // Tab-wrap trap (A11Y-11) — same treatment as ConsolidatedCard/
+  // InfoTooltip/SourcesPopover. Without it, Tab could walk out of the open
+  // menu into the rest of the page. The hook's own inert-background half is
+  // a no-op here specifically: this menu lives inline inside #app-content
+  // rather than as a portaled overlay, so it's the "target already contains
+  // the panel" case useFocusTrap's own doc comment already carves out —
+  // Tab-wrapping is what actually closes the gap for this caller.
   useFocusTrap(menuRef, menuOpen, {
     onEscape: () => {
       setMenuOpen(false);

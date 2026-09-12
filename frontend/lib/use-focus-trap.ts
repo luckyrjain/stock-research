@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, type RefObject } from 'react';
+import { useEffect, useRef, type RefObject } from 'react';
 
 const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -32,6 +32,19 @@ export function useFocusTrap(
 ) {
   const { onEscape, initialFocusRef, inertTargetId = 'app-content' } = opts;
 
+  // Read via a ref inside the keydown listener rather than depending on
+  // `onEscape` directly below — an inline arrow function passed as
+  // `onEscape` gets a new identity every render of the caller, and this
+  // effect also runs the one-time "focus the panel" step. Depending on
+  // `onEscape` would re-run that step (yanking focus back to the panel)
+  // on every unrelated re-render of the caller while the trap is merely
+  // *active*, not just on the open/close transition — a real bug caught in
+  // review: a component re-rendering from an unrelated async state update
+  // (e.g. a page-wide data hook resolving) while its trap-guarded panel is
+  // open would silently reset keyboard focus mid-Tab.
+  const onEscapeRef = useRef(onEscape);
+  useEffect(() => { onEscapeRef.current = onEscape; });
+
   useEffect(() => {
     if (!active) return;
     const target = document.getElementById(inertTargetId);
@@ -45,7 +58,7 @@ export function useFocusTrap(
     (initialFocusRef?.current ?? panelRef.current)?.focus();
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { onEscape?.(); return; }
+      if (e.key === 'Escape') { onEscapeRef.current?.(); return; }
       if (e.key !== 'Tab' || !panelRef.current) return;
       const focusables = panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
       if (focusables.length === 0) return;
@@ -61,5 +74,5 @@ export function useFocusTrap(
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [active, onEscape, initialFocusRef, panelRef]);
+  }, [active, initialFocusRef, panelRef]);
 }
