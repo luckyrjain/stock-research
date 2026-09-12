@@ -288,6 +288,100 @@ async def run_owned_db_call(
         raise HTTPException(status_code=503, detail="Database error. See server logs.")
 
 
+async def run_db_call(
+    request, rate_limit_name: str, max_calls: int, sync_fn, event_prefix: str, window_seconds: float = 60,
+    db_missing_detail: str = "DATABASE_URL not configured.", extra_log_fields: dict | None = None,
+):
+    """For an ownership-scoped endpoint, use run_owned_db_call() instead — this
+    is its counterpart for a PUBLIC data endpoint with no owner/client_id
+    concept at all (SME Signals, Screener): rate limit this call, 503
+    immediately if no DATABASE_URL is configured (`db_missing_detail`
+    customizes that message — e.g. pointing at which pipeline to run first —
+    since the two current callers each have their own wording), then run
+    `sync_fn` (a zero-arg callable doing the actual DB work) off the event
+    loop, translating any exception it raises into a sanitized 503 rather
+    than leaking raw exception text (which can carry a DSN/credentials) to
+    the caller — the real one is logged server-side as
+    `{event_prefix}_failed` instead. `extra_log_fields`, when given, is
+    merged into that log call (e.g. the symbol a per-symbol endpoint was
+    querying) without changing what the caller ever sees.
+
+    Unlike run_owned_db_call(), there's no ValueError/PermissionError/
+    HTTPException special-casing here — no current public endpoint's
+    sync_fn raises any of those, so this stays the plain shape the three
+    read endpoints actually had before this was extracted."""
+    _rate_limit(request, rate_limit_name, max_calls=max_calls, window_seconds=window_seconds)
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail=db_missing_detail)
+
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, sync_fn)
+    except Exception as exc:
+        log_event(LOGGER, f"{event_prefix}_failed", level="error", error=str(exc), **(extra_log_fields or {}))
+        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+
+
+async def run_locked_refresh(
+    request, lock_name: str, lock_ttl_seconds: int,
+    rate_limit_name: str, rate_limit_max_calls: int, rate_limit_window_seconds: float,
+    pipeline_run_fn, event_prefix: str, unhealthy_detail: str,
+    db_missing_detail: str = "DATABASE_URL not configured.",
+) -> dict:
+    """For an ownership-scoped endpoint, use run_owned_db_call() instead — this
+    covers the other public-endpoint plumbing shape, the single-flight
+    "kick off a background pipeline run" one shared by the SME and screener
+    refresh endpoints: 503 if no DATABASE_URL, then atomically claim
+    `lock_name` (409 if a refresh is already running), then rate-limit
+    (429) — checked in that exact order, deliberately, matching what both
+    refresh endpoints already did before this was extracted: an in-progress
+    refresh (409) is a fact about server state that costs nothing to check
+    and answers a different question than this caller's own rate limit
+    (429), so it's checked first. A rate-limit rejection releases the lock
+    it just claimed (in the `except` below) so a request that never actually
+    starts a refresh doesn't leave the lock stuck against everyone else.
+
+    `pipeline_run_fn` is a zero-arg callable that imports and runs the
+    pipeline, returning its health bool (e.g. a closure around
+    `pipelines.sme_ema_pipeline.run`) — kept as a plain callable rather than
+    a module path so the import stays lazy exactly as it was inline, without
+    this function needing to know how to import anything. `unhealthy_detail`
+    is the pipeline-specific explanation logged (as a warning) when
+    `pipeline_run_fn()` returns a falsy health flag.
+
+    Dispatches the actual run onto a background asyncio task (never awaited
+    by this call) so the endpoint can return 202 immediately; the lock is
+    released in a `finally` inside that task regardless of outcome."""
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail=db_missing_detail)
+    if not rate_limiter.try_acquire_lock(lock_name, lock_ttl_seconds):
+        raise HTTPException(status_code=409, detail="A refresh is already running.")
+    try:
+        _rate_limit(request, rate_limit_name, max_calls=rate_limit_max_calls, window_seconds=rate_limit_window_seconds)
+    except HTTPException:
+        rate_limiter.release_lock(lock_name)
+        raise
+
+    loop = asyncio.get_running_loop()
+
+    def _run_pipeline():
+        try:
+            healthy = pipeline_run_fn()
+            if not healthy:
+                log_event(LOGGER, f"{event_prefix}_unhealthy", level="warning", detail=unhealthy_detail)
+        except Exception as exc:
+            log_event(LOGGER, f"{event_prefix}_failed", level="error", error=str(exc))
+        finally:
+            rate_limiter.release_lock(lock_name)
+
+    async def _launch():
+        await loop.run_in_executor(None, _run_pipeline)
+
+    asyncio.create_task(_launch())
+    log_event(LOGGER, f"{event_prefix}_started")
+    return {"started": True}
+
+
 def claim_anonymous_rows_sync(
     engine, table: str, order_column: str, client_id: str, user_id: int, max_per_owner: int, lock_prefix: str,
 ) -> tuple[int, int]:
