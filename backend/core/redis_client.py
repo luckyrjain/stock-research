@@ -26,7 +26,7 @@ _redis_client_lock = threading.Lock()
 _redis_client_construction_failed = False
 
 
-def get_redis_client():
+def get_redis_client(construction_failed_event: str = "redis_client_construction_failed"):
     """Lazily construct a redis-py client (does not connect until first
     command). Returns None if REDIS_URL isn't set, or if construction itself
     failed (e.g. a malformed URL) — callers then use their own fallback
@@ -37,7 +37,15 @@ def get_redis_client():
     fresh next time, since Redis being briefly unreachable is transient), a
     bad REDIS_URL is a deterministic configuration problem that won't fix
     itself mid-process, so retrying it on every single call would just be
-    repeated, guaranteed-to-fail work."""
+    repeated, guaranteed-to-fail work.
+
+    `construction_failed_event` lets each caller keep its own distinct log
+    event name (cache.py's own construction failure previously logged as
+    "cache_redis_client_construction_failed", rate_limiter.py's as
+    "redis_client_construction_failed") even though the construction itself
+    now happens in one shared place — the client is shared, but which
+    subsystem discovered the failure first is still worth telling apart in
+    the logs."""
     global _redis_client, _redis_client_construction_failed
     url = os.environ.get("REDIS_URL")
     if not url:
@@ -56,7 +64,7 @@ def get_redis_client():
             _redis_client = redis.from_url(url, socket_connect_timeout=2, socket_timeout=2)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             _redis_client_construction_failed = True
-            warn_redis_failure("redis_client_construction_failed", exc)
+            warn_redis_failure(construction_failed_event, exc)
             return None
         return _redis_client
 

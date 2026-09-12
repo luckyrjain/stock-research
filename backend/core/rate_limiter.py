@@ -43,7 +43,7 @@ def _get_redis_client():
     (rather than calling core.redis_client.get_redis_client() at each call
     site below) purely so existing `patch("core.rate_limiter._get_redis_client",
     ...)` test targets keep working unchanged."""
-    return _redis_client_module.get_redis_client()
+    return _redis_client_module.get_redis_client("redis_client_construction_failed")
 
 
 def _warn_redis_failure(event: str, exc: Exception) -> None:
