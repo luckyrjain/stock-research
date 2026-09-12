@@ -8,14 +8,17 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from core import cache
+from core import redis_client as _redis_client_module
 
 
 class _CacheRedisTestBase(unittest.TestCase):
     """Shared setup for every Redis-backed cache test: a scratch disk
     directory (same convention as test_cache_failures.py) plus a reset of
-    core/cache.py's own lazily-constructed Redis client state, mirroring
-    tests/test_rate_limiter.py's _MemoryStateResetMixin for the equivalent
-    module-level Redis client cache in core/rate_limiter.py."""
+    core/redis_client.py's shared lazily-constructed Redis client state
+    (core/cache.py's own _get_redis_client() delegates there — see
+    core/cache.py — so that's the real state to reset, not a module-level
+    attribute on cache.py itself), mirroring tests/test_rate_limiter.py's
+    _MemoryStateResetMixin for the same shared cache."""
 
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-cache-redis-test-")
@@ -26,12 +29,12 @@ class _CacheRedisTestBase(unittest.TestCase):
         self.addCleanup(self._cache_dir_patch.stop)
 
         self._redis_url = os.environ.pop("REDIS_URL", None)
-        cache._redis_client = None
-        cache._redis_client_construction_failed = False
+        _redis_client_module._redis_client = None
+        _redis_client_module._redis_client_construction_failed = False
 
     def tearDown(self) -> None:
-        cache._redis_client = None
-        cache._redis_client_construction_failed = False
+        _redis_client_module._redis_client = None
+        _redis_client_module._redis_client_construction_failed = False
         if self._redis_url is not None:
             os.environ["REDIS_URL"] = self._redis_url
         else:

@@ -9,25 +9,16 @@ break the analysis pipeline itself — failures are logged and swallowed, the
 same convention core/state_store.py uses for its own telemetry/audit writes.
 """
 import os
-import threading
 from datetime import datetime, timezone
 
 from core.observability import get_logger, log_event
 
 LOGGER = get_logger("verdict_history")
 
-_ENGINE = None
-_ENGINE_LOCK = threading.Lock()
-
 
 def _get_engine():
-    global _ENGINE
-    if _ENGINE is None:
-        with _ENGINE_LOCK:
-            if _ENGINE is None:  # re-check: another thread may have won the race
-                from db.models import get_engine
-                _ENGINE = get_engine()
-    return _ENGINE
+    from db.models import get_shared_engine
+    return get_shared_engine()
 
 
 def save_snapshot(symbol: str, analysis: dict, signal_context: dict | None, stock_info: dict) -> None:

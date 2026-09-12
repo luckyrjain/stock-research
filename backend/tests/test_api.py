@@ -10,6 +10,7 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 import api
+import db.models as db_models
 from core import cache
 from core import rate_limiter
 from core import state_store
@@ -1513,8 +1514,8 @@ class ShareholdingDetailEndpointTest(unittest.TestCase):
         # inline, so the real _get_db_engine() still runs to produce that argument
         # even though the function receiving it is mocked. Regression test: this
         # was missing, so the test only ever passed by accident when an earlier
-        # test in the same process had already populated _shared._DB_ENGINE's module-
-        # level cache (via a real or fake DATABASE_URL) — on a fresh process (a
+        # test in the same process had already populated the shared engine cache
+        # (db.models._SHARED_ENGINE, via a real or fake DATABASE_URL) — on a fresh process (a
         # clean CI runner with no DATABASE_URL set at all, or this test simply
         # running first) it failed with a bare KeyError('DATABASE_URL') instead.
         with patch("tools.nse_tools.get_shareholding_detail", nse_tool), \
@@ -1887,13 +1888,13 @@ class ValuationAnchorHelperTest(unittest.TestCase):
 class SmeSignalsEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_rate_limited_returns_429(self) -> None:
@@ -2093,13 +2094,13 @@ class SmeSignalsEndpointTest(unittest.TestCase):
 class SmeSignalHistoryEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_rate_limited_returns_429(self) -> None:
@@ -2280,13 +2281,13 @@ def _fake_screener_engine(rows, total, total_monitored, industries, last_run):
 class ScreenerEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_rate_limited_returns_429(self) -> None:
@@ -2404,13 +2405,13 @@ class WatchlistEndpointsTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_get_missing_database_url_returns_503(self) -> None:
@@ -2732,13 +2733,13 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_get_with_valid_session_queries_by_user_id_ignoring_client_id(self) -> None:
@@ -2904,13 +2905,13 @@ class WatchlistClaimEndpointTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_without_session_returns_401(self) -> None:
@@ -3012,13 +3013,13 @@ class PositionsEndpointsTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_get_missing_database_url_returns_503(self) -> None:
@@ -3203,13 +3204,13 @@ class PositionsAccountLinkingTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_get_with_valid_session_queries_by_user_id_ignoring_client_id(self) -> None:
@@ -3315,13 +3316,13 @@ class PositionsClaimEndpointTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_without_session_returns_401(self) -> None:
@@ -3466,13 +3467,13 @@ class ComputeSectorConcentrationTest(unittest.TestCase):
 class PortfolioConcentrationEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_missing_database_url_returns_503(self) -> None:
@@ -3673,13 +3674,13 @@ class ConsolidatedEndpointTest(unittest.TestCase):
         self.addCleanup(self._cache_patch.stop)
 
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_invalid_symbol_returns_422(self) -> None:

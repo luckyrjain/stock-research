@@ -32,10 +32,10 @@ without REDIS_URL set.
 import json
 import os
 import tempfile
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from core import redis_client as _redis_client_module
 from core.observability import get_logger, log_event
 
 LOGGER = get_logger("cache")
@@ -63,48 +63,18 @@ TTL_HOURS: dict[str, float] = {
 
 _REDIS_KEY_PREFIX = "cache"
 
-_redis_client = None
-_redis_client_lock = threading.Lock()
-_redis_client_construction_failed = False
-
 
 def _get_redis_client():
-    """Same lazy-construction, remembered-failure pattern as
-    core/rate_limiter.py::_get_redis_client() — duplicated rather than imported.
-    core/cache.py is imported by nearly every other module in this codebase
-    (it's the most foundational piece of shared state here), so it
-    deliberately doesn't take on a dependency on a sibling module for
-    something this small; both modules independently read the same
-    REDIS_URL and construct their own client."""
-    global _redis_client, _redis_client_construction_failed
-    url = os.environ.get("REDIS_URL")
-    if not url:
-        return None
-    if _redis_client is not None:
-        return _redis_client
-    if _redis_client_construction_failed:
-        return None
-    with _redis_client_lock:
-        if _redis_client is not None:
-            return _redis_client
-        if _redis_client_construction_failed:
-            return None
-        try:
-            import redis
-            _redis_client = redis.from_url(url, socket_connect_timeout=2, socket_timeout=2)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            _redis_client_construction_failed = True
-            _warn_redis_failure("cache_redis_client_construction_failed", exc)
-            return None
-        return _redis_client
+    """Thin wrapper over core/redis_client.py's shared lazy-construction,
+    remembered-failure client cache — kept as its own private function
+    (rather than calling core.redis_client.get_redis_client() at each call
+    site below) purely so existing `patch("core.cache._get_redis_client",
+    ...)` test targets keep working unchanged."""
+    return _redis_client_module.get_redis_client("cache_redis_client_construction_failed")
 
 
 def _warn_redis_failure(event: str, exc: Exception) -> None:
-    # Logged every time (not just once) — same reasoning as
-    # core/rate_limiter.py's own _warn_redis_failure: going quiet after the
-    # first failure would hide a Redis outage lasting the rest of this
-    # process's life, and these should be rare in a healthy deployment.
-    log_event(LOGGER, event, level="warning", error=str(exc))
+    _redis_client_module.warn_redis_failure(event, exc)
 
 
 def _redis_key(symbol: str, task_name: str) -> str:
