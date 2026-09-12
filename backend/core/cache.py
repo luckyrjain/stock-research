@@ -30,12 +30,11 @@ without REDIS_URL set.
 """
 
 import json
-import os
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from core import redis_client as _redis_client_module
+from core.atomic_file import atomic_write_text
 from core.observability import get_logger, log_event
 
 LOGGER = get_logger("cache")
@@ -189,15 +188,7 @@ def save(symbol: str, task_name: str, data: dict) -> dict | None:
 
     p = cache_path(symbol, task_name)
     p.parent.mkdir(parents=True, exist_ok=True)
-
-    fd, tmp_path = tempfile.mkstemp(dir=p.parent, prefix=f".{task_name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(serialized)
-        os.replace(tmp_path, p)
-    except Exception:
-        Path(tmp_path).unlink(missing_ok=True)
-        raise
+    atomic_write_text(p, serialized)
     return meta
 
 

@@ -3,6 +3,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+import core.observability as observability
 import signals.engine as engine
 from signals.features import extract_features
 from signals.engine import _DEFAULT_WEIGHTS, _log_unmatched_sector_once, _weights_for_sector, run_signal_engine
@@ -329,20 +330,28 @@ class LogUnmatchedSectorOnceConcurrencyTest(unittest.TestCase):
     codebase. Two threads first encountering the same never-before-seen
     sector at the same moment could both pass the membership check before
     either added it, producing a duplicate warning log instead of the
-    documented one-time-per-process behavior."""
+    documented one-time-per-process behavior.
+
+    signals/engine.py now delegates to core.observability.warn_once()'s
+    shared lock+set mechanism, so this test forces the race by seeding that
+    module's per-event registry (`_warn_once_seen[event]`) with a
+    _PausingSet, rather than patching a module-local set on signals.engine
+    directly."""
+
+    _EVENT = "sector_weight_override_unmatched"
 
     def setUp(self) -> None:
-        engine._unmatched_sectors_logged.clear()
-        self.addCleanup(engine._unmatched_sectors_logged.clear)
+        observability._warn_once_seen.pop(self._EVENT, None)
+        self.addCleanup(observability._warn_once_seen.pop, self._EVENT, None)
 
     def test_two_concurrent_callers_for_the_same_new_sector_log_exactly_once(self) -> None:
         pausing_set = _PausingSet()
+        observability._warn_once_seen[self._EVENT] = pausing_set
 
         def _call():
             _log_unmatched_sector_once("Some Never-Before-Seen Sector")
 
-        with patch("signals.engine._unmatched_sectors_logged", pausing_set), \
-                patch("signals.engine.log_event") as mock_log:
+        with patch("core.observability.log_event") as mock_log:
             t1 = threading.Thread(target=_call)
             t1.start()
             # Wait until thread 1 has passed its own membership check and

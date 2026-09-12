@@ -18,15 +18,14 @@ this is a best-effort dedup, not a guarantee.
 
 import json
 import logging
-import os
 import re
-import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
 from rapidfuzz import fuzz, process
 
+from core.atomic_file import atomic_write_text
 from tools._nse_session import get_nse_session
 
 logger = logging.getLogger(__name__)
@@ -100,14 +99,7 @@ def _save_cache(path: Path, data: list[dict]) -> None:
     # mid-write, or two cron-triggered pipeline runs racing on the same
     # file), which every read site below then failed to parse.
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(data))
-        os.replace(tmp_path, path)
-    except Exception:
-        Path(tmp_path).unlink(missing_ok=True)
-        raise
+    atomic_write_text(path, json.dumps(data))
 
 
 def _load_cache(path: Path) -> list[dict] | None:

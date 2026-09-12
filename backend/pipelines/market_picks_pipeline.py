@@ -16,7 +16,6 @@ import json
 import math
 import os
 import re
-import tempfile
 import threading
 import time
 import uuid
@@ -30,6 +29,7 @@ from dotenv import load_dotenv
 from telemetry import source_health
 from telemetry import source_quality
 from core import state_store
+from core.atomic_file import atomic_write_text
 from core.error_tracking import init_error_tracking
 from core.observability import get_logger, log_event
 
@@ -197,14 +197,7 @@ def _extraction_cache_set(key: str, picks: list[dict]) -> None:
     _EXTRACT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     serialized = json.dumps({"ts": time.time(), "picks": picks})
     try:
-        fd, tmp_path = tempfile.mkstemp(dir=_EXTRACT_CACHE_DIR, prefix=f".{key}.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(serialized)
-            os.replace(tmp_path, _EXTRACT_CACHE_DIR / f"{key}.json")
-        except Exception:
-            Path(tmp_path).unlink(missing_ok=True)
-            raise
+        atomic_write_text(_EXTRACT_CACHE_DIR / f"{key}.json", serialized)
     except Exception:
         pass
 
