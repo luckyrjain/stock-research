@@ -9,12 +9,12 @@ import { usePositions } from '@/lib/positions';
 import { getClientId } from '@/lib/watchlist';
 import { useToast } from '@/components/toast';
 import { fmtInr, fmtTimestampIST } from '@/lib/format';
-import { useBrokerSyncStatus } from '@/lib/use-broker-sync-status';
+import { useBrokerSyncStatus, syncBroker } from '@/lib/use-broker-sync-status';
 import type {
   PortfolioProfile, PortfolioAccount, PortfolioAccountType,
   PortfolioAsset, PortfolioAssetType, PortfolioNetWorth,
   CasImportResult, CsvPreviewResult, CsvImportResult,
-  BrokerConnection, BrokerSyncAck,
+  BrokerConnection,
 } from '@/types';
 
 const CSV_MAPPING_KEY_PREFIX = 'portfolio_csv_mapping:';
@@ -478,19 +478,7 @@ function HdfcBrokerRow({ account, connection, onSynced, onPoll }: {
   }
 
   async function sync() {
-    setBusy(true);
-    setMsg(null);
-    try {
-      await api<BrokerSyncAck>('broker/hdfc_securities/sync', {
-        method: 'POST',
-        body: JSON.stringify({ account_id: account.id }),
-      });
-      setMsg('Syncing…');
-      onSynced();
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : 'Sync failed');
-      setBusy(false);
-    }
+    await syncBroker('hdfc_securities', account.id, api, setBusy, setMsg, onSynced);
   }
 
   return (
@@ -653,26 +641,7 @@ function BrokerRow({ account, broker, connection, onSynced, onPoll }: {
   }
 
   async function sync() {
-    setBusy(true);
-    setMsg(null);
-    try {
-      await api<BrokerSyncAck>(`broker/${broker.id}/sync`, {
-        method: 'POST',
-        body: JSON.stringify({ account_id: account.id }),
-      });
-      // The sync itself runs in the background (202 Accepted). `busy`
-      // deliberately stays true here rather than clearing in a `finally`
-      // below — the connections list hasn't been refetched yet at this
-      // point, so `connection.sync_status` is still whatever it was
-      // *before* this click, not yet "syncing". Clearing `busy` here would
-      // briefly re-enable "Sync now" until the next poll catches up. The
-      // status-resolution effect below clears it once the outcome is known.
-      setMsg('Syncing…');
-      onSynced();
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : 'Sync failed');
-      setBusy(false);
-    }
+    await syncBroker(broker.id, account.id, api, setBusy, setMsg, onSynced);
   }
 
   return (
