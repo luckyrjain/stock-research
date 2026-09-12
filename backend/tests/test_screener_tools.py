@@ -458,6 +458,21 @@ class ExtractQuarterlyTrendTest(unittest.TestCase):
         soup = BeautifulSoup("<html></html>", "lxml")
         self.assertEqual(_extract_quarterly_trend(soup), {})
 
+    def test_single_period_returns_empty_dict(self) -> None:
+        html = """
+        <section id="quarters">
+          <table>
+            <thead><tr><th></th><th>Mar 2024</th></tr></thead>
+            <tbody>
+              <tr><td>Sales</td><td>1000</td></tr>
+              <tr><td>EPS in Rs</td><td>10.5</td></tr>
+            </tbody>
+          </table>
+        </section>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        self.assertEqual(_extract_quarterly_trend(soup), {})
+
     def test_missing_eps_row_returns_empty_dict(self) -> None:
         html = self._table_html(sales_row="<td>1000</td><td>1100</td><td>1200</td>")
         soup = BeautifulSoup(html, "lxml")

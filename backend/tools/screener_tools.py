@@ -205,7 +205,14 @@ def _extract_table(soup: BeautifulSoup, section_id: str) -> tuple[list[str], lis
         cells = row.find_all(["th", "td"])
         if len(cells) < 2:
             continue
-        label = cells[0].get_text(" ", strip=True).rstrip("+").strip()
+        # _clean() strips ₹/commas that never actually appear in a row
+        # label today (only in value cells) — kept here anyway so this
+        # matches the more defensive of the two pre-extraction label
+        # computations (_extract_quarterly_trend/_extract_valuation_band's
+        # own _clean(...).lower().replace(" ", "") used it; the plain
+        # _extract_yearly_statement one didn't), rather than silently
+        # dropping it for two of the three callers.
+        label = _clean(cells[0].get_text(" ", strip=True)).rstrip("+").strip()
         if not label:
             continue
         values: list[float | None] = []
