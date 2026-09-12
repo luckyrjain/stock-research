@@ -2,7 +2,8 @@
 
 The **request contract** for every FastAPI endpoint: method, path, auth, params, request body,
 status codes, rate limits, and caching behaviour. **63 endpoints** — 29 in `backend/api.py`, 34
-across `backend/routes/` (`watchlist.py` 5, `positions.py` 6, `portfolio_aggregator.py` 23).
+across `backend/routes/` (`watchlist.py` 5, `positions.py` 6, `portfolio_aggregator.py` 17,
+`broker_sync.py` 6).
 
 **Division of responsibility with [`output-schema.md`](output-schema.md):**
 
