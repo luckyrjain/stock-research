@@ -132,7 +132,8 @@ stock-research/
 │   ├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
 │   ├── routes/                 Per-domain FastAPI routers extracted out of api.py (see
 │   │                           "Route module extraction" below) — watchlist.py, positions.py,
-│   │                           portfolio_aggregator.py, _shared.py (the read/write wrapper all share)
+│   │                           portfolio_aggregator.py, broker_sync.py, _shared.py (the
+│   │                           read/write wrapper all share)
 │   ├── config/
 │   │   ├── analyst.json        Analyst role/goal/backstory + section labels (config.crew_tasks.ANALYST_SECTIONS)
 │   │   └── crew_tasks.py       Builds the analyst prompt string from analyst.json

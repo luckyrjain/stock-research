@@ -52,7 +52,7 @@ graph TB
 
     subgraph BE["FastAPI — backend/ (single process)"]
         API["api.py<br/>29 routes"]
-        Routes["routes/<br/>watchlist · positions · portfolio_aggregator<br/>34 routes"]
+        Routes["routes/<br/>watchlist · positions · portfolio_aggregator · broker_sync<br/>34 routes"]
         Signals["signals/<br/>quant signal engine"]
         Analyst["analyst/crew.py<br/>LLM call + guardrails + failover"]
         Tools["tools/<br/>scrapers (never raise)"]
@@ -802,16 +802,19 @@ the database, not just its own two — a disclosed, not-yet-fixed footgun (see C
 
 ## Route module extraction (`routes/`)
 
-`api.py` is still the majority of the backend (~2,760 lines, **29 of the 61 routes**) — three
+`api.py` is still the majority of the backend (~2,760 lines, **29 of the 63 routes**) — four
 domains have been split out into `APIRouter` modules so far (the first two were the most
 duplicated; the third, `portfolio_aggregator.py`, is a large self-contained new domain that made
-more sense as its own router from the start):
+more sense as its own router from the start; the fourth, `broker_sync.py`, is a later split of the
+broker-connection endpoints back out of `portfolio_aggregator.py` once that router's own broker
+login/connect/sync half had grown to outweigh its CRUD half):
 
 ```text
 routes/
 ├── _shared.py                run_owned_db_call() — the rate-limit → 503-if-no-DATABASE_URL →
 │                              run_in_executor → sanitize-error wrapper multiple domains share;
-│                              also claim_anonymous_rows_sync() (watchlist/positions claim flow)
+│                              also claim_anonymous_rows_sync() (watchlist/positions claim flow),
+│                              OwnedRequest (the client_id-optional request-body base class)
 ├── watchlist.py    (5)        GET/POST /api/watchlist, DELETE /api/watchlist/{symbol},
 │                              GET /api/watchlist/calendar, POST /api/watchlist/claim
 │                              + resolve_owner()/owner_column()/WatchlistOwner (shared identity
@@ -822,12 +825,17 @@ routes/
 │                              positions table only, unrelated to the Portfolio Aggregator
 │                              despite the shared /api/portfolio prefix, which it lands on
 │                              because this router has no prefix= of its own)
-└── portfolio_aggregator.py (23)  APIRouter(prefix="/api/portfolio") — profiles, accounts,
-                               assets (+/valuations), networth, refresh-valuations, xirr,
-                               import-cas, import-csv(/preview), broker/{broker}/login-url,
+├── portfolio_aggregator.py (17)  APIRouter(prefix="/api/portfolio") — profiles, accounts,
+│                              assets (+/valuations), networth, refresh-valuations, xirr,
+│                              import-cas, import-csv(/preview). Full CRUD, hence the count
+└── broker_sync.py  (6)        Same /api/portfolio prefix — broker/{broker}/login-url,
                                broker/{broker}/connect, broker/{broker}/sync,
                                broker/connections, broker/hdfc_securities/login-start,
-                               broker/hdfc_securities/verify-otp. Full CRUD, hence the count
+                               broker/hdfc_securities/verify-otp. Imports
+                               _owned_account_id()/_owned_profile_id() from
+                               portfolio_aggregator.py rather than duplicating or promoting them
+                               to _shared.py — they're specific to that router's own
+                               profiles→accounts→assets ownership schema, not generic
 ```
 
 **`run_owned_db_call(request, rate_limit_name, max_calls, sync_fn, event_prefix, window_seconds=60)`**
@@ -838,13 +846,13 @@ map exceptions to status codes. `ValueError` → 422 (validation, e.g. cap excee
 `HTTPException` from inside `sync_fn` → re-raised as-is (so a 404 for a missing id isn't swallowed),
 anything else → a **sanitized** 503 with the real exception logged server-side, never returned.
 
-All three routers `import api` (not `from api import X`) and reach shared state (`_get_db_engine`,
-`_rate_limit`, `LOGGER`, `log_event`) via dotted access at call time. Two reasons: `api.py`
-registers these routers, so they can't bind `api.py`'s names at their own module top level before
-those names exist; and `unittest.mock.patch("api.X", ...)` only intercepts lookups made through the
-module object, not a name a `from X import Y` already copied at import time. `api.py` re-exports
-`_MAX_WATCHLIST_ITEMS_PER_CLIENT`/`_MAX_POSITIONS_PER_CLIENT` (both 200) because existing tests read
-them as plain values, not just as patch targets.
+All four routers import their shared primitives (`_get_db_engine`, `LOGGER`, `log_event`,
+`_rate_limit`/`_TICKER_RE` where needed) directly from `routes/_shared.py` —
+`from routes._shared import (...)`, not `import api`. This used to be `import api` for all of
+them (an ordering artifact of `api.py` registering these routers, not a real dependency
+direction, since `routes/_shared.py` has no dependency on `api.py` at all) — fixed one module at a
+time. `api.py` re-exports `_MAX_WATCHLIST_ITEMS_PER_CLIENT`/`_MAX_POSITIONS_PER_CLIENT` (both 200)
+because existing tests read them as plain values, not just as patch targets.
 
 The other 29 routes — SME signals, Screener, Market Picks, auth, API keys, financials, peers,
 insider activity, street consensus, shareholding detail, verdict history, consolidated view, symbol
@@ -989,7 +997,7 @@ inside `backend/`** — the directory move changed the top-level nesting, not an
 ```text
 stock-research/
 ├── backend/
-│   ├── api.py                     FastAPI server — 29 of the 57 routes, both SSE endpoints,
+│   ├── api.py                     FastAPI server — 29 of the 63 routes, both SSE endpoints,
 │   │                               symbol validation, shared helpers routes/ depends on
 │   ├── main.py                    CLI entry point; _fetch_task/_build_report shared with api.py
 │   ├── analyst/crew.py                    Analyst guardrails, cross-provider failover, run_analysis_with_fallback
