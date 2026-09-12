@@ -211,8 +211,8 @@ whichever one is relevant to the directory you're working in):
 | [`docs/setup.md`](docs/setup.md) | Full environment variable reference, local dev setup, troubleshooting |
 | [`docs/deployment.md`](docs/deployment.md) | Docker Compose, manual deployment, scaling guidance |
 | [`docs/architecture.md`](docs/architecture.md) | System-level request flows and module boundaries |
-| [`docs/api-reference.md`](docs/api-reference.md) | All 61 HTTP endpoints — auth mode, path/query params, request bodies, every status code and its trigger, rate-limit buckets, cache behaviour, SSE event streams |
-| [`docs/database.md`](docs/database.md) | All 22 PostgreSQL tables — columns, constraints, indexes, which code reads/writes each, the dual-ownership model, migrations, retention |
+| [`docs/api-reference.md`](docs/api-reference.md) | All 63 HTTP endpoints — auth mode, path/query params, request bodies, every status code and its trigger, rate-limit buckets, cache behaviour, SSE event streams |
+| [`docs/database.md`](docs/database.md) | All 23 PostgreSQL tables — columns, constraints, indexes, which code reads/writes each, the dual-ownership model, migrations, retention |
 | [`docs/tools.md`](docs/tools.md) | Reference for every data-fetching tool/scraper and its output shape |
 | [`docs/output-schema.md`](docs/output-schema.md) | Response payload shapes and cache-file formats (the request-side contract lives in `api-reference.md`) |
 | [`README.md`](README.md) | Quickstart — install, run, top-level feature summary |

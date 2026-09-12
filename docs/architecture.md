@@ -10,7 +10,7 @@ and links into rather than duplicating. Frontend detail lives in `frontend/CLAUD
 A FastAPI backend (`backend/api.py` + `backend/routes/`) talks to yfinance, Screener.in, NSE, BSE,
 AMFI, Trendlyne, RBI, and Google News, normalizes what it scrapes, runs a deterministic quant
 signal engine over it, and (for the flagship single-stock flow) calls an LLM for a structured
-recommendation. It serves **63 HTTP routes** (29 in `api.py`, 5 + 6 + 23 across the three
+recommendation. It serves **63 HTTP routes** (29 in `api.py`, 5 + 6 + 17 + 6 across the four
 extracted `routes/` modules; 61 of them under `/api/*`, plus `/` and `/health`). A
 Next.js 15 frontend never talks to FastAPI directly — every call goes through a same-shaped proxy
 route under `frontend/app/api/*` first. PostgreSQL (via SQLAlchemy Core, migrated with Alembic)
