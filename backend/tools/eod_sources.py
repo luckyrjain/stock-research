@@ -12,18 +12,14 @@ from pathlib import Path
 import requests
 
 from core.atomic_file import atomic_write_text
+from tools._nse_session import get_nse_session
 
 logger = logging.getLogger(__name__)
 
-_NSE_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    ),
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.nseindia.com/",
-}
+_NSE_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
 
 _BHAVCOPY_URL = "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{stamp}.csv"
 _EQUITY_MASTER_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
@@ -35,13 +31,16 @@ _TIMEOUT = 20
 
 def make_nse_session() -> requests.Session:
     """Fresh session with NSE headers and a primed cookie jar. Never raises."""
-    sess = requests.Session()
-    sess.headers.update(_NSE_HEADERS)
-    try:
-        sess.get("https://www.nseindia.com", timeout=6)
-    except Exception:
-        pass
-    return sess
+    return get_nse_session(
+        timeout=6,
+        accept="*/*",
+        extra_headers={
+            "User-Agent": _NSE_USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.nseindia.com/",
+        },
+        sleep_after_prime=0,
+    )
 
 
 def _archive_path(trade_date: date) -> Path:
