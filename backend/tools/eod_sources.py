@@ -11,6 +11,8 @@ from pathlib import Path
 
 import requests
 
+from core.atomic_file import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 _NSE_HEADERS = {
@@ -96,7 +98,7 @@ def download_bhavcopy(trade_date: date, session: requests.Session) -> dict:
             return {"status": "error", "error": f"unexpected bhavcopy body on {url}"}
         try:
             archive.parent.mkdir(parents=True, exist_ok=True)
-            archive.write_text(resp.text)
+            atomic_write_text(archive, resp.text)
         except Exception as exc:
             logger.warning("bhavcopy archive write failed for %s: %s", trade_date, exc)
         return {"status": "ok", "csv": resp.text}
