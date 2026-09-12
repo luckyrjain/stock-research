@@ -152,6 +152,47 @@ def _require_supported_broker(broker: str) -> None:
         raise HTTPException(status_code=422, detail=f"broker must be one of: {sorted(_SUPPORTED_BROKERS)}")
 
 
+def _validate_credential_pair(api_key: str | None, api_secret: str | None) -> None:
+    """Both-or-neither: first-time/replace setup must supply both app
+    credentials, a resume/retry call omits both to reuse what's already
+    registered — either alone is a 422."""
+    if bool(api_key) != bool(api_secret):
+        raise HTTPException(status_code=422, detail="provide both api_key and api_secret, or neither to reuse saved credentials")
+
+
+def _connection_reset_values(**extra) -> dict:
+    """Column resets applied whenever a broker_connections row's app
+    credentials are replaced — a prior access token was minted for
+    credentials that no longer exist, and a prior sync's outcome recorded
+    under them would misleadingly imply the new credentials already synced
+    something. `extra` carries any additional columns a specific call site
+    also needs cleared (e.g. hdfc_securities' pending_token_id)."""
+    return {
+        "access_token_enc": None,
+        "token_obtained_at": None,
+        "sync_status": "idle",
+        "last_sync_summary": None,
+        "last_sync_error": None,
+        **extra,
+    }
+
+
+def _decrypt_or_422(ciphertext: str, error_detail: str) -> str:
+    """Decrypts `ciphertext`, letting EncryptionNotConfigured surface as a
+    503 (unchanged) and translating any other decrypt failure into a 422
+    with `error_detail` — the message differs per call site (a corrupted
+    app secret vs. access token point the caller at different fixes), so
+    it's a parameter rather than a single hardcoded string."""
+    from core.crypto import EncryptionNotConfigured, decrypt
+
+    try:
+        return decrypt(ciphertext)
+    except EncryptionNotConfigured as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=422, detail=error_detail)
+
+
 @router.post("/broker/{broker}/login-url")
 async def broker_login_url(request: Request, broker: str, body: BrokerLoginUrlIn):
     """Returns the login URL to start (or resume) connecting `broker` for
@@ -180,8 +221,7 @@ async def broker_login_url(request: Request, broker: str, body: BrokerLoginUrlIn
             status_code=422,
             detail="hdfc_securities has no redirect login — use POST /broker/hdfc_securities/login-start instead",
         )
-    if bool(body.api_key) != bool(body.api_secret):
-        raise HTTPException(status_code=422, detail="provide both api_key and api_secret, or neither to reuse saved credentials")
+    _validate_credential_pair(body.api_key, body.api_secret)
 
     def _sync() -> dict:
         from core.crypto import EncryptionNotConfigured, encrypt
@@ -224,15 +264,7 @@ async def broker_login_url(request: Request, broker: str, body: BrokerLoginUrlIn
                 conn.execute(
                     update(broker_connections)
                     .where(broker_connections.c.id == existing.id)
-                    .values(
-                        api_key=body.api_key, api_secret_enc=api_secret_enc,
-                        access_token_enc=None, token_obtained_at=None,
-                        # A prior sync's outcome was fetched under credentials
-                        # that no longer exist — leaving "success" and its
-                        # summary on display would misleadingly imply the new
-                        # credentials have already synced something.
-                        sync_status="idle", last_sync_summary=None, last_sync_error=None,
-                    )
+                    .values(api_key=body.api_key, api_secret_enc=api_secret_enc, **_connection_reset_values())
                 )
             else:
                 conn.execute(
@@ -262,7 +294,7 @@ async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
     def _sync() -> dict:
         import datetime as _dt
 
-        from core.crypto import EncryptionNotConfigured, decrypt, encrypt
+        from core.crypto import EncryptionNotConfigured, encrypt
         from db.models import broker_connections
         from sqlalchemy import select, update
 
@@ -284,15 +316,10 @@ async def broker_connect(request: Request, broker: str, body: BrokerConnectIn):
                     detail=f"no {broker} app credentials registered for this account — call login-url first",
                 )
 
-            try:
-                api_secret = decrypt(conn_row.api_secret_enc)
-            except EncryptionNotConfigured as exc:
-                raise HTTPException(status_code=503, detail=str(exc))
-            except Exception:
-                raise HTTPException(
-                    status_code=422,
-                    detail="stored app secret could not be decrypted — re-register this broker's API key/secret",
-                )
+            api_secret = _decrypt_or_422(
+                conn_row.api_secret_enc,
+                "stored app secret could not be decrypted — re-register this broker's API key/secret",
+            )
 
             session = mod.exchange_request_token(conn_row.api_key, api_secret, body.request_token)
             if "error" in session or "access_token" not in session:
@@ -333,8 +360,7 @@ async def hdfc_login_start(request: Request, body: HdfcLoginStartIn):
     progress · `422` exactly one of api_key/api_secret supplied, or HDFC
     rejected the login/credentials step · `503` PORTFOLIO_ENCRYPTION_KEY
     unset (first-time/replace mode only)."""
-    if bool(body.api_key) != bool(body.api_secret):
-        raise HTTPException(status_code=422, detail="provide both api_key and api_secret, or neither to reuse saved credentials")
+    _validate_credential_pair(body.api_key, body.api_secret)
 
     def _sync() -> dict:
         from core import rate_limiter
@@ -414,8 +440,7 @@ async def hdfc_login_start(request: Request, body: HdfcLoginStartIn):
                         .where(broker_connections.c.id == existing.id)
                         .values(
                             api_key=api_key, api_secret_enc=api_secret_enc,
-                            access_token_enc=None, token_obtained_at=None, pending_token_id=None,
-                            sync_status="idle", last_sync_summary=None, last_sync_error=None,
+                            **_connection_reset_values(pending_token_id=None),
                         )
                     )
                 else:
@@ -472,7 +497,7 @@ async def hdfc_verify_otp(request: Request, body: HdfcVerifyOtpIn):
         import datetime as _dt
 
         from core import rate_limiter
-        from core.crypto import EncryptionNotConfigured, decrypt, encrypt
+        from core.crypto import EncryptionNotConfigured, encrypt
         from db.models import broker_connections
         from portfolio import hdfc_sync
         from sqlalchemy import select, update
@@ -545,15 +570,10 @@ async def hdfc_verify_otp(request: Request, body: HdfcVerifyOtpIn):
             if "error" in authorise_result:
                 raise HTTPException(status_code=422, detail=authorise_result["error"])
 
-            try:
-                api_secret = decrypt(conn_row.api_secret_enc)
-            except EncryptionNotConfigured as exc:
-                raise HTTPException(status_code=503, detail=str(exc))
-            except Exception:
-                raise HTTPException(
-                    status_code=422,
-                    detail="stored app secret could not be decrypted — re-register this broker's API key/secret",
-                )
+            api_secret = _decrypt_or_422(
+                conn_row.api_secret_enc,
+                "stored app secret could not be decrypted — re-register this broker's API key/secret",
+            )
 
             token_result = hdfc_sync.get_access_token(conn_row.api_key, api_secret, request_token)
             if "error" in token_result:
@@ -623,7 +643,6 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
 
     def _prepare() -> dict:
         from core import rate_limiter
-        from core.crypto import EncryptionNotConfigured, decrypt
         from db.models import broker_connections
         from sqlalchemy import select, update
 
@@ -674,15 +693,10 @@ async def broker_sync(request: Request, broker: str, body: BrokerSyncIn):
                 if conn_row is None or not conn_row.access_token_enc:
                     raise HTTPException(status_code=404, detail=f"no connected {broker} account for this account_id")
 
-                try:
-                    access_token = decrypt(conn_row.access_token_enc)
-                except EncryptionNotConfigured as exc:
-                    raise HTTPException(status_code=503, detail=str(exc))
-                except Exception:
-                    raise HTTPException(
-                        status_code=422,
-                        detail="stored credential could not be decrypted — reconnect this broker account",
-                    )
+                access_token = _decrypt_or_422(
+                    conn_row.access_token_enc,
+                    "stored credential could not be decrypted — reconnect this broker account",
+                )
 
                 conn.execute(
                     update(broker_connections)
