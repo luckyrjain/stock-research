@@ -32,6 +32,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from sqlalchemy import text
 
+from db.batch import batched_execute
 from db.models import get_engine, metadata, screener_stocks
 from core.error_tracking import init_error_tracking
 from core.observability import get_logger, log_event
@@ -101,38 +102,30 @@ def _fetch_one(stock: dict) -> dict:
 def _upsert_stocks(engine, rows: list[dict]) -> None:
     if not rows:
         return
-    batch_size = 200
-    total = 0
-    with engine.begin() as conn:
-        for i in range(0, len(rows), batch_size):
-            batch = rows[i : i + batch_size]
-            conn.execute(
-                text("""
-                    INSERT INTO screener_stocks
-                        (symbol, company_name, exchange, nse_industry, sector,
-                         current_price, pe_ratio, market_cap_cr, avg_volume_10d,
-                         rsi14, ema_trend, fetched_at)
-                    VALUES
-                        (:symbol, :company_name, :exchange, :nse_industry, :sector,
-                         :current_price, :pe_ratio, :market_cap_cr, :avg_volume_10d,
-                         :rsi14, :ema_trend, NOW())
-                    ON CONFLICT (symbol) DO UPDATE SET
-                        company_name   = EXCLUDED.company_name,
-                        exchange       = EXCLUDED.exchange,
-                        nse_industry   = EXCLUDED.nse_industry,
-                        sector         = EXCLUDED.sector,
-                        current_price  = EXCLUDED.current_price,
-                        pe_ratio       = EXCLUDED.pe_ratio,
-                        market_cap_cr  = EXCLUDED.market_cap_cr,
-                        avg_volume_10d = EXCLUDED.avg_volume_10d,
-                        rsi14          = EXCLUDED.rsi14,
-                        ema_trend      = EXCLUDED.ema_trend,
-                        fetched_at     = NOW()
-                """),
-                batch,
-            )
-            total += len(batch)
-    log_event(LOGGER, "screener_stocks_upserted", count=total)
+    sql = text("""
+        INSERT INTO screener_stocks
+            (symbol, company_name, exchange, nse_industry, sector,
+             current_price, pe_ratio, market_cap_cr, avg_volume_10d,
+             rsi14, ema_trend, fetched_at)
+        VALUES
+            (:symbol, :company_name, :exchange, :nse_industry, :sector,
+             :current_price, :pe_ratio, :market_cap_cr, :avg_volume_10d,
+             :rsi14, :ema_trend, NOW())
+        ON CONFLICT (symbol) DO UPDATE SET
+            company_name   = EXCLUDED.company_name,
+            exchange       = EXCLUDED.exchange,
+            nse_industry   = EXCLUDED.nse_industry,
+            sector         = EXCLUDED.sector,
+            current_price  = EXCLUDED.current_price,
+            pe_ratio       = EXCLUDED.pe_ratio,
+            market_cap_cr  = EXCLUDED.market_cap_cr,
+            avg_volume_10d = EXCLUDED.avg_volume_10d,
+            rsi14          = EXCLUDED.rsi14,
+            ema_trend      = EXCLUDED.ema_trend,
+            fetched_at     = NOW()
+    """)
+    batched_execute(engine, sql, rows, batch_size=200)
+    log_event(LOGGER, "screener_stocks_upserted", count=len(rows))
 
 
 def setup_db(engine) -> None:

@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import text
 
+from db.batch import batched_execute
 from db.models import corporate_actions, get_engine
 from core.error_tracking import init_error_tracking
 from core.observability import get_logger, log_event
@@ -56,9 +57,7 @@ def _upsert_actions(engine, rows: list[dict]) -> set[str]:
             type = EXCLUDED.type, price_factor = EXCLUDED.price_factor,
             amount = EXCLUDED.amount, record_date = EXCLUDED.record_date
     """)
-    with engine.begin() as conn:
-        for i in range(0, len(rows), _BATCH_SIZE):
-            conn.execute(sql, rows[i:i + _BATCH_SIZE])
+    batched_execute(engine, sql, rows, batch_size=_BATCH_SIZE)
     return {r["symbol"] for r in rows if r.get("price_factor") is not None}
 
 
@@ -114,9 +113,7 @@ def recompute_symbol(engine, symbol: str) -> int:
         updates.append({"s": symbol, "d": d, "adj": round(float(close) * factor, 4)})  # SQLite ignores Numeric scale; keep tests deterministic
     if updates:
         sql = text("UPDATE prices_daily SET adj_close = :adj WHERE symbol = :s AND trade_date = :d")
-        with engine.begin() as conn:
-            for i in range(0, len(updates), _BATCH_SIZE):
-                conn.execute(sql, updates[i:i + _BATCH_SIZE])
+        batched_execute(engine, sql, updates, batch_size=_BATCH_SIZE)
     return len(updates)
 
 
