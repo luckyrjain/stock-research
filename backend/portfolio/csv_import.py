@@ -168,6 +168,7 @@ def import_rows(engine, rows: list[list[str]], headers: list[str],
     """Append normalized transactions with dedupe; derive holdings units.
     All writes in one transaction. Never raises."""
     from sqlalchemy import insert as _insert, select, text as _text
+    from core import rate_limiter
     from db.models import (
         accounts as accounts_t, assets as assets_t,
         transactions as transactions_t,
@@ -190,96 +191,114 @@ def import_rows(engine, rows: list[list[str]], headers: list[str],
     # make re-imports of a date-ranged partial tradebook idempotent without
     # needing the file's own row order to stay stable across re-exports.
 
-    with engine.begin() as conn:
-        if not conn.execute(select(accounts_t.c.id)
-                            .where(accounts_t.c.id == account_id)).first():
-            return {"error": "account not found"}
+    # Lock scoped to this account, held for the whole import — without it,
+    # two concurrent uploads of the same/overlapping tradebook (a
+    # double-click, two tabs) each read the same pre-import `seen_keys`
+    # snapshot below and both decide their own row isn't a duplicate yet,
+    # since neither has committed. core.rate_limiter, not a
+    # pg_advisory_xact_lock — this codebase's Portfolio Aggregator tables
+    # are tested against a real SQLite engine (no live Postgres in tests),
+    # which has no advisory-lock/hashtext functions; rate_limiter's lock
+    # works identically on both backends since it never touches the DB.
+    # Same try_acquire_lock/release_lock pattern routes/broker_sync.py
+    # already uses for its own "don't let two attempts interleave" guard.
+    lock_name = f"csv_import:account:{account_id}"
+    if not rate_limiter.try_acquire_lock(lock_name, 300):
+        return {"error": "another import for this account is already running — try again shortly"}
 
-        existing = conn.execute(
-            select(assets_t.c.id, assets_t.c.symbol, assets_t.c.meta)
-            .where(assets_t.c.type == "stock")
-        ).mappings().fetchall()
-        by_symbol = {r["symbol"]: r["id"] for r in existing if r["symbol"]}
-        by_isin = {(r["meta"] or {}).get("isin"): r["id"]
-                   for r in existing if (r["meta"] or {}).get("isin")}
+    try:
+        with engine.begin() as conn:
+            if not conn.execute(select(accounts_t.c.id)
+                                .where(accounts_t.c.id == account_id)).first():
+                return {"error": "account not found"}
 
-        asset_ids: dict[str, int] = {}
-        seen_keys: dict[int, set] = {}
-        securities_master: list[dict] | None = None
-        for t in txns:
-            aid = asset_ids.get(t["symbol"])
-            if aid is None:
-                aid = by_symbol.get(t["symbol"]) \
-                    or (by_isin.get(t["isin"]) if t["isin"] else None)
-                if aid:
-                    summary["assets_matched"] += 1
-                else:
-                    if securities_master is None:
-                        securities_master = get_full_securities_master(engine)
-                    resolved = resolve_symbol(engine, t["symbol"], isin=t["isin"],
-                                               master=securities_master)
-                    if resolved["confidence"] in ("isin", "exact"):
-                        final_symbol = resolved["symbol"]
-                        meta = {"isin": t["isin"], "broker": broker,
-                                "resolved_exchange": resolved["exchange"]}
-                    else:
-                        final_symbol = t["symbol"]
-                        meta = {"isin": t["isin"], "broker": broker}
-                        note = f"symbol '{t['symbol']}' unverified"
-                        if resolved["candidate_name"]:
-                            note += f" (closest guess: {resolved['candidate_name']})"
-                        summary["warnings"].append(note)
-                    aid = by_symbol.get(final_symbol)
+            existing = conn.execute(
+                select(assets_t.c.id, assets_t.c.symbol, assets_t.c.meta)
+                .where(assets_t.c.type == "stock")
+            ).mappings().fetchall()
+            by_symbol = {r["symbol"]: r["id"] for r in existing if r["symbol"]}
+            by_isin = {(r["meta"] or {}).get("isin"): r["id"]
+                       for r in existing if (r["meta"] or {}).get("isin")}
+
+            asset_ids: dict[str, int] = {}
+            seen_keys: dict[int, set] = {}
+            securities_master: list[dict] | None = None
+            for t in txns:
+                aid = asset_ids.get(t["symbol"])
+                if aid is None:
+                    aid = by_symbol.get(t["symbol"]) \
+                        or (by_isin.get(t["isin"]) if t["isin"] else None)
                     if aid:
                         summary["assets_matched"] += 1
                     else:
-                        aid = conn.execute(_insert(assets_t).values(
-                            account_id=account_id, type="stock",
-                            name=final_symbol, symbol=final_symbol,
-                            meta=meta,
-                        ).returning(assets_t.c.id)).scalar()
-                        by_symbol[final_symbol] = aid
-                        summary["assets_created"] += 1
-                asset_ids[t["symbol"]] = aid
-                seen_keys[aid] = {
-                    _key(r[0], r[1], r[2], r[3]) for r in conn.execute(
-                        select(transactions_t.c.date, transactions_t.c.type,
-                               transactions_t.c.units, transactions_t.c.amount)
-                        .where(transactions_t.c.asset_id == aid,
-                               transactions_t.c.meta["source"].as_string() == "csv"))
-                }
+                        if securities_master is None:
+                            securities_master = get_full_securities_master(engine)
+                        resolved = resolve_symbol(engine, t["symbol"], isin=t["isin"],
+                                                   master=securities_master)
+                        if resolved["confidence"] in ("isin", "exact"):
+                            final_symbol = resolved["symbol"]
+                            meta = {"isin": t["isin"], "broker": broker,
+                                    "resolved_exchange": resolved["exchange"]}
+                        else:
+                            final_symbol = t["symbol"]
+                            meta = {"isin": t["isin"], "broker": broker}
+                            note = f"symbol '{t['symbol']}' unverified"
+                            if resolved["candidate_name"]:
+                                note += f" (closest guess: {resolved['candidate_name']})"
+                            summary["warnings"].append(note)
+                        aid = by_symbol.get(final_symbol)
+                        if aid:
+                            summary["assets_matched"] += 1
+                        else:
+                            aid = conn.execute(_insert(assets_t).values(
+                                account_id=account_id, type="stock",
+                                name=final_symbol, symbol=final_symbol,
+                                meta=meta,
+                            ).returning(assets_t.c.id)).scalar()
+                            by_symbol[final_symbol] = aid
+                            summary["assets_created"] += 1
+                    asset_ids[t["symbol"]] = aid
+                    seen_keys[aid] = {
+                        _key(r[0], r[1], r[2], r[3]) for r in conn.execute(
+                            select(transactions_t.c.date, transactions_t.c.type,
+                                   transactions_t.c.units, transactions_t.c.amount)
+                            .where(transactions_t.c.asset_id == aid,
+                                   transactions_t.c.meta["source"].as_string() == "csv"))
+                    }
 
-            key = _key(t["date"], t["type"], t["units"], t["amount"])
-            if key in seen_keys[aid]:
-                summary["duplicates"] += 1
-                continue
-            conn.execute(_insert(transactions_t).values(
-                asset_id=aid, date=t["date"], type=t["type"],
-                amount=t["amount"], units=t["units"],
-                meta={"source": "csv", "broker": broker},
-            ))
-            seen_keys[aid].add(key)
-            summary["imported"] += 1
+                key = _key(t["date"], t["type"], t["units"], t["amount"])
+                if key in seen_keys[aid]:
+                    summary["duplicates"] += 1
+                    continue
+                conn.execute(_insert(transactions_t).values(
+                    asset_id=aid, date=t["date"], type=t["type"],
+                    amount=t["amount"], units=t["units"],
+                    meta={"source": "csv", "broker": broker},
+                ))
+                seen_keys[aid].add(key)
+                summary["imported"] += 1
 
-        for symbol, aid in asset_ids.items():
-            row = conn.execute(_text(
-                "SELECT COALESCE(SUM(CASE WHEN type='buy' THEN units END), 0) "
-                "     - COALESCE(SUM(CASE WHEN type='sell' THEN units END), 0) "
-                "FROM transactions WHERE asset_id = :aid"
-            ), {"aid": aid}).scalar()
-            units = float(row or 0)
-            if units < 0:
+            for symbol, aid in asset_ids.items():
+                row = conn.execute(_text(
+                    "SELECT COALESCE(SUM(CASE WHEN type='buy' THEN units END), 0) "
+                    "     - COALESCE(SUM(CASE WHEN type='sell' THEN units END), 0) "
+                    "FROM transactions WHERE asset_id = :aid"
+                ), {"aid": aid}).scalar()
+                units = float(row or 0)
+                if units < 0:
+                    summary["warnings"].append(
+                        f"{symbol}: derived units negative ({units}) — floored to 0; "
+                        "tradebook likely incomplete")
+                    units = 0.0
+                conn.execute(_text(
+                    "INSERT INTO holdings (asset_id, units) VALUES (:aid, :u) "
+                    "ON CONFLICT (asset_id) DO UPDATE SET units = EXCLUDED.units"
+                ), {"aid": aid, "u": units})
+            if asset_ids:
                 summary["warnings"].append(
-                    f"{symbol}: derived units negative ({units}) — floored to 0; "
-                    "tradebook likely incomplete")
-                units = 0.0
-            conn.execute(_text(
-                "INSERT INTO holdings (asset_id, units) VALUES (:aid, :u) "
-                "ON CONFLICT (asset_id) DO UPDATE SET units = EXCLUDED.units"
-            ), {"aid": aid, "u": units})
-        if asset_ids:
-            summary["warnings"].append(
-                "derived units exclude bonus/split shares — verify against your broker")
+                    "derived units exclude bonus/split shares — verify against your broker")
+    finally:
+        rate_limiter.release_lock(lock_name)
 
     log_event(LOGGER, "csv_imported", account_id=account_id, broker=broker,
               **{k: v for k, v in summary.items() if k != "warnings"},

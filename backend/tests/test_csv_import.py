@@ -6,6 +6,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine, insert
 from sqlalchemy.pool import StaticPool
 
+from core import rate_limiter
 from portfolio.csv_import import (
     _normalize_rows,
     _parse_date,
@@ -173,6 +174,27 @@ class ImportRowsTest(unittest.TestCase):
         result = import_rows(self.engine, [_ZERODHA_ROW], _ZERODHA_HEADERS,
                              suggest_mapping(_ZERODHA_HEADERS)["mapping"], 9999, "zerodha")
         self.assertEqual(result, {"error": "account not found"})
+
+    def test_concurrent_import_for_same_account_returns_error(self) -> None:
+        """Regression test for the read-then-write dedupe race: two
+        concurrent uploads for the same account must not both read the same
+        pre-import seen_keys snapshot. Simulates "already running" the same
+        way a real concurrent request would leave the lock held."""
+        lock_name = f"csv_import:account:{self.account_id}"
+        self.assertTrue(rate_limiter.try_acquire_lock(lock_name, 300))
+        try:
+            result = import_rows(self.engine, [_ZERODHA_ROW], _ZERODHA_HEADERS,
+                                 suggest_mapping(_ZERODHA_HEADERS)["mapping"], self.account_id, "zerodha")
+            self.assertEqual(result, {
+                "error": "another import for this account is already running — try again shortly",
+            })
+        finally:
+            rate_limiter.release_lock(lock_name)
+
+        # Lock released — a subsequent import must succeed normally.
+        result = import_rows(self.engine, [_ZERODHA_ROW], _ZERODHA_HEADERS,
+                             suggest_mapping(_ZERODHA_HEADERS)["mapping"], self.account_id, "zerodha")
+        self.assertEqual(result["imported"], 1)
 
     def test_creates_new_asset_and_transaction(self) -> None:
         result = import_rows(self.engine, [_ZERODHA_ROW], _ZERODHA_HEADERS,

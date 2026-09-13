@@ -4,6 +4,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine, select
 from sqlalchemy.pool import StaticPool
 
+from core import rate_limiter
 from portfolio.cas_import import ARCHIVE_NAMESPACE, _scrub, archive_parsed, import_cas, parse_cas
 from db.models import accounts, assets, holdings, metadata, profiles, transactions
 
@@ -96,6 +97,29 @@ class ImportCasTest(unittest.TestCase):
         parsed = {"folios": [{"folio": "1", "schemes": [_scheme()]}]}
         result = import_cas(self.engine, parsed, 9999)
         self.assertEqual(result, {"error": "account not found"})
+
+    def test_concurrent_import_for_same_account_returns_error(self) -> None:
+        """Regression test for the delete-then-insert replace race in
+        _write_transactions(): two concurrent imports for the same account
+        must not interleave. Simulates "already running" the same way a
+        real concurrent request would leave the lock held."""
+        lock_name = f"cas_import:account:{self.account_id}"
+        self.assertTrue(rate_limiter.try_acquire_lock(lock_name, 300))
+        try:
+            parsed = {"folios": [{"folio": "1", "schemes": [_scheme()]}]}
+            result = import_cas(self.engine, parsed, self.account_id)
+            self.assertEqual(result, {
+                "error": "another import for this account is already running — try again shortly",
+            })
+        finally:
+            rate_limiter.release_lock(lock_name)
+
+        # Lock released — a subsequent import must succeed normally.
+        parsed = {"folios": [{"folio": "F1", "schemes": [
+            _scheme(txns=[_txn("2024-01-01", "PURCHASE")]),
+        ]}]}
+        result = import_cas(self.engine, parsed, self.account_id)
+        self.assertEqual(result["assets_created"], 1)
 
     def test_creates_new_mf_asset_with_holdings_and_transactions(self) -> None:
         parsed = {"folios": [{"folio": "F1", "schemes": [

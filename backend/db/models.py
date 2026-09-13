@@ -260,6 +260,19 @@ mf_holdings_history = Table(
 # of truth for it, so it's NULL (not 0) until the user fills it in on the
 # Portfolio page. Numeric rather than Integer since a mutual-fund-style
 # fractional holding isn't out of the question.
+#
+# Two independent writers, by design, not an oversight: routes/positions.py's
+# add_position() (manual "I bought this" clicks) and
+# portfolio/positions_mirror.py::upsert_position_from_holding() (a synced
+# broker holding mirrored in from the Portfolio Aggregator side — see that
+# module's own docstring). Both go through the same ON CONFLICT (owner,
+# symbol) upsert, so they can't create two rows for one owner+symbol — but a
+# column added here for one writer's concern must be checked against the
+# other writer's own DO UPDATE clause too, or a future sync/manual-add could
+# silently clobber it back to NULL/default. target_price/stop_loss/bought_at
+# are already scoped manual-only (positions_mirror.py's own DO UPDATE
+# deliberately excludes them); entry_price/shares/exchange are shared ground
+# between both writers.
 positions = Table(
     "positions",
     metadata,
