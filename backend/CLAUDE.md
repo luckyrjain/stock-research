@@ -93,19 +93,27 @@ These tool functions are decorated with `@tool` from `crewai.tools` purely for a
 | `_phase_analyze` | Batched LLM calls (8 stocks/batch, parallel) for qualitative summary + bull/bear factors. Does NOT ask the LLM for prices. |
 | `_phase_score` | Deterministic confidence scoring (`_compute_confidence`: 50% signal engine + 30% consensus + 20% recency, 0–100, plus a small ±3-point valuation nudge layered on top — see below). The 4-tier rec (BUY / WATCHLIST / HOLD / SELL) is a *separate* formula on top — `combined_dir = 0.55 × consensus + 0.45 × signal_score`, thresholded, with a quant-veto that demotes BUY → WATCHLIST on a strongly negative signal score. Entry/target/stop-loss computed from price and signal score — no LLM. Sector-balanced (`_apply_sector_balance()`): max 2 stocks per sector promoted to the primary list, excess deferred to the end — `sector` stays on every pick in the response (real, filterable data, not popped like the old internal-only `_sector`). Saves a daily snapshot under the `market_picks_history` namespace in `core/state_store.py` for trend tracking. |
 
-**Deliberately not decomposed in this pass**: at ~1,830 lines, `pipelines/market_picks_pipeline.py` is
-the single largest module in `pipelines/` (`api.py` itself, at ~2,730 lines, is the largest Python
-module in the repo overall — see "Route module extraction" below for the ongoing effort to shrink
-it), and `_phase_extract`/`_phase_consolidate` are each
-150-200+ lines mixing scraping, LLM calls, fuzzy matching, and validation — the same
-maintainability gap the `routes/` split (below) and the `results-dashboard.tsx` component
-extraction (further below) already closed for their own respective files. Flagged directly by a
-deep gap analysis but not attempted here: unlike those two prior extractions (each a mechanical,
-behavior-preserving reorganization with an existing test suite to lean on), this pipeline's six
-phases share mutable state and threading/async coordination that make a safe split materially
-riskier to get right without a much larger, dedicated verification pass — the same
-"disclosed, not silently dropped" instinct as `routes/` split's own "future work" note just below,
-not a claim this doesn't need doing.
+**Helper groups extracted; the six phase methods deliberately were not, yet.** This module used to
+be ~1,830 lines and was flagged repeatedly as the largest in `pipelines/` — but an
+`engineering-decision-discovery` pass that actually traced the code found the "shared mutable
+state and threading/async coordination" concern this note used to raise was overstated: `run()` is
+a clean, linear, explicit data-flow between phases (`raw_sources → raw_picks → consolidated →
+research_data/analyses → picks`), and the *only* genuinely shared mutable resource across the
+whole class is one lock-protected lazy `requests.Session` (`self._nse_session`, used inside
+`_phase_consolidate`) — the asyncio/threading coordination lives entirely in `api.py`'s SSE bridge,
+not inside this pipeline class itself. The real cost was file length/navigability, not coupling
+risk. On that basis, the ~800 lines of already-independent free-function helper groups were
+extracted into five new flat modules (matching this repo's existing one-file-per-pipeline
+convention — no subpackage): `pipelines/market_picks_llm.py` (LLM call helpers),
+`pipelines/market_picks_cache.py` (extraction result cache + picks result cache),
+`pipelines/market_picks_history.py` (daily snapshot history), `pipelines/market_picks_symbols.py`
+(symbol/company-name matching and dedup), and `pipelines/market_picks_scoring.py` (confidence
+scoring, recommendation classification, source-stat aggregation, sector balance).
+`pipelines/market_picks_pipeline.py` itself is now ~1,050 lines, holding just the
+`MarketPicksPipeline` class (its six `_phase_*` methods, untouched) and the CLI `main()`
+entrypoint. Splitting the phase methods themselves out of the class remains a separate, later
+decision — deliberately staged rather than attempted in the same pass, since doing both at once
+would have been a much larger diff to review in one shot.
 
 ### LLM cost instrumentation + cross-provider failover
 
@@ -806,7 +814,7 @@ This is pure text classification over the already-fetched `filings` list — no 
    a small confirmation nudge (±0.15) on top of the existing keyword-hit score — upgrade nudges up,
    downgrade nudges down, `reaffirmed` is neutral (no new directional information). Same
    "confirmation signal layered on top, not a fourth primary component" pattern as the valuation
-   percentile nudge in `pipelines/market_picks_pipeline.py::_compute_confidence()`.
+   percentile nudge in `pipelines/market_picks_scoring.py::_compute_confidence()`.
 4. **Frontend**: `main._build_report()` (shared by both the CLI and `api.py`'s SSE endpoint) calls
    `classify_filings()` once on the same `filings` list the report already returns, and adds the
    result as a new sibling `filings_summary` field on the `Report` — `results-dashboard.tsx`'s
@@ -1950,7 +1958,7 @@ validation is invisible to both of those modules.
    as `core/cache.py`/`telemetry/source_health.py` — no lock needed since each run writes its own uniquely-named
    file, unlike those modules' shared per-source file). Never raises — a telemetry write failure
    must never affect a real pipeline run.
-2. `pipelines/market_picks_pipeline.py::_aggregate_source_stats(raw_sources, raw_picks, consolidated)`
+2. `pipelines/market_picks_scoring.py::_aggregate_source_stats(raw_sources, raw_picks, consolidated)`
    tallies three counts per source, keyed off `tools.market_picks_tools.SOURCES` (every registered
    source always present, even at zero activity — a source name that doesn't match the registry,
    e.g. stale data, is ignored rather than creating an untracked key): `articles_fetched` (phase 1
