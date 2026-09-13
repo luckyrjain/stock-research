@@ -541,7 +541,7 @@ class MarketPicksStatusEndpointTest(unittest.TestCase):
 
     def test_returns_cache_metadata_and_next_scheduled_run(self) -> None:
         fake_status = {"last_run_at": "2026-07-20T00:00:00+00:00", "is_fresh": True}
-        with patch("pipelines.market_picks_pipeline.picks_cache_status", return_value=fake_status):
+        with patch("pipelines.market_picks_cache.picks_cache_status", return_value=fake_status):
             resp = client.get("/api/market-picks/status")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -551,7 +551,7 @@ class MarketPicksStatusEndpointTest(unittest.TestCase):
 
     def test_no_cache_returns_null_last_run(self) -> None:
         fake_status = {"last_run_at": None, "is_fresh": False}
-        with patch("pipelines.market_picks_pipeline.picks_cache_status", return_value=fake_status):
+        with patch("pipelines.market_picks_cache.picks_cache_status", return_value=fake_status):
             resp = client.get("/api/market-picks/status")
         body = resp.json()
         self.assertIsNone(body["last_run_at"])
