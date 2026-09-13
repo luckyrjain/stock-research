@@ -20,14 +20,16 @@ from signals.interpreter import interpret
 load_dotenv()
 
 # ── Market picks cache ────────────────────────────────────────────────────────
-# Defined in pipelines/market_picks_pipeline.py (the module that owns this pipeline's
-# output) so its own cron entrypoint and this file's on-demand SSE endpoint
-# read/write the exact same cache — re-exported here under the historical
-# names so existing call sites (and test patches targeting api._load_picks_cache
-# / api._save_picks_cache) keep working unchanged.
-from pipelines.market_picks_pipeline import HISTORY_NAMESPACE as _PICKS_HISTORY_NS
-from pipelines.market_picks_pipeline import load_picks_cache as _load_picks_cache
-from pipelines.market_picks_pipeline import save_picks_cache as _save_picks_cache
+# Defined in pipelines/market_picks_cache.py and pipelines/market_picks_history.py
+# (the modules that own this pipeline's cache/history, split out of
+# pipelines/market_picks_pipeline.py) so its own cron entrypoint and this
+# file's on-demand SSE endpoint read/write the exact same cache — re-exported
+# here under the historical names so existing call sites (and test patches
+# targeting api._load_picks_cache / api._save_picks_cache) keep working
+# unchanged.
+from pipelines.market_picks_history import HISTORY_NAMESPACE as _PICKS_HISTORY_NS
+from pipelines.market_picks_cache import load_picks_cache as _load_picks_cache
+from pipelines.market_picks_cache import save_picks_cache as _save_picks_cache
 from core import rate_limiter
 from core import state_store
 from routes._shared import (
@@ -967,7 +969,7 @@ async def get_market_picks_status(request: Request):
     """
     _rate_limit(request, "market_picks_status", max_calls=60, window_seconds=60)
 
-    from pipelines.market_picks_pipeline import picks_cache_status
+    from pipelines.market_picks_cache import picks_cache_status
 
     loop = asyncio.get_running_loop()
     status = await loop.run_in_executor(None, picks_cache_status)
@@ -1069,7 +1071,7 @@ async def get_market_picks_history(request: Request, date: str | None = Query(No
     guessed at.
 
     With ?date=YYYY-MM-DD: skips aggregation entirely and returns that single
-    day's full pick list verbatim (same shape market_picks_pipeline._save_history
+    day's full pick list verbatim (same shape market_picks_history._save_history
     wrote it in) — the aggregated view above only ever surfaces a first/last-seen
     roll-up per symbol, never a specific day's complete list. 404 if no snapshot
     was taken that day (weekend, holiday, or before this feature existed).
