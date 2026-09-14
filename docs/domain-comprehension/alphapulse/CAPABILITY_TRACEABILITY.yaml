@@ -1,0 +1,229 @@
+schema_version: 1
+source_revision:
+  repos:
+  - repo: stock-research
+    branch: claude/codebase-comprehensive-review-0rjms1
+    commit_sha: 1f9b6cd8ff23a6195125b5836005c0aecc80c658
+    observed_at: '2026-09-13T10:28:06Z'
+capabilities:
+- capability: Single-stock analysis (SSE, 6-slice fetch + signal engine + LLM verdict)
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/api.py:575-793
+  - backend/main.py:76-159,383
+  - backend/signals/engine.py
+  - backend/analyst/crew.py:840-925
+  - backend/analytics/verdict_history.py:33-109
+  owner: sole operator
+  evidence: business-flow agent Journey 1 (full trace, HIGH); backend-core agent (analyst/crew.py, verdict_history.py
+    verified read)
+  confidence: HIGH
+- capability: LLM analyst guardrails + cross-provider failover
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/analyst/crew.py:570-925
+  - backend/config/analyst.json
+  - backend/config/crew_tasks.py
+  owner: sole operator
+  evidence: backend-core agent, full verified read of analyst/crew.py
+  confidence: HIGH
+- capability: Market Picks multi-agent weekly pipeline (20-source scrape, LLM extraction, scoring)
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/pipelines/market_picks_pipeline.py
+  - backend/tools/market_picks_tools.py (+5 satellite modules)
+  owner: sole operator
+  evidence: business-flow agent Journey 2 (full trace, HIGH)
+  confidence: HIGH
+- capability: SME Signals golden/death-cross screener
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/pipelines/sme_ema_pipeline.py
+  - backend/tools/sme_tools.py
+  owner: sole operator
+  evidence: business-flow agent Journey 5 (verified read)
+  confidence: HIGH
+- capability: NIFTY 500 custom screener
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/pipelines/screener_pipeline.py
+  - backend/tools/nifty500_tools.py
+  owner: sole operator
+  evidence: business-flow agent Journey 5 (verified read)
+  confidence: HIGH
+- capability: EOD price store ingestion (bhavcopy + AMFI NAV)
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/pipelines/eod_prices_pipeline.py
+  - backend/tools/eod_sources.py
+  owner: sole operator
+  evidence: business-flow agent Journey 4 chain (verified read of run() structure)
+  confidence: MEDIUM
+- capability: Corporate actions ingestion + adj_close recompute
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/pipelines/corporate_actions_pipeline.py
+  - backend/tools/corporate_actions.py
+  owner: sole operator
+  evidence: routes/pipelines agent (verified read); health-gate completeness UNKNOWN, see UNKNOWNS.md
+  confidence: MEDIUM
+- capability: Watchlist star/unstar + dual ownership (client_id XOR user_id)
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/routes/watchlist.py
+  - backend/routes/_shared.py
+  owner: sole operator
+  evidence: P3b agent (verified read, IDOR + ownership resolution confirmed)
+  confidence: HIGH
+- capability: Positions ('I bought this') tracking
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/routes/positions.py
+  - backend/portfolio/positions_mirror.py
+  owner: sole operator
+  evidence: P3b + routes/pipelines agents (verified read); positions_mirror.py is a second, disclosed
+    writer
+  confidence: HIGH
+- capability: Watchlist/positions claim-to-account migration (opt-in)
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/routes/_shared.py::claim_anonymous_rows_sync()
+  - frontend/app/auth/verify/page.tsx:68-93
+  owner: sole operator
+  evidence: 'frontend agent (verified: no auto-migration on sign-in) + P3b agent (advisory-lock ordering)'
+  confidence: HIGH
+- capability: Daily watchlist alert email digest
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/pipelines/watchlist_alerts.py
+  - backend/core/email_sender.py
+  owner: sole operator
+  evidence: business-flow agent Journey 3 (full trace, HIGH)
+  confidence: HIGH
+- capability: Magic-link passwordless auth + sessions
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/auth.py
+  owner: sole operator
+  evidence: backend-core agent (full verified read) + P3b agent (adversarial confirmation)
+  confidence: HIGH
+- capability: Programmatic API access (API keys, tiered rate limits)
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/auth.py::create_api_key/get_user_for_api_key
+  - backend/api.py (/api/v1/*)
+  owner: sole operator
+  evidence: backend-core agent (auth.py verified); api.py route body not independently re-read (see UNKNOWNS.md)
+  confidence: MEDIUM
+- capability: Consolidated cross-mode search (read-only aggregation)
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/api.py::_consolidated_payload()
+  - frontend/components/consolidated-card.tsx
+  owner: sole operator
+  evidence: frontend agent (verified null-section handling); backend aggregation logic doc-sourced
+  confidence: MEDIUM
+- capability: 'Portfolio Aggregator: profiles/accounts/assets/valuations CRUD'
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/routes/portfolio_aggregator.py
+  owner: sole operator
+  evidence: routes/pipelines agent (verified read of route inventory)
+  confidence: HIGH
+- capability: 'Portfolio Aggregator: nightly auto-valuation + XIRR'
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/portfolio/portfolio_valuation.py
+  owner: sole operator
+  evidence: business-flow agent Journey 4 (full trace, HIGH)
+  confidence: HIGH
+- capability: 'Portfolio Aggregator: CAS PDF import (PII-scrubbed)'
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/portfolio/cas_import.py
+  owner: sole operator
+  evidence: P3b agent (verified PII scrubbing) + routes/pipelines agent (verified idempotency model)
+  confidence: HIGH
+- capability: 'Portfolio Aggregator: broker CSV/XLSX import'
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/portfolio/csv_import.py
+  - backend/tools/securities_master.py::resolve_symbol()
+  owner: sole operator
+  evidence: routes/pipelines agent (verified read); quality/ops agent confirmed resolve_symbol() is actively
+    wired despite stale doc claim otherwise
+  confidence: HIGH
+- capability: 'Portfolio Aggregator: broker API sync (Zerodha/HDFC Securities/Paytm Money)'
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/routes/broker_sync.py
+  - backend/portfolio/kite_sync.py
+  - backend/portfolio/hdfc_sync.py
+  - backend/portfolio/paytm_sync.py
+  - backend/portfolio/broker_sync_common.py
+  owner: sole operator
+  evidence: P3b agent (encryption boundary verified) + routes/pipelines agent (full endpoint inventory
+    + dedup verified); HDFC/Paytm live-response shape unverified per docs/backlog.md
+  confidence: HIGH for mechanism, MEDIUM for HDFC/Paytm real-world fidelity
+- capability: Rate limiting (sliding window, Redis-optional)
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/core/rate_limiter.py
+  - backend/routes/_shared.py
+  owner: sole operator
+  evidence: quality/ops + P3b agents (verified fallback logic and opt-in coverage pattern)
+  confidence: HIGH for mechanism, MEDIUM for completeness of coverage across all routes
+- capability: File + Redis caching layer
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/core/cache.py
+  owner: sole operator
+  evidence: backend-core + quality/ops agents (verified TTL map and fallback logic)
+  confidence: HIGH
+- capability: Broker credential encryption (Fernet)
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/core/crypto.py
+  owner: sole operator
+  evidence: backend-core + P3b agents (verified hard-fail-not-plaintext-fallback behavior)
+  confidence: HIGH
+- capability: Structured observability + optional Sentry error tracking
+  repositories:
+  - stock-research
+  code_locations:
+  - backend/core/observability.py
+  - backend/core/error_tracking.py
+  owner: sole operator
+  evidence: backend-core + quality/ops agents (verified read); correlation-ID scoped to 2 flows only (disclosed
+    gap)
+  confidence: HIGH
+- capability: Next.js BFF proxy layer (1:1 backend passthrough, auth/IP header translation)
+  repositories:
+  - stock-research
+  code_locations:
+  - frontend/app/api/**
+  owner: sole operator
+  evidence: frontend agent (all 30 route files read directly)
+  confidence: HIGH

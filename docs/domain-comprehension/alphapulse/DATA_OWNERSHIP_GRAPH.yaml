@@ -1,0 +1,292 @@
+schema_version: 1
+source_revision:
+  repos:
+  - repo: stock-research
+    branch: claude/codebase-comprehensive-review-0rjms1
+    commit_sha: 1f9b6cd8ff23a6195125b5836005c0aecc80c658
+    observed_at: '2026-09-13T10:28:06Z'
+nodes:
+- id: svc:backend
+  kind: service
+  label: backend (FastAPI monolith)
+- id: ds:postgres
+  kind: datastore
+  label: PostgreSQL (single instance)
+- id: cache:file
+  kind: cache
+  label: output/<SYMBOL>/<task>.json file cache
+- id: cache:redis
+  kind: cache
+  label: Redis (optional mirror)
+- id: table:users
+  kind: table
+  label: users
+- id: table:magic_links
+  kind: table
+  label: magic_links
+- id: table:sessions
+  kind: table
+  label: sessions
+- id: table:api_keys
+  kind: table
+  label: api_keys
+- id: table:watchlist_items
+  kind: table
+  label: watchlist_items
+- id: table:positions
+  kind: table
+  label: positions
+- id: table:verdict_history
+  kind: table
+  label: verdict_history
+- id: table:mf_holdings_history
+  kind: table
+  label: mf_holdings_history
+- id: table:sme_stocks
+  kind: table
+  label: sme_stocks
+- id: table:ema_signals
+  kind: table
+  label: ema_signals
+- id: table:screener_stocks
+  kind: table
+  label: screener_stocks
+- id: table:securities
+  kind: table
+  label: securities
+- id: table:prices_daily
+  kind: table
+  label: prices_daily
+- id: table:mf_nav_daily
+  kind: table
+  label: mf_nav_daily
+- id: table:corporate_actions
+  kind: table
+  label: corporate_actions
+- id: table:profiles
+  kind: table
+  label: profiles
+- id: table:accounts
+  kind: table
+  label: accounts
+- id: table:assets
+  kind: table
+  label: assets
+- id: table:holdings
+  kind: table
+  label: holdings
+- id: table:valuations
+  kind: table
+  label: valuations
+- id: table:transactions
+  kind: table
+  label: transactions
+- id: table:broker_connections
+  kind: table
+  label: broker_connections
+- id: table:app_state
+  kind: table
+  label: app_state
+edges:
+- source: svc:backend
+  target: ds:postgres
+  operation: connect
+  owner: svc:backend
+  evidence: backend/db/models.py:604-606 get_engine() (backend-core agent, verified read)
+  confidence: HIGH
+- source: svc:backend
+  target: cache:file
+  operation: read_write
+  owner: svc:backend
+  evidence: backend/core/cache.py:43-172 (backend-core agent, verified read)
+  confidence: HIGH
+- source: svc:backend
+  target: cache:redis
+  operation: read_write_optional
+  owner: svc:backend
+  evidence: backend/core/cache.py, core/rate_limiter.py (quality/ops agent, verified fallback logic)
+  confidence: HIGH
+- source: svc:backend
+  target: table:users
+  operation: write
+  owner: backend/auth.py::verify_magic_link()
+  evidence: backend/auth.py:106-110 (backend-core agent, verified read)
+  confidence: HIGH
+- source: svc:backend
+  target: table:magic_links
+  operation: write
+  owner: backend/auth.py::create_magic_link()/verify_magic_link()
+  evidence: backend/auth.py:68-75,94-101 (backend-core agent, verified read)
+  confidence: HIGH
+- source: svc:backend
+  target: table:sessions
+  operation: write
+  owner: backend/auth.py::create_session()/delete_session()
+  evidence: backend/auth.py:122-130 (backend-core agent, verified read)
+  confidence: HIGH
+- source: svc:backend
+  target: table:api_keys
+  operation: write
+  owner: backend/auth.py::create_api_key()/revoke_api_key()
+  evidence: backend/auth.py (backend-core agent, verified read)
+  confidence: HIGH
+- source: svc:backend
+  target: table:watchlist_items
+  operation: write
+  owner: backend/routes/watchlist.py
+  evidence: routes/watchlist.py:222-229 (P3b agent, verified read)
+  confidence: HIGH
+- source: svc:backend
+  target: table:positions
+  operation: write
+  owner: backend/routes/positions.py
+  evidence: routes/positions.py:117-130 (P3b agent, verified read)
+  confidence: HIGH
+- source: svc:backend
+  target: table:positions
+  operation: write
+  owner: backend/portfolio/positions_mirror.py::upsert_position_from_holding()
+  evidence: routes/pipelines agent + quality/ops agent, verified read (second, disclosed writer)
+  confidence: HIGH
+- source: svc:backend
+  target: table:verdict_history
+  operation: write
+  owner: backend/analytics/verdict_history.py::save_snapshot()
+  evidence: analytics/verdict_history.py:33-109 (backend-core + business-flow agents, verified read)
+  confidence: HIGH
+- source: svc:backend
+  target: table:mf_holdings_history
+  operation: write
+  owner: backend/analytics/mf_holdings_history.py::save_snapshot()
+  evidence: analytics/mf_holdings_history.py:62-84 (backend-core agent, verified read)
+  confidence: HIGH
+- source: svc:backend
+  target: table:sme_stocks
+  operation: write
+  owner: backend/pipelines/sme_ema_pipeline.py
+  evidence: docs/database.md:367-390; schema confirmed by backend-core agent, writer module not independently
+    re-read this engagement
+  confidence: MEDIUM
+- source: svc:backend
+  target: table:ema_signals
+  operation: write
+  owner: backend/pipelines/sme_ema_pipeline.py::_upsert_signals()
+  evidence: business-flow agent, verified read of sme_ema_pipeline.py:129-146,501-504
+  confidence: HIGH
+- source: svc:backend
+  target: table:screener_stocks
+  operation: write
+  owner: backend/pipelines/screener_pipeline.py::_upsert_stocks()
+  evidence: business-flow + routes/pipelines agents, verified read of screener_pipeline.py:101-135
+  confidence: HIGH
+- source: svc:backend
+  target: table:securities
+  operation: write
+  owner: backend/pipelines/eod_prices_pipeline.py
+  evidence: docs/database.md:482-504; not independently re-read by a dispatched agent this engagement
+  confidence: MEDIUM
+- source: svc:backend
+  target: table:prices_daily
+  operation: write
+  owner: backend/pipelines/eod_prices_pipeline.py
+  evidence: docs/database.md:506-538; portfolio_valuation.py:99-106 read confirms schema shape (business-flow
+    agent)
+  confidence: MEDIUM
+- source: svc:backend
+  target: table:prices_daily
+  operation: write
+  owner: backend/pipelines/corporate_actions_pipeline.py (adj_close column only)
+  evidence: 'docs/database.md:524-529 (Known schema gap #5); routes/pipelines agent corroborated column-level
+    split ownership'
+  confidence: MEDIUM
+- source: svc:backend
+  target: table:mf_nav_daily
+  operation: write
+  owner: backend/pipelines/eod_prices_pipeline.py
+  evidence: docs/database.md:539-561; not independently re-read this engagement
+  confidence: MEDIUM
+- source: svc:backend
+  target: table:corporate_actions
+  operation: write
+  owner: backend/pipelines/corporate_actions_pipeline.py
+  evidence: docs/database.md:562-596; routes/pipelines agent corroborated via grep
+  confidence: MEDIUM
+- source: svc:backend
+  target: table:profiles
+  operation: write
+  owner: backend/routes/portfolio_aggregator.py
+  evidence: 'docs/database.md:609-639; migration ec7850b73d2f corroborated by docs/backlog.md item #3;
+    not independently re-read this engagement'
+  confidence: MEDIUM
+- source: svc:backend
+  target: table:accounts
+  operation: write
+  owner: backend/routes/portfolio_aggregator.py
+  evidence: docs/database.md; not independently re-read this engagement
+  confidence: MEDIUM
+- source: svc:backend
+  target: table:assets
+  operation: write
+  owner: backend/routes/portfolio_aggregator.py
+  evidence: routes/pipelines agent (CRUD confirmed)
+  confidence: MEDIUM
+- source: svc:backend
+  target: table:assets
+  operation: write
+  owner: backend/portfolio/cas_import.py
+  evidence: routes/pipelines + P3b agents, verified read of cas_import.py:65-192
+  confidence: HIGH
+- source: svc:backend
+  target: table:assets
+  operation: write
+  owner: backend/portfolio/csv_import.py
+  evidence: routes/pipelines agent, verified read of csv_import.py:166-287
+  confidence: HIGH
+- source: svc:backend
+  target: table:holdings
+  operation: write
+  owner: backend/portfolio/broker_sync_common.py
+  evidence: routes/pipelines agent, verified read
+  confidence: HIGH
+- source: svc:backend
+  target: table:valuations
+  operation: write
+  owner: backend/portfolio/portfolio_valuation.py::upsert_valuation()
+  evidence: business-flow agent, verified read of portfolio_valuation.py:136-151
+  confidence: HIGH
+- source: svc:backend
+  target: table:valuations
+  operation: write
+  owner: backend/routes/portfolio_aggregator.py (manual entry endpoint)
+  evidence: 'routes/pipelines agent (CRUD confirmed); precedence: engine wins same-day for mf/stock'
+  confidence: MEDIUM
+- source: svc:backend
+  target: table:transactions
+  operation: write
+  owner: backend/portfolio/cas_import.py (meta.source=cas, replace)
+  evidence: routes/pipelines + P3b agents, verified read
+  confidence: HIGH
+- source: svc:backend
+  target: table:transactions
+  operation: write
+  owner: backend/portfolio/csv_import.py (meta.source=csv, append+content-dedup)
+  evidence: routes/pipelines agent, verified read
+  confidence: HIGH
+- source: svc:backend
+  target: table:transactions
+  operation: write
+  owner: backend/portfolio/broker_sync_common.py::sync_trades() (meta.source=<broker>_api, DB-constraint-deduped)
+  evidence: routes/pipelines agent, verified read
+  confidence: HIGH
+- source: svc:backend
+  target: table:broker_connections
+  operation: write
+  owner: backend/routes/broker_sync.py
+  evidence: P3b agent, verified read of broker_sync.py:219,244,302,313,407,563 (encryption path)
+  confidence: HIGH
+- source: svc:backend
+  target: table:app_state
+  operation: write
+  owner: backend/core/state_store.py::save()/mutate()
+  evidence: core/state_store.py:71-224 (backend-core agent, verified read)
+  confidence: HIGH

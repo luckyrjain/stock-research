@@ -1,0 +1,736 @@
+schema_version: 1
+source_revision:
+  repos:
+  - repo: stock-research
+    branch: claude/codebase-comprehensive-review-0rjms1
+    commit_sha: 1f9b6cd8ff23a6195125b5836005c0aecc80c658
+    observed_at: '2026-09-13T10:28:06Z'
+records:
+- id: api-01
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET / (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-02
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /health (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-03
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/validate/{symbol} (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-04
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/analyse/{symbol} (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-05
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/market-picks (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-06
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/market-picks/status (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-07
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/market-picks/history (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-08
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/prices (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-09
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/prices/history/{symbol} (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-10
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/peers/{symbol} (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-11
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/financials/{symbol} (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-12
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/shareholding-detail/{symbol} (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-13
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/insider-activity/{symbol} (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-14
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/street-consensus/{symbol} (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-15
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/verdict-history/{symbol} (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-16
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/sme-signals (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-17
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/sme-signals/{symbol}/history (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-18
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: POST /api/sme-signals/refresh (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-19
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/screener (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-20
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: POST /api/screener/refresh (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-21
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/consolidated/{symbol} (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-22
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: POST /api/auth/request-link (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-23
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/auth/verify (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-24
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/auth/me (auth=session)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-25
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: POST /api/auth/logout (auth=session-optional)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-26
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: POST /api/api-keys (auth=session)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-27
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/api-keys (auth=session)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-28
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: DELETE /api/api-keys/{key_id} (auth=session)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-29
+  kind: api
+  owner: backend/api.py
+  direction: inbound
+  contract: GET /api/v1/consolidated/{symbol} (auth=api_key)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-30
+  kind: api
+  owner: backend/routes/watchlist.py
+  direction: inbound
+  contract: GET /api/watchlist (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-31
+  kind: api
+  owner: backend/routes/watchlist.py
+  direction: inbound
+  contract: GET /api/watchlist/calendar (auth=none)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-32
+  kind: api
+  owner: backend/routes/watchlist.py
+  direction: inbound
+  contract: POST /api/watchlist (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-33
+  kind: api
+  owner: backend/routes/watchlist.py
+  direction: inbound
+  contract: DELETE /api/watchlist/{symbol} (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-34
+  kind: api
+  owner: backend/routes/watchlist.py
+  direction: inbound
+  contract: POST /api/watchlist/claim (auth=session)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-35
+  kind: api
+  owner: backend/routes/positions.py
+  direction: inbound
+  contract: GET /api/positions (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-36
+  kind: api
+  owner: backend/routes/positions.py
+  direction: inbound
+  contract: POST /api/positions (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-37
+  kind: api
+  owner: backend/routes/positions.py
+  direction: inbound
+  contract: PATCH /api/positions/{symbol} (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-38
+  kind: api
+  owner: backend/routes/positions.py
+  direction: inbound
+  contract: DELETE /api/positions/{symbol} (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-39
+  kind: api
+  owner: backend/routes/positions.py
+  direction: inbound
+  contract: POST /api/positions/claim (auth=session)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-40
+  kind: api
+  owner: backend/routes/positions.py
+  direction: inbound
+  contract: GET /api/portfolio/concentration (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-41
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: GET /api/portfolio/profiles (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-42
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: POST /api/portfolio/profiles (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-43
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: GET /api/portfolio/accounts (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-44
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: POST /api/portfolio/accounts (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-45
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: PATCH /api/portfolio/accounts/{account_id} (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-46
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: DELETE /api/portfolio/accounts/{account_id} (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-47
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: GET /api/portfolio/assets (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-48
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: POST /api/portfolio/assets (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-49
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: PATCH /api/portfolio/assets/{asset_id} (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-50
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: DELETE /api/portfolio/assets/{asset_id} (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-51
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: POST /api/portfolio/assets/{asset_id}/valuations (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-52
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: GET /api/portfolio/networth (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-53
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: POST /api/portfolio/refresh-valuations (auth=none-unscoped)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-54
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: GET /api/portfolio/xirr (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-55
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: POST /api/portfolio/import-cas (auth=owner)
+  evidence: docs/api-reference.md (MEDIUM-tier committed reference, cross-checked against source by this
+    engagement's backend-core/routes-pipelines/frontend/P3b research agents; see API_CATALOG.md row for
+    per-endpoint agent corroboration)
+  confidence: MEDIUM
+- id: api-56
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: POST /api/portfolio/import-csv/preview (auth=owner)
+  evidence: docs/api-reference.md (MEDIUM-tier committed reference, cross-checked against source by this
+    engagement's backend-core/routes-pipelines/frontend/P3b research agents; see API_CATALOG.md row for
+    per-endpoint agent corroboration)
+  confidence: MEDIUM
+- id: api-57
+  kind: api
+  owner: backend/routes/portfolio_aggregator.py
+  direction: inbound
+  contract: POST /api/portfolio/import-csv (auth=owner)
+  evidence: docs/api-reference.md (MEDIUM-tier committed reference, cross-checked against source by this
+    engagement's backend-core/routes-pipelines/frontend/P3b research agents; see API_CATALOG.md row for
+    per-endpoint agent corroboration)
+  confidence: MEDIUM
+- id: api-58
+  kind: api
+  owner: backend/routes/broker_sync.py
+  direction: inbound
+  contract: POST /api/portfolio/broker/{broker}/login-url (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-59
+  kind: api
+  owner: backend/routes/broker_sync.py
+  direction: inbound
+  contract: POST /api/portfolio/broker/{broker}/connect (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-60
+  kind: api
+  owner: backend/routes/broker_sync.py
+  direction: inbound
+  contract: POST /api/portfolio/broker/{broker}/sync (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-61
+  kind: api
+  owner: backend/routes/broker_sync.py
+  direction: inbound
+  contract: GET /api/portfolio/broker/connections (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-62
+  kind: api
+  owner: backend/routes/broker_sync.py
+  direction: inbound
+  contract: POST /api/portfolio/broker/hdfc_securities/login-start (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: api-63
+  kind: api
+  owner: backend/routes/broker_sync.py
+  direction: inbound
+  contract: POST /api/portfolio/broker/hdfc_securities/verify-otp (auth=owner)
+  evidence: backend-core agent (api.py grep of @app.<method> lines 1-29) / routes+pipelines agent (routes/*.py
+    direct read) / P3b agent (routes/watchlist.py, positions.py, broker_sync.py direct read) — see API_CATALOG.md
+    and ALPHAPULSE_MAP.md for exact file:line
+  confidence: HIGH
+- id: sse-analyse-start
+  kind: event
+  owner: backend/api.py
+  direction: outbound
+  contract: SSE event `start` on GET /api/analyse/{symbol}
+  evidence: api.py:596-600 (business-flow + backend-core agents)
+  confidence: HIGH
+- id: sse-analyse-task_done
+  kind: event
+  owner: backend/api.py
+  direction: outbound
+  contract: SSE event `task_done` (x6) on GET /api/analyse/{symbol}
+  evidence: api.py:619-631
+  confidence: HIGH
+- id: sse-analyse-analysing
+  kind: event
+  owner: backend/api.py
+  direction: outbound
+  contract: SSE event `analysing` on GET /api/analyse/{symbol}
+  evidence: api.py step 9 per business-flow agent
+  confidence: HIGH
+- id: sse-analyse-done
+  kind: event
+  owner: backend/api.py
+  direction: outbound
+  contract: SSE event `done` on GET /api/analyse/{symbol}
+  evidence: api.py:783-786
+  confidence: HIGH
+- id: sse-analyse-error
+  kind: event
+  owner: backend/api.py
+  direction: outbound
+  contract: SSE event `error` on GET /api/analyse/{symbol}
+  evidence: api.py:579-580,642-645,788-793
+  confidence: HIGH
+- id: sse-picks-picks_start
+  kind: event
+  owner: backend/pipelines/market_picks_pipeline.py
+  direction: outbound
+  contract: SSE event `picks_start` on GET /api/market-picks
+  evidence: market_picks_pipeline.py:961-991
+  confidence: HIGH
+- id: sse-picks-source_done
+  kind: event
+  owner: backend/pipelines/market_picks_pipeline.py
+  direction: outbound
+  contract: SSE event `source_done` on GET /api/market-picks
+  evidence: market_picks_pipeline.py:971-975,983
+  confidence: HIGH
+- id: sse-picks-extracting
+  kind: event
+  owner: backend/pipelines/market_picks_pipeline.py
+  direction: outbound
+  contract: SSE event `extracting` on GET /api/market-picks
+  evidence: market_picks_pipeline.py phase 2 boundary
+  confidence: HIGH
+- id: sse-picks-extract_progress
+  kind: event
+  owner: backend/pipelines/market_picks_pipeline.py
+  direction: outbound
+  contract: SSE event `extract_progress`
+  evidence: docs/api-reference.md:346
+  confidence: MEDIUM
+- id: sse-picks-consolidating
+  kind: event
+  owner: backend/pipelines/market_picks_pipeline.py
+  direction: outbound
+  contract: SSE event `consolidating`
+  evidence: market_picks_pipeline.py:1228
+  confidence: HIGH
+- id: sse-picks-validate_progress
+  kind: event
+  owner: backend/pipelines/market_picks_pipeline.py
+  direction: outbound
+  contract: SSE event `validate_progress`
+  evidence: docs/api-reference.md:348
+  confidence: MEDIUM
+- id: sse-picks-researching
+  kind: event
+  owner: backend/pipelines/market_picks_pipeline.py
+  direction: outbound
+  contract: SSE event `researching`
+  evidence: market_picks_pipeline.py:1427
+  confidence: HIGH
+- id: sse-picks-stock_researched
+  kind: event
+  owner: backend/pipelines/market_picks_pipeline.py
+  direction: outbound
+  contract: SSE event `stock_researched`
+  evidence: docs/api-reference.md:350
+  confidence: MEDIUM
+- id: sse-picks-analysis_error
+  kind: event
+  owner: backend/pipelines/market_picks_pipeline.py
+  direction: outbound
+  contract: SSE event `analysis_error` (discloses raw exception text — sanitization exception)
+  evidence: docs/api-reference.md:352,363-365; docs/backlog.md item 9
+  confidence: MEDIUM
+- id: sse-picks-scoring
+  kind: event
+  owner: backend/pipelines/market_picks_pipeline.py
+  direction: outbound
+  contract: SSE event `scoring`
+  evidence: market_picks_pipeline.py:1663
+  confidence: HIGH
+- id: sse-picks-done
+  kind: event
+  owner: backend/api.py
+  direction: outbound
+  contract: SSE event `done` on GET /api/market-picks
+  evidence: api.py:899-912
+  confidence: HIGH
+- id: sse-picks-error
+  kind: event
+  owner: backend/api.py
+  direction: outbound
+  contract: SSE event `error` on GET /api/market-picks
+  evidence: api.py:913-915; market_picks_pipeline.py:934-942
+  confidence: HIGH
+- id: cron-sme
+  kind: event
+  owner: GitHub Actions .github/workflows/sme-cron.yml
+  direction: outbound
+  contract: Scheduled trigger 0 13 * * 1-5 -> pipelines.sme_ema_pipeline.main()
+  evidence: sme-cron.yml:8 (business-flow agent, opened directly)
+  confidence: HIGH
+- id: cron-watchlist-alerts
+  kind: event
+  owner: GitHub Actions .github/workflows/watchlist-alerts-cron.yml
+  direction: outbound
+  contract: Scheduled trigger 30 13 * * 1-5 -> pipelines.watchlist_alerts.main()
+  evidence: watchlist-alerts-cron.yml:9
+  confidence: HIGH
+- id: cron-screener
+  kind: event
+  owner: GitHub Actions .github/workflows/screener-cron.yml
+  direction: outbound
+  contract: Scheduled trigger 0 14 * * 1-5 -> pipelines.screener_pipeline.main()
+  evidence: screener-cron.yml:11
+  confidence: HIGH
+- id: cron-eod-prices
+  kind: event
+  owner: GitHub Actions .github/workflows/eod-prices-cron.yml
+  direction: outbound
+  contract: Scheduled trigger 15 14 * * 1-5 -> pipelines.eod_prices_pipeline.main()
+  evidence: eod-prices-cron.yml:9
+  confidence: HIGH
+- id: cron-market-picks
+  kind: event
+  owner: GitHub Actions .github/workflows/market-picks-cron.yml
+  direction: outbound
+  contract: Scheduled trigger (weekly Monday) -> HTTP GET /api/market-picks?force=true on deployed backend
+  evidence: docs/architecture.md:457-460 (doc-sourced, not independently re-opened)
+  confidence: MEDIUM
+- id: cron-live-contract-check
+  kind: event
+  owner: GitHub Actions weekly workflow
+  direction: outbound
+  contract: Scheduled weekly opt-in live contract check over tests_live/
+  evidence: docs/architecture.md:450 (doc-sourced)
+  confidence: MEDIUM

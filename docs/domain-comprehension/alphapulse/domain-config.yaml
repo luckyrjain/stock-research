@@ -1,0 +1,143 @@
+# Domain config — AlphaPulse
+# Schema: domain-comprehension skill reference/domain-config-schema.md
+
+domain:
+  name: alphapulse
+  display_name: AlphaPulse
+  description: >-
+    Indian equity research platform (FastAPI + Next.js monolith): per-symbol stock
+    analysis with an LLM analyst verdict, a multi-agent Market Picks pipeline, SME
+    golden/death-cross screener, NIFTY 500 screener, cross-mode watchlist and
+    portfolio-aggregator tracking, and a magic-link account system.
+
+workspace:
+  root: /Users/luckyratanlaljain/project/stock-research
+  layout: single-repo
+
+scope:
+  include_keywords:
+    - stock
+    - equity
+    - nse
+    - bse
+    - screener
+    - market-picks
+    - marketpicks
+    - watchlist
+    - portfolio
+    - sme
+    - alphapulse
+    - analyst
+    - verdict
+  exclude_patterns:
+    - node_modules/
+    - .next/
+    - __pycache__/
+    - "backend/output/"
+    - ".venv/"
+    - "*.pyc"
+    - frontend/e2e/ (mocked, not backend evidence)
+  seed_repos:
+    - stock-research
+  default_excluded_classifications:
+    - documentation
+    - archived
+    - tooling
+  conditional_repos: []
+  artifact_root: docs/domain-comprehension/alphapulse
+
+context:
+  regulatory_notes: >-
+    No real payment processing (see docs/PRD.md "Explicitly Out of Scope"); scraping
+    surface has no legal/compliance review per docs/PRD.md bus-factor-of-one note.
+  product_lines:
+    - name: Stock Analysis
+      hints: ["app/page.tsx", "main.py", "analyst/crew.py", "signals/"]
+    - name: Market Picks
+      hints: ["pipelines/market_picks_pipeline.py", "app/market-picks", "tools/market_picks_tools.py"]
+    - name: SME Signals
+      hints: ["pipelines/sme_ema_pipeline.py", "app/sme-signals", "tools/sme_tools.py"]
+    - name: Screener
+      hints: ["pipelines/screener_pipeline.py", "app/screener", "tools/nifty500_tools.py"]
+    - name: Watchlist & Portfolio
+      hints: ["routes/watchlist.py", "routes/positions.py", "app/watchlist", "app/portfolio", "portfolio/"]
+
+five_questions:
+  - id: Q1
+    question: What component performs the core side effect of this domain (producing and persisting a BUY/HOLD/SELL verdict or equivalent recommendation)?
+    search_terms: ["run_analysis_with_fallback", "verdict", "BUY", "SELL", "HOLD", "analyst/crew.py"]
+  - id: Q2
+    question: What prevents duplicate processing (idempotency / dedup) across cache, LLM calls, and DB upserts?
+    search_terms: ["cache.py", "TTL", "ON CONFLICT", "upsert", "_extract_cache", "unique"]
+  - id: Q3
+    question: What is the source of truth for domain state (PostgreSQL app_state/tables vs regenerable file cache)?
+    search_terms: ["app_state", "state_store.py", "backend/output", "metadata", "db/models.py"]
+  - id: Q4
+    question: How is reconciliation or consistency performed across systems (verdict re-check, corporate actions, watchlist alerts)?
+    search_terms: ["watchlist_alerts.py", "verdict_history.py", "corporate_actions_pipeline.py", "recompute"]
+  - id: Q5
+    question: What happens when the primary operation (LLM analyst call, scrape, pipeline run) fails?
+    search_terms: ["run_analysis_with_fallback", "except", "fallback", "log_event", "error_tracking.py", "retry"]
+
+critical_path_tiers:
+  tier_0:
+    label: Side-effect executor
+    definition: >-
+      Code that performs the irreversible domain side effect — calling the LLM
+      analyst and persisting a verdict/report, or writing authoritative rows to
+      PostgreSQL (watchlist, positions, app_state, verdict_history).
+    provisional: ["backend/analyst/crew.py", "backend/core/state_store.py", "backend/db/models.py"]
+  tier_1:
+    label: Orchestration
+    definition: >-
+      Code that coordinates tier-0 execution — the SSE analysis endpoint/CLI,
+      the six batch pipelines, and the shared _fetch_task/_build_report flow.
+    provisional: ["backend/api.py", "backend/main.py", "backend/pipelines/"]
+  tier_2:
+    label: Recon / ops
+    definition: Reconciliation, reporting, telemetry, and analytics enrichment.
+    provisional: ["backend/analytics/", "backend/telemetry/", "backend/pipelines/watchlist_alerts.py"]
+  tier_3:
+    label: BFF / gates
+    definition: Next.js proxy routes and presentation layer.
+    provisional: ["frontend/app/api/", "frontend/app/", "frontend/components/"]
+  flow_critical_gates: ["backend/api.py", "backend/analyst/crew.py"]
+
+deliverables:
+  map_file: ALPHAPULSE_MAP.md
+  core_section: Core Domain Deep Dive
+
+runbook_procedures:
+  - trace_end_to_end
+  - replay_retry
+  - reconcile_mismatch
+  - clear_stuck
+  - investigate_no_effect
+  - emergency_stop
+
+ownership:
+  gitlab: null
+  datadog: null
+  note: >-
+    Single-operator project (see docs/PRD.md bus-factor-of-one). No GitLab/Jira
+    integration and no squad structure — Session 0b degrades to a single-owner
+    note per skill UNKNOWN conventions.
+
+architecture_validation:
+  enabled: false
+  span_window: n/a
+  dependency_depth: n/a
+  entry_services: []
+  critical_paths: []
+
+memory_bank:
+  consume_existing: true
+  export_mode: never
+  init_tool: none
+  merge_strategy: hand_wins
+  per_repo_export: tier_0_1_only
+
+api_tooling:
+  export_mode: never
+  otp_helper: auto
+  envs: [dev, prod]
