@@ -1,11 +1,18 @@
 """
 Securities master + broker-code resolver.
 
-Combines three registries into one symbol lookup:
+Combines three registries into one symbol lookup — all three now DB-backed
+(get_full_securities_master() reads load_nse_main_board()/load_bse_main_board()/
+load_sme_master(); nothing on this call path fetches live):
   - NSE main-board: db.models.securities table (populated nightly by
     pipelines/eod_prices_pipeline.py from NSE's EQUITY_L.csv — no fetch needed here).
-  - BSE main-board:  BSE public API (this module; groups A/B/T/Z/X/XT/P/MT/TS).
-  - NSE Emerge + BSE SME: tools/sme_tools.py (unchanged).
+  - BSE main-board: db.models.securities_bse table (populated nightly by
+    pipelines/eod_prices_pipeline.py::refresh_bse_securities_master, which itself
+    calls fetch_bse_main_board() below — BSE's own public API, groups
+    A/B/T/Z/X/XT/P/MT/TS).
+  - NSE Emerge + BSE SME: db.models.securities_sme table (populated nightly by
+    pipelines/eod_prices_pipeline.py::refresh_sme_securities_master, which itself
+    calls tools/sme_tools.py::get_all_sme_stocks()).
 
 resolve_symbol() lets a broker's internal stock code be matched against a
 real trading symbol via ISIN, exact code (with a known suffix stripped), or
@@ -24,7 +31,6 @@ from rapidfuzz import fuzz, process, utils as _rf_utils
 from sqlalchemy import select
 
 from db.models import securities as _securities_t
-from tools.sme_tools import get_all_sme_stocks
 
 _BSE_MAIN_CACHE = Path("output/_bse_main_master.json")
 _CACHE_TTL_HOURS = 24
@@ -52,6 +58,38 @@ def load_nse_main_board(engine) -> list[dict]:
     return [
         {"symbol": r["symbol"], "name": r["company_name"], "isin": r["isin"],
          "exchange": "NSE", "series": r["series"]}
+        for r in rows
+    ]
+
+
+def load_bse_main_board(engine) -> list[dict]:
+    """BSE main-board securities from the securities_bse table (populated
+    nightly by pipelines/eod_prices_pipeline.py::refresh_bse_securities_master —
+    no live fetch here)."""
+    from db.models import securities_bse as _bse_t
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(_bse_t.c.code, _bse_t.c.symbol, _bse_t.c.name, _bse_t.c.isin, _bse_t.c.series)
+        ).mappings().fetchall()
+    return [
+        {"symbol": r["symbol"], "name": r["name"], "isin": r["isin"],
+         "exchange": "BSE", "code": r["code"], "series": r["series"]}
+        for r in rows
+    ]
+
+
+def load_sme_master(engine) -> list[dict]:
+    """NSE Emerge + BSE SME securities from the securities_sme table
+    (populated nightly by pipelines/eod_prices_pipeline.py::refresh_sme_securities_master —
+    no live fetch here)."""
+    from db.models import securities_sme as _sme_t
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(_sme_t.c.exchange, _sme_t.c.symbol, _sme_t.c.name, _sme_t.c.isin, _sme_t.c.series)
+        ).mappings().fetchall()
+    return [
+        {"symbol": r["symbol"], "name": r["name"], "isin": r["isin"],
+         "exchange": r["exchange"], "series": r["series"]}
         for r in rows
     ]
 
@@ -145,16 +183,30 @@ def fetch_bse_main_board(force: bool = False) -> list[dict]:
 
 
 def get_full_securities_master(engine, force: bool = False) -> list[dict]:
-    """Merge NSE main-board + BSE main-board + NSE Emerge + BSE SME.
+    """Merge NSE main-board + BSE main-board + NSE Emerge/BSE SME — all three
+    now DB-backed (populated nightly by pipelines/eod_prices_pipeline.py), no
+    live fetch on this call path. `force` is accepted for backward
+    compatibility with existing callers but is a no-op: refreshing the
+    underlying tables happens via the nightly pipeline, not per-call.
     Dedup by ISIN; earlier sources (NSE main-board first) win on collision."""
     try:
         nse_rows = load_nse_main_board(engine)
     except Exception:
         nse_rows = []  # DB error: NSE main-board contributes nothing this call
 
+    try:
+        bse_rows = load_bse_main_board(engine)
+    except Exception:
+        bse_rows = []
+
+    try:
+        sme_rows = load_sme_master(engine)
+    except Exception:
+        sme_rows = []
+
     merged: list[dict] = []
     seen_isins: set[str] = set()
-    for group in (nse_rows, fetch_bse_main_board(force=force), get_all_sme_stocks(force=force)):
+    for group in (nse_rows, bse_rows, sme_rows):
         for s in group:
             isin = s.get("isin")
             if isin and isin in seen_isins:

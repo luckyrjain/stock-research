@@ -4,9 +4,10 @@ from unittest.mock import MagicMock, patch
 
 from sqlalchemy import create_engine, insert
 
-from db.models import metadata, securities
+from db.models import metadata, securities, securities_bse, securities_sme
 from tools.securities_master import (
     load_nse_main_board, fetch_bse_main_board,
+    load_bse_main_board, load_sme_master,
     get_full_securities_master, resolve_symbol,
 )
 
@@ -91,9 +92,45 @@ def _master_row(symbol, name, isin, exchange="NSE"):
     return {"symbol": symbol, "name": name, "isin": isin, "exchange": exchange, "series": "EQ"}
 
 
+class LoadBseMainBoardTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = create_engine("sqlite://")
+        metadata.create_all(self.engine, tables=[securities_bse])
+
+    def test_rows_are_returned_with_exchange_bse(self) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(insert(securities_bse).values(
+                code="500001", symbol="ABC", name="ABC Ltd",
+                isin="INE000A01011", series="A",
+            ))
+        out = load_bse_main_board(self.engine)
+        self.assertEqual(out, [{
+            "symbol": "ABC", "name": "ABC Ltd", "isin": "INE000A01011",
+            "exchange": "BSE", "code": "500001", "series": "A",
+        }])
+
+
+class LoadSmeMasterTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = create_engine("sqlite://")
+        metadata.create_all(self.engine, tables=[securities_sme])
+
+    def test_rows_are_returned_with_their_own_exchange(self) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(insert(securities_sme).values(
+                exchange="NSE", symbol="EMERGE1", name="Emerge Stock 1",
+                isin="INE999Z01001", series="SM",
+            ))
+        out = load_sme_master(self.engine)
+        self.assertEqual(out, [{
+            "symbol": "EMERGE1", "name": "Emerge Stock 1", "isin": "INE999Z01001",
+            "exchange": "NSE", "series": "SM",
+        }])
+
+
 class GetFullSecuritiesMasterTest(unittest.TestCase):
-    @patch("tools.securities_master.get_all_sme_stocks")
-    @patch("tools.securities_master.fetch_bse_main_board")
+    @patch("tools.securities_master.load_sme_master")
+    @patch("tools.securities_master.load_bse_main_board")
     @patch("tools.securities_master.load_nse_main_board")
     def test_isin_collision_prefers_nse(self, mock_nse, mock_bse, mock_sme) -> None:
         mock_nse.return_value = [_master_row("BAJAJHFL", "Bajaj Housing Finance Limited", "INE377Y01014")]
@@ -104,8 +141,8 @@ class GetFullSecuritiesMasterTest(unittest.TestCase):
         self.assertEqual(out[0]["symbol"], "BAJAJHFL")
         self.assertEqual(out[0]["exchange"], "NSE")
 
-    @patch("tools.securities_master.get_all_sme_stocks")
-    @patch("tools.securities_master.fetch_bse_main_board")
+    @patch("tools.securities_master.load_sme_master")
+    @patch("tools.securities_master.load_bse_main_board")
     @patch("tools.securities_master.load_nse_main_board")
     def test_nse_failure_does_not_crash_and_other_sources_still_contribute(
         self, mock_nse, mock_bse, mock_sme
