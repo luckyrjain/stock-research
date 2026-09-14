@@ -108,7 +108,6 @@ Open [http://localhost:3000](http://localhost:3000) for stock analysis. The othe
 | `backend/output/<SYMBOL>/` | Per-symbol task caches (plus `<task>_raw.json` debug dumps) |
 | `backend/output/_extract_cache/` | LLM extraction cache for market picks (6 h TTL) |
 | `backend/output/_market_picks/` | Market picks result cache (192 h / 7-day TTL, matching the weekly cron cadence) |
-| `backend/output/_nse_master.txt` | NSE equity symbol master (refreshed every 24 h) |
 | `backend/output/_bhavcopy/` | Raw NSE bhavcopy CSV archive (EOD price store ingestion replay) |
 | PostgreSQL (`DATABASE_URL`) | 23 tables — SME signals, screener, watchlist, positions, verdict history, MF-holdings history, accounts/sessions/API keys, EOD price store (securities/prices_daily/mf_nav_daily), corporate actions, the portfolio aggregator (profiles/accounts/assets/holdings/valuations/transactions), broker API sync (`broker_connections`), and `app_state` (daily pick snapshots, LLM cost counters, source health/quality, scraper error counters, CAS archives, CLI reports) (see [Architecture](architecture.md)) |
 | Redis (`REDIS_URL`, optional) | Shared rate-limit/cache state across multiple backend workers/hosts |

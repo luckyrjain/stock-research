@@ -174,8 +174,14 @@ def _upsert_bse_master(engine, rows: list[dict]) -> None:
 
 def _upsert_sme_master(engine, rows: list[dict]) -> None:
     """Same monotonic-last_seen upsert as _upsert_bse_master, keyed by
-    (exchange, symbol) — get_all_sme_stocks() already merges/dedups NSE
-    Emerge + BSE SME, so each (exchange, symbol) pair is unique."""
+    (exchange, symbol) — get_all_sme_stocks() merges/dedups NSE Emerge vs.
+    BSE SME (by ISIN/fuzzy name), but NOT within NSE Emerge's own fetch
+    (tools/sme_tools.py::fetch_nse_emerge_stocks() has no seen-set of its
+    own). A same-key duplicate is deduped below (last-wins) before
+    batching, since a batched `INSERT ... ON CONFLICT` that targets the
+    same (exchange, symbol) row twice in one statement would raise
+    Postgres's "cannot affect row a second time" error and abort the
+    whole batch's transaction."""
     if not rows:
         return
     today = date.today()
@@ -188,12 +194,15 @@ def _upsert_sme_master(engine, rows: list[dict]) -> None:
                                OR EXCLUDED.last_seen > securities_sme.last_seen
                              THEN EXCLUDED.last_seen ELSE securities_sme.last_seen END
     """)
-    params = [
-        {"exchange": r.get("exchange") or "NSE", "symbol": r["symbol"],
-         "name": r.get("name"), "isin": r.get("isin"), "series": r.get("series"),
-         "last_seen": today}
+    deduped = {
+        (r.get("exchange") or "NSE", r["symbol"]): {
+            "exchange": r.get("exchange") or "NSE", "symbol": r["symbol"],
+            "name": r.get("name"), "isin": r.get("isin"), "series": r.get("series"),
+            "last_seen": today,
+        }
         for r in rows if r.get("symbol")
-    ]
+    }
+    params = list(deduped.values())
     with engine.begin() as conn:
         for i in range(0, len(params), _BATCH_SIZE):
             conn.execute(sql, params[i:i + _BATCH_SIZE])
@@ -345,16 +354,6 @@ def run(dates: list[date]) -> int:
 
     refresh_securities_master(engine, session)
 
-    try:
-        refresh_bse_securities_master(engine)
-    except Exception as exc:  # BSE master step must never affect the equity exit code
-        log_event(LOGGER, "eod_bse_master_step_failed", level="warning", error=str(exc))
-
-    try:
-        refresh_sme_securities_master(engine)
-    except Exception as exc:  # SME master step must never affect the equity exit code
-        log_event(LOGGER, "eod_sme_master_step_failed", level="warning", error=str(exc))
-
     had_error = False
     for d in sorted(dates):
         summary = ingest_day(engine, d, session)
@@ -367,6 +366,16 @@ def run(dates: list[date]) -> int:
         ingest_navs(engine)
     except Exception as exc:  # NAV step must never affect the equity exit code
         log_event(LOGGER, "eod_nav_step_failed", level="warning", error=str(exc))
+
+    try:
+        refresh_bse_securities_master(engine)
+    except Exception as exc:  # BSE master step must never affect the equity exit code
+        log_event(LOGGER, "eod_bse_master_step_failed", level="warning", error=str(exc))
+
+    try:
+        refresh_sme_securities_master(engine)
+    except Exception as exc:  # SME master step must never affect the equity exit code
+        log_event(LOGGER, "eod_sme_master_step_failed", level="warning", error=str(exc))
 
     try:
         run_ca_step(engine, session)

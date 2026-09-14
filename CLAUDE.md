@@ -156,8 +156,7 @@ stock-research/
 │       ├── <SYMBOL>/           Per-symbol task caches (+ <task>_raw.json pre-normalization dumps)
 │       ├── _extract_cache/     LLM extraction cache (6 h TTL) — avoids re-calling LLM on re-runs
 │       ├── _market_picks/      Market picks result cache (192 h / 7-day TTL) for the SSE endpoint
-│       ├── _bhavcopy/          Raw NSE bhavcopy archive (EOD price store replay)
-│       └── _nse_master.txt     NSE equity symbol master, refreshed every 24 h
+│       └── _bhavcopy/          Raw NSE bhavcopy archive (EOD price store replay)
 ├── .env.example                Shared by both stacks; stays at the repo root (python-dotenv's
 │                               load_dotenv() walks up from backend/ and finds it there)
 ├── frontend/               Next.js 15 app (TypeScript, Tailwind CSS)
@@ -211,7 +210,7 @@ whichever one is relevant to the directory you're working in):
 | [`docs/deployment.md`](docs/deployment.md) | Docker Compose, manual deployment, scaling guidance |
 | [`docs/architecture.md`](docs/architecture.md) | System-level request flows and module boundaries |
 | [`docs/api-reference.md`](docs/api-reference.md) | All 61 HTTP endpoints — auth mode, path/query params, request bodies, every status code and its trigger, rate-limit buckets, cache behaviour, SSE event streams |
-| [`docs/database.md`](docs/database.md) | All 22 PostgreSQL tables — columns, constraints, indexes, which code reads/writes each, the dual-ownership model, migrations, retention |
+| [`docs/database.md`](docs/database.md) | All 25 PostgreSQL tables — columns, constraints, indexes, which code reads/writes each, the dual-ownership model, migrations, retention |
 | [`docs/tools.md`](docs/tools.md) | Reference for every data-fetching tool/scraper and its output shape |
 | [`docs/output-schema.md`](docs/output-schema.md) | Response payload shapes and cache-file formats (the request-side contract lives in `api-reference.md`) |
 | [`README.md`](README.md) | Quickstart — install, run, top-level feature summary |

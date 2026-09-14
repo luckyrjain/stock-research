@@ -12,6 +12,7 @@ from pipelines.eod_prices_pipeline import (
     _missing_dates, _upsert_navs, _upsert_prices, _upsert_seen, ingest_day,
     refresh_bse_securities_master, refresh_sme_securities_master,
 )
+from tools.securities_master import get_full_securities_master
 
 
 def _silence_sqlite_date_adapter_warning() -> None:
@@ -187,6 +188,65 @@ class RefreshSmeSecuritiesMasterTest(unittest.TestCase):
             row = conn.execute(select(securities_sme)).mappings().one()
         self.assertEqual((row["exchange"], row["symbol"]), ("NSE", "EMERGE1"))
         self.assertEqual(row["last_seen"], date.today())
+
+    @patch("pipelines.eod_prices_pipeline.get_all_sme_stocks")
+    def test_duplicate_exchange_symbol_pair_does_not_raise(self, mock_fetch) -> None:
+        # tools/sme_tools.py::fetch_nse_emerge_stocks() has no seen-set of its
+        # own — if NSE's live-analysis-emerge API ever returns the same
+        # symbol twice in one response, get_all_sme_stocks()'s own
+        # ISIN/fuzzy-name dedup (which only dedupes NSE vs. BSE) would not
+        # catch it, and a batched INSERT ... ON CONFLICT that targets the
+        # same (exchange, symbol) row twice in one statement raises
+        # Postgres's "cannot affect row a second time" error. Must dedup
+        # before batching instead.
+        mock_fetch.return_value = [
+            {"symbol": "EMERGE1", "name": "Emerge Stock 1", "isin": "INE999Z01001",
+             "series": "SM", "exchange": "NSE"},
+            {"symbol": "EMERGE1", "name": "Emerge Stock 1 (dup)", "isin": "INE999Z01001",
+             "series": "SM", "exchange": "NSE"},
+        ]
+        refresh_sme_securities_master(self.engine)  # must not raise
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(securities_sme)).mappings().all()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["exchange"], rows[0]["symbol"]), ("NSE", "EMERGE1"))
+
+
+class SecuritiesMasterEndToEndTest(unittest.TestCase):
+    """Proves the write side (Task 2: refresh_bse_securities_master /
+    refresh_sme_securities_master) and the read side (Task 3:
+    tools.securities_master.get_full_securities_master) actually agree on
+    the securities_bse/securities_sme row shape, against the same engine —
+    every other test in this suite exercises one layer in isolation."""
+
+    def setUp(self) -> None:
+        _silence_sqlite_date_adapter_warning()
+        self.engine = create_engine("sqlite://")
+        metadata.create_all(
+            self.engine, tables=[securities, securities_bse, securities_sme]
+        )
+
+    @patch("tools.securities_master.load_nse_main_board", return_value=[])
+    @patch("pipelines.eod_prices_pipeline.get_all_sme_stocks")
+    @patch("pipelines.eod_prices_pipeline.fetch_bse_main_board")
+    def test_ingested_bse_and_sme_rows_are_visible_through_the_merge(
+        self, mock_bse_fetch, mock_sme_fetch, mock_nse_load
+    ) -> None:
+        mock_bse_fetch.return_value = [
+            {"symbol": "ABC", "name": "ABC Ltd", "isin": "INE000A01011",
+             "exchange": "BSE", "code": "500001", "series": "A"},
+        ]
+        mock_sme_fetch.return_value = [
+            {"symbol": "EMERGE1", "name": "Emerge Stock 1", "isin": "INE999Z01001",
+             "series": "SM", "exchange": "NSE"},
+        ]
+
+        refresh_bse_securities_master(self.engine)
+        refresh_sme_securities_master(self.engine)
+
+        out = get_full_securities_master(self.engine)
+        symbols = {s["symbol"] for s in out}
+        self.assertEqual(symbols, {"ABC", "EMERGE1"})
 
 
 if __name__ == "__main__":

@@ -687,7 +687,6 @@ candidate name) rather than guessing.
 | Path | TTL | Key | Description |
 |---|---|---|---|
 | `backend/output/_extract_cache/<hash>.json` | 6 h | SHA-256 of source name + article titles/URLs | LLM extraction result per source |
-| `backend/output/_nse_master.txt` | 24 h | — | Newline-separated set of valid NSE equity symbols from EQUITY_L.csv |
 | `backend/output/_nifty500_master.json` | 24 h | — | NIFTY 500 constituent list (`{symbol, company_name, industry, isin}[]`) — pipelines/screener_pipeline.py's universe |
 | `backend/output/_bhavcopy/<YYYY-MM-DD>.csv` | Permanent | Trade date | Raw NSE bhavcopy archive — EOD price store ingestion replay without re-hitting NSE |
 
