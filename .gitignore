@@ -20,3 +20,4 @@ frontend/test-results/
 frontend/playwright-report/
 .superpower*
 graph*/*
+.worktrees/
