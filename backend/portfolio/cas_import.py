@@ -81,122 +81,143 @@ def import_cas(engine, parsed: dict, account_id: int) -> dict:
     """Write one parsed CAS into the portfolio tables. All writes in a single
     transaction. Returns a summary dict; {"error": ...} on bad account."""
     from sqlalchemy import insert as _insert, select, update as _update
+    from core import rate_limiter
     from db.models import accounts as accounts_t, assets as assets_t
 
     summary = {"schemes": 0, "assets_created": 0, "assets_matched": 0,
                "transactions": 0, "skipped_rows": 0, "warnings": []}
 
-    with engine.begin() as conn:
-        if not conn.execute(select(accounts_t.c.id)
-                            .where(accounts_t.c.id == account_id)).first():
-            return {"error": "account not found"}
+    # Lock scoped to this account, held for the whole import — without it,
+    # two concurrent imports for the same account (a double-click, two
+    # tabs, or the same statement re-uploaded before the first request
+    # finished) race the delete-then-insert replace in
+    # _write_transactions() below: both read the same pre-import asset
+    # snapshot, and interleaved DELETE/INSERT pairs across two uncommitted
+    # transactions can leave duplicate or orphaned rows. core.rate_limiter,
+    # not a pg_advisory_xact_lock — this codebase's Portfolio Aggregator
+    # tables are tested against a real SQLite engine (no live Postgres in
+    # tests), which has no advisory-lock/hashtext functions; rate_limiter's
+    # lock works identically on both backends since it never touches the
+    # DB. Same try_acquire_lock/release_lock pattern routes/broker_sync.py
+    # already uses for its own "don't let two attempts interleave" guard.
+    lock_name = f"cas_import:account:{account_id}"
+    if not rate_limiter.try_acquire_lock(lock_name, 300):
+        return {"error": "another import for this account is already running — try again shortly"}
 
-        existing = conn.execute(
-            select(assets_t.c.id, assets_t.c.symbol, assets_t.c.meta, assets_t.c.name)
-            .where(assets_t.c.type == "mf")
-        ).mappings().fetchall()
-        by_amfi = {r["symbol"]: r for r in existing if r["symbol"]}
-        by_isin = {(r["meta"] or {}).get("isin"): r
-                   for r in existing if (r["meta"] or {}).get("isin")}
-        # `_write_transactions()` deletes an asset's existing CAS rows before
-        # inserting the statement's own — correct once per asset per import
-        # (a full re-import restates that asset's history), but the same
-        # scheme can now be matched from more than one folio within this
-        # same statement (see the by_amfi/by_isin backfill above) — without
-        # this guard, the second folio's write would delete the first
-        # folio's just-inserted rows for the same asset before this
-        # transaction commits.
-        cas_rows_cleared: set[int] = set()
-        # Same reasoning applies to holdings.units and the archived flag: a
-        # scheme genuinely held via two folios (two SIP folios, a
-        # post-merger split) now resolves to one asset, but each folio still
-        # reports its OWN closing balance -- the true total is their sum,
-        # not either one alone (and not whichever folio the row happened to
-        # be created/last-updated from). Accumulated here across EVERY
-        # folio touching this asset -- including a zero/negative one, which
-        # matters for the archived reconciliation below: a dict that only
-        # ever held positive contributions could never represent "this
-        # asset's folios now net out to fully redeemed," making that
-        # reconciliation able to un-archive but never re-archive.
-        close_by_asset: dict[int, float] = {}
+    try:
+        with engine.begin() as conn:
+            if not conn.execute(select(accounts_t.c.id)
+                                .where(accounts_t.c.id == account_id)).first():
+                return {"error": "account not found"}
 
-        for folio in parsed.get("folios", []):
-            for scheme in folio.get("schemes", []):
-                summary["schemes"] += 1
-                amfi = (scheme.get("amfi") or "").strip() or None
-                isin = (scheme.get("isin") or "").strip() or None
-                if not amfi and not isin:
-                    summary["warnings"].append(
-                        f"scheme without AMFI code or ISIN skipped: {scheme.get('scheme')}")
-                    continue
-                close = float(scheme.get("close") or 0)
-                txns = scheme.get("transactions", [])
+            existing = conn.execute(
+                select(assets_t.c.id, assets_t.c.symbol, assets_t.c.meta, assets_t.c.name)
+                .where(assets_t.c.type == "mf")
+            ).mappings().fetchall()
+            by_amfi = {r["symbol"]: r for r in existing if r["symbol"]}
+            by_isin = {(r["meta"] or {}).get("isin"): r
+                       for r in existing if (r["meta"] or {}).get("isin")}
+            # `_write_transactions()` deletes an asset's existing CAS rows before
+            # inserting the statement's own — correct once per asset per import
+            # (a full re-import restates that asset's history), but the same
+            # scheme can now be matched from more than one folio within this
+            # same statement (see the by_amfi/by_isin backfill above) — without
+            # this guard, the second folio's write would delete the first
+            # folio's just-inserted rows for the same asset before this
+            # transaction commits.
+            cas_rows_cleared: set[int] = set()
+            # Same reasoning applies to holdings.units and the archived flag: a
+            # scheme genuinely held via two folios (two SIP folios, a
+            # post-merger split) now resolves to one asset, but each folio still
+            # reports its OWN closing balance -- the true total is their sum,
+            # not either one alone (and not whichever folio the row happened to
+            # be created/last-updated from). Accumulated here across EVERY
+            # folio touching this asset -- including a zero/negative one, which
+            # matters for the archived reconciliation below: a dict that only
+            # ever held positive contributions could never represent "this
+            # asset's folios now net out to fully redeemed," making that
+            # reconciliation able to un-archive but never re-archive.
+            close_by_asset: dict[int, float] = {}
 
-                row = (amfi and by_amfi.get(amfi)) or (isin and by_isin.get(isin))
-                if row:
-                    asset_id = row["id"]
-                    summary["assets_matched"] += 1
-                    updates = {}
-                    if not row["symbol"] and amfi:
-                        updates["symbol"] = amfi
-                    meta = dict(row["meta"] or {})
-                    if isin and not meta.get("isin"):
-                        meta["isin"] = isin
-                        updates["meta"] = meta
-                    if updates:
-                        conn.execute(_update(assets_t)
-                                     .where(assets_t.c.id == asset_id).values(**updates))
-                else:
-                    if close <= 0 and not txns:
+            for folio in parsed.get("folios", []):
+                for scheme in folio.get("schemes", []):
+                    summary["schemes"] += 1
+                    amfi = (scheme.get("amfi") or "").strip() or None
+                    isin = (scheme.get("isin") or "").strip() or None
+                    if not amfi and not isin:
                         summary["warnings"].append(
-                            f"closed scheme without transactions skipped: {scheme.get('scheme')}")
+                            f"scheme without AMFI code or ISIN skipped: {scheme.get('scheme')}")
                         continue
-                    asset_id = conn.execute(_insert(assets_t).values(
-                        account_id=account_id, type="mf",
-                        name=scheme.get("scheme") or f"CAS scheme {amfi or isin}",
-                        symbol=amfi,
-                        meta={"isin": isin, "folio": folio.get("folio"),
-                              "rta": scheme.get("rta")},
-                        archived=close <= 0,
-                    ).returning(assets_t.c.id)).scalar()
-                    summary["assets_created"] += 1
-                    # Record the new asset in this run's own lookup dicts —
-                    # not just the DB — so the same scheme appearing under a
-                    # second folio later in this same statement (a scheme
-                    # held via two SIP folios, or a post-merger folio split)
-                    # matches this asset instead of silently creating a
-                    # duplicate one. `existing` above was snapshotted once
-                    # before this loop started, so without this a later
-                    # iteration's lookup would still see it as unmatched.
-                    new_row = {"id": asset_id, "symbol": amfi,
-                               "meta": {"isin": isin}, "name": scheme.get("scheme")}
-                    if amfi:
-                        by_amfi[amfi] = new_row
-                    if isin:
-                        by_isin[isin] = new_row
+                    close = float(scheme.get("close") or 0)
+                    txns = scheme.get("transactions", [])
 
-                close_by_asset[asset_id] = close_by_asset.get(asset_id, 0.0) + close
+                    row = (amfi and by_amfi.get(amfi)) or (isin and by_isin.get(isin))
+                    if row:
+                        asset_id = row["id"]
+                        summary["assets_matched"] += 1
+                        updates = {}
+                        if not row["symbol"] and amfi:
+                            updates["symbol"] = amfi
+                        meta = dict(row["meta"] or {})
+                        if isin and not meta.get("isin"):
+                            meta["isin"] = isin
+                            updates["meta"] = meta
+                        if updates:
+                            conn.execute(_update(assets_t)
+                                         .where(assets_t.c.id == asset_id).values(**updates))
+                    else:
+                        if close <= 0 and not txns:
+                            summary["warnings"].append(
+                                f"closed scheme without transactions skipped: {scheme.get('scheme')}")
+                            continue
+                        asset_id = conn.execute(_insert(assets_t).values(
+                            account_id=account_id, type="mf",
+                            name=scheme.get("scheme") or f"CAS scheme {amfi or isin}",
+                            symbol=amfi,
+                            meta={"isin": isin, "folio": folio.get("folio"),
+                                  "rta": scheme.get("rta")},
+                            archived=close <= 0,
+                        ).returning(assets_t.c.id)).scalar()
+                        summary["assets_created"] += 1
+                        # Record the new asset in this run's own lookup dicts —
+                        # not just the DB — so the same scheme appearing under a
+                        # second folio later in this same statement (a scheme
+                        # held via two SIP folios, or a post-merger folio split)
+                        # matches this asset instead of silently creating a
+                        # duplicate one. `existing` above was snapshotted once
+                        # before this loop started, so without this a later
+                        # iteration's lookup would still see it as unmatched.
+                        new_row = {"id": asset_id, "symbol": amfi,
+                                   "meta": {"isin": isin}, "name": scheme.get("scheme")}
+                        if amfi:
+                            by_amfi[amfi] = new_row
+                        if isin:
+                            by_isin[isin] = new_row
 
-                summary["transactions"] += _write_transactions(
-                    conn, asset_id, folio.get("folio"), txns, summary,
-                    clear_existing=asset_id not in cas_rows_cleared)
-                cas_rows_cleared.add(asset_id)
+                    close_by_asset[asset_id] = close_by_asset.get(asset_id, 0.0) + close
 
-        for asset_id, total_close in close_by_asset.items():
-            if total_close > 0:
-                upsert_holdings_units(conn, asset_id, total_close)
-            # A scheme matched across one or more folios (see the
-            # by_amfi/by_isin backfill above -- this also covers an asset
-            # matched to a SINGLE folio in THIS statement whose own close
-            # now differs from its prior archived state, not just the
-            # multi-folio backfill case) may have been created
-            # `archived=True`/`False` off a stale assumption -- reconcile
-            # against the TRUE combined close now that every folio's
-            # contribution is in, rather than trusting whichever folio
-            # happened to be seen first at asset-creation time.
-            conn.execute(_update(assets_t)
-                         .where(assets_t.c.id == asset_id)
-                         .values(archived=total_close <= 0))
+                    summary["transactions"] += _write_transactions(
+                        conn, asset_id, folio.get("folio"), txns, summary,
+                        clear_existing=asset_id not in cas_rows_cleared)
+                    cas_rows_cleared.add(asset_id)
+
+            for asset_id, total_close in close_by_asset.items():
+                if total_close > 0:
+                    upsert_holdings_units(conn, asset_id, total_close)
+                # A scheme matched across one or more folios (see the
+                # by_amfi/by_isin backfill above -- this also covers an asset
+                # matched to a SINGLE folio in THIS statement whose own close
+                # now differs from its prior archived state, not just the
+                # multi-folio backfill case) may have been created
+                # `archived=True`/`False` off a stale assumption -- reconcile
+                # against the TRUE combined close now that every folio's
+                # contribution is in, rather than trusting whichever folio
+                # happened to be seen first at asset-creation time.
+                conn.execute(_update(assets_t)
+                             .where(assets_t.c.id == asset_id)
+                             .values(archived=total_close <= 0))
+    finally:
+        rate_limiter.release_lock(lock_name)
 
     log_event(LOGGER, "cas_imported", account_id=account_id,
               **{k: v for k, v in summary.items() if k != "warnings"},
