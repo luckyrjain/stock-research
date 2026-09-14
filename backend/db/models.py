@@ -315,6 +315,39 @@ securities = Table(
     Column("last_seen",    Date),
 )
 
+securities_bse = Table(
+    "securities_bse",
+    metadata,
+    # BSE's own numeric scrip code — guaranteed unique and stable even when
+    # the alpha `symbol` is blank or later renamed (see
+    # tools/securities_master.py::fetch_bse_main_board's own comment on why
+    # `code` is kept alongside `symbol`).
+    Column("code",      String(10), primary_key=True),
+    Column("symbol",    String(20)),
+    Column("name",      String(200)),
+    Column("isin",      String(12)),
+    Column("series",    String(10)),
+    # Last date this row was present in a BSE main-board master fetch — a
+    # stale last_seen means "no longer returned by BSE," never deleted
+    # outright (other tables key off `symbol`: watchlist_items, positions).
+    Column("last_seen", Date),
+)
+
+securities_sme = Table(
+    "securities_sme",
+    metadata,
+    # NSE Emerge and BSE SME share this table (get_all_sme_stocks() already
+    # merges + dedups them); `exchange` distinguishes which one each row
+    # came from, since NSE Emerge symbols and BSE SME symbols are disjoint
+    # ticker spaces with no cross-exchange collision risk after that merge.
+    Column("exchange",  String(10), primary_key=True),
+    Column("symbol",    String(20), primary_key=True),
+    Column("name",      String(200)),
+    Column("isin",      String(12)),
+    Column("series",    String(10)),
+    Column("last_seen", Date),
+)
+
 prices_daily = Table(
     "prices_daily",
     metadata,
