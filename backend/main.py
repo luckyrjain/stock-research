@@ -28,6 +28,7 @@ from signals.engine import run_signal_engine
 from signals.filings_classifier import classify_filings
 from core import state_store
 from signals.interpreter import interpret
+from tools._nse_session import get_nse_session
 from tools.news_tools import get_latest_news
 from tools.nse_tools import get_mf_holdings, get_stock_quote
 from tools.screener_tools import get_fundamentals, get_holdings
@@ -192,16 +193,9 @@ def _fetched_at(data: dict) -> str | None:
 def _nse_autocomplete(query: str) -> list[dict]:
     """Return raw NSE autocomplete results for a query."""
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://www.nseindia.com",
-            "Accept": "application/json",
-        }
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=6)
+        session = get_nse_session(timeout=6, sleep_after_prime=0)
         resp = session.get(
             f"https://www.nseindia.com/api/search/autocomplete?q={query}",
-            headers=headers,
             timeout=6,
         )
         return resp.json().get("symbols", [])

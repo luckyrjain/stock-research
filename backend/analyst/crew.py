@@ -5,12 +5,11 @@ import json
 import os
 import ast
 import re
-import threading
 import time
 from typing import Any, Tuple
 
 from config.crew_tasks import build_analysis_prompt
-from core.observability import get_logger, log_event
+from core.observability import get_logger, log_event, warn_once
 
 LOGGER = get_logger("crew")
 
@@ -478,25 +477,19 @@ _SECTOR_COMPARISON_PATTERN = re.compile(
 )
 
 
-_unmatched_sector_buckets_logged: set[str] = set()
-_unmatched_sector_buckets_lock = threading.Lock()
-
-
 def _log_unmatched_sector_bucket_once(sector: str) -> None:
     """One-time-per-process warning when a real sector value doesn't match
     any _SECTOR_RANGES bucket — same "validate the yfinance sector-taxonomy
     assumption against real production traffic" instinct as
     signals/engine.py::_log_unmatched_sector_once(), kept as a separate
-    counter/event rather than reusing that one directly: this guardrail's
-    bucket names (_SECTOR_RANGES) and signals/engine.py's own weight-
-    override groups are two independent consumers of the same disputed
-    `stock_info.sector` field, and conflating their telemetry would make it
-    impossible to tell which one actually saw an unmatched sector."""
-    with _unmatched_sector_buckets_lock:
-        if sector in _unmatched_sector_buckets_logged:
-            return
-        _unmatched_sector_buckets_logged.add(sector)
-    log_event(LOGGER, "sector_range_bucket_unmatched", level="warning", sector=sector)
+    event (and counted separately by core.observability.warn_once()'s
+    per-event key-set) rather than reusing that one's event/fields
+    directly: this guardrail's bucket names (_SECTOR_RANGES) and
+    signals/engine.py's own weight-override groups are two independent
+    consumers of the same disputed `stock_info.sector` field, and
+    conflating their telemetry would make it impossible to tell which one
+    actually saw an unmatched sector."""
+    warn_once(LOGGER, "sector_range_bucket_unmatched", sector, sector=sector)
 
 
 def _resolve_sector_bucket(sector: str | None) -> str | None:

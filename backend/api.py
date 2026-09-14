@@ -20,19 +20,21 @@ from signals.interpreter import interpret
 load_dotenv()
 
 # ── Market picks cache ────────────────────────────────────────────────────────
-# Defined in pipelines/market_picks_pipeline.py (the module that owns this pipeline's
-# output) so its own cron entrypoint and this file's on-demand SSE endpoint
-# read/write the exact same cache — re-exported here under the historical
-# names so existing call sites (and test patches targeting api._load_picks_cache
-# / api._save_picks_cache) keep working unchanged.
-from pipelines.market_picks_pipeline import HISTORY_NAMESPACE as _PICKS_HISTORY_NS
-from pipelines.market_picks_pipeline import load_picks_cache as _load_picks_cache
-from pipelines.market_picks_pipeline import save_picks_cache as _save_picks_cache
+# Defined in pipelines/market_picks_cache.py and pipelines/market_picks_history.py
+# (the modules that own this pipeline's cache/history, split out of
+# pipelines/market_picks_pipeline.py) so its own cron entrypoint and this
+# file's on-demand SSE endpoint read/write the exact same cache — re-exported
+# here under the historical names so existing call sites (and test patches
+# targeting api._load_picks_cache / api._save_picks_cache) keep working
+# unchanged.
+from pipelines.market_picks_history import HISTORY_NAMESPACE as _PICKS_HISTORY_NS
+from pipelines.market_picks_cache import load_picks_cache as _load_picks_cache
+from pipelines.market_picks_cache import save_picks_cache as _save_picks_cache
 from core import rate_limiter
 from core import state_store
 from routes._shared import (
     _TRUSTED_PROXY_SECRET, _TICKER_RE, _bearer_token_from_request, _check_rate_limit, _client_ip,
-    _fetch_live_price_sync, _get_db_engine, _rate_limit,
+    _fetch_live_price_sync, _get_db_engine, _rate_limit, run_db_call, run_locked_refresh, validate_ticker,
 )
 # Re-exported under their original names since this file (and its existing
 # tests) call them as api._compute_peer_percentiles / api._compute_valuation_anchor —
@@ -169,12 +171,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Referer": "https://www.nseindia.com",
-    "Accept": "application/json",
-}
-
 # ── ISIN resolution (NSE equity master, cached 1 h) ──────────────────────────
 
 _ISIN_CACHE: tuple[float, dict] | None = None
@@ -233,13 +229,11 @@ def _is_name_match(query: str, company: str) -> bool:
 
 
 def _quote_meta_sync(symbol: str) -> dict:
-    import requests
+    from tools._nse_session import get_nse_session
     try:
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=_NSE_HEADERS, timeout=6)
+        s = get_nse_session(timeout=6, sleep_after_prime=0)
         r = s.get(
             f"https://www.nseindia.com/api/quote-equity?symbol={symbol}",
-            headers=_NSE_HEADERS,
             timeout=6,
         )
         info = r.json().get("info", {})
@@ -336,17 +330,10 @@ def _bse_autocomplete_sync(query: str) -> list[dict]:
 
 
 def _autocomplete_sync(query: str) -> list[dict]:
-    import requests
-    try:
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=_NSE_HEADERS, timeout=6)
-        r = s.get(
-            f"https://www.nseindia.com/api/search/autocomplete?q={query}",
-            headers=_NSE_HEADERS, timeout=6,
-        )
-        return r.json().get("symbols", [])
-    except Exception:
-        return []
+    # Identical NSE autocomplete call to main._nse_autocomplete() — delegate
+    # there rather than maintaining two independent copies.
+    from main import _nse_autocomplete
+    return _nse_autocomplete(query)
 
 
 def _company_name_from_result(result: dict) -> str:
@@ -575,9 +562,7 @@ async def validate_symbol(symbol: str, request: Request, exchange: str = ""):
 @app.get("/api/analyse/{symbol}")
 async def analyse(symbol: str, request: Request, force: bool = False):
     _rate_limit(request, "analyse", max_calls=20, window_seconds=300)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = validate_ticker(symbol)
     run_id = uuid.uuid4().hex[:12]
 
     async def stream():
@@ -984,7 +969,7 @@ async def get_market_picks_status(request: Request):
     """
     _rate_limit(request, "market_picks_status", max_calls=60, window_seconds=60)
 
-    from pipelines.market_picks_pipeline import picks_cache_status
+    from pipelines.market_picks_cache import picks_cache_status
 
     loop = asyncio.get_running_loop()
     status = await loop.run_in_executor(None, picks_cache_status)
@@ -1086,7 +1071,7 @@ async def get_market_picks_history(request: Request, date: str | None = Query(No
     guessed at.
 
     With ?date=YYYY-MM-DD: skips aggregation entirely and returns that single
-    day's full pick list verbatim (same shape market_picks_pipeline._save_history
+    day's full pick list verbatim (same shape market_picks_history._save_history
     wrote it in) — the aggregated view above only ever surfaces a first/last-seen
     roll-up per symbol, never a specific day's complete list. 404 if no snapshot
     was taken that day (weekend, holiday, or before this feature existed).
@@ -1297,9 +1282,7 @@ async def get_price_history(
     would be meaningless for them.
     """
     _rate_limit(request, "prices_history", max_calls=60, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = validate_ticker(symbol)
     from tools.price_history_tools import get_price_series
 
     loop = asyncio.get_running_loop()
@@ -1327,9 +1310,7 @@ async def get_peers(request: Request, symbol: str):
     six-task analysis pipeline.
     """
     _rate_limit(request, "peers", max_calls=30, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = validate_ticker(symbol)
 
     def _fetch_sync() -> dict:
         from core import cache
@@ -1392,9 +1373,7 @@ async def get_financials(request: Request, symbol: str):
     analysis pipeline.
     """
     _rate_limit(request, "financials", max_calls=30, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = validate_ticker(symbol)
 
     def _fetch_sync() -> dict:
         from core import cache
@@ -1471,9 +1450,7 @@ async def get_shareholding_breakdown(request: Request, symbol: str):
     analysis pipeline.
     """
     _rate_limit(request, "shareholding_detail", max_calls=30, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = validate_ticker(symbol)
 
     def _fetch_sync() -> dict:
         from core import cache
@@ -1556,9 +1533,7 @@ async def get_insider_activity(request: Request, symbol: str):
     is the expected common case, not an error.
     """
     _rate_limit(request, "insider_activity", max_calls=30, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = validate_ticker(symbol)
 
     def _load_cached() -> dict | None:
         from core import cache
@@ -1670,9 +1645,7 @@ async def get_street_consensus(request: Request, symbol: str):
     the expected common case for most stocks on most days.
     """
     _rate_limit(request, "street_consensus", max_calls=30, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = validate_ticker(symbol)
 
     def _load_cached() -> dict | None:
         from core import cache
@@ -1818,9 +1791,7 @@ async def get_verdict_history(request: Request, symbol: str):
     still useful on its own.
     """
     _rate_limit(request, "verdict_history", max_calls=60, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = validate_ticker(symbol)
 
     from analytics.verdict_history import load_history
 
@@ -1864,16 +1835,10 @@ async def get_sme_signals(
     lookback/direction are ignored in regime view since there's no cross-event window
     to filter by.
     """
-    import os
-
-    _rate_limit(request, "sme_signals", max_calls=60, window_seconds=60)
-
     if direction not in ("all", "golden", "death"):
         raise HTTPException(status_code=422, detail="direction must be one of: all, golden, death")
     if view not in ("crosses", "regime"):
         raise HTTPException(status_code=422, detail="view must be one of: crosses, regime")
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the SME pipeline first.")
 
     def _query_sync() -> dict:
         from sqlalchemy import text as _text
@@ -1997,12 +1962,10 @@ async def get_sme_signals(
             },
         }
 
-    loop = asyncio.get_running_loop()
-    try:
-        return await loop.run_in_executor(None, _query_sync)
-    except Exception as exc:
-        log_event(LOGGER, "sme_signals_query_failed", level="error", error=str(exc))
-        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    return await run_db_call(
+        request, "sme_signals", 60, _query_sync, "sme_signals_query",
+        db_missing_detail="DATABASE_URL not configured. Run the SME pipeline first.",
+    )
 
 
 _CROSS_OUTCOME_WINDOWS = (10, 20)
@@ -2050,22 +2013,15 @@ async def get_sme_signal_history(request: Request, symbol: str):
     return (see _compute_cross_events) — e.g. "last 3 golden crosses: +12%,
     -4%, +22% over 20d" instead of a bare "golden cross on date X."
     """
-    import os
-
-    # Same 60/min budget as the sibling /api/sme-signals list endpoint —
-    # this one was previously unrated-limited despite being a fully
-    # anonymous, unbounded DB query, unlike every other DB-backed GET here.
-    _rate_limit(request, "sme_signal_history", max_calls=60, window_seconds=60)
-    sym = symbol.upper().strip()
     # Every sibling ticker-taking endpoint in this file validates against
     # _TICKER_RE before use — this one didn't, an inconsistency an
     # adversarial review flagged. Not SQL-injectable (sym is always a bind
     # parameter below), so a garbage value would only ever have yielded a
     # 404, but there's no reason for this endpoint to be the one exception.
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the SME pipeline first.")
+    # Validated before the rate-limit check (inside run_db_call() below),
+    # matching its sibling public SME/screener endpoints — see the "422
+    # takes priority over 429" note in docs/api-reference.md.
+    sym = validate_ticker(symbol)
 
     def _query_sync() -> dict:
         from sqlalchemy import text as _text
@@ -2097,12 +2053,14 @@ async def get_sme_signal_history(request: Request, symbol: str):
             "cross_events": _compute_cross_events(series),
         }
 
-    loop = asyncio.get_running_loop()
-    try:
-        result = await loop.run_in_executor(None, _query_sync)
-    except Exception as exc:
-        log_event(LOGGER, "sme_signal_history_failed", level="error", symbol=sym, error=str(exc))
-        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    # Same 60/min budget as the sibling /api/sme-signals list endpoint —
+    # this one was previously unrated-limited despite being a fully
+    # anonymous, unbounded DB query, unlike every other DB-backed GET here.
+    result = await run_db_call(
+        request, "sme_signal_history", 60, _query_sync, "sme_signal_history",
+        db_missing_detail="DATABASE_URL not configured. Run the SME pipeline first.",
+        extra_log_fields={"symbol": sym},
+    )
 
     if not result["series"]:
         raise HTTPException(status_code=404, detail=f"No stored EMA history for {sym}.")
@@ -2112,46 +2070,19 @@ async def get_sme_signal_history(request: Request, symbol: str):
 @app.post("/api/sme-signals/refresh", status_code=202)
 async def refresh_sme_signals(request: Request):
     """Run the SME EMA pipeline in the background. 409 if a run is in progress."""
-    import os
 
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
-    # Atomic claim (Redis-shared across workers when REDIS_URL is set, so two
-    # workers can no longer both pass this check and both start a refresh —
-    # unlike the old plain-bool guard this replaced). Checked before the rate
-    # limit, same order the old code used (409 takes priority over 429 when
-    # both would apply).
-    if not rate_limiter.try_acquire_lock(_SME_REFRESH_LOCK_NAME, _SME_REFRESH_LOCK_TTL_SECONDS):
-        raise HTTPException(status_code=409, detail="A refresh is already running.")
-    try:
-        _rate_limit(request, "sme_refresh", max_calls=3, window_seconds=3600)
-    except HTTPException:
-        rate_limiter.release_lock(_SME_REFRESH_LOCK_NAME)
-        raise
+    def _run_sme_pipeline() -> bool:
+        from pipelines.sme_ema_pipeline import run as run_sme_pipeline
+        return run_sme_pipeline()
 
-    loop = asyncio.get_running_loop()
-
-    def _run_pipeline():
-        try:
-            from pipelines.sme_ema_pipeline import run as run_sme_pipeline
-            healthy = run_sme_pipeline()
-            if not healthy:
-                log_event(
-                    LOGGER, "sme_refresh_unhealthy", level="warning",
-                    detail="Pipeline ran but reported an unhealthy result (empty stock list or "
-                           "too high an OHLCV fetch error rate) — see sme_ema_pipeline logs above.",
-                )
-        except Exception as exc:
-            log_event(LOGGER, "sme_refresh_failed", level="error", error=str(exc))
-        finally:
-            rate_limiter.release_lock(_SME_REFRESH_LOCK_NAME)
-
-    async def _launch():
-        await loop.run_in_executor(None, _run_pipeline)
-
-    asyncio.create_task(_launch())
-    log_event(LOGGER, "sme_refresh_started")
-    return {"started": True}
+    return await run_locked_refresh(
+        request, _SME_REFRESH_LOCK_NAME, _SME_REFRESH_LOCK_TTL_SECONDS,
+        "sme_refresh", 3, 3600, _run_sme_pipeline, "sme_refresh",
+        unhealthy_detail=(
+            "Pipeline ran but reported an unhealthy result (empty stock list or "
+            "too high an OHLCV fetch error rate) — see sme_ema_pipeline logs above."
+        ),
+    )
 
 
 # ── Custom screener ───────────────────────────────────────────────────────────
@@ -2193,16 +2124,12 @@ async def get_screener(
     currently-populated set of nse_industry values — the frontend's filter
     chips are built from this, not a hardcoded/guessed list.
     """
-    _rate_limit(request, "screener", max_calls=60, window_seconds=60)
-
     if ema_trend not in ("all", "bullish", "bearish"):
         raise HTTPException(status_code=422, detail="ema_trend must be one of: all, bullish, bearish")
     if sort not in _SCREENER_SORT_COLUMNS:
         raise HTTPException(status_code=422, detail=f"sort must be one of: {', '.join(sorted(_SCREENER_SORT_COLUMNS))}")
     if order not in ("asc", "desc"):
         raise HTTPException(status_code=422, detail="order must be asc or desc")
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured. Run the screener pipeline first.")
 
     def _query_sync() -> dict:
         from sqlalchemy import text as _text
@@ -2273,12 +2200,10 @@ async def get_screener(
             "refreshing":       rate_limiter.is_locked(_SCREENER_REFRESH_LOCK_NAME),
         }
 
-    loop = asyncio.get_running_loop()
-    try:
-        return await loop.run_in_executor(None, _query_sync)
-    except Exception as exc:
-        log_event(LOGGER, "screener_query_failed", level="error", error=str(exc))
-        raise HTTPException(status_code=503, detail="Database error. See server logs.")
+    return await run_db_call(
+        request, "screener", 60, _query_sync, "screener_query",
+        db_missing_detail="DATABASE_URL not configured. Run the screener pipeline first.",
+    )
 
 
 @app.post("/api/screener/refresh", status_code=202)
@@ -2286,39 +2211,19 @@ async def refresh_screener(request: Request):
     """Run the custom screener pipeline in the background. 409 if a run is
     already in progress — same lock-then-rate-limit pattern (and ordering)
     as /api/sme-signals/refresh."""
-    if not os.environ.get("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="DATABASE_URL not configured.")
-    if not rate_limiter.try_acquire_lock(_SCREENER_REFRESH_LOCK_NAME, _SCREENER_REFRESH_LOCK_TTL_SECONDS):
-        raise HTTPException(status_code=409, detail="A refresh is already running.")
-    try:
-        _rate_limit(request, "screener_refresh", max_calls=3, window_seconds=3600)
-    except HTTPException:
-        rate_limiter.release_lock(_SCREENER_REFRESH_LOCK_NAME)
-        raise
 
-    loop = asyncio.get_running_loop()
+    def _run_screener_pipeline() -> bool:
+        from pipelines.screener_pipeline import run as run_screener_pipeline
+        return run_screener_pipeline()
 
-    def _run_pipeline():
-        try:
-            from pipelines.screener_pipeline import run as run_screener_pipeline
-            healthy = run_screener_pipeline()
-            if not healthy:
-                log_event(
-                    LOGGER, "screener_refresh_unhealthy", level="warning",
-                    detail="Pipeline ran but reported an unhealthy result (empty constituent "
-                           "list or too high a metrics-fetch error rate) — see screener_pipeline logs above.",
-                )
-        except Exception as exc:
-            log_event(LOGGER, "screener_refresh_failed", level="error", error=str(exc))
-        finally:
-            rate_limiter.release_lock(_SCREENER_REFRESH_LOCK_NAME)
-
-    async def _launch():
-        await loop.run_in_executor(None, _run_pipeline)
-
-    asyncio.create_task(_launch())
-    log_event(LOGGER, "screener_refresh_started")
-    return {"started": True}
+    return await run_locked_refresh(
+        request, _SCREENER_REFRESH_LOCK_NAME, _SCREENER_REFRESH_LOCK_TTL_SECONDS,
+        "screener_refresh", 3, 3600, _run_screener_pipeline, "screener_refresh",
+        unhealthy_detail=(
+            "Pipeline ran but reported an unhealthy result (empty constituent "
+            "list or too high a metrics-fetch error rate) — see screener_pipeline logs above."
+        ),
+    )
 
 
 # ── Watchlist + Positions ─────────────────────────────────────────────────────
@@ -2440,9 +2345,7 @@ async def _consolidated_payload(sym: str) -> dict:
 @app.get("/api/consolidated/{symbol}")
 async def get_consolidated(request: Request, symbol: str):
     _rate_limit(request, "consolidated", max_calls=30, window_seconds=60)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = validate_ticker(symbol)
     return await _consolidated_payload(sym)
 
 
@@ -2700,9 +2603,7 @@ async def _require_api_key_user(request: Request) -> int:
 @app.get("/api/v1/consolidated/{symbol}")
 async def get_consolidated_v1(request: Request, symbol: str):
     await _require_api_key_user(request)
-    sym = symbol.upper().strip()
-    if not _TICKER_RE.match(sym):
-        raise HTTPException(status_code=422, detail="Invalid symbol.")
+    sym = validate_ticker(symbol)
     return await _consolidated_payload(sym)
 
 

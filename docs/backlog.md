@@ -372,10 +372,10 @@ skip-link plus `<header>`/`<main id="main">` landmarks, and `ConsolidatedCard` h
 trap (`inert` on the background + manual Tab-wrap) — neither was tracked as fixed before this
 pass. Still open — most in `design.md` §10/§12:
 
-- **The mobile nav dropdown (`site-nav.tsx`) has no real focus trap**, unlike `ConsolidatedCard` —
-  click-outside/Escape-to-close exist, but Tab can walk out of the open menu into the (visible,
-  non-inert) background. The nav bar itself is also still a plain `<div>`, not a `<nav>` landmark
-  (only the surrounding `<header>` is real) — **heading order unaudited**.
+- **The mobile nav dropdown (`site-nav.tsx`) now has a real Tab-wrap focus trap** (`useFocusTrap`,
+  same hook as `ConsolidatedCard`) plus an accessible name on the panel itself. The nav bar as a
+  whole is still a plain `<div>`, not a `<nav>` landmark (only the surrounding `<header>` is real)
+  — **heading order unaudited**.
 - **Three inputs still use `focus:outline-none`** (down from five) and out-specify the global focus
   rule — each has its own ring/border so none are blind, but it's a second inconsistent treatment
   that also fires on mouse click.
@@ -430,15 +430,19 @@ pass. Still open — most in `design.md` §10/§12:
 
 ## Engineering debt
 
-- **`api.py` is ~2,790 lines and holds 29 of the 61 routes.** Only watchlist, positions and the
-  Portfolio Aggregator have been extracted to `routes/`. A deep architecture pass this round traced
-  the full module dependency graph and found the extraction itself clean — no circular imports, no
-  business logic leaking into `api.py` beyond what's already disclosed here.
-- **`pipelines/market_picks_pipeline.py` has never been decomposed** — the largest module in the repo, with
-  six phases sharing mutable state and threading/async coordination. Re-audited this round for a
-  thread-safety bug specifically (shared dict/list/counter written from worker threads without a
-  lock) — none found; every `ThreadPoolExecutor` result is collected single-threaded via
-  `as_completed`, and the three explicit `threading.Lock()` usages are all correctly scoped.
+- **`api.py` is ~2,790 lines and holds 29 of the 63 routes.** Only watchlist, positions, the
+  Portfolio Aggregator, and broker sync have been extracted to `routes/`. A deep architecture pass
+  this round traced the full module dependency graph and found the extraction itself clean — no
+  circular imports, no business logic leaking into `api.py` beyond what's already disclosed here.
+- **`pipelines/market_picks_pipeline.py`'s helper groups are now extracted** (into
+  `market_picks_llm.py`/`market_picks_cache.py`/`market_picks_history.py`/
+  `market_picks_symbols.py`/`market_picks_scoring.py`), but its `MarketPicksPipeline` class — the
+  six `_phase_*` methods themselves — has not been. Re-audited for a thread-safety bug specifically
+  (shared dict/list/counter written from worker threads without a lock) — none found; every
+  `ThreadPoolExecutor` result is collected single-threaded via `as_completed`, and the one
+  genuinely shared mutable resource across the class (a lazily-built `requests.Session`) is
+  correctly lock-protected. Splitting the phase methods out of the class remains open, deliberately
+  deferred to a separate decision.
 - **No typed config module.** Closer to ~50 `os.getenv`/`os.environ` call sites across `backend/`
   today (re-counted this round), not the "~20" this doc previously estimated — the gap has grown
   as broker sync/portfolio-aggregator/API-keys landed, not shrunk. `docs/setup.md` is still the

@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import type { ConsolidatedView } from '@/types';
 import { REC_TONE_4TIER, REC_TONE_UNKNOWN } from '@/lib/tone';
+import { ErrorBanner } from '@/components/error-banner';
 import { useFocusTrap } from '@/lib/use-focus-trap';
 
 interface Props {
@@ -127,14 +128,7 @@ export default function ConsolidatedCard({ symbol, onClose }: Props) {
           {loading && <SectionSkeleton />}
 
           {!loading && error && (
-            <div role="alert" className="px-5 py-4 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm
-                                         flex items-start justify-between gap-4">
-              <span>Couldn&apos;t reach AlphaPulse.</span>
-              <button onClick={load} className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
-                                                  border border-sell/40 hover:bg-sell/10 transition-colors">
-                Retry
-              </button>
-            </div>
+            <ErrorBanner message="Couldn't reach AlphaPulse." onRetry={load} />
           )}
 
           {!loading && !error && data && (

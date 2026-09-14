@@ -16,7 +16,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
 import api
-import routes._shared as _shared
+import db.models as db_models
 from core import rate_limiter
 from db.models import (
     accounts, assets, holdings, metadata, mf_nav_daily, prices_daily, profiles,
@@ -89,8 +89,11 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
         ])
         self._old_db_url = os.environ.get("DATABASE_URL")
         os.environ["DATABASE_URL"] = "sqlite://"
-        self._old_engine = _shared._DB_ENGINE
-        _shared._DB_ENGINE = self.engine
+        # The lazily-constructed DB engine cache now lives in db/models.py
+        # (shared by every DB-touching module), not as routes/_shared.py's
+        # own module-level global — inject the test engine there instead.
+        self._old_engine = db_models._SHARED_ENGINE
+        db_models._SHARED_ENGINE = self.engine
         rate_limiter._memory_calls.clear()
         # test_other_owners_profile_account_and_asset_are_all_404 below also
         # exercises GET /broker/connections, which resolves its owner via
@@ -105,7 +108,7 @@ class PortfolioAggregatorEndpointTest(unittest.TestCase):
     def tearDown(self) -> None:
         self._owner_patcher.stop()
         self._broker_owner_patcher.stop()
-        _shared._DB_ENGINE = self._old_engine
+        db_models._SHARED_ENGINE = self._old_engine
         if self._old_db_url is None:
             os.environ.pop("DATABASE_URL", None)
         else:

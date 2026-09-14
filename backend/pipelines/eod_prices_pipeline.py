@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 
 from pipelines.corporate_actions_pipeline import run_ca_step
+from db.batch import batched_execute
 from db.models import get_engine, metadata, mf_nav_daily, prices_daily, securities
 from core.error_tracking import init_error_tracking
 from core.observability import get_logger, log_event
@@ -90,15 +91,13 @@ def _upsert_prices(engine, rows: list[dict]) -> int:
             turnover_lacs = EXCLUDED.turnover_lacs, trades = EXCLUDED.trades,
             delivery_qty = EXCLUDED.delivery_qty, delivery_pct = EXCLUDED.delivery_pct
     """)
-    with engine.begin() as conn:
-        for i in range(0, len(rows), _BATCH_SIZE):
-            conn.execute(sql, [
-                {k: r.get(k) for k in (
-                    "symbol", "trade_date", "open", "high", "low", "close",
-                    "prev_close", "avg_price", "volume", "turnover_lacs",
-                    "trades", "delivery_qty", "delivery_pct")}
-                for r in rows[i:i + _BATCH_SIZE]
-            ])
+    batched_execute(engine, sql, [
+        {k: r.get(k) for k in (
+            "symbol", "trade_date", "open", "high", "low", "close",
+            "prev_close", "avg_price", "volume", "turnover_lacs",
+            "trades", "delivery_qty", "delivery_pct")}
+        for r in rows
+    ], batch_size=_BATCH_SIZE)
     return len(rows)
 
 
@@ -118,9 +117,7 @@ def _upsert_seen(engine, rows: list[dict]) -> None:
                                OR EXCLUDED.last_seen > securities.last_seen
                              THEN EXCLUDED.last_seen ELSE securities.last_seen END
     """)
-    with engine.begin() as conn:
-        for i in range(0, len(rows), _BATCH_SIZE):
-            conn.execute(sql, rows[i:i + _BATCH_SIZE])
+    batched_execute(engine, sql, rows, batch_size=_BATCH_SIZE)
 
 
 def _upsert_master(engine, rows: list[dict]) -> None:
@@ -135,9 +132,7 @@ def _upsert_master(engine, rows: list[dict]) -> None:
             isin = EXCLUDED.isin, company_name = EXCLUDED.company_name,
             listing_date = EXCLUDED.listing_date, face_value = EXCLUDED.face_value
     """)
-    with engine.begin() as conn:
-        for i in range(0, len(rows), _BATCH_SIZE):
-            conn.execute(sql, rows[i:i + _BATCH_SIZE])
+    batched_execute(engine, sql, rows, batch_size=_BATCH_SIZE)
 
 
 def _upsert_navs(engine, rows: list[dict]) -> int:
@@ -149,9 +144,7 @@ def _upsert_navs(engine, rows: list[dict]) -> int:
         ON CONFLICT (scheme_code, nav_date) DO UPDATE SET
             nav = EXCLUDED.nav, scheme_name = EXCLUDED.scheme_name
     """)
-    with engine.begin() as conn:
-        for i in range(0, len(rows), _BATCH_SIZE):
-            conn.execute(sql, rows[i:i + _BATCH_SIZE])
+    batched_execute(engine, sql, rows, batch_size=_BATCH_SIZE)
     return len(rows)
 
 

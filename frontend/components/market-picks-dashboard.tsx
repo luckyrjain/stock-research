@@ -10,7 +10,9 @@ import { getClientId } from '@/lib/watchlist';
 import { safeExternalHref, fmtPrice } from '@/lib/format';
 import { REC_TONE_4TIER, REC_LABEL_4TIER } from '@/lib/tone';
 import { SortableTh, FilterChip } from './data-table-ui';
+import { SpinIcon } from './error-banner';
 import { useFocusTrap } from '@/lib/use-focus-trap';
+import { useSortState } from '@/lib/use-sort-state';
 
 type SortKey    = 'confidence_score' | 'change_pct' | 'pe_ratio' | 'valuation_percentile';
 type ConfFilter = 'all' | 'high' | 'medium' | 'low';
@@ -391,8 +393,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
   const { isPositioned, positions } = usePositions();
   const [concentratedSectors, setConcentratedSectors] = useState<string[]>([]);
   const [expanded,   setExpanded]   = useState<Set<string>>(new Set());
-  const [sortKey,    setSortKey]    = useState<SortKey | null>(null);
-  const [sortDir,    setSortDir]    = useState<'desc' | 'asc'>('desc');
+  const { sortKey, sortDir, toggleSort } = useSortState<SortKey>();
   const [search,     setSearch]     = useState('');
   const [confFilter,    setConfFilter]    = useState<ConfFilter>('all');
   const [sectorFilter,  setSectorFilter]  = useState<string>('all');
@@ -422,11 +423,6 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
       });
     return () => { cancelled = true; };
   }, [positions.length, generatedAt]);
-
-  function toggleSort(k: SortKey) {
-    if (sortKey === k) setSortDir(d => d === 'desc' ? 'asc' : 'desc');
-    else { setSortKey(k); setSortDir('desc'); }
-  }
 
   const displayed = useMemo(() => {
     let out = picks;
@@ -527,7 +523,7 @@ export default function MarketPicksDashboard({ picks, generatedAt, fromCache, on
                 : 'border-border text-muted hover:text-tx hover:border-border-hi'}`}
           >
             {rescanning
-              ? <><span aria-hidden="true" className="animate-spin-slow">⟳</span> Scanning…</>
+              ? <><SpinIcon /> Scanning…</>
               : <>↺ {fromCache ? 'Fresh scan' : 'Rescan'}</>}
           </button>
         </div>

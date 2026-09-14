@@ -12,10 +12,11 @@ Filters applied to cut ESOP/pledge noise:
 """
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta, timezone
 
 import requests
 
+from tools._nse_dates import parse_nse_date
 from tools._nse_session import get_nse_session
 
 logger = logging.getLogger(__name__)
@@ -130,12 +131,10 @@ def _trade_to_article(row: dict) -> dict | None:
 
 
 def _parse_pit_date(date_str: str) -> str | None:
-    for fmt in ("%d-%b-%Y %H:%M", "%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(date_str, fmt).replace(tzinfo=timezone.utc).isoformat()
-        except (ValueError, TypeError):
-            pass
-    return None
+    parsed = parse_nse_date(date_str, ("%d-%b-%Y %H:%M", "%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y"))
+    if parsed is None:
+        return None
+    return parsed.replace(tzinfo=timezone.utc).isoformat()
 
 
 def _fetch_pit_rows(sess: requests.Session, lookback_days: int) -> list[dict]:

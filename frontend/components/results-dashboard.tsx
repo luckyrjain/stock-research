@@ -13,6 +13,7 @@ import { InsiderActivityCard } from './insider-activity-card';
 import { ShareholdingDetailCard } from './shareholding-detail-card';
 import { StreetConsensusCard } from './street-consensus-card';
 import ValuationSummaryStrip from './valuation-summary-strip';
+import { SpinIcon } from './error-banner';
 import PriceSparkline from './price-sparkline';
 import VerdictTimeline from './verdict-timeline';
 import QuarterlyTrendCard from './quarterly-trend-card';
@@ -182,7 +183,7 @@ export default function ResultsDashboard({ report, onHardRefresh, refreshing }: 
                     hover:text-tx transition-colors duration-150 disabled:opacity-50"
                 >
                   {refreshing
-                    ? <><span aria-hidden="true" className="animate-spin-slow">⟳</span><span>Refreshing…</span></>
+                    ? <><SpinIcon /><span>Refreshing…</span></>
                     : <><span>↺</span><span>Refresh</span></>}
                 </button>
               )}

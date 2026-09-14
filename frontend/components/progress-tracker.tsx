@@ -1,4 +1,5 @@
 import type { TaskName, TaskStatus, Phase } from '@/types';
+import { SpinIcon } from '@/components/error-banner';
 
 const TASK_LABELS: Record<TaskName, string> = {
   stock_info:   'Market Data',
@@ -23,7 +24,7 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
 function StepChip({ name, status }: { name: TaskName; status: TaskStatus }) {
   const configs: Record<TaskStatus, { cls: string; icon: React.ReactNode }> = {
     idle:   { cls: 'bg-card border-border text-muted',              icon: '○' },
-    running:{ cls: 'bg-accent/10 border-accent text-accent',        icon: <span className="inline-block animate-spin-slow">⟳</span> },
+    running:{ cls: 'bg-accent/10 border-accent text-accent',        icon: <SpinIcon className="inline-block" /> },
     ok:     { cls: 'bg-buy/10 border-buy/30 text-buy',              icon: '✓' },
     fail:   { cls: 'bg-sell/10 border-sell/30 text-sell',           icon: '✕' },
     cached: { cls: 'bg-card border-border-hi text-muted',           icon: '↺' },

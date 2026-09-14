@@ -20,28 +20,19 @@ load.
 """
 import hashlib
 import secrets
-import threading
 from datetime import datetime, timedelta, timezone
 
 from core.observability import get_logger, log_event
 
 LOGGER = get_logger("auth")
 
-_ENGINE = None
-_ENGINE_LOCK = threading.Lock()
-
 MAGIC_LINK_TTL = timedelta(minutes=15)
 SESSION_TTL = timedelta(days=30)
 
 
 def _get_engine():
-    global _ENGINE
-    if _ENGINE is None:
-        with _ENGINE_LOCK:
-            if _ENGINE is None:  # re-check: another thread may have won the race
-                from db.models import get_engine
-                _ENGINE = get_engine()
-    return _ENGINE
+    from db.models import get_shared_engine
+    return get_shared_engine()
 
 
 def _hash_token(token: str) -> str:

@@ -4,6 +4,7 @@ import uuid
 from unittest.mock import MagicMock, patch
 
 from core import rate_limiter
+from core import redis_client as redis_client_module
 
 
 class _MemoryStateResetMixin:
@@ -11,16 +12,19 @@ class _MemoryStateResetMixin:
         rate_limiter._memory_calls.clear()
         rate_limiter._memory_slots.clear()
         rate_limiter._memory_locks.clear()
-        rate_limiter._redis_client = None
-        rate_limiter._redis_client_construction_failed = False
+        # The lazily-constructed Redis client cache now lives in
+        # core/redis_client.py (shared with core/cache.py) rather than as
+        # rate_limiter's own module-level globals — reset it there instead.
+        redis_client_module._redis_client = None
+        redis_client_module._redis_client_construction_failed = False
         self._redis_url = os.environ.pop("REDIS_URL", None)
 
     def tearDown(self) -> None:
         rate_limiter._memory_calls.clear()
         rate_limiter._memory_slots.clear()
         rate_limiter._memory_locks.clear()
-        rate_limiter._redis_client = None
-        rate_limiter._redis_client_construction_failed = False
+        redis_client_module._redis_client = None
+        redis_client_module._redis_client_construction_failed = False
         if self._redis_url is not None:
             os.environ["REDIS_URL"] = self._redis_url
         else:

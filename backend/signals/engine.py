@@ -1,8 +1,6 @@
 """Signal engine orchestration for scoring and verdict generation."""
 
-import threading
-
-from core.observability import get_logger, log_event
+from core.observability import get_logger, warn_once
 from signals.features import extract_features
 from signals.volume import volume_signal
 from signals.valuation import valuation_signal
@@ -83,18 +81,6 @@ _SECTOR_WEIGHT_OVERRIDES = {
     "cyclical": {"technical": 0.3, "volume": 0.3, "valuation": 0.3, "growth": 0.3},
 }
 
-_unmatched_sectors_logged: set[str] = set()
-# run_signal_engine() runs inside ThreadPoolExecutor workers from several
-# concurrent call sites (api.py's SSE handler, pipelines/market_picks_pipeline.py's
-# _phase_research, pipelines/watchlist_alerts.py's batch loop) — without this lock, two
-# threads that both first encounter the same never-before-seen sector at the
-# same moment can each pass the membership check below before either calls
-# .add(), producing a duplicate warning log instead of the documented
-# one-time-per-process behavior. Log noise only (no scoring impact), but a
-# real, concretely triggerable violation of that guarantee.
-_unmatched_sectors_lock = threading.Lock()
-
-
 def _log_unmatched_sector_once(sector: str) -> None:
     """One-time-per-process log when a real (non-None) sector value doesn't
     match any override bucket — the cheapest way to validate or invalidate
@@ -104,12 +90,15 @@ def _log_unmatched_sector_once(sector: str) -> None:
     to _DEFAULT_WEIGHTS (safe, but a no-op for the sector-aware tilt this
     engine exists to apply), and a "debug" line is invisible in this
     codebase's default INFO-level deployments — nobody would ever see this
-    fire without deliberately turning debug logging on first."""
-    with _unmatched_sectors_lock:
-        if sector in _unmatched_sectors_logged:
-            return
-        _unmatched_sectors_logged.add(sector)
-    log_event(LOGGER, "sector_weight_override_unmatched", level="warning", sector=sector)
+    fire without deliberately turning debug logging on first.
+
+    run_signal_engine() runs inside ThreadPoolExecutor workers from several
+    concurrent call sites (api.py's SSE handler, pipelines/market_picks_pipeline.py's
+    _phase_research, pipelines/watchlist_alerts.py's batch loop), so the
+    underlying check-then-add-then-log sequence must stay thread-safe — see
+    core.observability.warn_once() for the shared lock+set mechanism that
+    guarantees this."""
+    warn_once(LOGGER, "sector_weight_override_unmatched", sector, sector=sector)
 
 
 def _weights_for_sector(sector: str | None) -> dict[str, float]:

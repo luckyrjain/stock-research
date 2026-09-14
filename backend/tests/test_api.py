@@ -10,6 +10,7 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 import api
+import db.models as db_models
 from core import cache
 from core import rate_limiter
 from core import state_store
@@ -540,7 +541,7 @@ class MarketPicksStatusEndpointTest(unittest.TestCase):
 
     def test_returns_cache_metadata_and_next_scheduled_run(self) -> None:
         fake_status = {"last_run_at": "2026-07-20T00:00:00+00:00", "is_fresh": True}
-        with patch("pipelines.market_picks_pipeline.picks_cache_status", return_value=fake_status):
+        with patch("pipelines.market_picks_cache.picks_cache_status", return_value=fake_status):
             resp = client.get("/api/market-picks/status")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -550,7 +551,7 @@ class MarketPicksStatusEndpointTest(unittest.TestCase):
 
     def test_no_cache_returns_null_last_run(self) -> None:
         fake_status = {"last_run_at": None, "is_fresh": False}
-        with patch("pipelines.market_picks_pipeline.picks_cache_status", return_value=fake_status):
+        with patch("pipelines.market_picks_cache.picks_cache_status", return_value=fake_status):
             resp = client.get("/api/market-picks/status")
         body = resp.json()
         self.assertIsNone(body["last_run_at"])
@@ -1141,6 +1142,15 @@ class PeersEndpointTest(unittest.TestCase):
         resp = client.get("/api/peers/TCS")
         self.assertEqual(resp.status_code, 429)
 
+    def test_rate_limit_gates_before_symbol_validation(self) -> None:
+        # Regression test: _rate_limit() must run before validate_ticker(),
+        # so an already-exhausted bucket rejects even an invalid-symbol
+        # request with 429 (not 422) — otherwise a request with a garbage
+        # symbol could skip rate-limiting entirely.
+        rate_limiter._memory_calls["peers:testclient"] = [api.time.monotonic()] * 30
+        resp = client.get("/api/peers/not-a-symbol!!")
+        self.assertEqual(resp.status_code, 429)
+
     def test_returns_peers_with_percentiles_and_caches(self) -> None:
         raw = json.dumps({
             "symbol": "TCS",
@@ -1513,8 +1523,8 @@ class ShareholdingDetailEndpointTest(unittest.TestCase):
         # inline, so the real _get_db_engine() still runs to produce that argument
         # even though the function receiving it is mocked. Regression test: this
         # was missing, so the test only ever passed by accident when an earlier
-        # test in the same process had already populated _shared._DB_ENGINE's module-
-        # level cache (via a real or fake DATABASE_URL) — on a fresh process (a
+        # test in the same process had already populated the shared engine cache
+        # (db.models._SHARED_ENGINE, via a real or fake DATABASE_URL) — on a fresh process (a
         # clean CI runner with no DATABASE_URL set at all, or this test simply
         # running first) it failed with a bare KeyError('DATABASE_URL') instead.
         with patch("tools.nse_tools.get_shareholding_detail", nse_tool), \
@@ -1887,13 +1897,13 @@ class ValuationAnchorHelperTest(unittest.TestCase):
 class SmeSignalsEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_rate_limited_returns_429(self) -> None:
@@ -2093,13 +2103,13 @@ class SmeSignalsEndpointTest(unittest.TestCase):
 class SmeSignalHistoryEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_rate_limited_returns_429(self) -> None:
@@ -2280,13 +2290,13 @@ def _fake_screener_engine(rows, total, total_monitored, industries, last_run):
 class ScreenerEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_rate_limited_returns_429(self) -> None:
@@ -2294,6 +2304,21 @@ class ScreenerEndpointTest(unittest.TestCase):
         rate_limiter._memory_calls["screener:testclient"] = [api.time.monotonic()] * 60
         resp = client.get("/api/screener")
         self.assertEqual(resp.status_code, 429)
+
+    def test_invalid_param_with_exhausted_rate_limit_still_returns_422(self) -> None:
+        """Regression test for the run_db_call() extraction: query-param
+        validation runs before run_db_call() (and therefore before its
+        rate-limit check), by design — an invalid, malformed request is
+        rejected without spending a rate-limit slot or touching the DB,
+        exactly like an ownership-scoped endpoint's own pre-wrapper
+        validation already does. Pins this as an intentional contract
+        rather than an untested side effect of the extraction."""
+        os.environ["DATABASE_URL"] = "postgresql://fake/fake"
+        rate_limiter._memory_calls["screener:testclient"] = [api.time.monotonic()] * 60
+        resp = client.get("/api/screener?ema_trend=sideways")
+        self.assertEqual(resp.status_code, 422)
+        # The exhausted bucket wasn't touched by the invalid request.
+        self.assertEqual(len(rate_limiter._memory_calls["screener:testclient"]), 60)
 
     def test_missing_database_url_returns_503(self) -> None:
         resp = client.get("/api/screener")
@@ -2404,13 +2429,13 @@ class WatchlistEndpointsTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_get_missing_database_url_returns_503(self) -> None:
@@ -2732,13 +2757,13 @@ class WatchlistAccountLinkingTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_get_with_valid_session_queries_by_user_id_ignoring_client_id(self) -> None:
@@ -2904,13 +2929,13 @@ class WatchlistClaimEndpointTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_without_session_returns_401(self) -> None:
@@ -3012,13 +3037,13 @@ class PositionsEndpointsTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_get_missing_database_url_returns_503(self) -> None:
@@ -3203,13 +3228,13 @@ class PositionsAccountLinkingTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_get_with_valid_session_queries_by_user_id_ignoring_client_id(self) -> None:
@@ -3315,13 +3340,13 @@ class PositionsClaimEndpointTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_without_session_returns_401(self) -> None:
@@ -3466,13 +3491,13 @@ class ComputeSectorConcentrationTest(unittest.TestCase):
 class PortfolioConcentrationEndpointTest(unittest.TestCase):
     def setUp(self) -> None:
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_missing_database_url_returns_503(self) -> None:
@@ -3673,13 +3698,13 @@ class ConsolidatedEndpointTest(unittest.TestCase):
         self.addCleanup(self._cache_patch.stop)
 
         self._db_url = os.environ.pop("DATABASE_URL", None)
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def tearDown(self) -> None:
         if self._db_url is not None:
             os.environ["DATABASE_URL"] = self._db_url
-        _shared._DB_ENGINE = None
+        db_models._SHARED_ENGINE = None
         rate_limiter._memory_calls.clear()
 
     def test_invalid_symbol_returns_422(self) -> None:
@@ -4135,6 +4160,16 @@ class ConsolidatedV1EndpointTest(unittest.TestCase):
     def test_invalid_api_key_returns_401(self) -> None:
         with patch("auth.get_user_for_api_key", return_value=None):
             resp = client.get("/api/v1/consolidated/TCS", headers={"X-API-Key": "bogus"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_missing_api_key_and_invalid_symbol_returns_401_not_422(self) -> None:
+        # Regression test: _require_api_key_user() must run before ticker
+        # validation, so a request with no API key AND an invalid symbol is
+        # rejected for the missing key (401) rather than the bad symbol
+        # (422) — otherwise the auth gate (which exists specifically to
+        # rate-limit garbage keys before any DB lookup) could be skipped
+        # just by also sending an invalid symbol.
+        resp = client.get("/api/v1/consolidated/not-a-symbol!!")
         self.assertEqual(resp.status_code, 401)
 
     def test_invalid_key_is_rate_limited_before_any_db_lookup(self) -> None:

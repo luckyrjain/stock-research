@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-from pipelines.market_picks_pipeline import _SOURCE_CREDIBILITY
+from pipelines.market_picks_scoring import _SOURCE_CREDIBILITY
 from tools.market_picks_tools import (
     SOURCES,
     _current_year,

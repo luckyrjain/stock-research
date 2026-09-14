@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 import api
 from core import cache
+from pipelines import market_picks_cache
 from pipelines import market_picks_pipeline
 from core import rate_limiter
 from signals.models import Signal, SignalResult
@@ -261,10 +262,11 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-picks-sse-test-")
         self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
         # load_picks_cache/save_picks_cache (re-exported into api.py under
-        # their historical names) live in pipelines/market_picks_pipeline.py and read
+        # their historical names) live in pipelines/market_picks_cache.py and read
         # _PICKS_CACHE_PATH from that module's own globals — must patch it
-        # there, not on api.py (which no longer defines that name itself).
-        patch.object(market_picks_pipeline, "_PICKS_CACHE_PATH", Path(self._tmpdir) / "picks.json").start()
+        # there, not on api.py (which no longer defines that name itself) nor
+        # on pipelines.market_picks_pipeline (which only re-imports the name).
+        patch.object(market_picks_cache, "_PICKS_CACHE_PATH", Path(self._tmpdir) / "picks.json").start()
         self.addCleanup(patch.stopall)
         rate_limiter._memory_calls.clear()
         rate_limiter._memory_slots.clear()
@@ -291,7 +293,7 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
         self.assertEqual(events[-1]["event"], "done")
         self.assertEqual(events[-1]["total_picks"], 1)
         self.assertFalse(events[-1]["from_cache"])
-        self.assertTrue(market_picks_pipeline._PICKS_CACHE_PATH.exists())
+        self.assertTrue(market_picks_cache._PICKS_CACHE_PATH.exists())
         # The single-run lock must be released once the pipeline completes,
         # not left claimed — otherwise every subsequent force-refresh would
         # 409 forever.
@@ -304,7 +306,7 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
 
         events = _parse_sse(resp.text)
         self.assertEqual(events[-1]["event"], "done")
-        self.assertFalse(market_picks_pipeline._PICKS_CACHE_PATH.exists())
+        self.assertFalse(market_picks_cache._PICKS_CACHE_PATH.exists())
 
     def test_empty_result_is_not_cached(self) -> None:
         with patch("pipelines.market_picks_pipeline.MarketPicksPipeline", self._fake_pipeline([], healthy=True)):
@@ -313,7 +315,7 @@ class MarketPicksSuccessPathTest(unittest.TestCase):
         events = _parse_sse(resp.text)
         self.assertEqual(events[-1]["event"], "done")
         self.assertEqual(events[-1]["total_picks"], 0)
-        self.assertFalse(market_picks_pipeline._PICKS_CACHE_PATH.exists())
+        self.assertFalse(market_picks_cache._PICKS_CACHE_PATH.exists())
 
     def test_llm_capacity_rejection_emits_error_event(self) -> None:
         with patch("api._acquire_llm_slot", return_value=False):

@@ -172,6 +172,54 @@ def _extract_latest_metric_from_tables(soup: BeautifulSoup, labels: tuple[str, .
     return ""
 
 
+def _extract_table(soup: BeautifulSoup, section_id: str) -> tuple[list[str], list[tuple[str, list[float | None]]]] | None:
+    """Locate a Screener `<table>` by section id and do the mechanical walk
+    every yearly/quarterly Screener table extractor in this module needs:
+    read the `thead` row as the year/period axis, then read every `tbody`
+    row's label plus its cell values (each parsed via
+    `_clean(...).replace('%', '')` into `float`/`None`).
+
+    Deliberately does NOT enforce header/row length alignment, a minimum
+    row count, or any row-selection policy — `_extract_quarterly_trend`,
+    `_extract_valuation_band`, and `_extract_yearly_statement` each apply
+    their own distinct rules on top of the (headers, rows) this returns
+    (strict-vs-gap-tolerant alignment, a 3-year minimum, single-row vs
+    all-rows selection), and those policies must stay independent.
+
+    Returns `(headers, rows)` where `rows` is a list of `(row_label,
+    values)` pairs in document order, or `None` if the section or its
+    table isn't present.
+    """
+    section = soup.find("section", {"id": section_id})
+    if not section:
+        return None
+    table = section.find("table")
+    if not table:
+        return None
+
+    header_cells = table.select("thead tr th")
+    headers = [_clean(th.get_text(" ", strip=True)) for th in header_cells[1:]]
+
+    rows: list[tuple[str, list[float | None]]] = []
+    for row in table.select("tbody tr"):
+        cells = row.find_all(["th", "td"])
+        if len(cells) < 2:
+            continue
+        label = cells[0].get_text(" ", strip=True).rstrip("+").strip()
+        if not label:
+            continue
+        values: list[float | None] = []
+        for cell in cells[1:]:
+            raw = _clean(cell.get_text(" ", strip=True)).replace("%", "")
+            try:
+                values.append(float(raw))
+            except ValueError:
+                values.append(None)
+        rows.append((label, values))
+
+    return headers, rows
+
+
 def _extract_quarterly_trend(soup: BeautifulSoup, max_periods: int = 8) -> dict:
     """Sales/EPS/operating-margin mini-trend from Screener's Quarterly Results
     table (section#quarters) — the same company page `get_fundamentals`
@@ -185,32 +233,17 @@ def _extract_quarterly_trend(soup: BeautifulSoup, max_periods: int = 8) -> dict:
     percentage row (never derived/computed here), but several sectors
     (banks, NBFCs) routinely omit that row entirely — absent, not guessed,
     when it isn't cleanly present for the same window as revenue/eps."""
-    section = soup.find("section", {"id": "quarters"})
-    if not section:
+    parsed = _extract_table(soup, "quarters")
+    if parsed is None:
         return {}
-    table = section.find("table")
-    if not table:
-        return {}
-
-    header_cells = table.select("thead tr th")
-    periods = [_clean(th.get_text(" ", strip=True)) for th in header_cells[1:]]
+    periods, table_rows = parsed
 
     def _row_values(row_labels: tuple[str, ...]) -> list[float | None] | None:
         normalized = tuple(label.lower().replace(" ", "") for label in row_labels)
-        for row in table.select("tbody tr"):
-            cells = row.find_all(["th", "td"])
-            if len(cells) < 2:
-                continue
-            row_label = _clean(cells[0].get_text(" ", strip=True)).lower().replace(" ", "")
+        for label, values in table_rows:
+            row_label = label.lower().replace(" ", "")
             if not any(lbl in row_label for lbl in normalized):
                 continue
-            values: list[float | None] = []
-            for cell in cells[1:]:
-                raw = _clean(cell.get_text(" ", strip=True)).replace("%", "")
-                try:
-                    values.append(float(raw))
-                except ValueError:
-                    values.append(None)
             # A row with a different cell count than the header's own period
             # list can't be safely aligned by trimming each list to its own
             # last-N elements — that only produces a correct pairing if the
@@ -266,33 +299,18 @@ def _extract_valuation_band(soup: BeautifulSoup, max_years: int = 5) -> dict:
     have this data" elsewhere in this module) rather than raising — worth
     spot-checking against a live company page before relying on this in
     production."""
-    section = soup.find("section", {"id": "ratios"})
-    if not section:
+    parsed = _extract_table(soup, "ratios")
+    if parsed is None:
         return {}
-    table = section.find("table")
-    if not table:
-        return {}
-
-    header_cells = table.select("thead tr th")
-    years = [_clean(th.get_text(" ", strip=True)) for th in header_cells[1:]]
+    years, table_rows = parsed
     if not years:
         return {}
 
     pe_values: list[float | None] | None = None
-    for row in table.select("tbody tr"):
-        cells = row.find_all(["th", "td"])
-        if len(cells) < 2:
-            continue
-        row_label = _clean(cells[0].get_text(" ", strip=True)).lower().replace(" ", "")
+    for label, values in table_rows:
+        row_label = label.lower().replace(" ", "")
         if "pricetoearning" not in row_label and row_label not in ("p/e", "pe"):
             continue
-        values: list[float | None] = []
-        for cell in cells[1:]:
-            raw = _clean(cell.get_text(" ", strip=True)).replace("%", "")
-            try:
-                values.append(float(raw))
-            except ValueError:
-                values.append(None)
         pe_values = values
         break
 
@@ -342,40 +360,23 @@ def _extract_yearly_statement(soup: BeautifulSoup, section_id: str, max_years: i
     this module — worth spot-checking against a live company page before
     relying on this in production.
     """
-    section = soup.find("section", {"id": section_id})
-    if not section:
+    parsed = _extract_table(soup, section_id)
+    if parsed is None:
         return {}
-    table = section.find("table")
-    if not table:
-        return {}
-
-    header_cells = table.select("thead tr th")
-    years = [_clean(th.get_text(" ", strip=True)) for th in header_cells[1:]]
+    years, table_rows = parsed
     if not years:
         return {}
     n = min(len(years), max_years)
     years_n = years[-n:]
 
     rows = []
-    for row in table.select("tbody tr"):
-        cells = row.find_all(["th", "td"])
-        if len(cells) < 2:
-            continue
-        label = cells[0].get_text(" ", strip=True).rstrip("+").strip()
-        if not label:
-            continue
-        raw_values = [_clean(c.get_text(" ", strip=True)).replace("%", "") for c in cells[1:]]
+    for label, raw_values in table_rows:
         if len(raw_values) != len(years):
             # Row/header cell counts disagree (e.g. a trailing summary column
             # only one of the two carries) — skip rather than misalign a
             # value to the wrong year, same rule _extract_valuation_band uses.
             continue
-        values: list[float | None] = []
-        for raw in raw_values[-n:]:
-            try:
-                values.append(float(raw))
-            except ValueError:
-                values.append(None)
+        values = raw_values[-n:]
         if any(v is not None for v in values):
             rows.append({"label": label, "values": values})
 

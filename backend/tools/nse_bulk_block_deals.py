@@ -9,10 +9,11 @@ plain-language article so the extraction LLM can assign BUY/SELL direction.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import timezone
 
 import requests
 
+from tools._nse_dates import parse_nse_date
 from tools._nse_session import get_nse_session
 
 logger = logging.getLogger(__name__)
@@ -89,12 +90,9 @@ def _parse_deal_row(deal: dict, deal_type: str) -> dict | None:
         return None
 
     pub_iso: str | None = None
-    for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y"):
-        try:
-            pub_iso = datetime.strptime(date_str, fmt).replace(tzinfo=timezone.utc).isoformat()
-            break
-        except (ValueError, TypeError):
-            pass
+    parsed_date = parse_nse_date(date_str, ("%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y"))
+    if parsed_date is not None:
+        pub_iso = parsed_date.replace(tzinfo=timezone.utc).isoformat()
 
     return {
         "symbol":     symbol,
