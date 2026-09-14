@@ -26,12 +26,14 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+from sqlalchemy import select
 
 from telemetry import source_health
 from telemetry import source_quality
 from core import state_store
 from core.error_tracking import init_error_tracking
 from core.observability import get_logger, log_event
+from db.models import get_engine, securities
 
 load_dotenv()
 
@@ -481,51 +483,20 @@ def _build_ranking_reasons(
 
 # ── NSE equity master (hard symbol validation) ────────────────────────────────
 
-_NSE_MASTER_PATH = Path("output/_nse_master.txt")
-_NSE_MASTER_TTL  = 86400  # 24 h
 
-
-def _load_nse_symbol_master() -> set[str]:
-    """
-    Return the official set of NSE equity symbols.
-    Downloads EQUITY_L.csv from NSE archives and caches locally for 24 h.
-    Fails open (returns empty set) when both download and cache are unavailable,
-    so a network failure never silently blocks all validation.
-    """
+def _load_nse_symbol_universe() -> set[str]:
+    """Official set of NSE equity symbols, read from the `securities` table
+    (populated nightly by pipelines/eod_prices_pipeline.py::refresh_securities_master
+    from NSE's own EQUITY_L.csv — no live fetch or local file cache here,
+    unlike the function this replaces). Fails open (empty set) when
+    DATABASE_URL is unset or the query fails, so a DB hiccup never silently
+    blocks all validation — same fail-open contract the old function had."""
     try:
-        if _NSE_MASTER_PATH.exists():
-            if time.time() - _NSE_MASTER_PATH.stat().st_mtime < _NSE_MASTER_TTL:
-                syms = set(_NSE_MASTER_PATH.read_text().splitlines())
-                if syms:
-                    return syms
-        import csv
-        import io as _io
-        sess = requests.Session()
-        sess.headers.update({**_NSE_HEADERS, "Accept": "text/csv,text/plain,*/*"})
-        try:
-            sess.get("https://www.nseindia.com", timeout=6)
-        except Exception:
-            pass
-        r = sess.get(
-            "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
-            timeout=15,
-        )
-        r.raise_for_status()
-        reader = csv.DictReader(_io.StringIO(r.text))
-        syms = {row["SYMBOL"].strip().upper() for row in reader if row.get("SYMBOL", "").strip()}
-        if syms:
-            _NSE_MASTER_PATH.parent.mkdir(parents=True, exist_ok=True)
-            _NSE_MASTER_PATH.write_text("\n".join(sorted(syms)))
-        return syms
+        engine = get_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(select(securities.c.symbol)).fetchall()
+        return {r[0].strip().upper() for r in rows if r[0] and r[0].strip()}
     except Exception:
-        # Fall back to stale cache rather than failing open completely
-        try:
-            if _NSE_MASTER_PATH.exists():
-                syms = set(_NSE_MASTER_PATH.read_text().splitlines())
-                if syms:
-                    return syms
-        except Exception:
-            pass
         return set()  # empty = allow all (fail open)
 
 
@@ -1307,7 +1278,7 @@ Return ONLY this JSON (no markdown, no extra text):
                             if suffix == ".NS" and nse_master and ticker_hint.upper() not in nse_master:
                                 continue
                             # Disclosed limitation: the .BO (BSE) branch has
-                            # no equivalent hard gate — _load_nse_symbol_master()
+                            # no equivalent hard gate — _load_nse_symbol_universe()
                             # is genuinely NSE-only (NSE's own EQUITY_L.csv),
                             # and this codebase has no BSE equity-master
                             # fetcher to validate against (BSE listings are
@@ -1384,8 +1355,8 @@ Return ONLY this JSON (no markdown, no extra text):
 
             return None
 
-        # Load NSE equity master once (cached 24 h) before parallel validation
-        nse_master = _load_nse_symbol_master()
+        # Load NSE equity master once before parallel validation
+        nse_master = _load_nse_symbol_universe()
 
         consolidated: list[dict] = []
         # Maps a resolved symbol to its consolidated dict (not just a
