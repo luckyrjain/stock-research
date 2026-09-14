@@ -740,8 +740,8 @@ never a corrupt file.
 
 **Outside `core/cache.py` entirely**: `output/_market_picks/picks.json` (192h / 7d + 24h buffer, its own
 `_PICKS_CACHE_TTL_HOURS`), `output/_extract_cache/<hash>.json` (6h, content-aware key over title +
-URL + summary, pruned once per pipeline run), `output/_nse_master.txt` (24h),
-`output/_bse_main_master.json` (24h, securities master), and `output/_bhavcopy/` (raw bhavcopy
+URL + summary, pruned once per pipeline run), `output/_bse_main_master.json` (24h, BSE main-board
+fetch cache for the nightly `securities_bse` ingestion step), and `output/_bhavcopy/` (raw bhavcopy
 archive for replay). Everything under `output/` is regenerable; durable state is in `app_state`.
 
 ---
@@ -1102,8 +1102,7 @@ stock-research/
 │       ├── _extract_cache/           LLM extraction cache (6h TTL)
 │       ├── _market_picks/            Market picks result cache (7-day TTL)
 │       ├── _bhavcopy/                Raw NSE bhavcopy CSV archive (EOD price store replay)
-│       ├── _nse_master.txt           NSE equity symbol master (24h refresh)
-│       └── _bse_main_master.json     BSE main-board master (24h) — securities_master.py
+│       └── _bse_main_master.json     BSE main-board fetch cache (24h) — nightly securities_bse ingestion
 ├── .env / .env.example         Shared by both stacks; stays at the repo root
 ├── docker-compose.yml          backend + frontend + postgres + redis
 ├── .github/workflows/         ci, market-picks-cron, sme-cron, screener-cron,

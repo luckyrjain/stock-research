@@ -7,10 +7,10 @@ phases.
 """
 
 import re
-import time
-from pathlib import Path
 
-from core.atomic_file import atomic_write_text
+from sqlalchemy import select
+
+from db.models import get_engine, securities
 from pipelines.market_picks_scoring import _DEFAULT_CREDIBILITY
 
 # ── Company-name suffixes to strip before ticker lookup ──────────────────────
@@ -36,47 +36,19 @@ def _title_words(title: str) -> frozenset[str]:
 
 # ── NSE equity master (hard symbol validation) ────────────────────────────────
 
-_NSE_MASTER_PATH = Path("output/_nse_master.txt")
-_NSE_MASTER_TTL  = 86400  # 24 h
 
-
-def _load_nse_symbol_master() -> set[str]:
-    """
-    Return the official set of NSE equity symbols.
-    Downloads EQUITY_L.csv from NSE archives and caches locally for 24 h.
-    Fails open (returns empty set) when both download and cache are unavailable,
-    so a network failure never silently blocks all validation.
-    """
+def _load_nse_symbol_universe() -> set[str]:
+    """Official set of NSE equity symbols, read from the `securities` table
+    (populated nightly by pipelines/eod_prices_pipeline.py::refresh_securities_master
+    from NSE's own EQUITY_L.csv — no live fetch here). Fails open (empty set)
+    when DATABASE_URL is unset or the query fails, so a DB hiccup never
+    silently blocks all validation."""
     try:
-        if _NSE_MASTER_PATH.exists():
-            if time.time() - _NSE_MASTER_PATH.stat().st_mtime < _NSE_MASTER_TTL:
-                syms = set(_NSE_MASTER_PATH.read_text().splitlines())
-                if syms:
-                    return syms
-        import csv
-        import io as _io
-        from tools._nse_session import get_nse_session
-        sess = get_nse_session(timeout=6, accept="text/csv,text/plain,*/*", sleep_after_prime=0)
-        r = sess.get(
-            "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
-            timeout=15,
-        )
-        r.raise_for_status()
-        reader = csv.DictReader(_io.StringIO(r.text))
-        syms = {row["SYMBOL"].strip().upper() for row in reader if row.get("SYMBOL", "").strip()}
-        if syms:
-            _NSE_MASTER_PATH.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(_NSE_MASTER_PATH, "\n".join(sorted(syms)))
-        return syms
+        engine = get_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(select(securities.c.symbol)).fetchall()
+        return {r[0].strip().upper() for r in rows if r[0] and r[0].strip()}
     except Exception:
-        # Fall back to stale cache rather than failing open completely
-        try:
-            if _NSE_MASTER_PATH.exists():
-                syms = set(_NSE_MASTER_PATH.read_text().splitlines())
-                if syms:
-                    return syms
-        except Exception:
-            pass
         return set()  # empty = allow all (fail open)
 
 

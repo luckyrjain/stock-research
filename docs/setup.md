@@ -503,7 +503,6 @@ Market picks-specific caches:
 |---|---|---|
 | `backend/output/_market_picks/picks.json` | 7 days (192 h) | Full pipeline result |
 | `backend/output/_extract_cache/` | 6 hours | Per-source LLM extraction |
-| `backend/output/_nse_master.txt` | 24 hours | NSE equity symbol list |
 
 Everything durable that used to live beside these — daily pick snapshots, LLM cost counters,
 per-source health, scraper error counters, source-quality telemetry — is now in PostgreSQL, in
@@ -593,7 +592,14 @@ The pipeline fetches from external RSS feeds and GNews. If all sources return em
 
 ### NSE equity master download fails
 
-The pipeline fails open when `backend/output/_nse_master.txt` cannot be downloaded — all tickers are allowed through. If validation is too permissive, delete the stale cache file and ensure `nsearchives.nseindia.com` is reachable.
+Market Picks' symbol validation reads the NSE equity master from the `securities` table
+(`pipelines.market_picks_pipeline._load_nse_symbol_universe()`), not a local file — that table is
+populated nightly by `pipelines/eod_prices_pipeline.py` from NSE's `EQUITY_L.csv`. This fails open
+(empty set — all tickers are allowed through) when `DATABASE_URL` is unset, the DB is unreachable,
+or the table is simply empty (e.g. a fresh install before the first nightly run). If validation is
+too permissive, check that `securities` has actually been populated: confirm `DATABASE_URL` is set
+and run `python -m pipelines.eod_prices_pipeline` by hand (it needs `nsearchives.nseindia.com` to
+be reachable to fetch `EQUITY_L.csv`), then re-check the table row count.
 
 ### SME signals / Screener page returns 503
 

@@ -3,12 +3,16 @@ import warnings
 from datetime import date
 from unittest.mock import MagicMock, patch
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, insert, select, text
 
-from db.models import metadata, mf_nav_daily, prices_daily, securities
+from db.models import (
+    metadata, mf_nav_daily, prices_daily, securities, securities_bse, securities_sme,
+)
 from pipelines.eod_prices_pipeline import (
     _missing_dates, _upsert_navs, _upsert_prices, _upsert_seen, ingest_day,
+    refresh_bse_securities_master, refresh_sme_securities_master,
 )
+from tools.securities_master import get_full_securities_master
 
 
 def _silence_sqlite_date_adapter_warning() -> None:
@@ -116,6 +120,133 @@ class HeldSchemeCodesTest(unittest.TestCase):
         from pipelines.eod_prices_pipeline import _held_scheme_codes
         engine = create_engine("sqlite://")
         self.assertEqual(_held_scheme_codes(engine), set())
+
+
+class RefreshBseSecuritiesMasterTest(unittest.TestCase):
+    def setUp(self) -> None:
+        _silence_sqlite_date_adapter_warning()
+        self.engine = create_engine("sqlite://")
+        metadata.create_all(self.engine, tables=[securities_bse])
+
+    @patch("pipelines.eod_prices_pipeline.fetch_bse_main_board")
+    def test_upserts_rows_with_last_seen(self, mock_fetch) -> None:
+        mock_fetch.return_value = [
+            {"symbol": "ABC", "name": "ABC Ltd", "isin": "INE000A01011",
+             "exchange": "BSE", "code": "500001", "series": "A"},
+        ]
+        refresh_bse_securities_master(self.engine)
+        with self.engine.connect() as conn:
+            row = conn.execute(select(securities_bse)).mappings().one()
+        self.assertEqual(row["code"], "500001")
+        self.assertEqual(row["symbol"], "ABC")
+        self.assertEqual(row["last_seen"], date.today())
+
+    @patch("pipelines.eod_prices_pipeline.fetch_bse_main_board")
+    def test_last_seen_never_regresses(self, mock_fetch) -> None:
+        mock_fetch.return_value = [
+            {"symbol": "ABC", "name": "ABC Ltd", "isin": "INE000A01011",
+             "exchange": "BSE", "code": "500001", "series": "A"},
+        ]
+        with self.engine.begin() as conn:
+            conn.execute(insert(securities_bse).values(
+                code="500001", symbol="ABC", name="ABC Ltd",
+                isin="INE000A01011", series="A", last_seen=date(2099, 1, 1),
+            ))
+        refresh_bse_securities_master(self.engine)
+        with self.engine.connect() as conn:
+            row = conn.execute(select(securities_bse)).mappings().one()
+        self.assertEqual(row["last_seen"], date(2099, 1, 1))
+
+    @patch("pipelines.eod_prices_pipeline.fetch_bse_main_board")
+    def test_fetch_failure_never_raises_and_keeps_existing_rows(self, mock_fetch) -> None:
+        mock_fetch.return_value = []  # fetch_bse_main_board itself never raises; empty is its failure signal
+        with self.engine.begin() as conn:
+            conn.execute(insert(securities_bse).values(
+                code="500001", symbol="ABC", name="ABC Ltd",
+                isin="INE000A01011", series="A", last_seen=date(2020, 1, 1),
+            ))
+        refresh_bse_securities_master(self.engine)  # must not raise
+        with self.engine.connect() as conn:
+            row = conn.execute(select(securities_bse)).mappings().one()
+        self.assertEqual(row["last_seen"], date(2020, 1, 1))  # untouched, not deleted
+
+
+class RefreshSmeSecuritiesMasterTest(unittest.TestCase):
+    def setUp(self) -> None:
+        _silence_sqlite_date_adapter_warning()
+        self.engine = create_engine("sqlite://")
+        metadata.create_all(self.engine, tables=[securities_sme])
+
+    @patch("pipelines.eod_prices_pipeline.get_all_sme_stocks")
+    def test_upserts_rows_keyed_by_exchange_and_symbol(self, mock_fetch) -> None:
+        mock_fetch.return_value = [
+            {"symbol": "EMERGE1", "name": "Emerge Stock 1", "isin": "INE999Z01001",
+             "series": "SM", "exchange": "NSE"},
+        ]
+        refresh_sme_securities_master(self.engine)
+        with self.engine.connect() as conn:
+            row = conn.execute(select(securities_sme)).mappings().one()
+        self.assertEqual((row["exchange"], row["symbol"]), ("NSE", "EMERGE1"))
+        self.assertEqual(row["last_seen"], date.today())
+
+    @patch("pipelines.eod_prices_pipeline.get_all_sme_stocks")
+    def test_duplicate_exchange_symbol_pair_does_not_raise(self, mock_fetch) -> None:
+        # tools/sme_tools.py::fetch_nse_emerge_stocks() has no seen-set of its
+        # own — if NSE's live-analysis-emerge API ever returns the same
+        # symbol twice in one response, get_all_sme_stocks()'s own
+        # ISIN/fuzzy-name dedup (which only dedupes NSE vs. BSE) would not
+        # catch it, and a batched INSERT ... ON CONFLICT that targets the
+        # same (exchange, symbol) row twice in one statement raises
+        # Postgres's "cannot affect row a second time" error. Must dedup
+        # before batching instead.
+        mock_fetch.return_value = [
+            {"symbol": "EMERGE1", "name": "Emerge Stock 1", "isin": "INE999Z01001",
+             "series": "SM", "exchange": "NSE"},
+            {"symbol": "EMERGE1", "name": "Emerge Stock 1 (dup)", "isin": "INE999Z01001",
+             "series": "SM", "exchange": "NSE"},
+        ]
+        refresh_sme_securities_master(self.engine)  # must not raise
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(securities_sme)).mappings().all()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["exchange"], rows[0]["symbol"]), ("NSE", "EMERGE1"))
+
+
+class SecuritiesMasterEndToEndTest(unittest.TestCase):
+    """Proves the write side (Task 2: refresh_bse_securities_master /
+    refresh_sme_securities_master) and the read side (Task 3:
+    tools.securities_master.get_full_securities_master) actually agree on
+    the securities_bse/securities_sme row shape, against the same engine —
+    every other test in this suite exercises one layer in isolation."""
+
+    def setUp(self) -> None:
+        _silence_sqlite_date_adapter_warning()
+        self.engine = create_engine("sqlite://")
+        metadata.create_all(
+            self.engine, tables=[securities, securities_bse, securities_sme]
+        )
+
+    @patch("tools.securities_master.load_nse_main_board", return_value=[])
+    @patch("pipelines.eod_prices_pipeline.get_all_sme_stocks")
+    @patch("pipelines.eod_prices_pipeline.fetch_bse_main_board")
+    def test_ingested_bse_and_sme_rows_are_visible_through_the_merge(
+        self, mock_bse_fetch, mock_sme_fetch, mock_nse_load
+    ) -> None:
+        mock_bse_fetch.return_value = [
+            {"symbol": "ABC", "name": "ABC Ltd", "isin": "INE000A01011",
+             "exchange": "BSE", "code": "500001", "series": "A"},
+        ]
+        mock_sme_fetch.return_value = [
+            {"symbol": "EMERGE1", "name": "Emerge Stock 1", "isin": "INE999Z01001",
+             "series": "SM", "exchange": "NSE"},
+        ]
+
+        refresh_bse_securities_master(self.engine)
+        refresh_sme_securities_master(self.engine)
+
+        out = get_full_securities_master(self.engine)
+        symbols = {s["symbol"] for s in out}
+        self.assertEqual(symbols, {"ABC", "EMERGE1"})
 
 
 if __name__ == "__main__":

@@ -2,8 +2,8 @@
 NIFTY 500 constituent list fetcher — the "main NSE/BSE universe" bound for
 pipelines/screener_pipeline.py's stored-metrics table (GET /api/screener). NIFTY 500
 (NSE's own published index membership) is used rather than the full NSE
-equity master (_nse_master.txt, ~2000 symbols, already used elsewhere in this
-codebase for symbol validation): a daily per-stock yfinance .info scrape —
+equity master (the `securities` table, ~2000 symbols, populated nightly by
+pipelines/eod_prices_pipeline.py): a daily per-stock yfinance .info scrape —
 this codebase's heaviest documented per-symbol call, see pipelines/sme_ema_pipeline.py's
 own note on why it deliberately avoids that call for "hundreds of SME
 stocks" — is only reasonable at a bounded, curated scale. NIFTY 500 already

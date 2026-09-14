@@ -759,6 +759,29 @@ class PhaseResearchIsRecentIpoTest(unittest.TestCase):
         self.assertTrue(result["TCS"]["is_recent_ipo"])
 
 
+class LoadNseSymbolUniverseTest(unittest.TestCase):
+    @patch("pipelines.market_picks_symbols.get_engine")
+    def test_returns_symbols_from_securities_table(self, mock_get_engine) -> None:
+        from sqlalchemy import create_engine, insert
+        from db.models import metadata, securities
+        engine = create_engine("sqlite://")
+        metadata.create_all(engine, tables=[securities])
+        with engine.begin() as conn:
+            conn.execute(insert(securities).values(symbol="TCS"))
+            conn.execute(insert(securities).values(symbol="INFY"))
+        mock_get_engine.return_value = engine
+
+        from pipelines.market_picks_symbols import _load_nse_symbol_universe
+        self.assertEqual(_load_nse_symbol_universe(), {"TCS", "INFY"})
+
+    @patch("pipelines.market_picks_symbols.get_engine")
+    def test_fails_open_to_empty_set_on_db_error(self, mock_get_engine) -> None:
+        mock_get_engine.side_effect = Exception("DATABASE_URL not set")
+
+        from pipelines.market_picks_symbols import _load_nse_symbol_universe
+        self.assertEqual(_load_nse_symbol_universe(), set())
+
+
 class PhaseConsolidateDedupMergeTest(unittest.TestCase):
     """Regression tests for an adversarial-review finding: _phase_consolidate()
     groups raw LLM picks by _dedup_key() (ticker if present, else normalized
@@ -790,7 +813,7 @@ class PhaseConsolidateDedupMergeTest(unittest.TestCase):
         fake_session = self._fake_session([{"symbol": "TCS", "symbol_info": "Tata Consultancy Services Ltd"}])
 
         with patch("yfinance.Ticker", return_value=fake_ticker), \
-             patch("pipelines.market_picks_pipeline._load_nse_symbol_master", return_value=set()), \
+             patch("pipelines.market_picks_pipeline._load_nse_symbol_universe", return_value=set()), \
              patch.object(pipeline, "_nse_session_get", return_value=fake_session):
             result = pipeline._phase_consolidate(raw_picks, emit=lambda p: None)
 

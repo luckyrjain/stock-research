@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 import requests
 from dotenv import load_dotenv
+from sqlalchemy import select
 
 from telemetry import source_health
 from telemetry import source_quality
@@ -40,7 +41,7 @@ from pipelines.market_picks_history import _save_history, _load_trend
 from pipelines.market_picks_symbols import (
     _COMPANY_SUFFIXES,
     _title_words,
-    _load_nse_symbol_master,
+    _load_nse_symbol_universe,
     _select_target_price,
     _dedup_key,
     _resolve_symbol_via_fuzzy_match,
@@ -520,7 +521,7 @@ Return ONLY this JSON (no markdown, no extra text):
                             if suffix == ".NS" and nse_master and ticker_hint.upper() not in nse_master:
                                 continue
                             # Disclosed limitation: the .BO (BSE) branch has
-                            # no equivalent hard gate — _load_nse_symbol_master()
+                            # no equivalent hard gate — _load_nse_symbol_universe()
                             # is genuinely NSE-only (NSE's own EQUITY_L.csv),
                             # and this codebase has no BSE equity-master
                             # fetcher to validate against (BSE listings are
@@ -597,8 +598,8 @@ Return ONLY this JSON (no markdown, no extra text):
 
             return None
 
-        # Load NSE equity master once (cached 24 h) before parallel validation
-        nse_master = _load_nse_symbol_master()
+        # Load NSE equity master once before parallel validation
+        nse_master = _load_nse_symbol_universe()
 
         consolidated: list[dict] = []
         # Maps a resolved symbol to its consolidated dict (not just a

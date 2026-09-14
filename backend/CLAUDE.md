@@ -2162,7 +2162,7 @@ mirroring `pipelines/sme_ema_pipeline.py`'s shape, served at `/screener` via `GE
 
 1. **Universe**: NIFTY 500 (NSE's own published index membership,
    `tools/nifty500_tools.py::get_nifty500_constituents()`, 24 h cache) rather than the full
-   NSE equity master (`_nse_master.txt`, ~2000 symbols) — a daily per-stock yfinance `.info`
+   NSE equity master (the `securities` table, ~2000 symbols) — a daily per-stock yfinance `.info`
    scrape (this codebase's heaviest documented per-symbol call; see `pipelines/sme_ema_pipeline.py`'s
    own note on why it deliberately avoids that call for "hundreds of SME stocks") is only
    reasonable at a bounded, curated scale, and NIFTY 500 already covers the vast majority of
@@ -2326,21 +2326,34 @@ already has (or now has, via the EOD price store above) into one resolver. **Not
 anything** — this ships the module and its tests only; the intended consumer is a future
 broker-statement/CSV import, tracked separately.
 
-1. **Four registries, one merge.** `load_nse_main_board(engine)` queries the `securities` table
-   (populated nightly by `pipelines/eod_prices_pipeline.py` from NSE's `EQUITY_L.csv` — no separate fetch
-   needed, this is a free read off data the EOD store above already maintains), filtered to rows
-   with a real `company_name` (an unenriched row is a pre-`EQUITY_L.csv`-join miss, not useful for
-   name-fuzzy matching). `fetch_bse_main_board(force=False)` is a new fetch — BSE's own
-   `ListofScripData` API (the same endpoint `tools/sme_tools.py` already uses for BSE SME Groups
-   M/MS), looped over the main-board groups (`A`, `B`, `T`, `Z`, `X`, `XT`, `P`, `MT`, `TS`),
-   deduped by `SCRIP_CD` across groups, cached 24h under `output/_bse_main_master.json`
-   (atomic tempfile+`os.replace` write, same convention as `core/cache.py`/`tools/sme_tools.py`), never
-   raising — a failing group is skipped, not fatal to the others, and a total fetch failure falls
-   back to a stale cache, then to `[]`. `tools/sme_tools.py::get_all_sme_stocks()` (NSE Emerge +
-   BSE SME, existing, untouched) is the fourth. `get_full_securities_master(engine, force=False)`
-   merges all four, deduped by ISIN with NSE main-board preferred on collision (a DB failure on the
-   NSE side degrades to that source contributing nothing, not a raised exception — the other three
-   still merge).
+1. **Three registries, one merge — all DB-backed on this read path.** `load_nse_main_board(engine)`
+   queries the `securities` table (populated nightly by `pipelines/eod_prices_pipeline.py` from
+   NSE's `EQUITY_L.csv` — no separate fetch needed, this is a free read off data the EOD store
+   above already maintains), filtered to rows with a real `company_name` (an unenriched row is a
+   pre-`EQUITY_L.csv`-join miss, not useful for name-fuzzy matching). `load_bse_main_board(engine)`
+   and `load_sme_master(engine)` are the BSE main-board and NSE Emerge/BSE SME legs — both read
+   from the `securities_bse`/`securities_sme` tables (see "EOD price store" above), populated
+   nightly by `pipelines/eod_prices_pipeline.py::refresh_bse_securities_master()`/
+   `refresh_sme_securities_master()`. **Neither leg does a live fetch on this call path anymore**:
+   `fetch_bse_main_board(force=False)` (BSE's own `ListofScripData` API, looped over the
+   main-board groups `A`/`B`/`T`/`Z`/`X`/`XT`/`P`/`MT`/`TS`, deduped by `SCRIP_CD` across groups,
+   cached 24h under `output/_bse_main_master.json`) and `tools/sme_tools.py::get_all_sme_stocks()`
+   (NSE Emerge + BSE SME) are now exclusively the nightly ingestion job's own fetch
+   functions — `refresh_bse_securities_master(engine)`/`refresh_sme_securities_master(engine)`
+   (`pipelines/eod_prices_pipeline.py`) call them with `force=True` and upsert the result into
+   `securities_bse`/`securities_sme` respectively, each isolated in its own try/except so a fetch
+   failure there is logged and swallowed, never raised. `get_full_securities_master(engine,
+   force=False)` merges all three loaders' output, deduped by ISIN with NSE main-board preferred
+   on collision (a DB failure on any one leg degrades that source to contributing nothing, not a
+   raised exception — the other two still merge); `force` is accepted for backward compatibility
+   with existing callers but is a no-op on this DB-backed path — refreshing the underlying tables
+   happens via the nightly pipeline run, not per-call. Like the pre-existing NAV/corporate-actions/
+   valuation steps in `pipelines/eod_prices_pipeline.py::run()`, the nightly BSE/SME refresh only
+   actually executes when that pipeline finds at least one day genuinely missing from
+   `prices_daily` — a same-day re-run after everything's already ingested returns early before
+   `run()` is even called, so it's a no-op for `securities_bse`/`securities_sme` too. This didn't
+   matter for BSE/SME before this table existed, since each had its own independent 24h live-fetch
+   cache; now both depend entirely on this pipeline's own run cadence.
 2. **`resolve_symbol(engine, code, company_name=None, isin=None, master=None)`** resolves a
    broker's code to `{"symbol", "exchange", "confidence": "isin"|"exact"|"fuzzy"|"unresolved",
    "candidate_name"}`, in that tier order: an ISIN match (highest confidence — broker ISINs are
@@ -2507,7 +2520,7 @@ own, because nothing enforced a narrower blast radius).
    a genuinely empty database and verified (against a real local Postgres instance) to both
    `alembic upgrade head` cleanly onto nothing and `alembic downgrade base` cleanly back to
    nothing, producing exactly the same 11 tables, indexes, and constraints
-   `db/schema.sql`/`metadata.create_all()` already produce. **There are 10 revisions today** —
+   `db/schema.sql`/`metadata.create_all()` already produce. **There are 11 revisions today** —
    `0001_baseline_schema`, then `684c8a31e7e0_add_eod_price_store_and_corporate_` (the
    `securities`/`prices_daily`/`mf_nav_daily`/`corporate_actions` tables) and
    `8613aafc2d9d_add_portfolio_aggregator_foundation_` (`profiles`/`accounts`/`assets`/
@@ -2522,8 +2535,10 @@ own, because nothing enforced a narrower blast radius).
    non-redirect login needs a place to hold its `token_id` across steps — same section), also no
    new table; `ec7850b73d2f` adds `profiles.client_id`/`profiles.user_id` +
    `ck_profiles_exactly_one_owner` (real ownership on the Portfolio Aggregator's root table,
-   replacing its original no-auth design — see "Portfolio aggregator" below), also no new table.
-   Every revision after `0001` was autogenerated and round-trip-verified (upgrade →
+   replacing its original no-auth design — see "Portfolio aggregator" below), also no new table;
+   `903fbec42603` adds `securities_bse`/`securities_sme` for 25 (the securities master list's
+   nightly-ingested BSE main-board + NSE Emerge/BSE SME masters — see "Securities master +
+   symbol resolver" below). Every revision after `0001` was autogenerated and round-trip-verified (upgrade →
    `alembic check` clean → downgrade → upgrade) against an isolated scratch Postgres, the same way
    `0001` was.
 3. **A deployment predating Alembic must `alembic stamp 0001` and THEN
@@ -3075,7 +3090,7 @@ Never pass `loop.run_in_executor(...)` directly to `create_task` — it returns 
   appears to need one, say so and stop rather than building it. The binding list and the reasoning
   are in that file; `docs/backlog.md` links to it.
 - **Scope every pipeline's `--reset-db` to the tables that pipeline owns.** Never
-  `metadata.drop_all()` — the shared `MetaData()` carries all 23 tables, seven of which hold
+  `metadata.drop_all()` — the shared `MetaData()` carries all 25 tables, seven of which hold
   non-regenerable personal financial data (and, for `broker_connections`, real broker API
   credentials). See `docs/database.md` for the ownership map.
 - **`output/` is cache only. Durable state goes to PostgreSQL.** Every file under `output/` must

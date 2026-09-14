@@ -28,7 +28,10 @@ from sqlalchemy import text
 
 from pipelines.corporate_actions_pipeline import run_ca_step
 from db.batch import batched_execute
-from db.models import get_engine, metadata, mf_nav_daily, prices_daily, securities
+from db.models import (
+    get_engine, metadata, mf_nav_daily, prices_daily, securities,
+    securities_bse, securities_sme,
+)
 from core.error_tracking import init_error_tracking
 from core.observability import get_logger, log_event
 from tools.eod_sources import (
@@ -36,8 +39,10 @@ from tools.eod_sources import (
     fetch_scheme_history, make_nse_session, parse_bhavcopy,
     parse_equity_master, parse_nav_all,
 )
+from tools.securities_master import fetch_bse_main_board
+from tools.sme_tools import get_all_sme_stocks
 
-_EOD_TABLES = [securities, prices_daily, mf_nav_daily]
+_EOD_TABLES = [securities, securities_bse, securities_sme, prices_daily, mf_nav_daily]
 
 load_dotenv()
 LOGGER = get_logger("eod_prices")
@@ -133,6 +138,83 @@ def _upsert_master(engine, rows: list[dict]) -> None:
             listing_date = EXCLUDED.listing_date, face_value = EXCLUDED.face_value
     """)
     batched_execute(engine, sql, rows, batch_size=_BATCH_SIZE)
+
+
+def _upsert_bse_master(engine, rows: list[dict]) -> None:
+    """Upsert BSE main-board rows with a monotonic last_seen — a row absent
+    from this run's fetch keeps its prior last_seen rather than being
+    deleted (see securities._upsert_seen's own docstring for why)."""
+    if not rows:
+        return
+    today = date.today()
+    sql = text("""
+        INSERT INTO securities_bse (code, symbol, name, isin, series, last_seen)
+        VALUES (:code, :symbol, :name, :isin, :series, :last_seen)
+        ON CONFLICT (code) DO UPDATE SET
+            symbol = EXCLUDED.symbol, name = EXCLUDED.name, isin = EXCLUDED.isin,
+            series = EXCLUDED.series,
+            last_seen = CASE WHEN securities_bse.last_seen IS NULL
+                               OR EXCLUDED.last_seen > securities_bse.last_seen
+                             THEN EXCLUDED.last_seen ELSE securities_bse.last_seen END
+    """)
+    params = [
+        {"code": r["code"], "symbol": r.get("symbol"), "name": r.get("name"),
+         "isin": r.get("isin"), "series": r.get("series"), "last_seen": today}
+        for r in rows if r.get("code")
+    ]
+    batched_execute(engine, sql, params, batch_size=_BATCH_SIZE)
+
+
+def _upsert_sme_master(engine, rows: list[dict]) -> None:
+    """Same monotonic-last_seen upsert as _upsert_bse_master, keyed by
+    (exchange, symbol) — get_all_sme_stocks() merges/dedups NSE Emerge vs.
+    BSE SME (by ISIN/fuzzy name), but NOT within NSE Emerge's own fetch
+    (tools/sme_tools.py::fetch_nse_emerge_stocks() has no seen-set of its
+    own). A same-key duplicate is deduped below (last-wins) before
+    batching, since a batched `INSERT ... ON CONFLICT` that targets the
+    same (exchange, symbol) row twice in one statement would raise
+    Postgres's "cannot affect row a second time" error and abort the
+    whole batch's transaction."""
+    if not rows:
+        return
+    today = date.today()
+    sql = text("""
+        INSERT INTO securities_sme (exchange, symbol, name, isin, series, last_seen)
+        VALUES (:exchange, :symbol, :name, :isin, :series, :last_seen)
+        ON CONFLICT (exchange, symbol) DO UPDATE SET
+            name = EXCLUDED.name, isin = EXCLUDED.isin, series = EXCLUDED.series,
+            last_seen = CASE WHEN securities_sme.last_seen IS NULL
+                               OR EXCLUDED.last_seen > securities_sme.last_seen
+                             THEN EXCLUDED.last_seen ELSE securities_sme.last_seen END
+    """)
+    deduped = {
+        (r.get("exchange") or "NSE", r["symbol"]): {
+            "exchange": r.get("exchange") or "NSE", "symbol": r["symbol"],
+            "name": r.get("name"), "isin": r.get("isin"), "series": r.get("series"),
+            "last_seen": today,
+        }
+        for r in rows if r.get("symbol")
+    }
+    params = list(deduped.values())
+    batched_execute(engine, sql, params, batch_size=_BATCH_SIZE)
+
+
+def refresh_bse_securities_master(engine) -> None:
+    try:
+        rows = fetch_bse_main_board(force=True)
+        _upsert_bse_master(engine, rows)
+        log_event(LOGGER, "eod_bse_master_refreshed", rows=len(rows))
+    except Exception as exc:
+        log_event(LOGGER, "eod_bse_master_failed", level="warning", error=str(exc))
+
+
+def refresh_sme_securities_master(engine) -> None:
+    try:
+        rows = get_all_sme_stocks(force=True)
+        _upsert_sme_master(engine, rows)
+        log_event(LOGGER, "eod_sme_master_refreshed", rows=len(rows))
+    except Exception as exc:
+        log_event(LOGGER, "eod_sme_master_failed", level="warning", error=str(exc))
 
 
 def _upsert_navs(engine, rows: list[dict]) -> int:
@@ -240,9 +322,10 @@ def ingest_navs(engine) -> None:
 
 
 def setup_db(engine) -> None:
-    """Create this pipeline's own tables (securities, prices_daily,
-    mf_nav_daily) and exit — scoped, not metadata.create_all(engine), same
-    convention as pipelines/screener_pipeline.py's setup_db(). corporate_actions is
+    """Create this pipeline's own tables (securities, securities_bse,
+    securities_sme, prices_daily, mf_nav_daily) and exit — scoped, not
+    metadata.create_all(engine), same convention as
+    pipelines/screener_pipeline.py's setup_db(). corporate_actions is
     owned by pipelines/corporate_actions_pipeline.py's own --setup-db instead."""
     metadata.create_all(engine, tables=_EOD_TABLES)
     from db.models import stamp_alembic_head
@@ -274,6 +357,16 @@ def run(dates: list[date]) -> int:
         log_event(LOGGER, "eod_nav_step_failed", level="warning", error=str(exc))
 
     try:
+        refresh_bse_securities_master(engine)
+    except Exception as exc:  # BSE master step must never affect the equity exit code
+        log_event(LOGGER, "eod_bse_master_step_failed", level="warning", error=str(exc))
+
+    try:
+        refresh_sme_securities_master(engine)
+    except Exception as exc:  # SME master step must never affect the equity exit code
+        log_event(LOGGER, "eod_sme_master_step_failed", level="warning", error=str(exc))
+
+    try:
         run_ca_step(engine, session)
     except Exception as exc:  # CA step must never affect the equity exit code
         log_event(LOGGER, "eod_ca_step_failed", level="warning", error=str(exc))
@@ -291,7 +384,8 @@ def main() -> None:
     init_error_tracking()
     parser = argparse.ArgumentParser(description="EOD price store pipeline")
     parser.add_argument("--setup-db", action="store_true",
-                        help="Create DB tables (securities, prices_daily, mf_nav_daily) and exit")
+                        help="Create DB tables (securities, securities_bse, securities_sme, "
+                             "prices_daily, mf_nav_daily) and exit")
     parser.add_argument("--reset-db", action="store_true",
                         help="Drop and recreate this pipeline's own tables, then exit")
     group = parser.add_mutually_exclusive_group()
