@@ -1,25 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import type { ShareholdingDetail } from '@/types';
 import InfoTooltip from './info-tooltip';
 import { Card } from './dashboard-primitives';
 import { fmt } from '@/lib/format';
+import { useSymbolResource } from '@/lib/use-symbol-resource';
 
 function useShareholdingDetail(symbol: string): ShareholdingDetail | null {
-  const [detail, setDetail] = useState<ShareholdingDetail | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setDetail(null);
-    fetch(`/api/shareholding-detail/${encodeURIComponent(symbol)}`)
-      .then(res => (res.ok ? res.json() : null))
-      .then((data: ShareholdingDetail | null) => { if (!cancelled) setDetail(data); })
-      .catch(() => { if (!cancelled) setDetail(null); });
-    return () => { cancelled = true; };
-  }, [symbol]);
-
-  return detail;
+  return useSymbolResource<ShareholdingDetail>(symbol, 'shareholding-detail');
 }
 
 function HolderRow({ name, holdingPct }: { name: string; holdingPct: number }) {

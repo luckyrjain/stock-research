@@ -1,4 +1,5 @@
 import { clientIpHeaders } from '@/lib/proxy-headers';
+import { proxyJson } from '@/lib/proxy';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
@@ -8,16 +9,8 @@ export async function GET(
 ) {
   const { symbol } = await params;
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(`${API}/api/consolidated/${encodeURIComponent(symbol)}`, { headers: clientIpHeaders(req), cache: 'no-store' });
-  } catch {
-    return Response.json(
-      { error: 'Backend unavailable. Make sure the analysis service is running.' },
-      { status: 503 },
-    );
-  }
-
-  const data = await upstream.json();
-  return Response.json(data, { status: upstream.status });
+  return proxyJson(`${API}/api/consolidated/${encodeURIComponent(symbol)}`, {
+    headers: clientIpHeaders(req),
+    cache: 'no-store',
+  });
 }

@@ -49,6 +49,42 @@ test.describe('Home page', () => {
     await expect(page).toHaveURL('/watchlist');
   });
 
+  test('mobile menu traps Tab and returns focus to the toggle on Escape', async ({ page }) => {
+    // Regression test for the useFocusTrap wiring (A11Y-11): Tab must wrap
+    // within the open menu rather than escaping into the rest of the page,
+    // and Escape must close the menu and return focus to the toggle button.
+    await page.setViewportSize({ width: 375, height: 800 });
+    await page.goto('/');
+
+    const toggle = page.getByRole('button', { name: 'Toggle navigation menu' });
+    await toggle.click();
+    const menu = page.getByRole('menu');
+    await expect(menu).toBeVisible();
+
+    const links = menu.locator('a[href]');
+    const linkCount = await links.count();
+    expect(linkCount).toBeGreaterThan(0);
+
+    // Every focused element while Tab-cycling stays inside the menu (not,
+    // say, the search box or a link in the page body behind it) — checked
+    // for one full extra lap past linkCount to also prove wrap-around.
+    for (let i = 0; i < linkCount + 1; i++) {
+      await page.keyboard.press('Tab');
+      const focusedIsInsideMenu = await page.evaluate(() => {
+        const menuEl = document.querySelector('[role="menu"]');
+        return !!menuEl && menuEl.contains(document.activeElement);
+      });
+      expect(focusedIsInsideMenu).toBe(true);
+    }
+    // linkCount+1 Tabs from the panel's own initial focus wraps back to the
+    // first link.
+    await expect(links.first()).toBeFocused();
+
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    await expect(toggle).toBeFocused();
+  });
+
   test('idle hero offers a one-click sample report for skeptical first-time visitors', async ({ page }) => {
     const symbol = 'TCS';
     await page.route(`**/api/analyse/${symbol}**`, route =>

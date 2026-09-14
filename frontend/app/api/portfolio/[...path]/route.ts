@@ -1,5 +1,6 @@
 import { authHeaders } from '@/lib/auth-cookie';
 import { clientIpHeaders } from '@/lib/proxy-headers';
+import { proxyJson } from '@/lib/proxy';
 
 const API = process.env.API_URL ?? 'http://localhost:8000';
 
@@ -23,13 +24,6 @@ function disabled() {
   return Response.json(
     { error: 'Portfolio Aggregator is disabled on this deployment.' },
     { status: 404 },
-  );
-}
-
-function unavailable() {
-  return Response.json(
-    { error: 'Backend unavailable. Make sure the analysis service is running.' },
-    { status: 503 },
   );
 }
 
@@ -58,15 +52,7 @@ async function proxy(req: Request, path: string[], method: string) {
     body = await req.text();
   }
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(url, { method, headers, body, cache: 'no-store' });
-  } catch {
-    return unavailable();
-  }
-
-  const data = await upstream.json();
-  return Response.json(data, { status: upstream.status });
+  return proxyJson(url, { method, headers, body, cache: 'no-store' });
 }
 
 export async function GET(req: Request, { params }: { params: Promise<{ path: string[] }> }) {

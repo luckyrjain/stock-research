@@ -103,8 +103,8 @@ cd backend
 uvicorn api:app --reload --port 8000
 ```
 
-The backend exposes **57 routes** — 29 declared in `api.py`, 28 across the three routers in
-`routes/` (17 Portfolio Aggregator, 6 Positions, 5 Watchlist). The table below groups them by
+The backend exposes **63 routes** — 29 declared in `api.py`, 34 across the four routers in
+`routes/` (17 Portfolio Aggregator, 6 Broker Sync, 6 Positions, 5 Watchlist). The table below groups them by
 feature area rather than listing every one; see `backend/CLAUDE.md`'s "Agent Orchestration"
 section for the full narrative on each flow.
 

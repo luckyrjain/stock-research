@@ -2,10 +2,12 @@ import os
 import unittest
 from unittest.mock import patch
 
+import db.models as db_models
 from db.models import (
     api_keys,
     ema_signals,
     get_engine,
+    get_shared_engine,
     magic_links,
     mf_holdings_history,
     sessions,
@@ -32,6 +34,32 @@ class GetEngineTest(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             with self.assertRaises(KeyError):
                 get_engine()
+
+
+class GetSharedEngineTest(unittest.TestCase):
+    """The one process-wide lazy-singleton cache auth.py, core/state_store.py,
+    analytics/verdict_history.py, analytics/mf_holdings_history.py, and
+    routes/_shared.py all now delegate their own _get_engine()/_get_db_engine()
+    to, instead of each independently reimplementing it."""
+
+    def setUp(self) -> None:
+        db_models._SHARED_ENGINE = None
+
+    def tearDown(self) -> None:
+        db_models._SHARED_ENGINE = None
+
+    def test_not_constructed_at_import_time(self) -> None:
+        self.assertIsNone(db_models._SHARED_ENGINE)
+
+    def test_calling_twice_returns_the_same_engine_object(self) -> None:
+        with patch("db.models.get_engine") as mocked_get_engine:
+            fake_engine = object()
+            mocked_get_engine.return_value = fake_engine
+            first = get_shared_engine()
+            second = get_shared_engine()
+        self.assertIs(first, fake_engine)
+        self.assertIs(second, fake_engine)
+        mocked_get_engine.assert_called_once_with()
 
 
 class TableSchemaTest(unittest.TestCase):

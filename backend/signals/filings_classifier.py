@@ -25,6 +25,8 @@ real NSE text.
 import re
 from datetime import datetime
 
+from tools._nse_dates import parse_nse_date
+
 _CORPORATE_ACTION_KEYWORDS = {
     "dividend": ("dividend",),
     "split": ("stock split", "share split", "sub-division of", "sub division of"),
@@ -68,12 +70,7 @@ def _filing_text(f: dict) -> str:
 def _parse_filing_date(date_str: object) -> datetime | None:
     if not isinstance(date_str, str):
         return None
-    for fmt in ("%d-%b-%Y %H:%M", "%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
-        try:
-            return datetime.strptime(date_str, fmt)
-        except ValueError:
-            continue
-    return None
+    return parse_nse_date(date_str, ("%d-%b-%Y %H:%M", "%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"))
 
 
 def classify_corporate_actions(filings: list[dict]) -> list[dict]:

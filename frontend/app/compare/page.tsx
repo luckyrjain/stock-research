@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import ProgressTracker    from '@/components/progress-tracker';
 import ResultsDashboard   from '@/components/results-dashboard';
 import PageShell          from '@/components/page-shell';
+import { ErrorBanner }    from '@/components/error-banner';
 import CompareDiffTable   from '@/components/compare-diff-table';
 import { useStockAnalysis } from '@/lib/useStockAnalysis';
 import type { Report } from '@/types';
@@ -83,16 +84,7 @@ function CompareColumn({ symbol, onReport }: { symbol: string; onReport: (symbol
       )}
 
       {phase === 'error' && error && (
-        <div className="mb-4 px-4 py-3 rounded-xl bg-sell/10 border border-sell/30 text-sell text-sm flex items-start justify-between gap-4">
-          <span>{error}</span>
-          <button
-            onClick={() => handleAnalyse(symbol)}
-            className="shrink-0 px-3 py-1 rounded-lg text-xs font-semibold
-              border border-sell/40 text-sell hover:bg-sell/10 transition-colors duration-150"
-          >
-            Try Again
-          </button>
-        </div>
+        <ErrorBanner message={error} className="mb-4" retryLabel="Try Again" onRetry={() => handleAnalyse(symbol)} />
       )}
 
       {phase === 'done' && report && (

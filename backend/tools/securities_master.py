@@ -20,16 +20,13 @@ fuzzy company-name match. Consumed by portfolio/csv_import.py's broker CSV impor
 (new-asset resolution) — see that module for the integration.
 """
 
-import json
-import os
-import tempfile
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
 from rapidfuzz import fuzz, process, utils as _rf_utils
 from sqlalchemy import select
 
+from core.file_list_cache import is_fresh, load_json, save_json
 from db.models import securities as _securities_t
 
 _BSE_MAIN_CACHE = Path("output/_bse_main_master.json")
@@ -95,32 +92,15 @@ def load_sme_master(engine) -> list[dict]:
 
 
 def _is_fresh(path: Path) -> bool:
-    if not path.exists():
-        return False
-    age = datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)
-    return age < timedelta(hours=_CACHE_TTL_HOURS)
+    return is_fresh(path, _CACHE_TTL_HOURS)
 
 
 def _save_cache(path: Path, data: list[dict]) -> None:
-    # Atomic write (tempfile + os.replace) — same convention as
-    # core/cache.py::save()/tools/sme_tools.py::_save_cache, so an interrupted
-    # write never leaves a corrupt file behind for the next read to choke on.
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(data))
-        os.replace(tmp_path, path)
-    except Exception:
-        Path(tmp_path).unlink(missing_ok=True)
-        raise
+    save_json(path, data)
 
 
 def _load_cache(path: Path) -> list[dict] | None:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    return load_json(path)
 
 
 def fetch_bse_main_board(force: bool = False) -> list[dict]:

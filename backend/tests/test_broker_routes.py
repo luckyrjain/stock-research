@@ -22,7 +22,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.pool import StaticPool
 
 import api
-import routes._shared as _shared
+import db.models as db_models
 from core import rate_limiter
 from db.models import accounts, broker_connections, metadata, profiles
 
@@ -51,8 +51,11 @@ class BrokerRoutesTest(unittest.TestCase):
         metadata.create_all(self.engine, tables=[profiles, accounts, broker_connections])
         self._old_db_url = os.environ.get("DATABASE_URL")
         os.environ["DATABASE_URL"] = "sqlite://"
-        self._old_engine = _shared._DB_ENGINE
-        _shared._DB_ENGINE = self.engine
+        # The lazily-constructed DB engine cache now lives in db/models.py
+        # (shared by every DB-touching module), not as routes/_shared.py's
+        # own module-level global — inject the test engine there instead.
+        self._old_engine = db_models._SHARED_ENGINE
+        db_models._SHARED_ENGINE = self.engine
         # _mk_profile()/_mk_account() below hit the CRUD endpoints
         # (routes/portfolio_aggregator.py's own resolve_owner import) while
         # the broker endpoints under test in this file hit
@@ -78,7 +81,7 @@ class BrokerRoutesTest(unittest.TestCase):
     def tearDown(self) -> None:
         self._owner_patcher.stop()
         self._broker_owner_patcher.stop()
-        _shared._DB_ENGINE = self._old_engine
+        db_models._SHARED_ENGINE = self._old_engine
         for var, old in [
             ("DATABASE_URL", self._old_db_url),
             ("PORTFOLIO_ENCRYPTION_KEY", self._old_enc_key),
@@ -374,6 +377,40 @@ class BrokerRoutesTest(unittest.TestCase):
         acc = self._mk_account(pid)
         resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
         self.assertEqual(resp.status_code, 404)
+
+    @patch("portfolio.kite_sync.exchange_request_token")
+    @patch("portfolio.kite_sync.get_login_url")
+    def test_sync_with_corrupted_access_token_is_422_with_reconnect_message(
+        self, mock_login_url, mock_exchange,
+    ) -> None:
+        """Regression test for the routes/broker_sync.py dedup: `_decrypt_or_422()`
+        is shared by 3 call sites but must still produce the ORIGINAL,
+        distinct message at each one. This covers the `broker_sync()` call
+        site specifically — the message must keep pointing the caller at
+        "reconnect this broker account", not the app-secret-registration
+        message the other 2 call sites use."""
+        mock_login_url.return_value = "https://kite.trade/connect/login?v=3"
+        mock_exchange.return_value = {"access_token": "token-1"}
+
+        pid = self._mk_profile()
+        acc = self._mk_account(pid)
+        self._register_credentials("zerodha", acc, "my-key", "my-secret")
+        client.post("/api/portfolio/broker/zerodha/connect",
+                     json={"account_id": acc, "request_token": "rt"})
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                broker_connections.update()
+                .where(broker_connections.c.account_id == acc, broker_connections.c.broker == "zerodha")
+                .values(access_token_enc="not-a-real-fernet-token")
+            )
+
+        resp = client.post("/api/portfolio/broker/zerodha/sync", json={"account_id": acc})
+        self.assertEqual(resp.status_code, 422, resp.text)
+        self.assertEqual(
+            resp.json()["detail"],
+            "stored credential could not be decrypted — reconnect this broker account",
+        )
 
     @patch("portfolio.portfolio_valuation.refresh_valuations")
     @patch("portfolio.kite_sync.sync_account")

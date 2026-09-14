@@ -2,7 +2,6 @@ import contextlib
 import io
 import json
 import re
-from datetime import datetime
 from urllib.parse import quote, urlparse
 
 import requests
@@ -10,6 +9,7 @@ import yfinance as yf
 from lxml import etree
 from crewai.tools import tool
 
+from tools._nse_dates import parse_nse_date
 from tools._nse_session import NSE_BASE_URL as _NSE_BASE
 from tools._nse_session import get_nse_session
 
@@ -617,12 +617,8 @@ def _parse_filing_date(date_str: object) -> str | None:
     format doesn't match any of these (never guessed)."""
     if not isinstance(date_str, str):
         return None
-    for fmt in ("%d-%b-%Y %H:%M", "%d-%b-%Y", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(date_str, fmt).isoformat()
-        except ValueError:
-            continue
-    return None
+    parsed = parse_nse_date(date_str, ("%d-%b-%Y %H:%M", "%d-%b-%Y", "%Y-%m-%d"))
+    return parsed.isoformat() if parsed is not None else None
 
 
 def get_nse_basic_ratios(symbol: str) -> dict:

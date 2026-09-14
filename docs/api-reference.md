@@ -2,7 +2,8 @@
 
 The **request contract** for every FastAPI endpoint: method, path, auth, params, request body,
 status codes, rate limits, and caching behaviour. **63 endpoints** — 29 in `backend/api.py`, 34
-across `backend/routes/` (`watchlist.py` 5, `positions.py` 6, `portfolio_aggregator.py` 23).
+across `backend/routes/` (`watchlist.py` 5, `positions.py` 6, `portfolio_aggregator.py` 17,
+`broker_sync.py` 6).
 
 **Division of responsibility with [`output-schema.md`](output-schema.md):**
 
@@ -108,6 +109,11 @@ server logs."`
 and `GET /api/market-picks?force=true`: the lock is acquired *first*, and a subsequent rate-limit
 rejection releases it before returning 429. A rejected duplicate request therefore never steals
 the lock from a real in-flight run.
+
+**422 takes priority over 429** on `GET /api/sme-signals`, `GET /api/sme-signals/{symbol}/history`,
+and `GET /api/screener`: query-param validation runs before the rate-limit check (`routes/_shared.py`'s
+`run_db_call()`), so a malformed request is rejected without spending a rate-limit slot — intentional,
+since validation is free (no I/O) and the values being validated are public API surface, not secrets.
 
 ### Rate limiting
 

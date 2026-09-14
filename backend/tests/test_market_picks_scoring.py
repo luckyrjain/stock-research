@@ -13,25 +13,30 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from core import cache
+from pipelines import market_picks_cache
 from pipelines import market_picks_pipeline
 from state_store_harness import isolated_state_store
-from pipelines.market_picks_pipeline import (
-    MarketPicksPipeline,
+from pipelines.market_picks_pipeline import MarketPicksPipeline
+from pipelines.market_picks_cache import (
+    _prune_extract_cache,
+    picks_cache_status,
+    save_picks_cache,
+)
+from pipelines.market_picks_scoring import (
     _apply_sector_balance,
     _build_ranking_reasons,
     _classify_recommendation,
     _compute_confidence,
-    _dedup_key,
     _effective_signal,
-    _parse_targets_from_sources,
-    _prune_extract_cache,
     _reason_strength,
+    _trade_levels,
+)
+from pipelines.market_picks_symbols import (
+    _dedup_key,
+    _parse_targets_from_sources,
     _resolve_symbol_via_fuzzy_match,
     _select_target_price,
     _title_words,
-    _trade_levels,
-    picks_cache_status,
-    save_picks_cache,
 )
 
 
@@ -755,7 +760,7 @@ class PhaseResearchIsRecentIpoTest(unittest.TestCase):
 
 
 class LoadNseSymbolUniverseTest(unittest.TestCase):
-    @patch("pipelines.market_picks_pipeline.get_engine")
+    @patch("pipelines.market_picks_symbols.get_engine")
     def test_returns_symbols_from_securities_table(self, mock_get_engine) -> None:
         from sqlalchemy import create_engine, insert
         from db.models import metadata, securities
@@ -766,14 +771,14 @@ class LoadNseSymbolUniverseTest(unittest.TestCase):
             conn.execute(insert(securities).values(symbol="INFY"))
         mock_get_engine.return_value = engine
 
-        from pipelines.market_picks_pipeline import _load_nse_symbol_universe
+        from pipelines.market_picks_symbols import _load_nse_symbol_universe
         self.assertEqual(_load_nse_symbol_universe(), {"TCS", "INFY"})
 
-    @patch("pipelines.market_picks_pipeline.get_engine")
+    @patch("pipelines.market_picks_symbols.get_engine")
     def test_fails_open_to_empty_set_on_db_error(self, mock_get_engine) -> None:
         mock_get_engine.side_effect = Exception("DATABASE_URL not set")
 
-        from pipelines.market_picks_pipeline import _load_nse_symbol_universe
+        from pipelines.market_picks_symbols import _load_nse_symbol_universe
         self.assertEqual(_load_nse_symbol_universe(), set())
 
 
@@ -970,21 +975,21 @@ class ExtractionCacheSetTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-extract-cache-set-test-")
         self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
-        patch.object(market_picks_pipeline, "_EXTRACT_CACHE_DIR", Path(self._tmpdir)).start()
+        patch.object(market_picks_cache, "_EXTRACT_CACHE_DIR", Path(self._tmpdir)).start()
         self.addCleanup(patch.stopall)
 
     def test_writes_readable_json_round_trip(self) -> None:
         picks = [{"symbol": "TCS", "reason": "Strong buy"}]
-        market_picks_pipeline._extraction_cache_set("mykey", picks)
+        market_picks_cache._extraction_cache_set("mykey", picks)
 
-        cache_file = market_picks_pipeline._EXTRACT_CACHE_DIR / "mykey.json"
+        cache_file = market_picks_cache._EXTRACT_CACHE_DIR / "mykey.json"
         self.assertTrue(cache_file.exists())
         data = json.loads(cache_file.read_text())
         self.assertEqual(data["picks"], picks)
 
     def test_no_leftover_tmp_file_after_a_successful_write(self) -> None:
-        market_picks_pipeline._extraction_cache_set("mykey", [{"a": 1}])
-        cache_dir = market_picks_pipeline._EXTRACT_CACHE_DIR
+        market_picks_cache._extraction_cache_set("mykey", [{"a": 1}])
+        cache_dir = market_picks_cache._EXTRACT_CACHE_DIR
         leftover_tmp_files = [p for p in cache_dir.iterdir() if p.suffix == ".tmp"]
         self.assertEqual(leftover_tmp_files, [])
 
@@ -992,23 +997,23 @@ class ExtractionCacheSetTest(unittest.TestCase):
         # Simulates two overlapping pipeline runs racing on the same key —
         # the final file on disk must always be one complete, valid JSON
         # write (either the first or the second), never a torn mix of both.
-        market_picks_pipeline._extraction_cache_set("mykey", [{"batch": 1}])
-        market_picks_pipeline._extraction_cache_set("mykey", [{"batch": 2}])
+        market_picks_cache._extraction_cache_set("mykey", [{"batch": 1}])
+        market_picks_cache._extraction_cache_set("mykey", [{"batch": 2}])
 
-        cache_file = market_picks_pipeline._EXTRACT_CACHE_DIR / "mykey.json"
+        cache_file = market_picks_cache._EXTRACT_CACHE_DIR / "mykey.json"
         data = json.loads(cache_file.read_text())
         self.assertEqual(data["picks"], [{"batch": 2}])
 
     def test_missing_directory_is_created_and_write_still_succeeds(self) -> None:
         shutil.rmtree(self._tmpdir)
-        market_picks_pipeline._extraction_cache_set("mykey", [{"a": 1}])
-        cache_file = market_picks_pipeline._EXTRACT_CACHE_DIR / "mykey.json"
+        market_picks_cache._extraction_cache_set("mykey", [{"a": 1}])
+        cache_file = market_picks_cache._EXTRACT_CACHE_DIR / "mykey.json"
         self.assertTrue(cache_file.exists())
 
     def test_stored_value_is_retrievable_via_extraction_cache_get(self) -> None:
         picks = [{"symbol": "INFY"}]
-        market_picks_pipeline._extraction_cache_set("mykey", picks)
-        result = market_picks_pipeline._extraction_cache_get("mykey")
+        market_picks_cache._extraction_cache_set("mykey", picks)
+        result = market_picks_cache._extraction_cache_get("mykey")
         self.assertEqual(result, picks)
 
 
@@ -1021,18 +1026,18 @@ class PruneExtractCacheTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-extract-cache-prune-test-")
         self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
-        patch.object(market_picks_pipeline, "_EXTRACT_CACHE_DIR", Path(self._tmpdir)).start()
+        patch.object(market_picks_cache, "_EXTRACT_CACHE_DIR", Path(self._tmpdir)).start()
         self.addCleanup(patch.stopall)
 
     def test_removes_only_files_past_the_ttl(self) -> None:
-        cache_dir = market_picks_pipeline._EXTRACT_CACHE_DIR
+        cache_dir = market_picks_cache._EXTRACT_CACHE_DIR
         cache_dir.mkdir(parents=True, exist_ok=True)
         stale = cache_dir / "stale.json"
         fresh = cache_dir / "fresh.json"
         stale.write_text("{}")
         fresh.write_text("{}")
 
-        old_mtime = time.time() - market_picks_pipeline._EXTRACT_CACHE_TTL - 3600
+        old_mtime = time.time() - market_picks_cache._EXTRACT_CACHE_TTL - 3600
         import os
         os.utime(stale, (old_mtime, old_mtime))
 
@@ -1080,7 +1085,7 @@ class PicksCacheStatusTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="stock-research-picks-cache-status-test-")
         self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
-        patch.object(market_picks_pipeline, "_PICKS_CACHE_PATH", Path(self._tmpdir) / "picks.json").start()
+        patch.object(market_picks_cache, "_PICKS_CACHE_PATH", Path(self._tmpdir) / "picks.json").start()
         self.addCleanup(patch.stopall)
 
     def test_no_cache_file_returns_not_fresh_and_no_last_run(self) -> None:
@@ -1103,9 +1108,9 @@ class PicksCacheStatusTest(unittest.TestCase):
         import json
         from datetime import datetime, timedelta, timezone
 
-        cache_path = market_picks_pipeline._PICKS_CACHE_PATH
+        cache_path = market_picks_cache._PICKS_CACHE_PATH
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        ancient = (datetime.now(timezone.utc) - timedelta(hours=market_picks_pipeline._PICKS_CACHE_TTL_HOURS + 1))
+        ancient = (datetime.now(timezone.utc) - timedelta(hours=market_picks_cache._PICKS_CACHE_TTL_HOURS + 1))
         cache_path.write_text(json.dumps({
             "picks": [], "generated_at": "2026-01-01T00:00:00+00:00",
             "_meta": {"fetched_at": ancient.isoformat()},
@@ -1116,7 +1121,7 @@ class PicksCacheStatusTest(unittest.TestCase):
         self.assertFalse(status["is_fresh"])
 
     def test_malformed_cache_file_degrades_gracefully(self) -> None:
-        cache_path = market_picks_pipeline._PICKS_CACHE_PATH
+        cache_path = market_picks_cache._PICKS_CACHE_PATH
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text("{not valid json")
 

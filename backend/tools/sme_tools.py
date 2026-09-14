@@ -16,17 +16,14 @@ checks (or whose Screener.in name lookup failed) will still appear twice;
 this is a best-effort dedup, not a guarantee.
 """
 
-import json
 import logging
-import os
 import re
-import tempfile
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
 from rapidfuzz import fuzz, process
 
+from core.file_list_cache import is_fresh, load_json, save_json
 from tools._nse_session import get_nse_session
 
 logger = logging.getLogger(__name__)
@@ -87,27 +84,11 @@ def _nse_session() -> requests.Session:
 
 
 def _is_fresh(path: Path) -> bool:
-    if not path.exists():
-        return False
-    age = datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)
-    return age < timedelta(hours=_CACHE_TTL_HOURS)
+    return is_fresh(path, _CACHE_TTL_HOURS)
 
 
 def _save_cache(path: Path, data: list[dict]) -> None:
-    # Written atomically (tempfile + os.replace), same convention as
-    # core/cache.py::save() -- a plain write_text() left a truncated/corrupt file
-    # behind on an interrupted write (process killed/OOM/container restart
-    # mid-write, or two cron-triggered pipeline runs racing on the same
-    # file), which every read site below then failed to parse.
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(data))
-        os.replace(tmp_path, path)
-    except Exception:
-        Path(tmp_path).unlink(missing_ok=True)
-        raise
+    save_json(path, data)
 
 
 def _load_cache(path: Path) -> list[dict] | None:
@@ -120,11 +101,7 @@ def _load_cache(path: Path) -> list[dict] | None:
     None the same as "no usable cache" -- the mtime-based freshness check
     doesn't validate content, so without this guard a single corrupt file
     would keep raising on every call until the 24h TTL expired."""
-    try:
-        return json.loads(path.read_text())
-    except Exception as exc:
-        logger.warning("SME cache at %s is unreadable, treating as absent: %s", path, exc)
-        return None
+    return load_json(path, logger=logger, log_label="SME cache")
 
 
 def _enrich_names(stocks: list[dict]) -> list[dict]:

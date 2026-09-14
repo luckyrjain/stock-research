@@ -132,7 +132,8 @@ stock-research/
 │   ├── db/                     SQLAlchemy Core tables (models.py) + schema.sql reference
 │   ├── routes/                 Per-domain FastAPI routers extracted out of api.py (see
 │   │                           "Route module extraction" below) — watchlist.py, positions.py,
-│   │                           portfolio_aggregator.py, _shared.py (the read/write wrapper all share)
+│   │                           portfolio_aggregator.py, broker_sync.py, _shared.py (the
+│   │                           read/write wrapper all share)
 │   ├── config/
 │   │   ├── analyst.json        Analyst role/goal/backstory + section labels (config.crew_tasks.ANALYST_SECTIONS)
 │   │   └── crew_tasks.py       Builds the analyst prompt string from analyst.json
@@ -209,7 +210,7 @@ whichever one is relevant to the directory you're working in):
 | [`docs/setup.md`](docs/setup.md) | Full environment variable reference, local dev setup, troubleshooting |
 | [`docs/deployment.md`](docs/deployment.md) | Docker Compose, manual deployment, scaling guidance |
 | [`docs/architecture.md`](docs/architecture.md) | System-level request flows and module boundaries |
-| [`docs/api-reference.md`](docs/api-reference.md) | All 61 HTTP endpoints — auth mode, path/query params, request bodies, every status code and its trigger, rate-limit buckets, cache behaviour, SSE event streams |
+| [`docs/api-reference.md`](docs/api-reference.md) | All 63 HTTP endpoints — auth mode, path/query params, request bodies, every status code and its trigger, rate-limit buckets, cache behaviour, SSE event streams |
 | [`docs/database.md`](docs/database.md) | All 25 PostgreSQL tables — columns, constraints, indexes, which code reads/writes each, the dual-ownership model, migrations, retention |
 | [`docs/tools.md`](docs/tools.md) | Reference for every data-fetching tool/scraper and its output shape |
 | [`docs/output-schema.md`](docs/output-schema.md) | Response payload shapes and cache-file formats (the request-side contract lives in `api-reference.md`) |

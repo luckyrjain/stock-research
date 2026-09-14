@@ -3,6 +3,7 @@ import { expectNoA11yViolations } from './fixtures';
 
 const PROFILE = { id: 1, name: 'Household' };
 const ACCOUNT = { id: 1, profile_id: 1, name: 'HDFC Savings', institution: null, type: 'bank' };
+const BROKER_ACCOUNT = { id: 2, profile_id: 1, name: 'Zerodha Trading', institution: null, type: 'broker' };
 
 test.describe('Net Worth (portfolio aggregator)', () => {
   test('has no axe violations once a profile is selected', async ({ page }) => {
@@ -69,5 +70,47 @@ test.describe('Net Worth (portfolio aggregator)', () => {
 
     await page.getByRole('button', { name: 'edit' }).click();
     await expect(page.locator('input[type="number"]')).toHaveValue('150000');
+  });
+
+  test('broker row shows connected status + sync button, and stays reconnectable after a sync error', async ({ page }) => {
+    // Regression coverage for BrokerStatusLine's own invariant: connection.connected
+    // stays true after a token expires (sync_status flips to 'error' instead), so
+    // Reconnect must not be gated on `connected` alone — see its doc comment in
+    // app/portfolio-aggregator/page.tsx.
+    const zerodhaConnection = {
+      id: 10, account_id: BROKER_ACCOUNT.id, broker: 'zerodha',
+      token_obtained_at: '2026-08-01T03:00:00Z', last_synced_at: '2026-08-01T03:00:00Z',
+      connected: true, sync_status: 'idle', last_sync_summary: null, last_sync_error: null,
+    };
+    const hdfcConnectionExpired = {
+      id: 11, account_id: BROKER_ACCOUNT.id, broker: 'hdfc_securities',
+      token_obtained_at: '2026-08-01T03:00:00Z', last_synced_at: '2026-08-01T03:00:00Z',
+      connected: true, sync_status: 'error', last_sync_summary: null, last_sync_error: 'token expired',
+    };
+
+    await page.route('**/api/portfolio/profiles*', route => {
+      if (route.request().method() === 'POST') return route.fulfill({ json: PROFILE });
+      return route.fulfill({ json: { profiles: [PROFILE] } });
+    });
+    await page.route('**/api/portfolio/accounts?profile_id=1*', route => route.fulfill({ json: { accounts: [BROKER_ACCOUNT] } }));
+    await page.route('**/api/portfolio/assets?account_id=2*', route => route.fulfill({ json: { assets: [] } }));
+    await page.route('**/api/portfolio/networth?profile_id=1*', route => route.fulfill({
+      json: { total: 0, by_type: {}, by_account: [] },
+    }));
+    await page.route('**/api/portfolio/broker/connections?profile_id=1*', route => route.fulfill({
+      json: { connections: [zerodhaConnection, hdfcConnectionExpired] },
+    }));
+
+    await page.goto('/portfolio-aggregator');
+    await page.getByRole('button', { name: PROFILE.name }).click();
+
+    await expect(page.getByText('Zerodha connected', { exact: false })).toBeVisible();
+    await expect(page.getByText('last synced', { exact: false }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sync now' }).first()).toBeVisible();
+
+    // hdfc_securities: connected is still true, but sync_status 'error' must
+    // still surface a Reconnect button despite `connected` alone saying otherwise.
+    await expect(page.getByText('HDFC Securities connected', { exact: false })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Reconnect HDFC Securities' })).toBeVisible();
   });
 });

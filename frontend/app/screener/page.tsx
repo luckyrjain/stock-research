@@ -7,6 +7,7 @@ import PageShell from '@/components/page-shell';
 import WatchlistButton from '@/components/watchlist-button';
 import SectorHeatmap from '@/components/sector-heatmap';
 import { Skeleton, FilterChip, SortableTh } from '@/components/data-table-ui';
+import { useSortState } from '@/lib/use-sort-state';
 import { fmtCr, fmtPrice, fmtVolume } from '@/lib/format';
 
 type EmaTrendFilter = 'all' | 'bullish' | 'bearish';
@@ -125,8 +126,7 @@ export default function ScreenerPage() {
   // typed text, so they don't need this.
   const [debouncedPeMax, setDebouncedPeMax] = useState('');
   const [debouncedMarketCapMin, setDebouncedMarketCapMin] = useState('');
-  const [sortKey,    setSortKey]    = useState<SortKey>('market_cap_cr');
-  const [sortDir,    setSortDir]    = useState<SortDir>('desc');
+  const { sortKey, setSortKey, sortDir, setSortDir, toggleSort } = useSortState<SortKey>('market_cap_cr');
   // Defaults above render identically on the server and on first client
   // paint (avoiding a hydration mismatch); the persisted values, if any,
   // are then applied in one batch right after mount — see the hydration
@@ -268,17 +268,6 @@ export default function ScreenerPage() {
       .then(res => (res.ok ? res.json() : null))
       .then((json: ScreenerResponse | null) => { if (json) setHeatmapStocks(json.stocks); })
       .catch(() => { /* heatmap just doesn't render — the table below is unaffected */ });
-  }, []);
-
-  const toggleSort = useCallback((k: SortKey) => {
-    setSortKey(prevKey => {
-      if (prevKey === k) {
-        setSortDir(prevDir => (prevDir === 'desc' ? 'asc' : 'desc'));
-        return k;
-      }
-      setSortDir('desc');
-      return k;
-    });
   }, []);
 
   const stocks: ScreenerStock[] = data?.stocks ?? [];
