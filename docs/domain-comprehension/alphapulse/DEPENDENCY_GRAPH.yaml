@@ -1,0 +1,247 @@
+schema_version: 1
+source_revision:
+  repos:
+  - repo: stock-research
+    branch: claude/codebase-comprehensive-review-0rjms1
+    commit_sha: 1f9b6cd8ff23a6195125b5836005c0aecc80c658
+    observed_at: '2026-09-13T10:28:06Z'
+perspective: backend/api.py
+edges:
+- source: frontend/app/api/**
+  target: backend/api.py
+  perspective: backend/api.py
+  direction: downstream
+  interaction: synchronous
+  criticality: CRITICAL
+  evidence: 'frontend agent: all 30 proxy routes call backend over HTTP; sole entry path per docs/architecture.md
+    ''no direct browser to FastAPI'' rule'
+  confidence: HIGH
+- source: backend/api.py
+  target: backend/main.py
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: CRITICAL
+  evidence: 'backend-core agent: main.py:76 imports for _fetch_task/_build_report, called from api.py:589'
+  confidence: HIGH
+- source: backend/api.py
+  target: backend/tools/*.py (20+ scrapers)
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: HIGH
+  evidence: 'backend-core + routes/pipelines agents: main._fetch_task dispatches to tools.*'
+  confidence: HIGH
+- source: backend/api.py
+  target: backend/signals/engine.py
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: HIGH
+  evidence: api.py:649-656 (business-flow agent, verified read)
+  confidence: HIGH
+- source: backend/api.py
+  target: backend/analyst/crew.py
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: CRITICAL
+  evidence: api.py:662-760 (business-flow + backend-core agents, verified read); core LLM side-effect
+    executor
+  confidence: HIGH
+- source: backend/analyst/crew.py
+  target: 'External: Anthropic/OpenAI/Groq/Google/OpenRouter/Ollama'
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: CRITICAL
+  evidence: analyst/crew.py:745-925 litellm.completion() calls (backend-core agent, verified read)
+  confidence: HIGH
+- source: backend/api.py
+  target: PostgreSQL (verdict_history)
+  perspective: backend/api.py
+  direction: upstream
+  interaction: asynchronous
+  criticality: MEDIUM
+  evidence: api.py:749-753 fire-and-forget write (business-flow agent); a client disconnect does not cancel
+    it
+  confidence: HIGH
+- source: backend/tools/*.py
+  target: 'External: NSE/BSE/Screener.in/Trendlyne/AMFI/RBI/GNews/yfinance'
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: HIGH
+  evidence: backend-core, routes/pipelines agents; every scraper 'never raises', degrades on failure
+  confidence: HIGH
+- source: backend/pipelines/market_picks_pipeline.py
+  target: backend/tools/*.py
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: MEDIUM
+  evidence: 'business-flow agent: 20 sources scraped in _phase_scrape, isolated per-source failure'
+  confidence: HIGH
+- source: backend/pipelines/market_picks_pipeline.py
+  target: backend/analyst path (litellm)
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: MEDIUM
+  evidence: 'business-flow agent: phases 2 and 5 make LLM calls'
+  confidence: HIGH
+- source: backend/pipelines/sme_ema_pipeline.py
+  target: 'External: NSE/BSE/yfinance'
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: LOW
+  evidence: 'business-flow agent: sme_ema_pipeline.py:449-482, leaf batch job, weekday cron only'
+  confidence: HIGH
+- source: backend/pipelines/screener_pipeline.py
+  target: 'External: NSE/yfinance'
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: LOW
+  evidence: 'business-flow agent: screener_pipeline.py:150-196, leaf batch job'
+  confidence: HIGH
+- source: backend/pipelines/eod_prices_pipeline.py
+  target: 'External: NSE bhavcopy/AMFI'
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: MEDIUM
+  evidence: 'business-flow agent: eod_prices_pipeline.py:262-294; feeds Portfolio Aggregator valuation
+    downstream'
+  confidence: HIGH
+- source: backend/pipelines/eod_prices_pipeline.py
+  target: backend/pipelines/corporate_actions_pipeline.py
+  perspective: backend/api.py
+  direction: downstream
+  interaction: synchronous
+  criticality: LOW
+  evidence: 'business-flow agent: eod_prices_pipeline.py:284, isolated try/except step'
+  confidence: HIGH
+- source: backend/pipelines/eod_prices_pipeline.py
+  target: backend/portfolio/portfolio_valuation.py
+  perspective: backend/api.py
+  direction: downstream
+  interaction: synchronous
+  criticality: MEDIUM
+  evidence: 'business-flow agent: eod_prices_pipeline.py:288-292, isolated try/except step (4th chained
+    step)'
+  confidence: HIGH
+- source: backend/portfolio/portfolio_valuation.py
+  target: PostgreSQL (prices_daily, mf_nav_daily, valuations)
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: MEDIUM
+  evidence: 'business-flow agent: portfolio_valuation.py:99-151'
+  confidence: HIGH
+- source: backend/pipelines/watchlist_alerts.py
+  target: PostgreSQL (watchlist_items JOIN users)
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: MEDIUM
+  evidence: 'business-flow agent: watchlist_alerts.py:118-135'
+  confidence: HIGH
+- source: backend/pipelines/watchlist_alerts.py
+  target: backend/main.py + backend/analyst/crew.py (re-invokes Journey 1 pipeline)
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: HIGH
+  evidence: 'business-flow agent: watchlist_alerts.py:138-191, reuses the full stock-analysis pipeline
+    per watched symbol'
+  confidence: HIGH
+- source: backend/pipelines/watchlist_alerts.py
+  target: 'External: SMTP'
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: LOW
+  evidence: 'business-flow agent: core/email_sender.py:136, best-effort, never raises'
+  confidence: HIGH
+- source: backend/routes/broker_sync.py
+  target: 'External: Zerodha/HDFC Securities/Paytm Money'
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: MEDIUM
+  evidence: 'P3b + routes/pipelines agents: broker_sync.py, portfolio/{kite,hdfc,paytm}_sync.py, polling/pull-only'
+  confidence: HIGH
+- source: backend/routes/broker_sync.py
+  target: backend/core/crypto.py
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: HIGH
+  evidence: 'P3b agent: every broker_connections secret write goes through encrypt() first'
+  confidence: HIGH
+- source: backend/routes/watchlist.py
+  target: PostgreSQL (watchlist_items)
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: MEDIUM
+  evidence: 'P3b agent: routes/watchlist.py:222-229'
+  confidence: HIGH
+- source: backend/routes/positions.py
+  target: backend/routes/watchlist.py (resolve_owner, owner_column)
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: MEDIUM
+  evidence: 'P3b agent: positions.py imports these directly from watchlist.py'
+  confidence: HIGH
+- source: backend/routes/portfolio_aggregator.py
+  target: backend/routes/watchlist.py (resolve_owner pattern)
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: MEDIUM
+  evidence: 'routes/pipelines agent: same ownership-resolution shape reused'
+  confidence: MEDIUM
+- source: backend/portfolio/broker_sync_common.py
+  target: backend/portfolio/positions_mirror.py
+  perspective: backend/api.py
+  direction: downstream
+  interaction: synchronous
+  criticality: LOW
+  evidence: 'routes/pipelines agent: sync_holdings() calls upsert_position_from_holding()'
+  confidence: HIGH
+- source: backend/api.py
+  target: backend/core/rate_limiter.py
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: HIGH
+  evidence: 'P3b + quality/ops agents: routes/_shared.py wraps rate_limiter.is_allowed()'
+  confidence: HIGH
+- source: backend/core/rate_limiter.py
+  target: Redis (optional)
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: LOW
+  evidence: 'quality/ops agent: falls back to in-memory on absence/error, verified fallback logic'
+  confidence: HIGH
+- source: backend/core/cache.py
+  target: Redis (optional)
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: LOW
+  evidence: 'quality/ops agent: independent lazy client, same fallback pattern'
+  confidence: HIGH
+- source: backend/core/error_tracking.py
+  target: 'External: Sentry (optional)'
+  perspective: backend/api.py
+  direction: upstream
+  interaction: synchronous
+  criticality: LOW
+  evidence: 'backend-core agent: genuinely inert without SENTRY_DSN, verified read'
+  confidence: HIGH

@@ -1,0 +1,76 @@
+# Risk Map
+
+## Top smells (max 10, ranked)
+
+Ranked by severity × business impact. Full inventory below.
+
+| Rank | Smell | Severity | Business impact | Evidence | Recommended remediation |
+|------|-------|----------|-----------------|---------|-------------------------|
+| 1 | Rate limiting is opt-in per-route, not framework-enforced default-deny | Medium | A future route that forgets to call `_rate_limit()`/`run_owned_db_call()` gets **zero** protection against abuse or cost blowout (this app has real per-call LLM cost) — silent until exploited | P3b agent: `core/rate_limiter.py`/`routes/_shared.py` are opt-in helpers, not global middleware; no unguarded route was found among those reviewed, but the architecture doesn't prevent one | Add a lightweight FastAPI dependency/middleware default that requires an explicit opt-out annotation, or a CI check that greps every `@app.<method>`/`@router.<method>` for a `_rate_limit`/`run_owned_db_call` call nearby |
+| 2 | `god module`: `backend/api.py` (2711 lines, 29 routes) | Medium | Slows onboarding/review of the single largest concentration of business logic in the app; raises single-file merge-conflict risk for a solo operator using AI pair-programming across sessions | quality/ops agent: `wc -l backend/api.py` = 2711; self-disclosed in `backend/CLAUDE.md` as an intentionally incremental extraction | Continue the existing route-extraction pattern (watchlist/positions/portfolio_aggregator/broker_sync already moved out) for SME/screener/market-picks/auth/API-key/financials endpoints |
+| 3 | `god module`: `backend/pipelines/market_picks_pipeline.py` (1848 lines) | Medium | Six phases sharing mutable state and thread/async coordination in one file — a change to one phase risks an unreviewed side effect on another | quality/ops agent: `wc -l` = 1848, self-disclosed as "deliberately not decomposed" | Deferred by design per the codebase's own docs — leave as-is unless a real bug traces to cross-phase coupling |
+| 4 | Doc drift: table count (22 vs 23) across root `CLAUDE.md`, `backend/CLAUDE.md`, `docs/database.md` | Low | Cosmetic, but a symptom of the same doc-maintenance burden that affects a bus-factor-of-one project the most | backend-core + quality/ops agents both independently found `db/models.py` has 23 `Table(...)` definitions while root `CLAUDE.md`'s summary table says 22 | One-line fix in root `CLAUDE.md` |
+| 5 | `transactions` table has 3 writers (`cas_import`, `csv_import`, broker-sync), only one of which (`broker-sync`) has a DB-level uniqueness guard | Medium | `csv_import`'s dedup is a read-then-write race with no lock — two concurrent uploads of the same overlapping tradebook could both insert, corrupting XIRR math | routes/pipelines agent + `docs/backlog.md` item #2 (independently disclosed in-repo) | Add `external_ref`-style unique constraint or the existing `pg_advisory_xact_lock` pattern to `csv_import`/`cas_import` |
+| 6 | `positions` table has 2 writers across unrelated features (Market Picks' manual add vs. Portfolio Aggregator's broker-sync mirror) | Medium | A future column addition to one writer's concern (e.g. a new Market-Picks-only field) risks being silently ignored or clobbered by the other writer if not equally considered | routes/pipelines + quality/ops agents, both independently confirmed via `portfolio/positions_mirror.py` | Column-level ownership comment already exists in `positions_mirror.py`'s docstring — no code change required, but worth a schema-level comment too |
+| 7 | PII (email address) logged at `warning` level on SMTP delivery failure | Low | A structured-log aggregator or its operator sees a plaintext recipient email; low severity (self-submitted, not a secret) but a literal instance of PII entering logs | P3b agent: `api.py:2501` `log_event(..., "auth_link_email_not_delivered", level="warning", email=email)` | Hash or truncate the email before logging, or drop the field and rely on `run_id` correlation |
+| 8 | No IP-keyed rate limit at all on `GET /api/v1/consolidated/{symbol}` before the DB-backed API-key check | Medium | Unbounded failed `X-API-Key` guesses each cost a DB lookup — disclosed in `docs/api-reference.md` and `docs/backlog.md` (marked "done" as of a fixed pass adding a per-IP pre-check — **not independently re-verified against current source by this engagement's dispatched agents**, so this row is carried forward from docs as MEDIUM confidence pending a future pass) | docs/api-reference.md:762-765; docs/backlog.md item 1 (marked done) | Independently verify in a future DELTA pass that `_require_api_key_user()` truly calls `_rate_limit()` before the DB lookup |
+| 9 | No formal audit-log table — only two `log_event()` calls (`watchlist_claimed`, `positions_claimed`) function as an audit trail | Low | Limited forensic ability for account/broker-connection/portfolio changes beyond current-state columns | P3b agent: `grep -l '@Audit\|auditLog\|audit_trail\|AuditEvent' backend` → nothing; disclosed as accepted in `backend/CLAUDE.md`'s own "Explicitly deferred" list | Accepted for current scale per the codebase's own architectural stance — revisit only if usage or stakes grow |
+| 10 | `corporate_actions_pipeline.py` not confirmed to have the same `>50%`-error-rate health gate as its four sibling pipelines | Low-Medium | A near-total silent-failure mode (e.g. a PURPOSE-field rename) could log a plausible-looking `ca_ingested actions=0` at INFO with no failed-exit-code signal, per `docs/backlog.md`'s own disclosed mechanism | docs/backlog.md "Data model" item #3 (self-disclosed); not independently re-confirmed by a dispatched agent this engagement (routes/pipelines agent noted "no `_MAX_ACCEPTABLE_ERROR_RATE` found in this file" but did not fully read it) | Apply `eod_prices_pipeline.py`'s fail-loudly pattern; widen `parse_bhavcopy`'s required-field check (already tracked in `docs/backlog.md`) |
+
+## Architectural smells (full inventory)
+
+| Smell | Location | Severity | Evidence | Confidence | Mitigation hint |
+|-------|----------|----------|----------|------------|-----------------|
+| God module | `backend/api.py` (2711 lines, 29/63 routes still inline) | High (size) / Medium (disclosed, in-progress) | quality/ops agent `wc -l`; self-disclosed in `backend/CLAUDE.md` | HIGH | Continue route extraction |
+| God module | `backend/pipelines/market_picks_pipeline.py` (1848 lines) | High (size) / Medium (disclosed) | quality/ops agent | HIGH | Deferred by design |
+| God module (frontend) | `frontend/app/portfolio-aggregator/page.tsx` (1332 lines) | Low-Medium | quality/ops agent `wc -l`; not previously flagged in `backend/CLAUDE.md`'s dashboard-extraction pass | MEDIUM | Candidate for component extraction |
+| Cyclic dependency | none found | — | quality/ops agent manually spot-checked `routes/_shared.py ← watchlist.py ← {positions.py, portfolio_aggregator.py} ← broker_sync.py`; `core/` has no imports from `routes/`/`api.py` | MEDIUM (manual spot-check, no generated graph — degraded per KNOWN_OMISSIONS.md) | N/A |
+| Multiple writers | `transactions` (cas_import, csv_import, broker-sync) | Medium | routes/pipelines agent + `docs/backlog.md` #2; only broker-sync has a DB constraint | HIGH | See Top Smell #5 |
+| Multiple writers | `positions` (routes/positions.py, portfolio/positions_mirror.py) | Medium | routes/pipelines + quality/ops agents | HIGH | See Top Smell #6 |
+| Multiple writers | `valuations` (manual entry endpoint, nightly `refresh_valuations()` engine) | Low | backend-core + business-flow agents; precedence is explicit and documented (engine wins same-day for mf/stock) | HIGH | Not a defect — documented precedence |
+| Shared database, no clear owner | N/A — does not apply | — | quality/ops agent: single Postgres, single app, one `MetaData()` — this smell requires multiple independently-deployed services | HIGH | N/A |
+| Missing contract | none found | — | quality/ops agent cross-checked all ~33 frontend proxy routes against backend route definitions — 1:1 match, no orphan | HIGH | N/A |
+| Duplicate implementation | 7 near-identical `_nse_session()`/`_get_session()` wrappers | Low | routes/pipelines + quality/ops agents; deliberate — preserves existing test-patch targets (`tools/_nse_session.py`'s own docstring) | HIGH | Accepted tradeoff, no action needed |
+| Duplicate implementation | `kite_sync.py`/`hdfc_sync.py`/`paytm_sync.py` scaffolding | Low (resolved) | routes/pipelines agent: shared write-path already factored into `broker_sync_common.py`; only fetch/normalize differs per broker | HIGH | Well-factored already |
+| Duplicate implementation | Two independently-implemented SSE state machines (`useStockAnalysis.ts`'s `reduceSSEMessage` vs. market-picks page's inline switch) | Medium | frontend agent | HIGH | Extract a shared pure-reducer pattern for the market-picks SSE handling too |
+| Large transaction, many tables | `broker_sync_common.py::run_broker_sync()` — one `engine.begin()` spans `assets`+`holdings`+`valuations`+`positions` (via mirror)+`transactions`+`broker_connections` across 2 unrelated feature domains | Medium | quality/ops agent, `broker_sync_common.py:354-358` | HIGH | Deliberate atomicity guarantee, infrequent per-account operation — acceptable as-is |
+| Temporal coupling / long sync chain | Not found on `/api/analyse/{symbol}` | — (absence is the finding) | quality/ops agent: properly async, `run_in_executor` + heartbeats | HIGH | N/A — well-designed |
+| Cross-domain join | Not investigated directly (no SQL-join-across-context evidence surfaced by any agent) | — | — | UNKNOWN | Recommend a targeted DELTA-mode check if this becomes relevant |
+| Leaky BFF | Not found | — | frontend agent: proxy routes are pure passthrough + header translation, no business logic | HIGH | N/A |
+| Dead path | `corporate_actions_pipeline.py`'s recompute has "zero production readers" — `portfolio_valuation._latest_close()` reads raw `close`, not `adj_close` | Low-Medium | `docs/database.md` "Known schema gaps" #5 (self-disclosed, not independently re-verified by a dispatched agent, but consistent with the business-flow agent's own reading of `portfolio_valuation.py:99-106` which confirmed the raw-`close` read) | MEDIUM | Verify before any future feature starts depending on `adj_close` |
+| Rate limiting opt-in, not enforced | Cross-cutting | Medium | P3b agent | HIGH | See Top Smell #1 |
+| PII in logs | `api.py:2501` (email at warning level) | Low | P3b agent | HIGH | See Top Smell #7 |
+| Doc drift | 22 vs 23 tables (root CLAUDE.md vs. backend/CLAUDE.md vs. code) | Low | backend-core + quality/ops agents | HIGH | One-line fix |
+| Doc drift | `backend/CLAUDE.md`'s "Securities master + symbol resolver" section says "not yet wired into anything" while `csv_import.py`/`hdfc_sync.py` actively call `resolve_symbol()` | Low | quality/ops agent, direct grep | HIGH | One-line fix in that doc section |
+
+## Change impact (context rollup)
+
+| Context | Impacted services (n) | Impacted events (n) | Impacted APIs (n) | Runtime consumers (n) | Confidence |
+|---------|----------------------:|--------------------:|------------------:|------------------------:|------------|
+| Stock Analysis | 3 (Watchlist & Positions, Consolidated Search, Accounts & Auth via no dependency) | 6 SSE event types | 8 endpoints (#3-4,10-15) | 0 (P2b skipped) | HIGH |
+| Market Picks | 2 (Watchlist & Positions, Consolidated Search) | 12 SSE event types | 3 endpoints (#5-7) | 0 | HIGH |
+| SME Signals | 1 (Consolidated Search) | 0 | 3 endpoints (#16-18) | 0 | HIGH |
+| NIFTY 500 Screener | 0 observed | 0 | 2 endpoints (#19-20) | 0 | HIGH |
+| Watchlist & Positions | 3 (Stock Analysis, Portfolio Aggregator, Accounts & Auth) | 0 (email side-effect only) | 11 endpoints (#30-40) | 0 | HIGH |
+| Portfolio Aggregator | 2 (EOD Price Store, Watchlist & Positions) | 0 | 23 endpoints (#41-63) | 0 | HIGH |
+| Accounts & Auth | 3 (every owner-scoped context) | 0 | 8 endpoints (#22-29) | 0 | HIGH |
+| EOD Price Store | 1 (Portfolio Aggregator) | 0 | 0 (ingestion-only) | 0 | HIGH |
+| Consolidated Search | 0 downstream | 0 | 2 endpoints (#21,29 shared) | 0 | HIGH |
+
+## Change risk
+
+| Repo / context | Risk | Fan-out (downstream count) | Runtime critical? | Test coverage signal | Owner clarity | Evidence |
+|----------------|------|---------|-------------------|-------------|---------------|----------|
+| Stock Analysis (`api.py`, `analyst/`, `signals/`) | **High** — Tier 0/1, many downstream deps (Watchlist alerts re-invokes it daily; Consolidated Search reads it), god-module fan-out | 3 | Yes (P2 static flow only — P2b runtime unconfirmed) | Strong — `test_analysis_guardrails.py`, `test_signal_engine.py`, `test_crew_tasks.py` all present | HIGH (sole operator) | quality/ops agent test inventory |
+| Auth (`auth.py`) | **High** — Tier 0, every owner-scoped context depends on `resolve_owner()`'s upstream session validation; security-sensitive | 3+ | Yes | Present (test files not individually confirmed by name, but `backend-core`+`P3b` agents both read `auth.py` directly with no test gaps flagged) | HIGH | backend-core, P3b agents |
+| Portfolio Aggregator + broker sync | **High** — largest write fan-out (4 writers into `assets`/`transactions`), handles encrypted broker credentials, largest single file (`broker_sync.py`, 812 lines) | 2 | Not on the Stock-Analysis critical path, but high-stakes (real financial data + broker credentials) | Strong — `test_kite_sync.py`, `test_hdfc_sync.py`, `test_paytm_sync.py`, `test_broker_sync_common.py`, `test_cas_import.py`, `test_csv_import.py`, `test_portfolio_valuation.py` all present | HIGH | routes/pipelines, P3b, quality/ops agents |
+| Watchlist & Positions | Moderate — multiple consumers (Stock Analysis, Portfolio Aggregator's mirror write), but well-tested and IDOR-hardened | 3 | Yes (daily alert re-invocation) | Present (`test_api.py` covers pre-extraction; `test_routes_shared.py` covers the shared wrapper) | HIGH | P3b, quality/ops agents |
+| Market Picks pipeline | Moderate — large single file but isolated per-source/per-phase failure handling; no DB table of its own (file-cache blast radius is smaller) | 2 | Weekly cron only, not request-path-critical | Strong — `test_market_picks_scoring.py`, `test_market_picks_sources.py` | HIGH | quality/ops, business-flow agents |
+| SME / Screener pipelines | **Safe** — leaf batch jobs, single-table writers, isolated per-stock failure, explicit health gates | 1 each | No | Strong — dedicated test files each | HIGH | business-flow, quality/ops agents |
+| EOD Price Store + Corporate Actions | Moderate — feeds Portfolio Aggregator valuation; `corporate_actions_pipeline.py`'s health-gate completeness is UNKNOWN (see Top Smell #10) | 1 | No | Present (`test_eod_pipeline.py`, `test_ca_pipeline.py`) | HIGH | routes/pipelines, quality/ops agents |
+| Frontend BFF proxy layer | **Safe** — stateless passthrough, no business logic, 1:1 contract match confirmed | 8 (fans out to every backend context) | Yes (it's the only path in) | E2E-only (no unit tests — disclosed gap) | HIGH | frontend, quality/ops agents |
+
+## Merge Conflicts (ADD_REPO mode)
+
+Not applicable — this is a first-time `FULL` engagement on a single repo, not an `ADD_REPO` run.
+No merge-conflict rows to record.
