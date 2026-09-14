@@ -21,7 +21,6 @@ from datetime import datetime, timezone
 
 import requests
 from dotenv import load_dotenv
-from sqlalchemy import select
 
 from telemetry import source_health
 from telemetry import source_quality
